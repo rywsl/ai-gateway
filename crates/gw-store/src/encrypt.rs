@@ -10,7 +10,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Default)]
-pub struct KekCache(pub Arc<HashMap<String, [u8; 32]>>);
+pub struct KekCache(Arc<HashMap<String, [u8; 32]>>);
+
+impl KekCache {
+    pub fn new(map: HashMap<String, [u8; 32]>) -> Self {
+        Self(Arc::new(map))
+    }
+    pub fn empty() -> Self {
+        Self(Arc::new(HashMap::new()))
+    }
+    pub(crate) fn get(&self, kid: &str) -> Option<&[u8; 32]> {
+        self.0.get(kid)
+    }
+}
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct EncryptedKey {
@@ -22,7 +34,6 @@ pub struct EncryptedKey {
 
 pub fn decrypt(enc: &EncryptedKey, cache: &KekCache) -> anyhow::Result<SecretString> {
     let kek = cache
-        .0
         .get(&enc.kek_kid)
         .ok_or_else(|| anyhow::anyhow!("kek not found: {}", enc.kek_kid))?;
     let cipher = Aes256Gcm::new(kek.into());
@@ -36,10 +47,12 @@ pub fn decrypt(enc: &EncryptedKey, cache: &KekCache) -> anyhow::Result<SecretStr
     Ok(SecretString::from(s))
 }
 
-/// Test-only helper for round-trip tests. Not gated to `#[cfg(test)]` because
-/// integration tests under `tests/` compile against the crate's public API as
-/// a separate binary and would not see `cfg(test)` items.
-pub fn encrypt_for_test(plain: &str, kek: [u8; 32]) -> EncryptedKey {
+/// FOR TESTS ONLY: encrypts plain into an EncryptedKey using the provided KEK.
+/// Do not call from production code — production data must come through KMS.
+/// This function is exposed for integration tests; future versions may gate
+/// this behind a `test-utils` cargo feature.
+#[doc(hidden)]
+pub fn encrypt_for_test_only(plain: &str, kek: [u8; 32]) -> EncryptedKey {
     use aes_gcm::aead::{AeadCore, OsRng};
     let cipher = Aes256Gcm::new(&kek.into());
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);

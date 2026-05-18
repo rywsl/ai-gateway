@@ -58,7 +58,7 @@ rand = "0.8"
 pingora = "0.8"
 pingora-proxy = "0.8"
 fred = { version = "9", features = ["partial-tracing", "metrics", "subscriber-client"] }
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "macros", "migrate", "json", "time"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "macros", "migrate", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 jsonwebtoken = "9"
 governor = "0.7"

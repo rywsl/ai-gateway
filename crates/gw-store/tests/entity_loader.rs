@@ -7,8 +7,6 @@ use gw_store::encrypt::KekCache;
 use gw_store::loader::{LoaderCtx, load_entity};
 use gw_store::pg_client;
 use gw_store::redis_client::RedisCtx;
-use std::collections::HashMap;
-use std::sync::Arc;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
 
@@ -44,7 +42,7 @@ async fn cold_load_from_pgsql_writes_back_to_redis() {
     let ctx = LoaderCtx {
         redis: redis.clone(),
         pg,
-        kek: KekCache(Arc::new(HashMap::new())),
+        kek: KekCache::empty(),
     };
 
     let v = load_entity(
