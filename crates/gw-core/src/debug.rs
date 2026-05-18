@@ -29,6 +29,7 @@ pub struct MutationRecord {
 pub struct TraceBuffer {
     pub phases: [PhaseRecord; 32],
     pub phase_count: u8,
+    pub phase_overflow_count: u16,
     pub stream_chunks: Vec<ChunkRecord>,
     pub ir_mutations: Vec<MutationRecord>,
     pub filter_drop_reasons: SmallVec<[(String, &'static str); 8]>,
@@ -46,6 +47,7 @@ impl TraceBuffer {
         Self {
             phases: [PhaseRecord::default(); 32],
             phase_count: 0,
+            phase_overflow_count: 0,
             stream_chunks: Vec::new(),
             ir_mutations: Vec::new(),
             filter_drop_reasons: SmallVec::new(),
@@ -62,6 +64,7 @@ impl TraceBuffer {
     pub fn phase_start(&mut self, name: &'static str, alloc: u64) {
         let idx = self.phase_count as usize;
         if idx >= self.phases.len() {
+            self.phase_overflow_count = self.phase_overflow_count.saturating_add(1);
             return;
         }
         self.phases[idx] = PhaseRecord {
@@ -76,7 +79,10 @@ impl TraceBuffer {
 
     #[inline(always)]
     pub fn phase_end(&mut self, alloc: u64) {
-        let idx = (self.phase_count as usize).saturating_sub(1);
+        let idx = match (self.phase_count as usize).checked_sub(1) {
+            Some(i) => i,
+            None => return,
+        };
         if idx >= self.phases.len() {
             return;
         }

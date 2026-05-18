@@ -88,7 +88,7 @@ pub struct UserGroup {
     pub markup: f32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ApiKeyEntry {
     pub key_id: ApiKeyId,
     pub user_id: UserId,
@@ -108,6 +108,24 @@ pub struct ApiKeyEntry {
     pub ip_allowlist: Option<Vec<String>>,
     #[serde(default)]
     pub expires_at: Option<OffsetDateTime>,
+}
+
+impl std::fmt::Debug for ApiKeyEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyEntry")
+            .field("key_id", &self.key_id)
+            .field("user_id", &self.user_id)
+            .field("status", &self.status)
+            .field("hash", &format_args!("[REDACTED; {} bytes]", self.hash.len()))
+            .field("allowed_models", &self.allowed_models)
+            .field("allowed_channels", &self.allowed_channels)
+            .field("rpm_limit", &self.rpm_limit)
+            .field("tpm_limit", &self.tpm_limit)
+            .field("markup", &self.markup)
+            .field("ip_allowlist", &self.ip_allowlist)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
