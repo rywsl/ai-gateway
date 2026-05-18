@@ -96,21 +96,57 @@ are tracked as TODO items in the relevant crate.
 What v1 ships:
 
 - All 8 routing strategies with breaker integration.
+- BreakerState in-flight RAII counter (`InFlightGuard`) wired through
+  `pick_peer` so `LoadBalance` and the per-key cap
+  (`PER_KEY_INFLIGHT_CAP = 1024`) see real traffic.
 - Same-protocol passthrough with `Cow::Borrowed` zero-copy fast path.
 - Cross-protocol *request* IR re-render (OpenAI ↔ Anthropic ↔ Gemini).
 - ADR-023 five-tier permission merge, ADR-024 hard caps, ADR-004 freeze RAII.
+- Balance enforcement: `request_filter` reads
+  `counter:user:{effective_user_id}:balance_micro` from Redis and rejects
+  with `GW_QUOTA_BALANCE_ZERO` 402 when the balance is ≤ 0. The
+  `USER_CIRCUIT` in-process cache is the secondary short-circuit.
+- Distinct error codes for "gateway tripped user RPM"
+  (`GW_QUOTA_RPM_EXCEEDED`) versus "upstream returned 429"
+  (`GW_UPSTREAM_OVERLOADED`).
+- Optional XFF parsing: `[security] trust_xff` (default `false`). When
+  enabled the client IP is read from the first entry of
+  `X-Forwarded-For`; otherwise the L4 socket peer is used. MUST only be
+  enabled behind a trusted L7 LB that strips client-supplied XFF.
 - Single-event SSE streaming surface (sufficient for the v1 codec contracts).
 - Billing record emission via mpsc-backed flusher to a Redis stream.
 - KMS dev mode (env-supplied KEK); production AWS KMS integration is a
   follow-up.
 
-Known gaps tracked for v2:
+Known gaps tracked for v2 (and v1.1 where called out):
 
-- Cross-protocol response body re-render is not yet wired into the
-  proxy response filter; v1 routes 2xx through the streaming path.
+- **Non-stream completions are REJECTED** at `request_filter` with
+  `GW_REQUEST_NONSTREAM_NOT_SUPPORTED` 400. v1.1 will lift this once codec
+  `parse_response` is implemented (currently `unimplemented!()` for every
+  codec); shipping non-stream today would silently bill `cost_micro = 0`.
+- `ApiKeyEntry.expires_at` not enforced — v2.
+- `ApiKeyEntry.ip_allowlist` not enforced — v2.
+- `UserEntry.daily_quota_tokens` not enforced — v2.
+- `Vendor.timeout_overrides` not honoured (only `Pricing` timeouts) — v2.
+- `Pricing.model_markup` not multiplied into the cost calculation — v2.
+- `Sticky` strategy memory leak: no TTL sweep on the assignment map — v2.
+- JWT validation is RS256 algorithm-pinned only; `iss` / `aud` / `nbf`
+  not validated — v2.
 - HMAC signature verification is opt-in via header; mandatory enforcement
   per policy ships in a follow-up.
-- Multi-event SSE buffering / coalescing is single-event today.
+- Cross-protocol response body re-render is not yet wired into the
+  proxy response filter; v1 routes 2xx through the streaming path.
+- Multi-event SSE buffering / coalescing is single-event today
+  (Gemini-style combined final event not implemented).
+- Per-chunk `serde_json::Value` allocation in SSE parsing — v2 perf.
+- `sse_leftover: Vec<u8>` allocates per event drain — v2 perf.
+- `ipblock_snapshot()` rebuilds per request — v2 perf.
+- No retry executor wired (Pingora default retries off); `RetryConfig`
+  exists but the executor isn't on the proxy hot path — v2.
+- No DLQ for billing flush failures: a Redis flusher error drops the
+  bounded mpsc batch on the floor — v2.
+- Cross-protocol body data loss for Anthropic / Gemini wires that lack
+  an `extra` IR field — v2.
 - The full Pingora + wiremock + reqwest e2e harness is scaffolded in
   `crates/gw-gateway/tests/e2e_full_flow.rs` but marked `#[ignore]`; we
   ship per-filter integration tests in `e2e_failure_modes.rs` that run
