@@ -65,3 +65,18 @@ fn round_robin_rotates_through_three_keys() {
     set.insert(p3);
     assert_eq!(set.len(), 3, "round-robin should hit all three keys");
 }
+
+#[test]
+fn cost_first_picks_highest_priority_proxy() {
+    use gw_routing::strategy::cost_first::CostFirst;
+    let keys = vec![fake_key("a", -10), fake_key("b", 50), fake_key("c", 10)];
+    let b = BreakerStore::default();
+    let ctx = PickCtx {
+        user_id: &UserId::from("u"),
+        model: &ModelName::from("m"),
+        conversation_id: None,
+        message_hash: None,
+    };
+    let picked = CostFirst.pick(&keys, &b, &ctx).unwrap();
+    assert_eq!(picked.key_id.as_ref(), "b");
+}

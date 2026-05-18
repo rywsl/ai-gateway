@@ -22,6 +22,18 @@ impl Strategy for CacheAffinity {
         b: &BreakerStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
+        // Without a message hash there is no meaningful prefix-cache affinity to
+        // preserve; hashing `model + ":"` alone would funnel every request for a
+        // given model to one key. Degrade to first-available instead.
+        let Some(msg_hash) = ctx.message_hash else {
+            for k in c {
+                if b.get_or_create(&k.key_id).is_available() {
+                    return Some(k);
+                }
+            }
+            return None;
+        };
+
         // Build a filtered slice of available candidates so the hash maps onto
         // a stable, contiguous index space.
         let available: Vec<&Arc<VendorKey>> = c
@@ -35,9 +47,7 @@ impl Strategy for CacheAffinity {
         let mut hasher = Sha256::new();
         hasher.update(ctx.model.as_ref().as_bytes());
         hasher.update(b":");
-        if let Some(h) = ctx.message_hash {
-            hasher.update(h.to_le_bytes());
-        }
+        hasher.update(msg_hash.to_le_bytes());
         let digest = hasher.finalize();
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&digest[..8]);

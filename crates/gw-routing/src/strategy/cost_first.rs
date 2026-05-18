@@ -1,9 +1,13 @@
-//! `CostFirst` strategy: pick the cheapest available key.
+//! Cost-first strategy.
 //!
-//! The plan calls for sorting by `key.markup` ascending, but `VendorKey` has no
-//! direct markup field (markup lives on `Pricing`/`MergedPermissions`). v1
-//! proxy: sort by `priority` ASCENDING — by convention the cheapest pool is
-//! given the lowest priority tier. TODO(v2): wire `Pricing.model_markup`.
+//! v1 limitation: VendorKey has no embedded cost/markup field; true cost
+//! resolution requires async lookup into `gw_store::EntityStore.pricing`,
+//! which is too expensive on the per-candidate hot path. This v1 implementation
+//! delegates to a priority-DESCENDING sort (same direction as FixedOrder) as a
+//! coarse proxy — operators are expected to set higher `priority` on cheaper
+//! key pools.
+//!
+//! TODO(v2): consult Pricing.model_markup and sort ascending by true cost.
 
 use super::*;
 
@@ -17,14 +21,14 @@ impl Strategy for CostFirst {
     fn pick<'a>(
         &self,
         candidates: &'a [Arc<VendorKey>],
-        b: &BreakerStore,
+        breakers: &BreakerStore,
         _ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
         let mut sorted: Vec<_> = candidates.iter().enumerate().collect();
-        // Ascending priority: lowest first ≈ cheapest tier.
-        sorted.sort_by_key(|(_, k)| k.priority);
+        // priority desc (higher = preferred / cheaper-tier-by-convention)
+        sorted.sort_by_key(|(_, k)| -k.priority);
         for (i, _) in &sorted {
-            if b.get_or_create(&candidates[*i].key_id).is_available() {
+            if breakers.get_or_create(&candidates[*i].key_id).is_available() {
                 return Some(&candidates[*i]);
             }
         }

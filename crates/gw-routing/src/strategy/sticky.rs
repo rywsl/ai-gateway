@@ -14,6 +14,12 @@ const STICKY_TTL: Duration = Duration::from_secs(30 * 60);
 
 pub struct Sticky {
     /// `conversation_id → (key_id, inserted_at)`.
+    ///
+    /// TODO(v2): periodic `sweep_expired()` or migrate to `moka::Cache` with TTL.
+    /// Today this `DashMap` grows monotonically — entries past `STICKY_TTL` are
+    /// re-bound on access but never evicted, so abandoned conversations leak.
+    /// Background sweeping requires a task driver not yet wired in this crate;
+    /// the gw-gateway binary in Phase 5 will own the sweep loop.
     pub bindings: DashMap<String, (KeyId, Instant)>,
 }
 

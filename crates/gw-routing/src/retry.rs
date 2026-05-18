@@ -9,6 +9,12 @@
 //!   whether the upstream actually executed the side effect).
 //! - Total wall-clock budget: 60s non-stream, 600s stream.
 //! - Per-request attempt cap: `cross_key_max` (default 3).
+//!
+//! v1 limitation: `RetryConfig::mode` and `same_key_max` are accepted but not
+//! enforced — the executor uses `cross_key_max` as the global attempt cap. The
+//! same-key vs cross-key distinction (ADR-022) requires the caller to update
+//! `mark_visited` on each new attempt; this wiring lives in gw-proxy and will
+//! activate the full mode semantics in Phase 4.
 
 use gw_core::error::{ErrorCategory, ErrorIR};
 use gw_core::ids::KeyId;

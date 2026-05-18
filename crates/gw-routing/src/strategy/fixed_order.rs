@@ -17,7 +17,7 @@ impl Strategy for FixedOrder {
         _ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
         let mut sorted: Vec<_> = candidates.iter().enumerate().collect();
-        // Descending priority: higher priority first.
+        // priority desc — `priority` field is "higher = more preferred" per gw-core::entity
         sorted.sort_by_key(|(_, k)| -k.priority);
         for (i, _) in &sorted {
             if b.get_or_create(&candidates[*i].key_id).is_available() {

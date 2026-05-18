@@ -2,19 +2,19 @@
 //!
 //! Each `KeyId` owns a [`BreakerState`] holding:
 //! - a 30-second sliding window of `(Instant, success)` samples
-//! - an atomic circuit state (`0 = closed`, `1 = open`, `2 = half-open`)
+//! - an atomic circuit state (closed / open / half-open)
 //! - an `open_until_ms` deadline (millis since UNIX epoch) for open → half-open transition
 //! - an `in_flight` counter that the proxy increments on borrow and decrements on release
 //!
 //! Trip rule (ADR-008): with ≥20 samples and >50% failure rate, close → open
 //! and set `open_until_ms = now + 60_000`. After the deadline elapses, the next
 //! `is_available()` call CAS-flips open → half-open and returns `true` to admit a
-//! probe request.
+//! single probe request. Once half-open, further callers receive `false` until
+//! the probe outcome resolves the circuit.
 //!
-//! v1 limitation: there is no explicit half-open → closed transition on success;
-//! the circuit naturally relaxes as failure samples roll off the 30s window
-//! (a recorded success while half-open does NOT immediately reset `circuit`).
-//! TODO(v2): explicit half-open → closed transition on first success.
+//! Recovery: a successful sample recorded while half-open CAS-flips the circuit
+//! back to closed. A failure while half-open will trip the breaker back to open
+//! via the normal failure-rate check (if the rate threshold is still exceeded).
 
 use dashmap::DashMap;
 use gw_core::ids::KeyId;
@@ -23,6 +23,11 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Circuit-state encodings stored in `BreakerState::circuit`.
+const CIRCUIT_CLOSED: u8 = 0;
+const CIRCUIT_OPEN: u8 = 1;
+const CIRCUIT_HALF_OPEN: u8 = 2;
 
 /// Bounded 30-second sliding window of `(timestamp, success_flag)` samples.
 pub struct SlidingWindow {
@@ -70,7 +75,7 @@ impl SlidingWindow {
 
 pub struct BreakerState {
     pub failure_window: Mutex<SlidingWindow>,
-    /// `0 = closed`, `1 = open`, `2 = half-open`.
+    /// One of [`CIRCUIT_CLOSED`], [`CIRCUIT_OPEN`], [`CIRCUIT_HALF_OPEN`].
     pub circuit: AtomicU8,
     pub open_until_ms: AtomicU64,
     pub in_flight: AtomicU32,
@@ -86,56 +91,74 @@ impl BreakerState {
     pub fn new() -> Self {
         Self {
             failure_window: Mutex::new(SlidingWindow::new()),
-            circuit: AtomicU8::new(0),
+            circuit: AtomicU8::new(CIRCUIT_CLOSED),
             open_until_ms: AtomicU64::new(0),
             in_flight: AtomicU32::new(0),
         }
     }
 
     /// Record one outcome (success or failure). On ≥20 samples with >50% failure
-    /// rate, trips the breaker open for 60s.
+    /// rate, trips the breaker open for 60s. On success while half-open,
+    /// transitions the circuit back to closed.
     pub fn record(&self, ok: bool) {
         let mut w = self.failure_window.lock();
         w.record(ok);
         let (total, rate) = w.failure_rate();
+        drop(w); // release before atomic ops
         if total >= 20 && rate > 0.5 {
-            self.circuit.store(1, Ordering::Release);
+            self.circuit.store(CIRCUIT_OPEN, Ordering::Release);
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             self.open_until_ms
                 .store(now_ms + 60_000, Ordering::Release);
+        } else if ok && self.circuit.load(Ordering::Acquire) == CIRCUIT_HALF_OPEN {
+            // probe succeeded → close
+            let _ = self.circuit.compare_exchange(
+                CIRCUIT_HALF_OPEN,
+                CIRCUIT_CLOSED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
         }
     }
 
     /// Returns `true` if the key may be used.
     ///
     /// - closed: always available.
-    /// - open: available iff the open deadline has elapsed; the call CAS-flips
-    ///   the state to half-open and admits a probe.
-    /// - half-open: already past the deadline; remains available so the probe
-    ///   in-flight can proceed.
+    /// - open: available iff the open deadline has elapsed AND this caller wins
+    ///   the CAS to claim the half-open probe slot. The CAS WINNER transitions
+    ///   open → half-open and returns `true`; concurrent losers and any caller
+    ///   arriving while the circuit is already half-open receive `false` (the
+    ///   in-flight probe must resolve first).
     pub fn is_available(&self) -> bool {
         let c = self.circuit.load(Ordering::Acquire);
-        if c == 0 {
+        if c == CIRCUIT_CLOSED {
             return true;
         }
+        if c == CIRCUIT_HALF_OPEN {
+            // Another probe is already in flight.
+            return false;
+        }
+        // c == CIRCUIT_OPEN: check whether the deadline has elapsed.
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        if now_ms >= self.open_until_ms.load(Ordering::Acquire) {
-            // Only flip 1 → 2; if already 2, leave alone.
-            let _ = self.circuit.compare_exchange(
-                1,
-                2,
+        if now_ms < self.open_until_ms.load(Ordering::Acquire) {
+            return false;
+        }
+        // Deadline elapsed — try to claim the probe slot. Only the CAS winner
+        // is admitted; concurrent callers must wait for the probe outcome.
+        self.circuit
+            .compare_exchange(
+                CIRCUIT_OPEN,
+                CIRCUIT_HALF_OPEN,
                 Ordering::AcqRel,
                 Ordering::Acquire,
-            );
-            return true;
-        }
-        false
+            )
+            .is_ok()
     }
 }
 
