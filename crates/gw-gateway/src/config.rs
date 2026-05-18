@@ -6,14 +6,15 @@
 //!   3. Environment variables prefixed with `GW_`, nesting separator `__`
 //!      (e.g. `GW_REDIS__URL` populates `redis.url`).
 //!
-//! Secret material (KEK hex, DB passwords) should arrive via env vars and is
-//! kept inside `secrecy::SecretString` so accidental `Debug` output redacts.
+//! Secret material (KEK hex, DB connection strings with embedded passwords)
+//! should arrive via env vars and is kept inside `secrecy::SecretString` so
+//! accidental `Debug` output redacts.
 
 use figment::{
     Figment,
     providers::{Env, Format, Toml},
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -25,7 +26,10 @@ pub struct Config {
     pub ledger: LedgerCfg,
     pub kms: KmsCfg,
     pub debug: DebugCfg,
-    pub auth: AuthCfg,
+    // TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
+    // `HardCapCfg` defaults. Once it accepts caller-supplied caps, reintroduce
+    // an `[auth]` section here and thread `hard_cap_max_input_tokens` /
+    // `hard_cap_max_cost_micro` into `LlmGateway` via `Wired`.
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,13 +41,18 @@ pub struct ServerCfg {
 
 #[derive(Debug, Deserialize)]
 pub struct RedisCfg {
-    pub url: String,
+    /// Connection URL including credentials. Wrapped in `SecretString` so a
+    /// stray `{:?}` print of the surrounding `Config` keeps the password
+    /// redacted.
+    pub url: SecretString,
     pub pool_size: usize,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PgCfg {
-    pub url: String,
+    /// Connection URL including credentials. Wrapped in `SecretString` for the
+    /// same reason as `RedisCfg::url`.
+    pub url: SecretString,
     pub max_connections: u32,
 }
 
@@ -80,10 +89,69 @@ pub struct DebugCfg {
     pub include_response_body: bool,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AuthCfg {
-    pub hard_cap_max_input_tokens: u32,
-    pub hard_cap_max_cost_micro: u64,
+impl RedisCfg {
+    /// Expose the connection URL for the redis client. The string is only
+    /// consumed at startup by the connect call.
+    pub fn url_str(&self) -> &str {
+        self.url.expose_secret()
+    }
+}
+
+impl PgCfg {
+    /// Expose the connection URL for the pg client. The string is only
+    /// consumed at startup by the connect call.
+    pub fn url_str(&self) -> &str {
+        self.url.expose_secret()
+    }
+}
+
+impl Config {
+    /// Validate cross-field invariants and numeric ranges. Called from
+    /// [`load`] right after deserialisation so misconfiguration surfaces at
+    /// startup rather than at first use.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.server.business_port == 0
+            || self.server.metrics_port == 0
+            || self.server.health_port == 0
+        {
+            anyhow::bail!("invalid config: server ports must be non-zero");
+        }
+        if self.server.business_port == self.server.metrics_port
+            || self.server.business_port == self.server.health_port
+            || self.server.metrics_port == self.server.health_port
+        {
+            anyhow::bail!(
+                "invalid config: server.business_port, server.metrics_port \
+                 and server.health_port must all differ"
+            );
+        }
+
+        if self.redis.pool_size == 0 {
+            anyhow::bail!("invalid config: redis.pool_size must be > 0");
+        }
+        if self.pgsql.max_connections == 0 {
+            anyhow::bail!("invalid config: pgsql.max_connections must be > 0");
+        }
+
+        if self.ledger.batch_size == 0 {
+            anyhow::bail!("invalid config: ledger.batch_size must be > 0");
+        }
+        if self.ledger.channel_capacity == 0 {
+            anyhow::bail!("invalid config: ledger.channel_capacity must be > 0");
+        }
+        if self.ledger.flush_interval_ms == 0 {
+            anyhow::bail!("invalid config: ledger.flush_interval_ms must be > 0");
+        }
+
+        if !(0.0..=1.0).contains(&self.debug.sampling_rate) {
+            anyhow::bail!(
+                "invalid config: debug.sampling_rate must be in [0.0, 1.0], got {}",
+                self.debug.sampling_rate
+            );
+        }
+
+        Ok(())
+    }
 }
 
 pub fn load() -> anyhow::Result<Config> {
@@ -92,5 +160,6 @@ pub fn load() -> anyhow::Result<Config> {
         .merge(Toml::file("config/local.toml"))
         .merge(Env::prefixed("GW_").split("__"))
         .extract()?;
+    cfg.validate()?;
     Ok(cfg)
 }

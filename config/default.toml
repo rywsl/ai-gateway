@@ -46,8 +46,7 @@ sampling_rate = 0.0001
 include_request_body = false
 include_response_body = false
 
-[auth]
-# Refuse to route requests that exceed these hard caps regardless of per-user
-# policy. Protects the gateway from pathological inputs.
-hard_cap_max_input_tokens = 2000000
-hard_cap_max_cost_micro = 100000000
+# TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
+# `HardCapCfg` defaults. When it accepts caller-supplied caps, reintroduce
+# an `[auth]` section here with `hard_cap_max_input_tokens` and
+# `hard_cap_max_cost_micro` and thread them into `LlmGateway`.

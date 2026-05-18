@@ -39,7 +39,6 @@ use gw_proxy::LlmGateway;
 use gw_routing::{BreakerStore, RetryConfig};
 use gw_store::EntityStore;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// Bundle of `Arc`-shared collaborators handed off to Pingora as the
@@ -142,6 +141,14 @@ pub fn run() -> anyhow::Result<()> {
         "pingora business service starting"
     );
 
+    // Flip readiness right before `run_forever()`. `add_service` above
+    // registers the service synchronously and pingora binds the listening
+    // sockets prior to entering the run loop, so by the time external probes
+    // reach `/readyz` the business port is accepting connections. Flipping
+    // earlier (e.g. inside `bootstrap()`) would create a window where
+    // `/readyz` returns 200 but the business port is still refused.
+    health::READY.store(true, std::sync::atomic::Ordering::Release);
+
     // `run_forever` consumes the server and is `-> !`, so this call never
     // returns. The trailing `Ok(())` below is unreachable but keeps the
     // function signature `anyhow::Result<()>` for callers/tests.
@@ -149,20 +156,21 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
-    // 1. KMS — load KEK material. Held in scope (not currently passed to
-    // EntityStore::new which is parameterless in v1; the cache will be wired
-    // through the loader path in a later task).
+    // 1. KMS — load and validate KEK material so config errors surface at
+    // startup. The cache is dropped at the end of this function; when the
+    // loader path is wired to consume encrypted vendor keys, promote
+    // `kek_cache` into the `Wired` struct so it survives across `bootstrap()`.
     let _kek_cache = kms::init(cfg).await.context("KMS init failed")?;
 
     // 2. Storage clients. Both calls validate connectivity before returning.
     let redis = gw_store::redis_client::RedisCtx::connect(
-        &cfg.redis.url,
+        cfg.redis.url_str(),
         cfg.redis.pool_size,
     )
     .await
     .context("redis connect failed")?;
 
-    let pg = gw_store::pg_client::connect(&cfg.pgsql.url, cfg.pgsql.max_connections)
+    let pg = gw_store::pg_client::connect(cfg.pgsql.url_str(), cfg.pgsql.max_connections)
         .await
         .context("postgres connect failed")?;
     // Pg pool is held for future loader use; loader runs on demand from
@@ -184,8 +192,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         Duration::from_millis(cfg.ledger.flush_interval_ms),
     ));
 
-    // 5. Health server. Spawned BEFORE flipping READY so /readyz is
-    // immediately reachable (it'll still return 503 until READY is true).
+    // 5. Health server. Spawned before returning so /livez is reachable
+    // immediately; /readyz will return 503 until the main thread flips
+    // `health::READY` right before `server.run_forever()`.
     let health_port = cfg.server.health_port;
     tokio::spawn(async move {
         if let Err(e) = health::run_health_server(health_port).await {
@@ -196,9 +205,6 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             );
         }
     });
-
-    // 6. Bootstrap done — flip readiness probe.
-    health::READY.store(true, Ordering::Release);
 
     Ok(Wired {
         store,
