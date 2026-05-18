@@ -2,4 +2,5 @@
 
 pub mod error;
 pub mod ids;
+pub mod ir;
 pub mod protocol;
