@@ -4,3 +4,17 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[dependencies]
+gw-core = { path = "../gw-core" }
+gw-store = { path = "../gw-store" }
+serde.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+rand.workspace = true
+sha2.workspace = true
+secrecy.workspace = true
