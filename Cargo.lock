@@ -869,7 +869,6 @@ dependencies = [
 name = "gw-auth"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "dashmap",
  "futures",
