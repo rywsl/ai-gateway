@@ -1,0 +1,56 @@
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCategory {
+    ClientBadRequest,
+    ClientAuth,
+    ClientQuota,
+    UpstreamError,
+    UpstreamTimeout,
+    UpstreamOverloaded,
+    GatewayInternal,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ErrorIR<'a> {
+    pub category: ErrorCategory,
+    pub status: u16,
+    pub upstream_status: Option<u16>,
+    pub code: Cow<'a, str>,
+    pub message: Cow<'a, str>,
+    pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_raw: Option<&'a serde_json::value::RawValue>,
+    pub request_id: &'a str,
+    pub retry_after_secs: Option<u32>,
+}
+
+/// 稳定错误码字典（ADR-020）—— 永不在小版本中变更含义。
+pub mod codes {
+    pub const GW_AUTH_INVALID_JWT: &str = "GW_AUTH_INVALID_JWT";
+    pub const GW_AUTH_INVALID_APIKEY: &str = "GW_AUTH_INVALID_APIKEY";
+    pub const GW_AUTH_NO_KEY_PERMISSION: &str = "GW_AUTH_NO_KEY_PERMISSION";
+    pub const GW_AUTH_IP_BLOCKED: &str = "GW_AUTH_IP_BLOCKED";
+    pub const GW_AUTH_IP_NOT_ALLOWED: &str = "GW_AUTH_IP_NOT_ALLOWED";
+    pub const GW_AUTH_SIGNATURE_INVALID: &str = "GW_AUTH_SIGNATURE_INVALID";
+    pub const GW_QUOTA_BALANCE_ZERO: &str = "GW_QUOTA_BALANCE_ZERO";
+    pub const GW_QUOTA_RPM_EXCEEDED: &str = "GW_QUOTA_RPM_EXCEEDED";
+    pub const GW_QUOTA_TPM_EXCEEDED: &str = "GW_QUOTA_TPM_EXCEEDED";
+    pub const GW_QUOTA_CONCURRENT_EXCEEDED: &str = "GW_QUOTA_CONCURRENT_EXCEEDED";
+    pub const GW_REQUEST_PROTOCOL_UNKNOWN: &str = "GW_REQUEST_PROTOCOL_UNKNOWN";
+    pub const GW_REQUEST_INPUT_TOO_LARGE: &str = "GW_REQUEST_INPUT_TOO_LARGE";
+    pub const GW_REQUEST_COST_TOO_HIGH: &str = "GW_REQUEST_COST_TOO_HIGH";
+    pub const GW_REQUEST_CONTENT_REJECTED: &str = "GW_REQUEST_CONTENT_REJECTED";
+    pub const GW_REQUEST_MODEL_NOT_FOUND: &str = "GW_REQUEST_MODEL_NOT_FOUND";
+    pub const GW_ROUTING_NO_AVAILABLE_CHANNEL: &str = "GW_ROUTING_NO_AVAILABLE_CHANNEL";
+    pub const GW_UPSTREAM_TIMEOUT: &str = "GW_UPSTREAM_TIMEOUT";
+    pub const GW_UPSTREAM_5XX: &str = "GW_UPSTREAM_5XX";
+    pub const GW_UPSTREAM_4XX: &str = "GW_UPSTREAM_4XX";
+    pub const GW_UPSTREAM_OVERLOADED: &str = "GW_UPSTREAM_OVERLOADED";
+    pub const GW_UPSTREAM_CANCELLED: &str = "GW_UPSTREAM_CANCELLED";
+    pub const GW_BACKEND_UNAVAILABLE: &str = "GW_BACKEND_UNAVAILABLE";
+    pub const GW_GATEWAY_INTERNAL: &str = "GW_GATEWAY_INTERNAL";
+}
