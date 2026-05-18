@@ -1,0 +1,23 @@
+[package]
+name = "gw-ledger"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gw-core = { path = "../gw-core" }
+gw-store = { path = "../gw-store" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time", "macros"] }
+async-trait.workspace = true
+time.workspace = true
+fred.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "test-util"] }
+testcontainers.workspace = true
+testcontainers-modules.workspace = true

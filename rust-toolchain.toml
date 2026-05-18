@@ -1,0 +1,7 @@
+[toolchain]
+# Pingora 0.8 transitively depends on `getrandom 0.4` (via `cf-rustracing`),
+# which requires `wasip3` whose manifest uses `edition2024`. The minimum rustc
+# that recognises that edition is 1.85; we pin 1.86 to match the toolchain
+# already installed in CI.
+channel = "1.86.0"
+components = ["rustfmt", "clippy"]

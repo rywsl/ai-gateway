@@ -1,0 +1,35 @@
+[package]
+name = "gw-auth"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gw-core = { path = "../gw-core" }
+gw-store = { path = "../gw-store" }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+jsonwebtoken.workspace = true
+governor.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+time.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+ipnet.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+criterion.workspace = true
+
+[[bench]]
+name = "merge_permissions"
+harness = false

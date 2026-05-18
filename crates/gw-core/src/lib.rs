@@ -1,0 +1,11 @@
+//! gw-core: 纯类型层（无 IO / 无 async）。所有上层 crate 共享的 IR / ErrorIR / Versioned / ID newtype 集中于此。
+
+pub mod debug;
+pub mod entity;
+pub mod error;
+pub mod ids;
+pub mod ir;
+pub mod permissions;
+pub mod protocol;
+pub mod traits;
+pub mod versioned;

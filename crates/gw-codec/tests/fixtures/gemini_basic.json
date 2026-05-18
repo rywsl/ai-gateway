@@ -1,0 +1,12 @@
+{
+  "contents": [
+    {"role": "user", "parts": [{"text": "Hello, Gemini."}]}
+  ],
+  "systemInstruction": {
+    "parts": [{"text": "You are a helpful assistant."}]
+  },
+  "generationConfig": {
+    "maxOutputTokens": 256,
+    "temperature": 0.6
+  }
+}

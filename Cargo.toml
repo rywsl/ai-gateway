@@ -1,0 +1,97 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gw-core",
+    "crates/gw-codec-macros",
+    "crates/gw-codec",
+    "crates/gw-store",
+    "crates/gw-auth",
+    "crates/gw-routing",
+    "crates/gw-ledger",
+    "crates/gw-proxy",
+    "crates/gw-gateway",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.86"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# 基础类型
+bytes = "1.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sonic-rs = "0.3"
+thiserror = "1"
+anyhow = "1"
+secrecy = { version = "0.10", features = ["serde"] }
+time = { version = "0.3", features = ["serde", "macros"] }
+url = { version = "2.5", features = ["serde"] }
+smallvec = { version = "1.13", features = ["serde"] }
+
+# 异步
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# proc-macro
+proc-macro2 = "1"
+syn = { version = "2", features = ["full"] }
+quote = "1"
+
+# 缓存 / 并发
+moka = { version = "0.12", features = ["future"] }
+dashmap = "6"
+parking_lot = "0.12"
+arc-swap = "1"
+once_cell = "1.20"
+
+# 加密
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+rand = "0.8"
+
+# 网关 / 网络
+pingora = "0.8"
+pingora-proxy = "0.8"
+fred = { version = "9", features = ["partial-tracing", "metrics", "subscriber-client"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "macros", "migrate", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+jsonwebtoken = "9"
+governor = "0.7"
+ipnet = "2.10"
+hex = "0.4"
+
+# 可观测
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# 配置
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# 内存
+tikv-jemallocator = "0.6"
+tikv-jemalloc-ctl = "0.6"
+
+# 测试
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
+wiremock = "0.6"
+criterion = { version = "0.5", features = ["async_tokio"] }
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.bench]
+inherits = "release"
+debug = true
