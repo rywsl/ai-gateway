@@ -17,3 +17,14 @@ tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "passthrough"
+harness = false
+
+[[bench]]
+name = "cross_protocol"
+harness = false

@@ -18,3 +18,10 @@ metrics.workspace = true
 rand.workspace = true
 sha2.workspace = true
 secrecy.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "strategy_pick"
+harness = false
