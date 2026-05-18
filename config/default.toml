@@ -1,0 +1,53 @@
+# Default configuration for gw-gateway.
+#
+# This file ships in-tree; overrides come from (in precedence order, low → high):
+#   1. config/default.toml (this file)
+#   2. config/local.toml (gitignored, optional per-machine overrides)
+#   3. environment variables prefixed with GW_, using __ as nesting separator.
+#      e.g. `GW_REDIS__URL=redis://prod:6379` overrides `[redis] url = ...`.
+#
+# Secrets (KEK material, DB passwords) MUST be supplied via env vars, never
+# committed.
+
+[server]
+business_port = 8000
+metrics_port = 9090
+health_port = 8080
+
+[redis]
+url = "redis://localhost:6379"
+pool_size = 8
+
+[pgsql]
+url = "postgres://postgres:postgres@localhost:5432/gateway"
+max_connections = 16
+
+[ratelimit]
+# Workspace-global ceiling for requests per minute. Per-user RPM lives in
+# DB and is enforced by gw-auth at request time.
+global_rpm = 100000
+
+[ledger]
+# Bounded mpsc channel between proxy filters and the background flusher.
+# `try_send` drops records (with a counter increment) when full to keep the
+# request path latency-bounded.
+channel_capacity = 65536
+batch_size = 200
+flush_interval_ms = 200
+
+[kms]
+# Dev mode: provide a 32-byte KEK as 64 hex chars via env var
+# `GW_KMS__KEK_HEX=...`. Production mode (AWS KMS) is wired separately.
+key_id = "primary"
+
+[debug]
+# Sampled detailed request/response log. ADR-027.
+sampling_rate = 0.0001
+include_request_body = false
+include_response_body = false
+
+[auth]
+# Refuse to route requests that exceed these hard caps regardless of per-user
+# policy. Protects the gateway from pathological inputs.
+hard_cap_max_input_tokens = 2000000
+hard_cap_max_cost_micro = 100000000
