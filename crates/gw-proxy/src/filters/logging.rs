@@ -29,6 +29,34 @@ pub async fn run(
     let now = std::time::Instant::now();
     ctx.timing.end = Some(now);
 
+    // Unconditional request counter. Pingora fires `logging` for every
+    // completed request, including short-circuit responses from
+    // `request_filter` (4xx auth/codec/rate-limit failures). The
+    // BillingRecord/TPM emit path further down is gated on a 4-tuple of
+    // `Some(..)` that is only populated once routing succeeds, so without
+    // this counter a gateway that has only served 401s renders an empty
+    // `/metrics` body. Emit early so any request hitting the proxy lights
+    // up the exporter registry. The `status_class` label keeps cardinality
+    // bounded (5 values: 1xx..5xx, plus "err" when pingora reports an
+    // upstream error with no recorded status).
+    let status_class = match (err.is_some(), ctx.upstream_status) {
+        (_, Some(s)) => match s / 100 {
+            1 => "1xx",
+            2 => "2xx",
+            3 => "3xx",
+            4 => "4xx",
+            5 => "5xx",
+            _ => "other",
+        },
+        (true, None) => "err",
+        (false, None) => "early",
+    };
+    metrics::counter!(
+        "gateway_requests_total",
+        "status_class" => status_class,
+    )
+    .increment(1);
+
     // ---------------------------------------------------------------------
     // Compute the real cost (micro) using ctx.usage + (optional) pricing.
     // The freeze guard, if present, is settled with this number. If there's

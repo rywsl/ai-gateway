@@ -44,5 +44,12 @@ fn init_metrics(cfg: &Config) -> anyhow::Result<()> {
         .install()
         .context("failed to install prometheus exporter")?;
 
+    // Emit a baseline counter at startup so `/metrics` is non-empty even
+    // before any traffic completes. Without at least one `counter!`/`gauge!`
+    // call, `metrics-exporter-prometheus` renders the registry as an empty
+    // body — which makes a healthy 200 response indistinguishable from a
+    // broken exporter during ops triage.
+    metrics::counter!("gateway_started_total").increment(1);
+
     Ok(())
 }
