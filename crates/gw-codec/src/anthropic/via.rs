@@ -48,24 +48,36 @@ impl<'a> TryFrom<&RequestIR<'a>> for AnthropicRequest<'a> {
 
     #[inline]
     fn try_from(ir: &RequestIR<'a>) -> Result<Self, Self::Error> {
-        // Anthropic separates system from messages: take the *first*
-        // `System` message as the top-level field, drop subsequent ones (the
-        // Anthropic API doesn't support multiple system prompts).
-        let mut system: Option<Cow<'a, str>> = None;
+        // Anthropic separates system from messages and only supports a SINGLE
+        // top-level `system` field. We:
+        //   1. Concatenate ALL leading System messages with "\n\n" so no
+        //      content is silently dropped.
+        //   2. Continue extracting User/Assistant/Tool messages from after
+        //      the leading System run.
+        //   3. If a non-leading (mid-conversation) System message appears,
+        //      we fold it into `system` too and emit a `tracing::warn!`.
+        //      Conversation order is perturbed in this case; v1 trade-off.
+        let mut system_parts: Vec<String> = Vec::new();
+        let mut seen_non_system = false;
         let mut messages: Vec<AnthropicMessage<'a>> = Vec::with_capacity(ir.messages.len());
         for m in &ir.messages {
             match m {
                 MessageIR::System { content } => {
-                    if system.is_none() {
-                        system = Some(content_to_text(content));
+                    if seen_non_system {
+                        tracing::warn!(
+                            "anthropic: mid-conversation System message folded into top-level system; conversation order may be perturbed"
+                        );
                     }
+                    system_parts.push(content_to_text(content).into_owned());
                 }
                 MessageIR::User { content } => {
+                    seen_non_system = true;
                     messages.push(AnthropicMessage::User {
                         content: content_to_text(content),
                     });
                 }
                 MessageIR::Assistant { content, .. } => {
+                    seen_non_system = true;
                     messages.push(AnthropicMessage::Assistant {
                         content: content_to_text(content),
                     });
@@ -74,12 +86,20 @@ impl<'a> TryFrom<&RequestIR<'a>> for AnthropicRequest<'a> {
                     // Tool results fold into the trailing user turn in
                     // Anthropic's content blocks. v1: emit as a user turn
                     // with the tool output verbatim.
+                    // TODO(v2): emit Anthropic tool_result block instead of
+                    // folding into User text.
+                    seen_non_system = true;
                     messages.push(AnthropicMessage::User {
                         content: content_to_text(content),
                     });
                 }
             }
         }
+        let system: Option<Cow<'a, str>> = if system_parts.is_empty() {
+            None
+        } else {
+            Some(Cow::Owned(system_parts.join("\n\n")))
+        };
         Ok(AnthropicRequest {
             model: ir.model.clone(),
             messages,

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Serialize, IrConvert)]
 #[ir(target = "RequestIR", direction = "both")]
+// TODO(v2): add explicit tools/tool_choice fields; for v1 they round-trip through `extra`.
 pub struct OpenAiRequest<'a> {
     #[ir(map = "model")]
     #[serde(borrow)]

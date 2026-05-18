@@ -60,6 +60,8 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
                     }
                 }
                 MessageIR::User { content } | MessageIR::Tool { content, .. } => {
+                    // TODO(v2): emit Gemini functionResponse block instead of
+                    // folding Tool messages into user text.
                     contents.push(GeminiContent {
                         role: Cow::Borrowed("user"),
                         parts: vec![GeminiPart {

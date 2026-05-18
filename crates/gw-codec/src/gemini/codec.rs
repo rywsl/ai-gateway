@@ -64,26 +64,14 @@ impl ProtocolCodec for Gemini {
             }
             let val: serde_json::Value = match serde_json::from_str(payload) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(_) => {
+                    // CONTRACT: malformed SSE payloads do not short-circuit
+                    // the stream — log and continue scanning the chunk.
+                    tracing::warn!("malformed SSE data on gemini");
+                    continue;
+                }
             };
-            // finishReason on the candidate marks stream end.
             let candidate = val.get("candidates").and_then(|c| c.get(0));
-            if let Some(reason) = candidate
-                .and_then(|c| c.get("finishReason"))
-                .and_then(|r| r.as_str())
-            {
-                let finish = match reason {
-                    "STOP" => FinishReasonIR::Stop,
-                    "MAX_TOKENS" => FinishReasonIR::Length,
-                    "SAFETY" => FinishReasonIR::ContentFilter,
-                    _ => FinishReasonIR::Other,
-                };
-                // Some final chunks also carry text; prefer to emit Delta
-                // first only if non-empty. For simplicity, surface End.
-                return Ok(Some(StreamEventIR::End {
-                    finish_reason: finish,
-                }));
-            }
             let txt = candidate
                 .and_then(|c| c.get("content"))
                 .and_then(|c| c.get("parts"))
@@ -91,12 +79,38 @@ impl ProtocolCodec for Gemini {
                 .and_then(|p| p.get("text"))
                 .and_then(|t| t.as_str())
                 .map(|s| Cow::Owned(s.to_owned()));
+            let finish = candidate
+                .and_then(|c| c.get("finishReason"))
+                .and_then(|r| r.as_str());
+
+            // CONTRACT: under v1's one-event-per-call rule, when a final
+            // Gemini chunk carries BOTH text and finishReason we must pick
+            // one. We prefer the Delta (text) to avoid silent text loss; the
+            // finishReason is logged and dropped. Cross-protocol callers
+            // that need an explicit End for the rare text+finish co-occurrence
+            // can synthesize one on the framer side.
+            // TODO(v2): widen `parse_stream_chunk` return type so we can emit
+            // Delta + End from a single chunk.
             if txt.is_some() {
+                if let Some(reason) = finish {
+                    tracing::warn!(
+                        "gemini: finishReason {reason} dropped to preserve trailing text; framer should synthesize End"
+                    );
+                }
                 return Ok(Some(StreamEventIR::Delta {
                     text: txt,
                     tool_call: None,
                     thinking: None,
                 }));
+            }
+            if let Some(reason) = finish {
+                let finish_reason = match reason {
+                    "STOP" => FinishReasonIR::Stop,
+                    "MAX_TOKENS" => FinishReasonIR::Length,
+                    "SAFETY" => FinishReasonIR::ContentFilter,
+                    _ => FinishReasonIR::Other,
+                };
+                return Ok(Some(StreamEventIR::End { finish_reason }));
             }
         }
         Ok(None)
@@ -140,7 +154,21 @@ impl ProtocolCodec for Gemini {
                 buf.extend_from_slice(&bytes);
                 buf.extend_from_slice(b"\n\n");
             }
-            _ => {}
+            StreamEventIR::Error(err) => {
+                // Gemini has no formal SSE error event shape; surface the
+                // gateway error as a `data:` JSON frame.
+                let mut tmp = BytesMut::new();
+                self.render_error(err, &mut tmp);
+                buf.extend_from_slice(b"data: ");
+                buf.extend_from_slice(&tmp);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::Start { .. } => {
+                tracing::warn!("gemini: StreamEventIR::Start dropped (no wire equivalent in v1)");
+            }
+            StreamEventIR::Usage(_) => {
+                tracing::warn!("gemini: StreamEventIR::Usage dropped (no wire equivalent in v1)");
+            }
         }
         Ok(())
     }

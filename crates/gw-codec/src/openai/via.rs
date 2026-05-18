@@ -21,6 +21,7 @@ impl<'a> From<OpenAiRequest<'a>> for RequestIR<'a> {
             None
         } else {
             // Owned-key map; the keys are already owned `String`.
+            // TODO(v2): zero-copy extension keys via Cow<'a, str> wire field
             let mut out: std::collections::HashMap<Cow<'a, str>, Box<RawValue>> =
                 std::collections::HashMap::with_capacity(src.extra.len());
             for (k, v) in src.extra {
@@ -106,13 +107,24 @@ fn openai_msg_to_ir(m: OpenAiMessage<'_>) -> MessageIR<'_> {
                         // (owned, since the source `Cow` may have been borrowed
                         // from the request body).
                         let args_owned = tc.function.arguments.into_owned();
-                        let raw = RawValue::from_string(args_owned).unwrap_or_else(|_| {
-                            // Fallback: RawValue::from_string requires the
-                            // string to be valid JSON. If the upstream sent a
-                            // non-JSON arguments value, wrap it as a JSON
-                            // string literal.
-                            RawValue::from_string("\"\"".to_owned()).unwrap()
-                        });
+                        let raw = match RawValue::from_string(args_owned.clone()) {
+                            Ok(rv) => rv,
+                            Err(_) => {
+                                // Fallback: RawValue::from_string requires the
+                                // payload to be valid JSON. If the upstream
+                                // sent a non-JSON `arguments` value, escape
+                                // it as a JSON string literal so the assistant
+                                // can at least interpret it as raw text.
+                                tracing::warn!(
+                                    "openai tool_call.arguments not valid JSON; passing through as string literal"
+                                );
+                                let escaped = serde_json::to_string(&args_owned)
+                                    .expect("serde_json::to_string of &String is infallible");
+                                RawValue::from_string(escaped).expect(
+                                    "serialized JSON string literal must be valid JSON",
+                                )
+                            }
+                        };
                         ToolCallIR {
                             id: tc.id,
                             name: tc.function.name,

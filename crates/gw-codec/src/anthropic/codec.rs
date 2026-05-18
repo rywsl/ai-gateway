@@ -63,8 +63,16 @@ impl ProtocolCodec for Anthropic {
                 finish_reason: FinishReasonIR::Stop,
             })),
             (Some("content_block_delta"), Some(payload)) if !payload.is_empty() => {
-                let val: serde_json::Value =
-                    serde_json::from_str(payload).map_err(|_| internal_err("anthropic bad delta json"))?;
+                let val: serde_json::Value = match serde_json::from_str(payload) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        // CONTRACT: malformed payloads must not short-circuit
+                        // the stream — surface a warn and return Ok(None) so
+                        // the framer continues to the next chunk.
+                        tracing::warn!("malformed SSE data on anthropic");
+                        return Ok(None);
+                    }
+                };
                 let txt = val
                     .get("delta")
                     .and_then(|d| d.get("text"))
@@ -101,7 +109,24 @@ impl ProtocolCodec for Anthropic {
             StreamEventIR::End { .. } => {
                 buf.extend_from_slice(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
             }
-            _ => {}
+            StreamEventIR::Error(err) => {
+                // Anthropic SSE error shape: `event: error\ndata: {json}\n\n`.
+                let mut tmp = BytesMut::new();
+                self.render_error(err, &mut tmp);
+                buf.extend_from_slice(b"event: error\ndata: ");
+                buf.extend_from_slice(&tmp);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::Start { .. } => {
+                tracing::warn!(
+                    "anthropic: StreamEventIR::Start dropped (no wire equivalent in v1)"
+                );
+            }
+            StreamEventIR::Usage(_) => {
+                tracing::warn!(
+                    "anthropic: StreamEventIR::Usage dropped (no wire equivalent in v1)"
+                );
+            }
         }
         Ok(())
     }

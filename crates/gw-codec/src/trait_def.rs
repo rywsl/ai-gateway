@@ -24,6 +24,23 @@ pub trait ProtocolCodec: Send + Sync + 'static {
     fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>>;
     fn render_request(&self, ir: &RequestIR<'_>, buf: &mut BytesMut) -> Result<(), ErrorIR<'static>>;
 
+    /// Parse one already-framed SSE event chunk.
+    ///
+    /// CONTRACT: The caller pre-frames the upstream byte stream on `\n\n`
+    /// boundaries and passes exactly one complete event to this method. The
+    /// codec implementation does NOT split or accumulate; it interprets
+    /// exactly one event and returns `Ok(None)` if the chunk contains no
+    /// usable IR payload (e.g. an SSE comment line, keep-alive, or unknown
+    /// event).
+    ///
+    /// Codecs are expected to be tolerant of malformed `data:` payloads:
+    /// they return `Ok(None)` (with a `tracing::warn!`) rather than `Err`,
+    /// so that streaming is not short-circuited mid-response.
+    ///
+    /// TODO(v2): widen the return type to `Vec<StreamEventIR>` or an
+    /// iterator so a single upstream chunk can emit multiple IR events
+    /// (e.g. Gemini's combined `text + finishReason` final chunk). v1
+    /// enforces one-event-per-call.
     fn parse_stream_chunk<'a>(
         &self,
         chunk: &'a [u8],

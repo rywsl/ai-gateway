@@ -41,10 +41,12 @@ pub struct AnthropicRequest<'a> {
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum AnthropicMessage<'a> {
     User {
+        // TODO(v2): support content as array-of-blocks (text/image/tool_use/tool_result)
         #[serde(borrow)]
         content: Cow<'a, str>,
     },
     Assistant {
+        // TODO(v2): support content as array-of-blocks (text/image/tool_use/tool_result)
         #[serde(borrow)]
         content: Cow<'a, str>,
     },

@@ -63,19 +63,29 @@ impl ProtocolCodec for OpenAi {
             if payload.is_empty() {
                 continue;
             }
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
-                let txt = val
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
-                    .and_then(|d| d.get("content"))
-                    .and_then(|c| c.as_str())
-                    .map(|s| Cow::Owned(s.to_owned()));
-                return Ok(Some(StreamEventIR::Delta {
-                    text: txt,
-                    tool_call: None,
-                    thinking: None,
-                }));
+            match serde_json::from_str::<serde_json::Value>(payload) {
+                Ok(val) => {
+                    let txt = val
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str())
+                        .map(|s| Cow::Owned(s.to_owned()));
+                    return Ok(Some(StreamEventIR::Delta {
+                        text: txt,
+                        tool_call: None,
+                        thinking: None,
+                    }));
+                }
+                Err(_) => {
+                    // CONTRACT: a malformed `data:` payload should NOT
+                    // short-circuit the entire stream — surface a warn and
+                    // return Ok(None) so the framer can continue with the
+                    // next chunk.
+                    tracing::warn!("malformed SSE data on openai");
+                    return Ok(None);
+                }
             }
         }
         Ok(None)
@@ -103,7 +113,21 @@ impl ProtocolCodec for OpenAi {
             StreamEventIR::End { .. } => {
                 buf.extend_from_slice(b"data: [DONE]\n\n");
             }
-            _ => {}
+            StreamEventIR::Error(err) => {
+                // Surface the gateway error on the wire as a final `data:`
+                // frame so the client observes it even mid-stream.
+                let mut tmp = BytesMut::new();
+                self.render_error(err, &mut tmp);
+                buf.extend_from_slice(b"data: ");
+                buf.extend_from_slice(&tmp);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::Start { .. } => {
+                tracing::warn!("openai: StreamEventIR::Start dropped (no wire equivalent in v1)");
+            }
+            StreamEventIR::Usage(_) => {
+                tracing::warn!("openai: StreamEventIR::Usage dropped (no wire equivalent in v1)");
+            }
         }
         Ok(())
     }
