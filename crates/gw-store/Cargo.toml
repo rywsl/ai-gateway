@@ -4,3 +4,32 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[dependencies]
+gw-core = { path = "../gw-core" }
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+time.workspace = true
+secrecy.workspace = true
+url.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+moka.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
+fred.workspace = true
+sqlx.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
