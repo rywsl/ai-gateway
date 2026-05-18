@@ -20,7 +20,6 @@ use bytes::BytesMut;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
 use gw_core::entity::{ModelGroup, StrategyKind};
-use gw_core::ids::ModelName;
 use gw_core::ir::Mutations;
 use gw_routing::candidates::get_candidate_keys;
 use gw_routing::strategy::{
@@ -263,7 +262,11 @@ pub async fn rewrite_request(
     {
         let _ = upstream_request.insert_header("host", host.to_string());
     }
-    let traceparent = format!("00-{}-{}-01", ctx.trace_id.0, &ctx.trace_id.0[..16]);
+    // W3C traceparent: version-traceid-spanid-flags. The span-id is a fresh
+    // 8-byte random value per upstream hop (re-using the trace-id prefix as we
+    // used to do made the span-id deterministic and meaningless to consumers).
+    let span_id = hex::encode(rand::random::<[u8; 8]>());
+    let traceparent = format!("00-{}-{}-01", ctx.trace_id.0, span_id);
     let _ = upstream_request.insert_header("traceparent", traceparent);
 
     // Rewrite Content-Length: the body may have changed.
@@ -282,9 +285,4 @@ fn codec_for(k: gw_core::protocol::ProtocolKind) -> AnyCodec {
         ProtocolKind::Anthropic => AnyCodec::Anthropic(gw_codec::anthropic::Anthropic),
         ProtocolKind::Gemini => AnyCodec::Gemini(gw_codec::gemini::Gemini),
     }
-}
-
-#[allow(dead_code)]
-fn _force_uses(model: &ModelName) -> &str {
-    model.as_ref()
 }

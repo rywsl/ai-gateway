@@ -19,6 +19,7 @@
 use crate::ctx::ReqCtx;
 use crate::error_emit;
 use gw_auth::ip_filter::check_blocklist;
+use gw_auth::ratelimit::RateLimitGuard;
 use gw_codec::trait_def::Headers;
 use gw_codec::AnyCodec;
 use gw_core::debug::DebugTrigger;
@@ -28,6 +29,7 @@ use pingora::{Error, ErrorType, Result};
 use pingora_proxy::Session;
 use std::borrow::Cow;
 use std::net::IpAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// Returned to the gateway as a short-circuit signal when we've already
@@ -42,10 +44,15 @@ pub(crate) fn short_circuit(status: u16) -> Box<Error> {
     )
 }
 
+/// Hard ceiling on globally-inflight streaming requests. v1: 100k. Moving this
+/// to config is tracked under phase-5.
+const GLOBAL_STREAM_CAP: usize = 100_000;
+
 pub async fn run(
     session: &mut Session,
     ctx: &mut ReqCtx,
     store: &Arc<EntityStore>,
+    ratelimit: &Arc<RateLimitGuard>,
 ) -> Result<()> {
     ctx.phase_start("early_request_filter");
     // Snapshot the protocol detection inputs so we don't borrow the session
@@ -71,6 +78,35 @@ pub async fn run(
             ctx.phase_end();
             return Err(short_circuit(err.status));
         }
+    }
+
+    // -----------------------------------------------------------------
+    // 3. Global concurrent-stream cap. The per-user cap is enforced in
+    //    `request_filter`; here we protect the whole process against
+    //    runaway concurrency before we spend any auth/parse cycles.
+    //
+    //    Note: ordering — we accept that a request can briefly exceed the
+    //    cap if many slots open concurrently before any has registered;
+    //    the drop is bounded because per-user `check_stream_slot` is the
+    //    only place the counter increments and is gated downstream.
+    // -----------------------------------------------------------------
+    let total_inflight = ratelimit.total_streams.load(Ordering::Acquire);
+    if total_inflight >= GLOBAL_STREAM_CAP {
+        let err = ErrorIR {
+            category: ErrorCategory::ClientQuota,
+            status: 429,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_QUOTA_CONCURRENT_EXCEEDED),
+            message: Cow::Borrowed("global concurrent stream cap exceeded"),
+            retryable: true,
+            upstream_raw: None,
+            request_id: request_id.as_str(),
+            retry_after_secs: Some(5),
+        };
+        let codec = pick_emit_codec(&ctx.client_codec);
+        error_emit::send_error(session, &codec, &err).await;
+        ctx.phase_end();
+        return Err(short_circuit(err.status));
     }
 
     // -----------------------------------------------------------------
