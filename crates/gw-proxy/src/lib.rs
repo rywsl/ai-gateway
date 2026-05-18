@@ -8,6 +8,9 @@
 //! and wires them into the `ProxyHttp` impl.
 
 pub mod ctx;
+pub mod detailed_log;
+pub mod error_emit;
+pub mod filters;
 pub mod gateway;
 pub mod mem;
 pub mod timeouts;

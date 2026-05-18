@@ -1,28 +1,27 @@
 //! `LlmGateway` — the `ProxyHttp` implementation that wires every Phase 1-3
-//! crate together.
+//! crate together. Each method delegates to a `filters::*` module.
 //!
-//! Task 4.1 ships only the skeleton:
-//! - `new_ctx` that generates a 16-byte random trace/request ID.
-//! - A stub `upstream_peer` that resolves the picked vendor's first base URL
-//!   (or falls back to OpenAI) and constructs an `HttpPeer` with default
-//!   timeouts.
-//!
-//! Task 4.2 inserts the full filter chain (early/request/upstream/response/
-//! logging) into this impl.
+//! Construction is via [`LlmGateway::new`] which takes pre-built `Arc`s for
+//! every long-lived collaborator. The `gw-gateway` binary owns these and the
+//! gateway itself is `Sync`-clean so Pingora can hand it to the service
+//! framework.
 
 use crate::ctx::ReqCtx;
-use crate::timeouts::Timeouts;
+use crate::filters;
 use async_trait::async_trait;
+use bytes::Bytes;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::ids::{RequestId, TraceId};
 use gw_ledger::Ledger;
 use gw_routing::{BreakerStore, RetryConfig};
 use gw_store::EntityStore;
+use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::Result;
 use pingora_proxy::{ProxyHttp, Session};
 use rand::RngCore;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub struct LlmGateway {
     pub store: Arc<EntityStore>,
@@ -64,27 +63,76 @@ impl ProxyHttp for LlmGateway {
         ReqCtx::new(trace, req)
     }
 
+    async fn early_request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        filters::early::run(session, ctx, &self.store).await
+    }
+
+    async fn request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<bool> {
+        filters::request::run(
+            session,
+            ctx,
+            &self.store,
+            &self.ratelimit,
+            self.global_rpm,
+        )
+        .await
+    }
+
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         ctx.phase_start("upstream_peer");
-        // Task 4.2 will replace this stub with the full route → pick → render
-        // chain. For 4.1 we resolve from `ctx.picked_vendor` (if Task 4.2 wired
-        // it) or fall back to OpenAI so the skeleton has a concrete peer for
-        // wiring tests.
-        let host = ctx
-            .picked_vendor
-            .as_ref()
-            .and_then(|v| v.value.base_urls.first())
-            .and_then(|u| u.host_str())
-            .map(str::to_owned)
-            .unwrap_or_else(|| "api.openai.com".to_string());
-        let mut peer = HttpPeer::new(format!("{host}:443"), true, host);
-        Timeouts::default_for_nonstream().apply_to_peer(&mut peer, ctx.is_stream);
+        let peer = filters::upstream::pick_peer(session, ctx, &self.store, &self.breakers).await?;
         ctx.phase_end();
-        Ok(Box::new(peer))
+        Ok(peer)
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        filters::upstream::rewrite_request(session, upstream_request, ctx).await
+    }
+
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        ctx.upstream_status = Some(upstream_response.status.as_u16());
+        Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        filters::response::run(session, body, end_of_stream, ctx)
+    }
+
+    async fn logging(
+        &self,
+        session: &mut Session,
+        err: Option<&pingora::Error>,
+        ctx: &mut Self::CTX,
+    ) {
+        filters::logging::run(session, err, ctx, &self.breakers, &self.ledger).await;
     }
 }
 
