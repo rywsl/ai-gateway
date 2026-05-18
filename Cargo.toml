@@ -27,7 +27,7 @@ thiserror = "1"
 anyhow = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 time = { version = "0.3", features = ["serde", "macros"] }
-url = "2.5"
+url = { version = "2.5", features = ["serde"] }
 smallvec = { version = "1.13", features = ["serde"] }
 
 # 异步
