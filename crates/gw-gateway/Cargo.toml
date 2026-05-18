@@ -38,3 +38,12 @@ pingora-proxy.workspace = true
 tikv-jemallocator.workspace = true
 secrecy.workspace = true
 hex.workspace = true
+
+[dev-dependencies]
+# Phase 6 e2e + failure-mode integration tests. Most of these are pulled in
+# only by `tests/` and are not linked into the binary.
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+sqlx = { workspace = true }
+reqwest.workspace = true
+bytes.workspace = true
