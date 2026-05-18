@@ -33,7 +33,7 @@ pub struct RequestIR<'a> {
     pub untouched: UntouchedFlags,
 }
 
-impl<'a> Default for RequestIR<'a> {
+impl Default for RequestIR<'_> {
     fn default() -> Self {
         Self {
             model: Cow::Borrowed(""),
@@ -173,7 +173,7 @@ pub struct ResponseIR<'a> {
     pub metadata: MetadataIR<'a>,
 }
 
-impl<'a> Default for ResponseIR<'a> {
+impl Default for ResponseIR<'_> {
     fn default() -> Self {
         Self {
             id: Cow::Borrowed(""),
