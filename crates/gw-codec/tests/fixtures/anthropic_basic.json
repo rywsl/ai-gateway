@@ -1,0 +1,9 @@
+{
+  "model": "claude-3-5-sonnet-20241022",
+  "system": "You are a helpful assistant.",
+  "messages": [
+    {"role": "user", "content": "Hello, Claude."}
+  ],
+  "max_tokens": 1024,
+  "temperature": 0.5
+}
