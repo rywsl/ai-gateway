@@ -19,6 +19,7 @@ use gw_core::ids::{ApiKeyId, ModelName, RequestId, TraceId, UserId};
 use gw_core::permissions::MergedPermissions;
 use gw_core::versioned::Versioned;
 use gw_ledger::FreezeGuard;
+use gw_routing::InFlightGuard;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
@@ -68,6 +69,12 @@ pub struct ReqCtx {
     pub freeze_guard: Option<FreezeGuard>,
     pub stream_slot: Option<StreamSlot>,
     pub bytes_sent_to_client: AtomicU64,
+    /// RAII handle on the picked vendor key's in-flight counter. Held by the
+    /// proxy from `upstream_peer` through end-of-request so the counter
+    /// decrement runs on every termination path (success, error, cancel).
+    /// `None` if no upstream was picked (e.g. request short-circuited in
+    /// `request_filter`).
+    pub inflight_guard: Option<InFlightGuard>,
 
     // --- Streaming buffer (response_body_filter leftovers) ---
     /// Bytes from an upstream chunk that did not contain a full SSE event.
@@ -110,6 +117,7 @@ impl ReqCtx {
             freeze_guard: None,
             stream_slot: None,
             bytes_sent_to_client: AtomicU64::new(0),
+            inflight_guard: None,
             sse_leftover: Vec::new(),
             upstream_status: None,
             retry_count: 0,

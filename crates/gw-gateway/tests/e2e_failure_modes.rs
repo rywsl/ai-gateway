@@ -107,16 +107,20 @@ fn freeze_guard_drop_without_settle_rolls_back() {
 }
 
 // ---------------------------------------------------------------------------
-// AC-2.6-1: codec `parse_error` maps upstream 429 to GW_QUOTA_RPM_EXCEEDED.
+// AC-2.6-1: codec `parse_error` maps an *upstream* 429 to
+// GW_UPSTREAM_OVERLOADED. The gateway's own per-user RPM trip uses
+// GW_QUOTA_RPM_EXCEEDED (see the rate-limit guard test below); keeping the
+// codes distinct lets on-call distinguish "vendor capped us" from
+// "gateway capped the user".
 // ---------------------------------------------------------------------------
 #[test]
-fn codec_parse_error_429_maps_to_rpm_exceeded() {
+fn codec_parse_error_429_maps_to_upstream_overloaded() {
     let codec = OpenAi;
     let body = br#"{"error":{"message":"rate limit hit","type":"rate_limit_error"}}"#;
     let err = codec.parse_error(429, body);
     assert_eq!(err.status, 429);
     assert_eq!(err.upstream_status, Some(429));
-    assert_eq!(err.code.as_ref(), "GW_QUOTA_RPM_EXCEEDED");
+    assert_eq!(err.code.as_ref(), "GW_UPSTREAM_OVERLOADED");
     assert!(matches!(err.category, ErrorCategory::ClientQuota));
     assert!(err.retryable, "429 must be retryable per spec §6 retry matrix");
 }

@@ -10,6 +10,6 @@ pub mod candidates;
 pub mod retry;
 pub mod strategy;
 
-pub use breaker::{BreakerState, BreakerStore};
+pub use breaker::{BreakerState, BreakerStore, InFlightGuard};
 pub use retry::{RetryConfig, RetryExecutor, RetryMode};
 pub use strategy::{PickCtx, Strategy, StrategyAny};

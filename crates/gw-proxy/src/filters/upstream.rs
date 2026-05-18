@@ -27,7 +27,7 @@ use gw_routing::strategy::{
     latency_first::LatencyFirst, load_balance::LoadBalance, round_robin::RoundRobin,
     sticky::Sticky, weighted_rr::WeightedRr,
 };
-use gw_routing::{BreakerStore, PickCtx, Strategy, StrategyAny};
+use gw_routing::{BreakerStore, InFlightGuard, PickCtx, Strategy, StrategyAny};
 use gw_store::EntityStore;
 use pingora::http::RequestHeader;
 use pingora::upstreams::peer::HttpPeer;
@@ -157,8 +157,16 @@ pub async fn pick_peer(
     t.apply_to_peer(&mut peer, ctx.is_stream);
 
     // Stash on ctx for upstream_request_filter + logging.
-    ctx.picked_vendor_key = Some(picked_arc);
+    ctx.picked_vendor_key = Some(picked_arc.clone());
     ctx.picked_vendor = Some(vendor);
+
+    // Install the in-flight RAII guard now that we've committed to a key.
+    // The Drop impl decrements the counter on every termination path
+    // (success, error, cancel) — see `gw_routing::InFlightGuard`. This is
+    // what makes `LoadBalance::pick` and `get_candidate_keys`'s per-key
+    // in-flight cap (PER_KEY_INFLIGHT_CAP = 1024) actually observe traffic.
+    let breaker = breakers.get_or_create(&picked_arc.key_id);
+    ctx.inflight_guard = Some(InFlightGuard::new(breaker));
 
     Ok(Box::new(peer))
 }

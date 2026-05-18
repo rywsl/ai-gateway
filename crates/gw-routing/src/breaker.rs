@@ -179,3 +179,39 @@ impl BreakerStore {
         self.get_or_create(k).in_flight.load(Ordering::Relaxed)
     }
 }
+
+/// RAII increment of a [`BreakerState::in_flight`] counter. Incremented on
+/// `new`, decremented on `Drop`. The proxy holds this on `ReqCtx` so the
+/// counter releases on every termination path (success, error, cancel).
+///
+/// The counter feeds two consumers:
+/// 1. [`crate::strategy::load_balance::LoadBalance`] — picks the candidate
+///    with the lowest in-flight count.
+/// 2. [`crate::candidates::get_candidate_keys`] — drops candidates whose
+///    in-flight is at or above the per-key cap.
+///
+/// Without this guard both consumers see `0` for every key and the
+/// LoadBalance strategy degenerates to "always pick the first candidate"
+/// while the per-key cap is dead code.
+pub struct InFlightGuard {
+    state: Arc<BreakerState>,
+}
+
+impl InFlightGuard {
+    /// Increment the in-flight counter on the supplied `BreakerState`. The
+    /// matching decrement runs on `Drop`. Use `Ordering::AcqRel` because the
+    /// counter is read with `Ordering::Relaxed` from both
+    /// `LoadBalance::pick` and `get_candidate_keys`, and we want each
+    /// observation of an increment to be paired with the prior decrement of
+    /// the previous owner on the same thread (per-thread happens-before).
+    pub fn new(state: Arc<BreakerState>) -> Self {
+        state.in_flight.fetch_add(1, Ordering::AcqRel);
+        Self { state }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.state.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}

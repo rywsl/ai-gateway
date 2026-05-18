@@ -48,7 +48,12 @@ pub(crate) fn classify(status: u16) -> ErrorCategory {
 #[inline(always)]
 pub(crate) fn map_code(status: u16) -> &'static str {
     match status {
-        429 => codes::GW_QUOTA_RPM_EXCEEDED,
+        // 429 from an *upstream* indicates the vendor itself is overloaded /
+        // rate-limiting us, distinct from the gateway tripping a user's
+        // per-account RPM cap (which uses GW_QUOTA_RPM_EXCEEDED). Keep the
+        // codes distinct so dashboards and on-call runbooks can tell which
+        // ceiling fired.
+        429 => codes::GW_UPSTREAM_OVERLOADED,
         400..=499 => codes::GW_UPSTREAM_4XX,
         500..=599 => codes::GW_UPSTREAM_5XX,
         _ => codes::GW_GATEWAY_INTERNAL,
