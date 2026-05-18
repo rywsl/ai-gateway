@@ -26,6 +26,8 @@ pub struct Config {
     pub ledger: LedgerCfg,
     pub kms: KmsCfg,
     pub debug: DebugCfg,
+    #[serde(default)]
+    pub security: SecurityCfg,
     // TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
     // `HardCapCfg` defaults. Once it accepts caller-supplied caps, reintroduce
     // an `[auth]` section here and thread `hard_cap_max_input_tokens` /
@@ -87,6 +89,19 @@ pub struct DebugCfg {
     pub sampling_rate: f64,
     pub include_request_body: bool,
     pub include_response_body: bool,
+}
+
+/// Transport-layer security settings.
+///
+/// `trust_xff` opts the gateway into parsing client IPs from the
+/// `X-Forwarded-For` header. Only enable when the gateway sits behind a
+/// trusted L7 load balancer that strips client-supplied XFF headers — a
+/// public-internet deployment with this flag on lets any client forge the
+/// header and trivially bypass IP blocklists. The default is `false`.
+#[derive(Debug, Deserialize, Default)]
+pub struct SecurityCfg {
+    #[serde(default)]
+    pub trust_xff: bool,
 }
 
 impl RedisCfg {

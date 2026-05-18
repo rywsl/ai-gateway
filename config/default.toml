@@ -46,6 +46,14 @@ sampling_rate = 0.0001
 include_request_body = false
 include_response_body = false
 
+[security]
+# When true, parse the client IP from the X-Forwarded-For header (first /
+# left-most entry). MUST only be enabled behind a trusted L7 load balancer
+# that strips client-supplied XFF headers; otherwise the IP blocklist is
+# trivially bypassable. Defaults to false so misconfigured deployments fail
+# closed (i.e. blocklist matches the LB's IP, not arbitrary clients).
+trust_xff = false
+
 # TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
 # `HardCapCfg` defaults. When it accepts caller-supplied caps, reintroduce
 # an `[auth]` section here with `hard_cap_max_input_tokens` and

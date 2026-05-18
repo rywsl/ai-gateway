@@ -10,7 +10,7 @@
 
 use crate::ctx::ReqCtx;
 use crate::error_emit;
-use crate::filters::early::{pick_emit_codec, short_circuit, with_request_id};
+use crate::filters::early::{client_ip_from_session, pick_emit_codec, short_circuit, with_request_id};
 use gw_auth::apikey::verify_apikey;
 use gw_auth::ip_filter::check_blocklist;
 use gw_auth::jwt::verify_jwt;
@@ -20,7 +20,7 @@ use gw_auth::AuthCtx;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, ModelName, UserId};
 use gw_store::deduction::{UserCircuit, USER_CIRCUIT};
-use gw_store::EntityStore;
+use gw_store::{CounterStore, EntityStore};
 use pingora::Result;
 use pingora_proxy::Session;
 use std::borrow::Cow;
@@ -33,7 +33,9 @@ pub async fn run(
     ctx: &mut ReqCtx,
     store: &Arc<EntityStore>,
     ratelimit: &Arc<RateLimitGuard>,
+    counters: &Arc<CounterStore>,
     global_rpm: u32,
+    trust_xff: bool,
 ) -> Result<bool> {
     ctx.phase_start("request_filter");
     ctx.timing.start = Some(Instant::now());
@@ -143,7 +145,7 @@ pub async fn run(
     // ---------------------------------------------------------------------
     // 2. Re-run IP blocklist with the resolved scope IDs.
     // ---------------------------------------------------------------------
-    let client_ip_v = client_ip(session);
+    let client_ip_v = client_ip_from_session(session, trust_xff);
     if let Some(ip) = client_ip_v {
         if let Err(err) = check_blocklist(ip, Some(&user_id), api_key_id.as_ref(), store).await {
             emit_and_bail(session, ctx, &err, &request_id).await?;
@@ -220,6 +222,34 @@ pub async fn run(
     ctx.idempotent = !is_stream;
 
     // ---------------------------------------------------------------------
+    // 4b. v1 limitation: reject non-stream completions outright. The codec
+    //     `parse_response` method is `unimplemented!()` for every protocol
+    //     in v1 scope, which means a non-stream path through `logging`
+    //     would settle the freeze at `cost_micro = 0` (no usage observed)
+    //     and the user would be billed nothing. Surfacing a clear 400 here
+    //     fails closed and avoids silent free traffic; v1.1 lifts this once
+    //     `parse_response` lands per the codec contract.
+    // ---------------------------------------------------------------------
+    if !is_stream {
+        let err = ErrorIR {
+            category: ErrorCategory::ClientBadRequest,
+            status: 400,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_REQUEST_NONSTREAM_NOT_SUPPORTED),
+            message: Cow::Borrowed(
+                "v1 gateway requires stream=true on every request; \
+                 non-stream completions will land in v1.1",
+            ),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        };
+        emit_and_bail(session, ctx, &err, &request_id).await?;
+        unreachable!()
+    }
+
+    // ---------------------------------------------------------------------
     // 5. Merge permissions across the five-tier hierarchy.
     // ---------------------------------------------------------------------
     let auth_ctx = AuthCtx {
@@ -255,7 +285,45 @@ pub async fn run(
     }
 
     // ---------------------------------------------------------------------
-    // 7. USER_CIRCUIT breaker (zero-balance / banned-user short-circuit).
+    // 7. Balance enforcement. Read the payer's `balance_micro` counter from
+    //     Redis and reject when it has fallen to zero or below. This is the
+    //     primary zero-balance gate; the USER_CIRCUIT check below is a
+    //     fast-path follow-up that catches users whose circuit was tripped
+    //     open in a prior request (e.g. by the ledger flusher on a debit
+    //     that drove balance negative).
+    //
+    //     The Redis read is on the hot path but the read is a single GET
+    //     against the connection pool — at typical Redis RTTs (<1ms LAN)
+    //     this is well within the gateway's per-request budget. On Redis
+    //     failure we choose to admit (fail-open) so a transient Redis blip
+    //     does not block all paying users; the freeze guard still bounds
+    //     loss to the freeze estimate.
+    // ---------------------------------------------------------------------
+    let balance = counters
+        .get("user", merged.effective_user_id.as_ref(), "balance_micro")
+        .await
+        .unwrap_or(0);
+    if balance <= 0 {
+        let err = ErrorIR {
+            category: ErrorCategory::ClientQuota,
+            status: 402,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_ZERO),
+            message: Cow::Borrowed("user balance exhausted"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: Some(30),
+        };
+        emit_and_bail(session, ctx, &err, &request_id).await?;
+        unreachable!()
+    }
+
+    // ---------------------------------------------------------------------
+    // 7b. USER_CIRCUIT breaker (zero-balance / banned-user short-circuit).
+    //     Acts as an in-process cache: once a request observes a negative
+    //     balance and the ledger flusher trips this circuit, subsequent
+    //     requests within the open window skip the Redis read above.
     // ---------------------------------------------------------------------
     if let Some(circuit) = USER_CIRCUIT.get(&merged.effective_user_id) {
         if let UserCircuit::Open { until, .. } = *circuit.value() {
@@ -339,13 +407,6 @@ fn freeze_estimate(est_input_tokens: u32, markup: &f32) -> u64 {
     let base = est_input_tokens as u64;
     let with_markup = (base as f32 * markup.max(1.0)) as u64;
     with_markup.max(1)
-}
-
-fn client_ip(session: &Session) -> Option<IpAddr> {
-    session.client_addr().and_then(|sa| match sa {
-        pingora::protocols::l4::socket::SocketAddr::Inet(addr) => Some(addr.ip()),
-        _ => None,
-    })
 }
 
 /// Emit an error via the client codec and return a short-circuit Err so the

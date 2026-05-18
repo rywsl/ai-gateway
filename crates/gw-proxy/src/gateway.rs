@@ -14,7 +14,7 @@ use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::ids::{RequestId, TraceId};
 use gw_ledger::Ledger;
 use gw_routing::{BreakerStore, RetryConfig};
-use gw_store::EntityStore;
+use gw_store::{CounterStore, EntityStore};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::Result;
@@ -28,26 +28,38 @@ pub struct LlmGateway {
     pub breakers: Arc<BreakerStore>,
     pub ratelimit: Arc<RateLimitGuard>,
     pub ledger: Arc<Ledger>,
+    pub counters: Arc<CounterStore>,
     pub retry_cfg: RetryConfig,
     pub global_rpm: u32,
+    /// When `true`, parse the client IP from the `X-Forwarded-For` header
+    /// (using the first / left-most entry, which represents the original
+    /// client per RFC 7239 convention). When `false`, use the L4 socket
+    /// peer address only. Default is `false` so a misconfigured deployment
+    /// does not silently bypass IP blocklisting via a forged header.
+    pub trust_xff: bool,
 }
 
 impl LlmGateway {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<EntityStore>,
         breakers: Arc<BreakerStore>,
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
+        counters: Arc<CounterStore>,
         retry_cfg: RetryConfig,
         global_rpm: u32,
+        trust_xff: bool,
     ) -> Self {
         Self {
             store,
             breakers,
             ratelimit,
             ledger,
+            counters,
             retry_cfg,
             global_rpm,
+            trust_xff,
         }
     }
 }
@@ -68,7 +80,7 @@ impl ProxyHttp for LlmGateway {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        filters::early::run(session, ctx, &self.store, &self.ratelimit).await
+        filters::early::run(session, ctx, &self.store, &self.ratelimit, self.trust_xff).await
     }
 
     async fn request_filter(
@@ -81,7 +93,9 @@ impl ProxyHttp for LlmGateway {
             ctx,
             &self.store,
             &self.ratelimit,
+            &self.counters,
             self.global_rpm,
+            self.trust_xff,
         )
         .await
     }

@@ -37,7 +37,7 @@ use gw_auth::ratelimit::RateLimitGuard;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
 use gw_routing::{BreakerStore, RetryConfig};
-use gw_store::EntityStore;
+use gw_store::{CounterStore, EntityStore};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,7 +48,9 @@ struct Wired {
     breakers: Arc<BreakerStore>,
     ratelimit: Arc<RateLimitGuard>,
     ledger: Arc<Ledger>,
+    counters: Arc<CounterStore>,
     global_rpm: u32,
+    trust_xff: bool,
     business_port: u16,
 }
 
@@ -127,8 +129,10 @@ pub fn run() -> anyhow::Result<()> {
         wired.breakers,
         wired.ratelimit,
         wired.ledger,
+        wired.counters,
         RetryConfig::default(),
         wired.global_rpm,
+        wired.trust_xff,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -182,6 +186,14 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let breakers = Arc::new(BreakerStore::default());
     let ratelimit = Arc::new(RateLimitGuard::new());
 
+    // Counter store — shared Redis-backed read/write surface for the balance
+    // enforcement check in `request_filter` and the per-user TPM / RPM
+    // counters the ledger flusher debits. Cloning `RedisCtx` is cheap (just
+    // bumps an `Arc<RedisPool>`).
+    let counters = Arc::new(CounterStore {
+        redis: redis.clone(),
+    });
+
     // 4. Ledger flusher — spawns a long-lived `tokio::spawn` on the current
     // runtime. The runtime is parked (not dropped) once bootstrap completes
     // so this task continues running.
@@ -211,7 +223,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         breakers,
         ratelimit,
         ledger,
+        counters,
         global_rpm: cfg.ratelimit.global_rpm,
+        trust_xff: cfg.security.trust_xff,
         business_port: cfg.server.business_port,
     })
 }

@@ -53,6 +53,7 @@ pub async fn run(
     ctx: &mut ReqCtx,
     store: &Arc<EntityStore>,
     ratelimit: &Arc<RateLimitGuard>,
+    trust_xff: bool,
 ) -> Result<()> {
     ctx.phase_start("early_request_filter");
     // Snapshot the protocol detection inputs so we don't borrow the session
@@ -70,7 +71,7 @@ pub async fn run(
     // 1. IP blocklist (Global scope only — User/ApiKey scoping happens
     //    in `request_filter` once auth resolves the IDs).
     // -----------------------------------------------------------------
-    if let Some(ip) = client_ip(session) {
+    if let Some(ip) = client_ip_from_session(session, trust_xff) {
         if let Err(err) = check_blocklist(ip, None, None, store).await {
             let codec = pick_emit_codec(&ctx.client_codec);
             let scoped = with_request_id(&err, &request_id);
@@ -151,7 +152,34 @@ pub async fn run(
     Ok(())
 }
 
-fn client_ip(session: &Session) -> Option<IpAddr> {
+/// Resolve the client IP for blocklist / permission checks.
+///
+/// When `trust_xff` is `true`, prefer the first (left-most) entry of the
+/// `X-Forwarded-For` header, which per RFC 7239 convention is the original
+/// client as seen by the trusted L7 load balancer. Operators MUST only
+/// enable this flag behind a load balancer they own end-to-end, otherwise
+/// clients can forge the header and trivially bypass the IP blocklist.
+///
+/// When `trust_xff` is `false` (the default), use Pingora's `client_addr()`
+/// — i.e. the L4 socket peer. Behind a reverse proxy this returns the
+/// proxy's IP, so the IP allow / blocklist matches against the proxy
+/// rather than the client; that's a safe fail-closed default while we
+/// confirm the deployment topology.
+///
+/// Returns `None` for non-Inet sockets (e.g. Unix domain sockets in tests)
+/// or unparseable XFF values.
+pub(crate) fn client_ip_from_session(session: &Session, trust_xff: bool) -> Option<IpAddr> {
+    if trust_xff {
+        if let Some(xff) = session.req_header().headers.get("x-forwarded-for") {
+            if let Ok(s) = xff.to_str() {
+                if let Some(first) = s.split(',').next() {
+                    if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+    }
     session.client_addr().and_then(|sa| match sa {
         pingora::protocols::l4::socket::SocketAddr::Inet(addr) => Some(addr.ip()),
         _ => None,

@@ -34,7 +34,7 @@ use gw_auth::ratelimit::RateLimitGuard;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
 use gw_routing::{BreakerStore, RetryConfig};
-use gw_store::EntityStore;
+use gw_store::{CounterStore, EntityStore};
 
 const MIGRATION: &str = include_str!("../../gw-store/migrations/0001_initial.sql");
 const SEED_SQL: &str = include_str!("fixtures/seed.sql");
@@ -111,6 +111,9 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         8,
         Duration::from_millis(100),
     ));
+    let counters: Arc<CounterStore> = Arc::new(CounterStore {
+        redis: redis.clone(),
+    });
 
     // -----------------------------------------------------------------
     // 4. Construct LlmGateway. This is the "smoke" assertion: the
@@ -121,8 +124,10 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         breakers.clone(),
         ratelimit.clone(),
         ledger.clone(),
+        counters.clone(),
         RetryConfig::default(),
         100_000,
+        false,
     );
 
     // -----------------------------------------------------------------

@@ -26,7 +26,7 @@ use gw_auth::ratelimit::RateLimitGuard;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
 use gw_routing::{BreakerStore, RetryConfig};
-use gw_store::EntityStore;
+use gw_store::{CounterStore, EntityStore};
 
 /// Builds a `LlmGateway` whose collaborators are all in-memory defaults.
 /// Useful as a smoke-build assertion: any breaking change to the constructor
@@ -58,15 +58,20 @@ fn llm_gateway_constructor_signature_smoke() {
     // Compile-only assertion: LlmGateway::new accepts the documented Arc<...>
     // collaborator set. This protects the gw-gateway main() from silent
     // signature drift.
+    #[allow(clippy::too_many_arguments)]
     fn _accepts(
         store: Arc<EntityStore>,
         breakers: Arc<BreakerStore>,
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
+        counters: Arc<CounterStore>,
         retry_cfg: RetryConfig,
         global_rpm: u32,
+        trust_xff: bool,
     ) -> LlmGateway {
-        LlmGateway::new(store, breakers, ratelimit, ledger, retry_cfg, global_rpm)
+        LlmGateway::new(
+            store, breakers, ratelimit, ledger, counters, retry_cfg, global_rpm, trust_xff,
+        )
     }
     // Do not call it — `Ledger::start` would need a live Redis. We only need
     // this to compile.
