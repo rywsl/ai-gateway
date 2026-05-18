@@ -1,4 +1,8 @@
-//! Per-user request-rate and concurrent-stream limiting.
+//! Rate-limit enforcement (RPM + concurrent streams).
+//!
+//! TPM (tokens-per-minute) is NOT enforced here — it requires the token count
+//! from the upstream response and is therefore enforced by the gateway's
+//! response-side filter (gw-proxy's logging filter, post-stream-completion).
 //!
 //! - **Request rate** (`check`): one `governor` direct rate limiter per
 //!   `effective_user_id`, configured at the user's RPM. A failed `check()`
@@ -39,6 +43,7 @@ impl RateLimitGuard {
         }
     }
 
+    // TODO(phase-4): TPM enforcement via deferred deduction after token counting.
     pub fn check(&self, perm: &MergedPermissions) -> Result<RateLimitTicket, ErrorIR<'static>> {
         if perm.rpm_limit > 0 {
             let lim = self
@@ -53,7 +58,7 @@ impl RateLimitGuard {
                 return Err(rpm_err());
             }
         }
-        Ok(RateLimitTicket { _placeholder: () })
+        Ok(RateLimitTicket)
     }
 
     pub fn check_stream_slot(
@@ -80,14 +85,12 @@ impl RateLimitGuard {
     }
 }
 
-pub struct RateLimitTicket {
-    _placeholder: (),
-}
+pub struct RateLimitTicket;
 
 pub struct StreamSlot {
     pub uid: UserId,
-    pub counter: Arc<AtomicUsize>,
-    pub total: Arc<AtomicUsize>,
+    counter: Arc<AtomicUsize>,
+    total: Arc<AtomicUsize>,
 }
 
 impl Drop for StreamSlot {

@@ -10,7 +10,6 @@ gw-core = { path = "../gw-core" }
 gw-store = { path = "../gw-store" }
 serde.workspace = true
 thiserror.workspace = true
-anyhow.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 futures.workspace = true

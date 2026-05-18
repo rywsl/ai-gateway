@@ -71,30 +71,39 @@ impl Ledger {
 }
 
 async fn flush(redis: &RedisCtx, buf: &mut Vec<BillingRecord>) {
+    let batch_len = buf.len();
     let client = redis.pool.next();
     let pipe = client.pipeline();
     for rec in buf.drain(..) {
         let key = format!("counter:user:{}:balance_micro", rec.user_id);
+        let payload = serde_json::to_string(&rec).unwrap_or_default();
         let delta = -(rec.cost_micro as i64);
         // Each pipeline op is async but only queues the command in memory;
-        // the actual RTT happens in `pipe.all().await` below. We ignore
-        // per-command errors here because they would only surface as
-        // serialization issues — the pipeline `all()` call returns the real
-        // network error.
-        let _: Result<(), _> = pipe.incr_by(&key, delta).await;
-        let payload = serde_json::to_string(&rec).unwrap_or_default();
-        let _: Result<(), _> = pipe
-            .xadd(
+        // the actual RTT happens in `pipe.all().await` below. If a queue step
+        // fails (e.g., bad arg encoding from a future schema drift), log and
+        // skip the matching xadd to keep balance and stream consistent.
+        if let Err(e) = pipe.incr_by::<(), _>(&key, delta).await {
+            tracing::warn!(target: "gw_ledger", error = %e, "billing flush: incr_by queue failed");
+            metrics::counter!("gateway_billing_queue_errors_total").increment(1);
+            continue;
+        }
+        if let Err(e) = pipe
+            .xadd::<(), _, _, _, _>(
                 "billing:records",
                 false,
                 None::<()>,
                 "*",
                 ("payload", payload),
             )
-            .await;
+            .await
+        {
+            tracing::warn!(target: "gw_ledger", error = %e, "billing flush: xadd queue failed");
+            metrics::counter!("gateway_billing_queue_errors_total").increment(1);
+        }
     }
     if let Err(e) = pipe.all::<()>().await {
-        tracing::warn!(target: "gw_ledger", error = %e, "billing pipeline flush failed");
+        tracing::warn!(target: "gw_ledger", error = %e, batch_len, "billing flush RTT failed; records lost");
         metrics::counter!("gateway_billing_flush_errors_total").increment(1);
+        metrics::counter!("gateway_billing_records_lost_total").increment(batch_len as u64);
     }
 }

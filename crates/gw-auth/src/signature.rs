@@ -1,9 +1,15 @@
-//! HMAC-SHA256 signature verification with constant-time comparison.
+//! HMAC-SHA256 request signature verification.
+//!
+//! NOTE: `timestamp` is included in the signing string but freshness is NOT
+//! enforced here — the caller MUST validate the timestamp against a clock-skew
+//! window (e.g. ±5 minutes) before invoking `verify` to prevent replay attacks.
 //!
 //! Canonical signing string is:
 //! ```text
 //! <method>\n<path>\n<timestamp>\n<sha256(body) as lowercase hex>
 //! ```
+//!
+//! Comparison is constant-time via [`subtle::ConstantTimeEq`].
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

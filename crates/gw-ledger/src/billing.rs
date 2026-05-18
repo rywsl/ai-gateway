@@ -11,6 +11,7 @@ use serde::Serialize;
 /// (1e-6 of base currency) to keep arithmetic in `i64`.
 #[derive(Debug, Serialize, Clone)]
 pub struct BillingRecord {
+    /// Unix milliseconds (UTC).
     pub ts_ms: u64,
     pub request_id: String,
     pub trace_id: String,
@@ -42,7 +43,8 @@ pub struct BillingRecord {
 #[serde(rename_all = "snake_case")]
 pub enum BillingStatus {
     Ok,
-    Err,
+    #[serde(rename = "err")]
+    Error,
     Cancelled,
 }
 

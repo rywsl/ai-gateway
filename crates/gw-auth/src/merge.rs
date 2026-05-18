@@ -6,13 +6,16 @@
 //!   that tier" and is therefore skipped.
 //! - `rpm_limit` / `tpm_limit` take the **minimum positive** across all tiers.
 //! - `markup` is the **product** across all tiers (defaults to 1.0).
-//! - `forced_model_group` comes from the highest-priority user group (if any).
+//! - `forced_model_group` comes from the highest-priority user group, with ties
+//!   broken deterministically by lexicographic `UserGroupId`.
 //! - `effective_user_id` is the parent main-account id for a sub-account,
 //!   otherwise the user's own id.
 
+use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::*;
 use gw_core::permissions::MergedPermissions;
 use gw_store::EntityStore;
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::AuthCtx;
@@ -21,19 +24,15 @@ pub async fn merge_permissions(
     ctx: &AuthCtx,
     store: &EntityStore,
     global_rpm: u32,
-) -> anyhow::Result<MergedPermissions> {
+) -> Result<MergedPermissions, ErrorIR<'static>> {
     let user = store
         .user
         .get(&ctx.user_id)
         .await
-        .ok_or_else(|| anyhow::anyhow!("user not found"))?;
+        .ok_or_else(user_not_found)?;
 
     let main = match &user.value.parent_id {
-        Some(p) => store
-            .user
-            .get(p)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("parent not found"))?,
+        Some(p) => store.user.get(p).await.ok_or_else(user_not_found)?,
         None => user.clone(),
     };
 
@@ -110,11 +109,21 @@ pub async fn merge_permissions(
         * api_key.as_ref().map(|a| a.value.markup).unwrap_or(1.0);
 
     // ---------------------------------------------------------------------
-    // forced model_group: highest-priority group's binding
+    // forced model_group: highest-priority group's binding.
+    //
+    // Sort by (descending priority, ascending UserGroupId) so ties resolve
+    // deterministically — `max_by_key` would otherwise pick the *last* element
+    // with the max priority, which depends on `user_group_ids` insertion order.
     // ---------------------------------------------------------------------
-    let forced = groups
-        .iter()
-        .max_by_key(|g| g.value.priority)
+    let mut groups_sorted: Vec<_> = groups.iter().collect();
+    groups_sorted.sort_by(|a, b| {
+        b.value
+            .priority
+            .cmp(&a.value.priority)
+            .then_with(|| a.value.id.as_ref().cmp(b.value.id.as_ref()))
+    });
+    let forced = groups_sorted
+        .first()
         .and_then(|g| g.value.model_group_binding.clone());
 
     // ---------------------------------------------------------------------
@@ -160,4 +169,23 @@ where
 
 fn min_pos(vals: &[u32]) -> u32 {
     vals.iter().filter(|v| **v > 0).min().copied().unwrap_or(0)
+}
+
+/// Missing-user / missing-parent error.
+///
+/// No dedicated `GW_AUTH_USER_NOT_FOUND` code exists yet; we reuse
+/// `GW_AUTH_INVALID_APIKEY` (auth context fails closed at the same 401 status)
+/// to keep the stable-codes dictionary stable and avoid cross-crate churn.
+fn user_not_found() -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::ClientAuth,
+        status: 401,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_AUTH_INVALID_APIKEY),
+        message: Cow::Borrowed("user not found"),
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    }
 }

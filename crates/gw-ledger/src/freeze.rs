@@ -22,6 +22,7 @@ pub struct FreezeGuard {
 impl FreezeGuard {
     /// Reserve `amount` micro-units against the user's balance. The returned
     /// guard MUST be settled (or dropped) so the freeze is released.
+    // TODO(memory): DEDUCT entries persist for the process lifetime; consider periodic GC of zero-state entries from a background task in gw-gateway.
     pub fn freeze(uid: UserId, amount: u64) -> Self {
         let state = DEDUCT
             .entry(uid.clone())
@@ -48,9 +49,15 @@ impl FreezeGuard {
     /// add `actual_micro` to `deducted`. Safe to call once; subsequent calls
     /// (and the destructor) become no-ops.
     pub fn settle(&self, actual_micro: u64) {
-        if self.settled.swap(true, Ordering::AcqRel) {
+        // Race-free idempotency: only the winner proceeds with state mutation.
+        if self
+            .settled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return;
         }
+        // Atomic ops below can't realistically panic — settled flag is committed.
         self.state
             .frozen_micro
             .fetch_sub(self.freeze_amount as i64, Ordering::AcqRel);
