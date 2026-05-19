@@ -4,7 +4,15 @@
 //! - user / user_group / apikey / ipblock: 300s TTL
 //! - vendor / vendor_key / model_group / pricing: 1800s TTL
 //! - jwks: 3600s TTL
+//!
+//! Hot-path callers should use the `*_or_load` methods, which dedupe concurrent
+//! loads via Moka's `try_get_with_by_ref` and fall through to the Redis→PG
+//! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
+use crate::loader::{
+    load_apikey, load_jwks, load_model_group, load_pricing, load_user, load_user_group,
+    load_vendor, load_vendor_key, LoaderCtx,
+};
 use gw_core::entity::*;
 use gw_core::ids::*;
 use gw_core::versioned::Versioned;
@@ -22,6 +30,9 @@ pub struct EntityStore {
     pub pricing: Cache<ModelName, Arc<Versioned<Pricing>>>,
     pub jwks: Cache<Kid, Arc<Versioned<JwksEntry>>>,
     pub ipblock: Cache<String, Arc<Versioned<IpBlockEntry>>>,
+    /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
+    /// `None` for unit tests that pre-populate caches by hand.
+    loader: Option<Arc<LoaderCtx>>,
 }
 
 impl Default for EntityStore {
@@ -32,6 +43,14 @@ impl Default for EntityStore {
 
 impl EntityStore {
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    pub fn with_loader(ctx: LoaderCtx) -> Self {
+        Self::build(Some(Arc::new(ctx)))
+    }
+
+    fn build(loader: Option<Arc<LoaderCtx>>) -> Self {
         Self {
             user: Cache::builder()
                 .max_capacity(1_000_000)
@@ -69,6 +88,7 @@ impl EntityStore {
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(300))
                 .build(),
+            loader,
         }
     }
 
@@ -80,5 +100,132 @@ impl EntityStore {
             .iter()
             .map(|(k, v)| ((*k).clone(), v))
             .collect()
+    }
+
+    pub async fn user_or_load(&self, id: &UserId) -> Option<Arc<Versioned<UserEntry>>> {
+        if let Some(hit) = self.user.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        self.user
+            .try_get_with_by_ref(id, async move {
+                load_user(&loader, &id2).await.map(Arc::new)
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn user_group_or_load(
+        &self,
+        id: &UserGroupId,
+    ) -> Option<Arc<Versioned<UserGroup>>> {
+        if let Some(hit) = self.user_group.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        self.user_group
+            .try_get_with_by_ref(id, async move {
+                load_user_group(&loader, &id2).await.map(Arc::new)
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn apikey_or_load(
+        &self,
+        id: &ApiKeyId,
+    ) -> Option<Arc<Versioned<ApiKeyEntry>>> {
+        if let Some(hit) = self.apikey.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        self.apikey
+            .try_get_with_by_ref(id, async move {
+                load_apikey(&loader, &id2).await.map(Arc::new)
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn vendor_or_load(&self, id: &VendorId) -> Option<Arc<Versioned<Vendor>>> {
+        if let Some(hit) = self.vendor.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        self.vendor
+            .try_get_with_by_ref(id, async move {
+                load_vendor(&loader, &id2).await.map(Arc::new)
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn vendor_key_or_load(
+        &self,
+        id: &KeyId,
+    ) -> Option<Arc<Versioned<VendorKey>>> {
+        if let Some(hit) = self.vendor_key.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        self.vendor_key
+            .try_get_with_by_ref(id, async move {
+                load_vendor_key(&loader, &id2).await.map(Arc::new)
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn model_group_or_load(
+        &self,
+        id: &Group,
+    ) -> Option<Arc<Versioned<ModelGroup>>> {
+        if let Some(hit) = self.model_group.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        self.model_group
+            .try_get_with_by_ref(id, async move {
+                load_model_group(&loader, &id2).await.map(Arc::new)
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn pricing_or_load(
+        &self,
+        id: &ModelName,
+    ) -> Option<Arc<Versioned<Pricing>>> {
+        if let Some(hit) = self.pricing.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        self.pricing
+            .try_get_with_by_ref(id, async move {
+                load_pricing(&loader, &id2).await.map(Arc::new)
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn jwks_or_load(&self, id: &Kid) -> Option<Arc<Versioned<JwksEntry>>> {
+        if let Some(hit) = self.jwks.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        self.jwks
+            .try_get_with_by_ref(id, async move {
+                load_jwks(&loader, &id2).await.map(Arc::new)
+            })
+            .await
+            .ok()
     }
 }

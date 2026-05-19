@@ -13,3 +13,4 @@ pub mod stream_consumer;
 pub use counter_store::CounterStore;
 pub use deduction::{CircuitReason, DEDUCT, DeductionState, USER_CIRCUIT, UserCircuit};
 pub use entity_store::EntityStore;
+pub use loader::LoaderCtx;
