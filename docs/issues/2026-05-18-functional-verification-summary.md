@@ -4,6 +4,16 @@ Branch: `feat/llm-gateway-impl` @ `143bbd3`
 Verification was performed on a fresh `docker compose up -d` (clean
 `-v` volumes), against the gateway image built from the same SHA.
 
+## Resolution status (2026-05-19)
+
+| Issue | Status |
+| :--- | :---: |
+| warm-path-no-cold-loader (critical) | RESOLVED in `feat/llm-gateway-impl` |
+| metrics-status-class-collapses-shortcircuit (minor) | RESOLVED |
+| background-tasks-verification: StreamConsumer placeholder | RESOLVED (invalidate-on-event; see `2026-05-19-streamconsumer-xreadgroup-parse-error.md` for an open fred-parse issue) |
+| background-tasks-verification: cold-loader (same as critical) | RESOLVED |
+| error-code-verification: Anthropic `x-api-key`-only | DOCUMENTED in README as v1 limitation |
+
 ## Phases executed
 
 | Phase | Topic | Status |

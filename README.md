@@ -118,6 +118,27 @@ What v1 ships:
 - KMS dev mode (env-supplied KEK); production AWS KMS integration is a
   follow-up.
 
+Operational behaviour and v1 caveats:
+
+- **Authentication**: requests with a valid `x-api-key` + `x-api-key-id` pair
+  resolve through the Redis → PostgreSQL cold-load chain. The cache is filled
+  on first access and re-validated either via `events:entity` stream
+  invalidation (when a control plane XADDs an event with `ns=<entity>, id=<id>`)
+  or by per-entity TTL (300s for hot entities, 1800s for vendor/pricing,
+  3600s for JWKS).
+- **Anthropic SDK clients**: Anthropic's public protocol authenticates with
+  `x-api-key` alone. The v1 gateway requires `(x-api-key-id, x-api-key)` as a
+  pair so a BYOK gateway can route to the right tenant key without server-side
+  lookups by key prefix. Clients porting from Anthropic's SDK must supply
+  both headers; missing one yields `GW_AUTH_INVALID_APIKEY` ("missing auth")
+  rather than a more specific code.
+- **Cross-pod cache invalidation**: in v1 single-pod deployments the cache is
+  refreshed via per-entity TTL only. Multi-pod deployments use the
+  `events:entity` Redis stream for invalidation, but fred 9.4 + redis:7 has a
+  known parse-error path on empty XREADGROUP replies that surfaces as warn
+  logs without breaking the request path. See
+  `docs/issues/2026-05-19-streamconsumer-xreadgroup-parse-error.md`.
+
 Known gaps tracked for v2 (and v1.1 where called out):
 
 - **Non-stream completions are REJECTED** at `request_filter` with
