@@ -92,6 +92,14 @@ pub async fn pick_peer(
     store: &Arc<EntityStore>,
     breakers: &Arc<BreakerStore>,
 ) -> Result<Box<HttpPeer>> {
+    // The remaining `ErrorType::Custom(...)` short-circuits in this function
+    // stay as bare-500 errors (no JSON envelope) on purpose. They signal
+    // internal invariants that should never trip if the earlier filter stages
+    // did their job (e.g. `early_request_filter` should always have set
+    // `ctx.client_codec`; `request_filter` should always have set
+    // `ctx.model`/`ctx.merged_perm`). Wrapping them in a vendor-flavoured
+    // envelope would hide the underlying defect; the empty-body 500 keeps
+    // them loud in pingora's logs so the root cause is easy to spot.
     let model = ctx
         .model
         .as_ref()
