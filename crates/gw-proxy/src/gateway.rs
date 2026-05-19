@@ -186,13 +186,11 @@ impl ProxyHttp for LlmGateway {
     /// Silence pingora's own ERROR-level log for the gateway's intentional
     /// short-circuits.
     ///
-    /// `filters::early::short_circuit` builds an `Error` whose outer
-    /// `etype` is `HTTPStatus(_)` and whose root-cause `etype` is the
-    /// marker `Custom("gw_short_circuit")`. By that point the client has
-    /// already received a vendor-flavoured JSON envelope via
+    /// By the time `suppress_error_log` runs, the client has already
+    /// received a vendor-flavoured JSON envelope via
     /// `error_emit::send_error`, so the `error!("Fail to filter request"
     /// / "Fail to proxy")` line in `pingora_proxy::lib.rs` is
-    /// double-counting an intentional rejection. We mute only this exact
+    /// double-counting an intentional rejection. We mute only that exact
     /// shape — any other error (upstream connect refused, upstream
     /// timeout, an internal sanity-check that bubbles a bare `HTTPStatus`
     /// without our marker cause) still falls through to the default
@@ -201,18 +199,33 @@ impl ProxyHttp for LlmGateway {
     /// The `logging` filter still receives the same `Option<&Error>` and
     /// keeps `gateway_requests_total{status_class}` partitioning 4xx /
     /// 5xx, so observability does not regress.
+    ///
+    /// The actual shape check lives in [`is_gw_short_circuit`] so it can
+    /// be unit-tested without standing up a `Session`.
     fn suppress_error_log(
         &self,
         _session: &Session,
         _ctx: &Self::CTX,
         error: &pingora::Error,
     ) -> bool {
-        matches!(error.etype, pingora::ErrorType::HTTPStatus(_))
-            && matches!(
-                error.root_etype(),
-                pingora::ErrorType::Custom(s) if *s == "gw_short_circuit"
-            )
+        is_gw_short_circuit(error)
     }
+}
+
+/// Returns true when the error came out of `filters::early::short_circuit`.
+///
+/// The short-circuit builder stamps an outer `ErrorType::HTTPStatus(_)`
+/// on top of a root cause of `ErrorType::Custom("gw_short_circuit")`. Both
+/// conditions must hold so genuine pingora failures (connect refused,
+/// upstream timeout, sanity-check 500s without the marker cause) still
+/// surface at ERROR.
+fn is_gw_short_circuit(error: &pingora::Error) -> bool {
+    use pingora::ErrorType;
+    matches!(error.etype, ErrorType::HTTPStatus(_))
+        && matches!(
+            error.root_etype(),
+            ErrorType::Custom(s) if *s == "gw_short_circuit"
+        )
 }
 
 /// 16-byte random ID encoded as lowercase hex (32 chars).
@@ -220,4 +233,39 @@ fn trace_id_hex() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_gw_short_circuit;
+    use pingora::{Error, ErrorType};
+
+    #[test]
+    fn suppresses_gateway_short_circuit() {
+        let e = Error::because(
+            ErrorType::HTTPStatus(401),
+            "gateway short-circuit",
+            Error::new(ErrorType::Custom("gw_short_circuit")),
+        );
+        assert!(is_gw_short_circuit(&e));
+    }
+
+    #[test]
+    fn does_not_suppress_bare_http_status() {
+        // Outer HTTPStatus but no marker cause — should still log.
+        let e = Error::new(ErrorType::HTTPStatus(500));
+        assert!(!is_gw_short_circuit(&e));
+    }
+
+    #[test]
+    fn does_not_suppress_upstream_failure() {
+        // No HTTPStatus envelope; root cause is the marker but outer
+        // etype is a genuine pingora failure — should still log.
+        let e = Error::because(
+            ErrorType::ConnectRefused,
+            "upstream down",
+            Error::new(ErrorType::Custom("gw_short_circuit")),
+        );
+        assert!(!is_gw_short_circuit(&e));
+    }
 }
