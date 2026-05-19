@@ -4,13 +4,21 @@
 //! the namespace (key prefix), the row-fetch SQL, and a `decode_fn` that
 //! materialises the JSON payload into the target type.
 
-use super::encrypt::KekCache;
-use super::redis_client::RedisCtx;
+use std::sync::Arc;
+
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::RedisMap;
-use gw_core::versioned::Versioned;
+use secrecy::SecretString;
 use sqlx::PgPool;
-use std::sync::Arc;
+
+use gw_core::entity::{
+    ApiKeyEntry, JwksEntry, ModelGroup, Pricing, UserEntry, UserGroup, Vendor, VendorKey,
+};
+use gw_core::ids::{ApiKeyId, Group, Kid, KeyId, ModelName, UserGroupId, UserId, VendorId};
+use gw_core::versioned::Versioned;
+
+use crate::encrypt::{decrypt, EncryptedKey, KekCache};
+use super::redis_client::RedisCtx;
 
 #[derive(Clone)]
 pub struct LoaderCtx {
@@ -84,14 +92,6 @@ fn ttl_for(ns: &str) -> u64 {
         _ => 300,
     }
 }
-
-use gw_core::entity::{
-    ApiKeyEntry, IpBlockEntry, JwksEntry, ModelGroup, Pricing, UserEntry, UserGroup, Vendor,
-    VendorKey,
-};
-use gw_core::ids::{ApiKeyId, Group, Kid, KeyId, ModelName, UserGroupId, UserId, VendorId};
-use crate::encrypt::{decrypt, EncryptedKey};
-use secrecy::SecretString;
 
 /// Wire shape of a `vendor_keys.payload` row. The plaintext `api_key` is held
 /// encrypted on disk under `api_key_enc`; decryption happens at decode time so
@@ -237,9 +237,6 @@ pub async fn load_jwks(ctx: &LoaderCtx, id: &Kid) -> anyhow::Result<Versioned<Jw
     .await
 }
 
-// IpBlockEntry is intentionally NOT cold-loaded by id — its consumer
-// (`gw_auth::ip_filter::check_blocklist`) iterates the whole snapshot. v1.1
-// treats the in-memory snapshot as authoritative; full-table preload is a
-// follow-up.
-#[allow(dead_code)]
-fn _ipblock_intentionally_no_cold_loader(_: &IpBlockEntry) {}
+// Note: IpBlockEntry has no cold-loader-by-id; its consumer iterates the
+// whole snapshot via `EntityStore::ipblock_snapshot`. v1 accepts an empty
+// runtime list; preload-from-PG is a follow-up.
