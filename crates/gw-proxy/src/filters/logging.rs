@@ -7,9 +7,46 @@ use gw_core::traits::Redactor;
 use gw_ledger::billing::{BillingRecord, BillingStatus, UsageSource};
 use gw_ledger::Ledger;
 use gw_routing::BreakerStore;
+use pingora::ErrorType;
 use pingora_proxy::Session;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Classify a completed request into one of 8 stable buckets:
+/// `1xx`/`2xx`/`3xx`/`4xx`/`5xx`/`other`/`err`/`early`.
+///
+/// Short-circuit responses (auth/codec/quota) never set `upstream_status` because
+/// the request never reached the upstream. `request_filter` returns an
+/// `Err(pingora::Error::because(ErrorType::HTTPStatus(s), ...))` whose `etype`
+/// carries the wire status we sent to the client. We extract that status so
+/// `gateway_requests_total{status_class}` reports 4xx for auth rejections
+/// rather than collapsing every short-circuit into the single `err` label.
+pub fn status_class_for(
+    err: Option<&pingora::Error>,
+    upstream_status: Option<u16>,
+) -> &'static str {
+    if let Some(s) = upstream_status {
+        return bucket(s);
+    }
+    if let Some(e) = err {
+        if let ErrorType::HTTPStatus(s) = e.etype {
+            return bucket(s);
+        }
+        return "err";
+    }
+    "early"
+}
+
+fn bucket(s: u16) -> &'static str {
+    match s / 100 {
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        _ => "other",
+    }
+}
 
 /// Placeholder redactor used until a config-driven implementation lands.
 /// Performs no redaction; the preview is truncated to `PREVIEW_MAX_BYTES` by
@@ -36,21 +73,11 @@ pub async fn run(
     // `Some(..)` that is only populated once routing succeeds, so without
     // this counter a gateway that has only served 401s renders an empty
     // `/metrics` body. Emit early so any request hitting the proxy lights
-    // up the exporter registry. The `status_class` label keeps cardinality
-    // bounded (5 values: 1xx..5xx, plus "err" when pingora reports an
-    // upstream error with no recorded status).
-    let status_class = match (err.is_some(), ctx.upstream_status) {
-        (_, Some(s)) => match s / 100 {
-            1 => "1xx",
-            2 => "2xx",
-            3 => "3xx",
-            4 => "4xx",
-            5 => "5xx",
-            _ => "other",
-        },
-        (true, None) => "err",
-        (false, None) => "early",
-    };
+    // up the exporter registry. `status_class_for` extracts the HTTPStatus
+    // bucket from `pingora::Error::etype` when the short-circuit response
+    // never set `upstream_status`, so 4xx auth rejections are no longer
+    // collapsed into the single `err` label.
+    let status_class = status_class_for(err, ctx.upstream_status);
     metrics::counter!(
         "gateway_requests_total",
         "status_class" => status_class,
