@@ -221,7 +221,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         Ok(_handle) => {
             tracing::info!(
                 target: "gw_gateway",
-                "stream consumer groups created (events:entity, events:counter); XREADGROUP loop not yet enabled"
+                "stream consumer started (events:entity, events:counter) with XREADGROUP invalidate-on-event"
             );
         }
         Err(e) => {
