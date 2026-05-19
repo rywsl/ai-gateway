@@ -6,12 +6,6 @@
 
 use pingora::{Error, ErrorType};
 
-fn classify(err: Option<&Error>, upstream_status: Option<u16>) -> &'static str {
-    // This MUST stay in sync with the body of
-    // crates/gw-proxy/src/filters/logging.rs::status_class_for.
-    gw_proxy::filters::logging::status_class_for(err, upstream_status)
-}
-
 #[test]
 fn short_circuit_401_buckets_as_4xx() {
     let e = Error::because(
@@ -19,7 +13,10 @@ fn short_circuit_401_buckets_as_4xx() {
         "auth",
         Error::new(ErrorType::Custom("gw_short_circuit")),
     );
-    assert_eq!(classify(Some(&e), None), "4xx");
+    assert_eq!(
+        gw_proxy::filters::logging::status_class_for(Some(&e), None),
+        "4xx"
+    );
 }
 
 #[test]
@@ -29,21 +26,33 @@ fn short_circuit_413_buckets_as_4xx() {
         "too large",
         Error::new(ErrorType::Custom("gw_short_circuit")),
     );
-    assert_eq!(classify(Some(&e), None), "4xx");
+    assert_eq!(
+        gw_proxy::filters::logging::status_class_for(Some(&e), None),
+        "4xx"
+    );
 }
 
 #[test]
 fn upstream_200_buckets_as_2xx() {
-    assert_eq!(classify(None, Some(200)), "2xx");
+    assert_eq!(
+        gw_proxy::filters::logging::status_class_for(None, Some(200)),
+        "2xx"
+    );
 }
 
 #[test]
 fn unknown_error_no_status_falls_back_to_err() {
     let e = Error::new(ErrorType::Custom("misc"));
-    assert_eq!(classify(Some(&e), None), "err");
+    assert_eq!(
+        gw_proxy::filters::logging::status_class_for(Some(&e), None),
+        "err"
+    );
 }
 
 #[test]
 fn no_err_no_upstream_is_early() {
-    assert_eq!(classify(None, None), "early");
+    assert_eq!(
+        gw_proxy::filters::logging::status_class_for(None, None),
+        "early"
+    );
 }
