@@ -61,6 +61,9 @@ impl StreamConsumer {
                     &consumer_name,
                     Some(COUNT_PER_POLL),
                     Some(BLOCK_MS),
+                    // noack=false: we want entries delivered into the pending-entries list so
+                    // our explicit xack below confirms processing. Flipping this to true would
+                    // drop the PEL safety net.
                     false,
                     vec![ENTITY_STREAM, COUNTER_STREAM],
                     vec![">", ">"],
