@@ -193,7 +193,10 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         pg,
         kek: kek_cache,
     };
-    let store = Arc::new(gw_store::EntityStore::with_loader(loader));
+    let store = Arc::new(gw_store::EntityStore::with_loader_and_timeout(
+        loader,
+        std::time::Duration::from_millis(cfg.loader.cold_load_timeout_ms),
+    ));
     let breakers = Arc::new(BreakerStore::default());
     let ratelimit = Arc::new(RateLimitGuard::new());
 

@@ -19,6 +19,47 @@ use gw_core::versioned::Versioned;
 use moka::future::Cache;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::timeout;
+
+/// Cold-load timeout wrapper.
+///
+/// Wraps a loader future with `tokio::time::timeout(deadline, fut)`. On
+/// timeout, increments `gateway_cold_load_timeout_total{ns}` and returns
+/// `None`. On `Err(_)`, returns `None` and lets the loader's own
+/// `tracing::warn` carry the underlying message. On `Ok(v)`, returns
+/// `Some(v)`.
+pub async fn with_cold_load_timeout<T>(
+    ns: &'static str,
+    deadline: Duration,
+    fut: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Option<T> {
+    match timeout(deadline, fut).await {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "gw_store::loader",
+                ns = %ns,
+                error = %e,
+                "cold loader returned error"
+            );
+            None
+        }
+        Err(_elapsed) => {
+            metrics::counter!(
+                "gateway_cold_load_timeout_total",
+                "ns" => ns,
+            )
+            .increment(1);
+            tracing::warn!(
+                target: "gw_store::loader",
+                ns = %ns,
+                deadline_ms = deadline.as_millis() as u64,
+                "cold loader timed out"
+            );
+            None
+        }
+    }
+}
 
 pub struct EntityStore {
     pub user: Cache<UserId, Arc<Versioned<UserEntry>>>,
@@ -33,6 +74,10 @@ pub struct EntityStore {
     /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
     /// `None` for unit tests that pre-populate caches by hand.
     loader: Option<Arc<LoaderCtx>>,
+    /// Per-cold-load deadline. If a loader future hasn't resolved by this
+    /// duration, the miss returns `None` and bumps
+    /// `gateway_cold_load_timeout_total{ns}`. Defaults to 2s.
+    cold_load_timeout: Duration,
 }
 
 impl Default for EntityStore {
@@ -43,14 +88,18 @@ impl Default for EntityStore {
 
 impl EntityStore {
     pub fn new() -> Self {
-        Self::build(None)
+        Self::build(None, Duration::from_secs(2))
     }
 
     pub fn with_loader(ctx: LoaderCtx) -> Self {
-        Self::build(Some(Arc::new(ctx)))
+        Self::with_loader_and_timeout(ctx, Duration::from_secs(2))
     }
 
-    fn build(loader: Option<Arc<LoaderCtx>>) -> Self {
+    pub fn with_loader_and_timeout(ctx: LoaderCtx, cold_load_timeout: Duration) -> Self {
+        Self::build(Some(Arc::new(ctx)), cold_load_timeout)
+    }
+
+    fn build(loader: Option<Arc<LoaderCtx>>, cold_load_timeout: Duration) -> Self {
         Self {
             user: Cache::builder()
                 .max_capacity(1_000_000)
@@ -89,6 +138,7 @@ impl EntityStore {
                 .time_to_live(Duration::from_secs(300))
                 .build(),
             loader,
+            cold_load_timeout,
         }
     }
 
@@ -108,9 +158,15 @@ impl EntityStore {
         }
         let loader = self.loader.as_ref()?.clone();
         let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
         self.user
             .try_get_with_by_ref(id, async move {
-                load_user(&loader, &id2).await.map(Arc::new)
+                with_cold_load_timeout("user", deadline, async move {
+                    load_user(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
             })
             .await
             .ok()
@@ -125,9 +181,15 @@ impl EntityStore {
         }
         let loader = self.loader.as_ref()?.clone();
         let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
         self.user_group
             .try_get_with_by_ref(id, async move {
-                load_user_group(&loader, &id2).await.map(Arc::new)
+                with_cold_load_timeout("user_group", deadline, async move {
+                    load_user_group(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
             })
             .await
             .ok()
@@ -142,9 +204,15 @@ impl EntityStore {
         }
         let loader = self.loader.as_ref()?.clone();
         let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
         self.apikey
             .try_get_with_by_ref(id, async move {
-                load_apikey(&loader, &id2).await.map(Arc::new)
+                with_cold_load_timeout("apikey", deadline, async move {
+                    load_apikey(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
             })
             .await
             .ok()
@@ -156,9 +224,15 @@ impl EntityStore {
         }
         let loader = self.loader.as_ref()?.clone();
         let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
         self.vendor
             .try_get_with_by_ref(id, async move {
-                load_vendor(&loader, &id2).await.map(Arc::new)
+                with_cold_load_timeout("vendor", deadline, async move {
+                    load_vendor(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
             })
             .await
             .ok()
@@ -173,9 +247,15 @@ impl EntityStore {
         }
         let loader = self.loader.as_ref()?.clone();
         let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
         self.vendor_key
             .try_get_with_by_ref(id, async move {
-                load_vendor_key(&loader, &id2).await.map(Arc::new)
+                with_cold_load_timeout("vendor_key", deadline, async move {
+                    load_vendor_key(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
             })
             .await
             .ok()
@@ -190,9 +270,15 @@ impl EntityStore {
         }
         let loader = self.loader.as_ref()?.clone();
         let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
         self.model_group
             .try_get_with_by_ref(id, async move {
-                load_model_group(&loader, &id2).await.map(Arc::new)
+                with_cold_load_timeout("model_group", deadline, async move {
+                    load_model_group(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
             })
             .await
             .ok()
@@ -207,9 +293,15 @@ impl EntityStore {
         }
         let loader = self.loader.as_ref()?.clone();
         let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
         self.pricing
             .try_get_with_by_ref(id, async move {
-                load_pricing(&loader, &id2).await.map(Arc::new)
+                with_cold_load_timeout("pricing", deadline, async move {
+                    load_pricing(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
             })
             .await
             .ok()
@@ -221,9 +313,15 @@ impl EntityStore {
         }
         let loader = self.loader.as_ref()?.clone();
         let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
         self.jwks
             .try_get_with_by_ref(id, async move {
-                load_jwks(&loader, &id2).await.map(Arc::new)
+                with_cold_load_timeout("jwks", deadline, async move {
+                    load_jwks(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
             })
             .await
             .ok()

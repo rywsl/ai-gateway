@@ -56,5 +56,6 @@ pub mod codes {
     pub const GW_UPSTREAM_OVERLOADED: &str = "GW_UPSTREAM_OVERLOADED";
     pub const GW_UPSTREAM_CANCELLED: &str = "GW_UPSTREAM_CANCELLED";
     pub const GW_BACKEND_UNAVAILABLE: &str = "GW_BACKEND_UNAVAILABLE";
+    pub const GW_COLD_LOAD_TIMEOUT: &str = "GW_COLD_LOAD_TIMEOUT";
     pub const GW_GATEWAY_INTERNAL: &str = "GW_GATEWAY_INTERNAL";
 }
