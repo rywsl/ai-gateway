@@ -15,7 +15,7 @@
 use super::entity_store::EntityStore;
 use super::redis_client::RedisCtx;
 use fred::interfaces::StreamsInterface;
-use fred::types::XReadResponse;
+use fred::types::{RedisValue, XReadResponse};
 use gw_core::ids::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,24 +54,26 @@ impl StreamConsumer {
         let consumer_name = format!("{}-consumer", self.instance_id);
         loop {
             let client = self.redis.pool.next();
-            // XReadResponse<K1, I, K2, V> = HashMap<K1, Vec<(I, HashMap<K2, V>)>>
-            let read: Result<XReadResponse<String, String, String, String>, _> = client
-                .xreadgroup_map(
+            // We use the raw `xreadgroup` (returning RedisValue) instead of
+            // `xreadgroup_map` because the latter's into_xread_response decoder
+            // does not tolerate RESP `Null` replies — which is what redis returns
+            // when BLOCK_MS expires with no messages. By inspecting the raw value
+            // we can short-circuit on Null/empty before invoking the map decoder.
+            let raw: Result<RedisValue, _> = client
+                .xreadgroup(
                     &*self.instance_id,
                     &consumer_name,
                     Some(COUNT_PER_POLL),
                     Some(BLOCK_MS),
-                    // noack=false: we want entries delivered into the pending-entries list so
-                    // our explicit xack below confirms processing. Flipping this to true would
-                    // drop the PEL safety net.
+                    // noack=false: explicit XACK below confirms processing.
                     false,
                     vec![ENTITY_STREAM, COUNTER_STREAM],
                     vec![">", ">"],
                 )
                 .await;
 
-            let entries = match read {
-                Ok(map) => map,
+            let value = match raw {
+                Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(
                         target: "gw_store::stream_consumer",
@@ -82,6 +84,31 @@ impl StreamConsumer {
                     continue;
                 }
             };
+
+            // Null = BLOCK timed out with no messages. Empty array = same shape
+            // in RESP2 some redis versions. Either way: nothing to do this tick.
+            if value.is_null() {
+                continue;
+            }
+            if let RedisValue::Array(ref a) = value {
+                if a.is_empty() {
+                    continue;
+                }
+            }
+
+            let entries: XReadResponse<String, String, String, String> =
+                match value.into_xread_response() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "gw_store::stream_consumer",
+                            error = %e,
+                            "xreadgroup non-null reply failed to parse; backing off"
+                        );
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
 
             for (stream, stream_entries) in entries {
                 for (entry_id, fields) in stream_entries {
