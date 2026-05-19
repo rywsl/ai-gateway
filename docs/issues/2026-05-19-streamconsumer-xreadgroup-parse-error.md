@@ -54,3 +54,12 @@ Either way, the failure is on the empty-reply path — the polling loop never se
 ## Workaround
 
 None needed for the v1 single-pod deployment. Document this under "Known v1 limitations" in the README.
+
+## Resolution (2026-05-19+)
+
+Fixed in commit `23794c0` by switching `consume_loop` from `xreadgroup_map`
+(which fails on `RedisValue::Null` empty replies) to the raw `xreadgroup`
+returning `RedisValue`. The new loop short-circuits on `Null` / empty
+`Array` before invoking the map decoder. Verified by
+`crates/gw-store/tests/stream_consumer_empty_reply.rs`: zero warn logs over
+1.2 s of empty polling.
