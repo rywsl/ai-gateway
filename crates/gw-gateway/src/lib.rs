@@ -122,8 +122,10 @@ pub fn run() -> anyhow::Result<()> {
     let wired = rx
         .recv()
         .context("bootstrap thread exited before signalling")??;
-    // The bootstrap thread now parks on `pending`; we intentionally leak the
-    // handle. Dropping the JoinHandle does not terminate the thread.
+    // Detach the bootstrap thread. Dropping its JoinHandle does not stop the
+    // thread — the runtime inside it is parked on `pending()`, keeping the
+    // background tasks (Ledger flusher, health server, StreamConsumer) alive
+    // for the process lifetime.
     std::mem::drop(bootstrap_handle);
 
     // Pingora server lives on the main thread and never returns.
@@ -219,7 +221,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         Ok(_handle) => {
             tracing::info!(
                 target: "gw_gateway",
-                "stream consumer started (events:entity, events:counter)"
+                "stream consumer groups created (events:entity, events:counter); XREADGROUP loop not yet enabled"
             );
         }
         Err(e) => {
