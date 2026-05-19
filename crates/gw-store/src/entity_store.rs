@@ -21,6 +21,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
+/// Default per-cold-load deadline. Bootstrap can override this via
+/// `EntityStore::with_loader_and_timeout` (wired from
+/// `gw-gateway` `LoaderCfg::cold_load_timeout_ms`, default 2000 ms).
+const DEFAULT_COLD_LOAD_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Sentinel error used to drive Moka's `try_get_with_by_ref` Err arm without
+/// caching the failure. The real diagnostic is emitted by
+/// `with_cold_load_timeout` as a `tracing::warn`; this string is never user-
+/// or log-facing on its own.
+const COLD_LOAD_MISS_SENTINEL: &str = "cold-load miss (timeout or loader error); see warn log";
+
 /// Cold-load timeout wrapper.
 ///
 /// Wraps a loader future with `tokio::time::timeout(deadline, fut)`. On
@@ -88,11 +99,11 @@ impl Default for EntityStore {
 
 impl EntityStore {
     pub fn new() -> Self {
-        Self::build(None, Duration::from_secs(2))
+        Self::build(None, DEFAULT_COLD_LOAD_TIMEOUT)
     }
 
     pub fn with_loader(ctx: LoaderCtx) -> Self {
-        Self::with_loader_and_timeout(ctx, Duration::from_secs(2))
+        Self::with_loader_and_timeout(ctx, DEFAULT_COLD_LOAD_TIMEOUT)
     }
 
     pub fn with_loader_and_timeout(ctx: LoaderCtx, cold_load_timeout: Duration) -> Self {
@@ -166,7 +177,7 @@ impl EntityStore {
                 })
                 .await
                 .map(Arc::new)
-                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
             })
             .await
             .ok()
@@ -189,7 +200,7 @@ impl EntityStore {
                 })
                 .await
                 .map(Arc::new)
-                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
             })
             .await
             .ok()
@@ -212,7 +223,7 @@ impl EntityStore {
                 })
                 .await
                 .map(Arc::new)
-                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
             })
             .await
             .ok()
@@ -232,7 +243,7 @@ impl EntityStore {
                 })
                 .await
                 .map(Arc::new)
-                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
             })
             .await
             .ok()
@@ -255,7 +266,7 @@ impl EntityStore {
                 })
                 .await
                 .map(Arc::new)
-                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
             })
             .await
             .ok()
@@ -278,7 +289,7 @@ impl EntityStore {
                 })
                 .await
                 .map(Arc::new)
-                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
             })
             .await
             .ok()
@@ -301,7 +312,7 @@ impl EntityStore {
                 })
                 .await
                 .map(Arc::new)
-                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
             })
             .await
             .ok()
@@ -321,7 +332,7 @@ impl EntityStore {
                 })
                 .await
                 .map(Arc::new)
-                .ok_or_else(|| anyhow::anyhow!("cold-load timed out or failed"))
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
             })
             .await
             .ok()
