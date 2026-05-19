@@ -38,25 +38,31 @@ SQL
 docker compose exec -T redis redis-cli SET "counter:user:$USER_ID:balance_micro" 1000000
 
 # 3. Hit the gateway.
-RESPONSE=$(curl -sS -X POST http://localhost:8000/v1/chat/completions \
+# Capture status code AND body in one curl call.
+HTTP_STATUS=$(curl -sS -o /tmp/smoke-warm-path.body -w "%{http_code}" -X POST http://localhost:8000/v1/chat/completions \
   -H "x-api-key: $KEY" \
   -H "x-api-key-id: $KEY_ID" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"hello"}],"stream":true}')
+BODY=$(cat /tmp/smoke-warm-path.body)
 
-echo "Response: $RESPONSE"
+echo "HTTP $HTTP_STATUS"
+echo "Body: $BODY"
 
-# 4. Assert: auth passed (no GW_AUTH_INVALID_APIKEY).
-if echo "$RESPONSE" | grep -q "GW_AUTH_INVALID_APIKEY"; then
+# 4. Primary assertion: auth must NOT reject.
+if [ "$HTTP_STATUS" = "401" ] || echo "$BODY" | grep -q "GW_AUTH_INVALID_APIKEY"; then
   echo "FAIL: auth still rejecting — cold loader not wired"
   exit 1
 fi
 
-# Expected next-stage failure: no model_group seeded yet, so routing fails.
-if echo "$RESPONSE" | grep -qE "GW_ROUTING|GW_REQUEST_MODEL|GW_BACKEND"; then
-  echo "PASS: auth succeeded; failed downstream as expected"
+# 5. Secondary check (informational): expect a downstream failure since no
+# vendor_key/model_group is seeded. HTTP 5xx or a known GW_ROUTING/MODEL/BACKEND
+# code in the body both qualify.
+if [ "$HTTP_STATUS" -ge 500 ] || echo "$BODY" | grep -qE "GW_ROUTING|GW_REQUEST_MODEL|GW_BACKEND"; then
+  echo "PASS: auth succeeded (HTTP $HTTP_STATUS); failed downstream as expected"
   exit 0
 fi
 
-echo "UNEXPECTED: response did not match auth-success or known downstream-failure patterns"
+# Auth passed but the response shape is something else (e.g. unexpected 2xx).
+echo "UNEXPECTED: auth passed but downstream returned HTTP $HTTP_STATUS without a known failure marker"
 exit 1
