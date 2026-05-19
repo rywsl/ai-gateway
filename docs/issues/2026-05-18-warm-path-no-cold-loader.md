@@ -125,3 +125,33 @@ curl -sS -X POST http://localhost:8000/v1/chat/completions \
 # {"error":{"code":"GW_AUTH_INVALID_APIKEY","message":"api key invalid","type":"client_auth"}}
 # HTTP 401
 ```
+
+## Resolution (2026-05-19)
+
+Resolved by `feat(gw-store): cold-loader chain wired into EntityStore via *_or_load`
+(commit 786ca03). Bootstrap now constructs `LoaderCtx { redis, pg, kek }`, hands it
+to `EntityStore::with_loader`, and the eight `*_or_load` methods fall through to
+Redis L1 → PG L2 → write-back on cache miss. Verified by `scripts/smoke-warm-path.sh`:
+seeded `users` + `api_keys` rows now resolve through auth, request progresses
+past `request_filter` into routing as expected.
+
+### Smoke-script outcome (2026-05-19 run)
+
+Against `docker compose` with the freshly built image (Tasks 1-5 merged), the
+smoke script confirms the headline assertion — auth no longer rejects with
+`GW_AUTH_INVALID_APIKEY`. The request now reaches the upstream filter where
+`model_group_or_load` legitimately returns `None` (no model group seeded), and
+pingora short-circuits with HTTP 500 + `gw_no_model_group` (empty body, error
+in `etype: ErrorType::Custom`). Gateway log line confirming:
+
+```
+ERROR Fail to proxy:  gw_no_model_group, status: 500, tries: 1, retry: false, POST /v1/chat/completions
+```
+
+The script's second-stage assertion currently greps for
+`GW_ROUTING|GW_REQUEST_MODEL|GW_BACKEND` in the JSON body and exits 1
+("UNEXPECTED") because the body is empty for this internal short-circuit. The
+substance is correct (auth path works, downstream legitimately fails) but the
+assertion pattern needs broadening to recognise empty-body 5xx with
+`gw_no_model_group` / `gw_vendor_missing` / `gw_model_group_missing`. Tracked as
+a follow-up; not a regression of the cold-loader wiring.
