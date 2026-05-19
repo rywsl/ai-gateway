@@ -19,6 +19,20 @@
 > v3 决定：**worker 不开任何业务 HTTP 端口**；客户端 task API 完全在 gateway 实现；gateway ↔ worker 仅通过 Redis 联系（Stream + Entity + Counter）。worker 主动入队消费、主动写终态、主动 settle。受影响：ADR-T2/T3/T7/T8/T10/T11/T12/T13 全部重写；ADR-T14（HMAC 内部安全契约）整体删除，因为不再有跨进程 HTTP；ADR-T15（gateway 反代链）改为「gateway task 路径实现」。
 >
 > **v3.1 微调（2026-05-19，撤回 `gw-proxy → gw-task` 反向依赖）**：v3 初稿允许 `gw-proxy` 依赖 `gw-task` 以复用 DTO/schema 工具，违反用户「不让 worker 出现在 proxy 的依赖」的原意。修订：`gw-task` 与 `gw-proxy` 并列、互不依赖；共享面下沉到 `gw-core`（task DTO、TaskKind/TaskStatus 枚举、task 错误码）、`gw-store`（entity:task / tasks:queue / tasks:cancel / tasks:leases 的读写 helper + schema_version 校验）、`gw-adapter`（新抽 crate，proxy 与 worker 都依赖）。受影响：ADR-T1 依赖图、ADR-T12、ADR-T15。`gw-task` 仍是 worker 自用的 library（任务执行循环、看门狗、settle 编排），不参与 gateway 侧实现。
+>
+> **v3.2 微调（2026-05-19，业务/支撑分离）**：v3.1 把 task 业务的 Redis schema helper 下沉到 `gw-store` 是错的——`gw-store` 是通用 Entity/Counter/Append log 协议的支撑层，往里塞 `task::*` 命名空间会让支撑层耦合业务认知。原则升级：**业务化模块单独拆 crate，不寄生在功能支撑模块**。修订方案：把 v3.1 的 `gw-task` 一拆为二：
+> - `gw-task`（业务**契约 + 通用工具**层）：DTO、Redis schema helper、settle lua 脚本字符串、TaskFreezeGuard 的 task 侧实现编排——纯 library，无 tokio runtime、无 axum、无后台 loop；**proxy 与 worker 都依赖**。"worker"在用户硬约束中特指**执行进程实体**，不是 task 业务本身，故 proxy 依赖 `gw-task`（业务）不违反"不让 worker 出现在 proxy 依赖"。
+> - `gw-task-runtime`（worker **执行**层）：tasks:queue 消费循环、状态机驱动、看门狗 leader election、CancellationToken 管理、reqwest 调上游——仅 `gw-task-worker` binary 依赖；`gw-proxy` **禁止**依赖。
+> - 同样原则向其他业务模块外推（见末尾"架构影响补注"）：`gw-billing`（复杂计费公式）、`gw-adapter`（上游差异化）都遵循"业务一 crate"原则。`gw-store::task::*` 撤回。受影响：ADR-T1 依赖图、ADR-T12、ADR-T15、未决问题 #8、架构影响补注。
+>
+> **v3.3 微调（2026-05-19，部署可分离性升级为硬约束）**：v3.2 的 Redis 通信形态已经天然支持 N gateway × M worker，但 spec 没把"部署组合"作为显式约束写下来。补：
+> - 「一网关 × 多 worker」「多网关 × 一 worker」「多网关 × 多 worker」「网关与 worker 跨网络/跨可用区/跨集群部署」全部必须支持；
+> - 唯一耦合面 = 同一个 Redis namespace（KMS KEK 同源）；PgSQL 可同实例可分库（只要 schema 一致），但 gateway 不强求与 worker 共库；
+> - 任意一边水平伸缩不需要对端配置变更；
+> - 任意一边滚动重启、版本升级，对端无感（schema 版本兼容窗口内）；
+> - 不允许任何"网关知道某个具体 worker 实例"的硬编码或路由表，反之亦然。
+>
+> 新增 ADR-T16 固化此约束 + 验收条件。受影响：ADR-T13（worker 注册协议范围）、ADR-T11（部署形态扩展为矩阵）、未决问题新增 #10。
 
 ---
 
@@ -42,36 +56,58 @@
 
 ## 3. 设计决策（ADR 草案）
 
-### ADR-T1 新增两个 crate：`gw-task` + `gw-task-worker`；并新增 `gw-adapter`
+### ADR-T1 新增 crate：`gw-task` + `gw-task-runtime` + `gw-task-worker`；并新增 `gw-adapter`
+
+业务/支撑分离 + 执行体分离，task 一族拆三层：
 
 ```
-gw-core    ◄── gw-task, gw-proxy, gw-adapter, ...    （task DTO / TaskKind / TaskStatus / 错误码 放 gw-core）
-gw-codec   ◄── gw-task, gw-proxy
-gw-store   ◄── gw-task, gw-proxy                     （entity:task / tasks:queue / tasks:cancel / tasks:leases 读写 helper 放 gw-store）
-gw-routing ◄── gw-task, gw-proxy
-gw-auth    ◄── gw-task, gw-proxy
-gw-ledger  ◄── gw-task, gw-proxy                     （FreezeGuard trait + 两套实现）
-gw-adapter ◄── gw-task, gw-proxy                     （上游 adapter trait 与实现，proxy 与 worker 共享）
-gw-task    ◄── gw-task-worker （binary：tokio runtime + 后台 loop + 健康端口）
-gw-proxy   ◄── gw-gateway     （binary：原 Pingora 入口）
+gw-core         ← 通用 ID/IR/错误
+gw-codec        ← 协议 codec
+gw-store        ← 通用 Entity/Counter/Append log 协议（**禁止业务命名空间**）
+gw-routing      ← 选 key
+gw-auth         ← 鉴权
+gw-ledger       ← 余额账户、FreezeGuard trait（含 Task 实现）
+gw-adapter      ← 上游差异化（业务 crate）
+gw-billing      ← 复杂计费公式（业务 crate，video/阶梯/markup；详见 §架构补注）
+gw-task         ← **task 业务契约层**：DTO、Redis schema helper、entity:task / tasks:queue 编解码、settle 编排（业务 crate；纯 library）
+gw-task-runtime ← worker 执行层：tokio loop、看门狗、claim/lease、CancellationToken（仅 worker binary 用）
+gw-proxy        ← Pingora 入口（gateway 业务）
+gw-gateway      ← gateway binary
+gw-task-worker  ← worker binary
 ```
 
-**禁止边**：
-- `gw-task → gw-proxy`：禁止（worker 不依赖 proxy）；
-- `gw-proxy → gw-task`：**也禁止**（task crate 不出现在 proxy 的依赖里，这是用户硬约束）。
+**依赖方向**：
 
-`gw-task` 与 `gw-proxy` 完全平行。两边的共享面通过更下层的 crate：
+```
+gw-core ◄── 全部
+gw-codec ◄── gw-proxy, gw-task, gw-task-runtime
+gw-store ◄── gw-auth, gw-routing, gw-ledger, gw-adapter, gw-task, gw-proxy
+gw-auth ◄── gw-proxy, gw-task            （task 业务校验快照解码用）
+gw-routing ◄── gw-proxy, gw-task-runtime  （worker 选 vendor key）
+gw-ledger ◄── gw-proxy, gw-task           （TaskFreezeGuard::try_freeze 走 gw-task → gw-ledger）
+gw-adapter ◄── gw-proxy, gw-task-runtime  （上游 adapter；gateway 同步与 worker 任务都用）
+gw-billing ◄── gw-ledger, gw-task-runtime, gw-proxy  （复杂计费公式）
+gw-task ◄── gw-proxy, gw-task-runtime    （task 业务契约，proxy 与 runtime 都需要）
+gw-task-runtime ◄── gw-task-worker        （只有 worker binary 用）
+gw-proxy ◄── gw-gateway
+```
 
-| 共享物 | 归属 crate | 用法 |
+**禁止边**（硬约束）：
+
+- `gw-task-runtime → gw-proxy`：禁。
+- `gw-proxy → gw-task-runtime`：**禁**（这是用户"worker 不出现在 proxy 依赖"的精确落地——指向**执行体**层 crate，不指向业务契约层）。
+- `gw-store → gw-task`、`gw-store → gw-billing`、`gw-store → gw-adapter`：**禁**（支撑层不依赖任何业务 crate）。
+- 任何业务 crate 之间互依需在 spec 内显式登记，避免业务之间隐式耦合。
+
+`gw-task` 与 `gw-task-runtime` 拆分的关键点：
+
+| 维度 | `gw-task`（业务契约层） | `gw-task-runtime`（执行层） |
 |---|---|---|
-| TaskKind / TaskStatus / TaskId / 任务错误码 | `gw-core` | 两边 import 同一份枚举 |
-| entity:task 的 HASH 字段集 + schema_version 检查 | `gw-store`（扩展 entity helper） | 写：gateway 调；读：gateway+worker 都调 |
-| tasks:queue / tasks:cancel XADD/XREADGROUP wrapper | `gw-store` | 写：gateway；消费：worker |
-| tasks:leases ZSET wrapper | `gw-store` | 看门狗（worker 侧） |
-| task settle lua 脚本 | `gw-ledger` | 仅 worker 调；脚本字符串常量也在 gw-ledger |
-| 上游 adapter（OAuth refresh、JWT、kiro EventStream） | `gw-adapter` | gateway 同步路径 + worker 任务路径都用 |
-
-gateway 侧的 task-shape 检测器、long-poll 等业务逻辑放 `gw-proxy` 自己（业务规则属于业务层），不需要从 `gw-task` 借。
+| 内容 | DTO、Redis schema 编解码 helper、entity:task / tasks:queue / tasks:cancel / tasks:leases 的字段约定、settle lua 脚本字符串、TaskFreezeGuard 在 task 侧的接入方式 | tokio multi-thread runtime 装配、tasks:queue XREADGROUP 消费循环、状态机驱动、看门狗 leader election、CancellationToken 管理、reqwest 调上游、heartbeat loop |
+| 形态 | 纯 library，无后台 task，可在同步上下文用 | 启动后产生持续运行的 tokio task |
+| 依赖 | gw-core / gw-store / gw-codec / gw-ledger / gw-auth | gw-task / gw-codec / gw-routing / gw-adapter / gw-billing / gw-ledger |
+| 谁用 | `gw-proxy`（写入 + 读取契约） / `gw-task-runtime`（消费 + 推进） | 仅 `gw-task-worker` binary |
+| 测试 | 单测 schema 编解码、错误码、状态转移规则 | 集成测试 + 与 Redis testcontainer 配合 |
 
 二进制名 `gw-tasks`。`cargo build -p gw-gateway` 与 `cargo build -p gw-task-worker` 分开。
 
@@ -370,17 +406,14 @@ video 时长计费 simple_log schema 新增 `task_id / duration_seconds / task_t
 ### ADR-T12 与 gateway 的协作面（v3 重写）
 
 - **零 HTTP**。
-- **零 crate 直接互依**：`gw-proxy ↔ gw-task` 两个方向都禁止。
-- **唯一耦合面 = Redis 三件套 + 下沉到底层 crate 的共享类型**：
+- **零执行体 crate 直接互依**：`gw-proxy ↔ gw-task-runtime` 两个方向都禁止。
+- **业务契约层 `gw-task` 是 proxy 与 runtime 的共同依赖**：DTO、Redis schema 编解码、settle 脚本字符串全在 `gw-task`；proxy 与 runtime 通过 `gw-task` 看见同一份契约。
+- **唯一运行时耦合面 = Redis 三件套**：
   - Stream：`tasks:queue` / `tasks:cancel`；
   - Entity：`entity:task:*` / `entity:worker:*`；
-  - Counter：`counter:user:<uid>:task_frozen_micro`、四层并发 counter；
-  - 共享 DTO 与错误码：`gw-core`；
-  - 共享 Redis schema helper：`gw-store`；
-  - 共享 settle lua 脚本：`gw-ledger`；
-  - 共享上游 adapter：`gw-adapter`。
+  - Counter：`counter:user:<uid>:task_frozen_micro`、四层并发 counter。
 - **共享底座**：Redis 实例、PgSQL 实例、Entity namespace、`billing:records` stream、`alerts` stream、KMS KEK。
-- **schema 协议契约**：`entity:task.schema_version` 字段，`gw-store` 的 helper 在读写时强制校验；新增 field 视为兼容；改语义必须 bump 版本，新旧 worker 一个版本周期同时兼容（蓝绿/滚动升级）。
+- **schema 协议契约**：`entity:task.schema_version` 字段由 `gw-task` 维护读写 helper；新增 field 视为兼容；改语义必须 bump 版本，新旧 worker 一个版本周期同时兼容。
 
 ### ADR-T13 Worker 注册协议（v3 大幅简化）
 
@@ -403,54 +436,90 @@ worker 启动 → 写 `entity:worker:<worker_id>` HASH：
 - 仅供 ops dashboard / Alert（如所有 worker 全 draining → 报警）；
 - TTL 15s + 5s 续约。
 
+### ADR-T16 部署可分离性（v3.3 新增）
+
+形态矩阵：
+
+| 拓扑 | 是否支持 | 备注 |
+|---|---|---|
+| 1 gateway × 1 worker（单机开发） | ✓ | docker compose 即可 |
+| 1 gateway × N worker | ✓ | Redis Stream consumer group 自动分发；增加副本 = 起多一个 binary |
+| N gateway × 1 worker | ✓ | 多个 gateway 写同一份 `tasks:queue` Stream；worker 单一 consumer 消费 |
+| N gateway × M worker | ✓ | 默认形态 |
+| 跨可用区 / 跨地域 / 跨集群 | ✓ | 只要 gateway 与 worker 能连到同一个 Redis（或 Redis cluster 同 namespace） |
+
+**硬约束**：
+
+1. **零进程内调用、零 HTTP 调用**——gateway 与 worker 之间只通过 Redis 通信（参 ADR-T12），这条本身就支持任意拓扑。
+2. **零硬编码对端地址**：gateway 配置里不出现 worker host/port；worker 配置里不出现 gateway host/port。两边各自只配 Redis/PgSQL DSN + KMS KEK。
+3. **零成对启动顺序约束**：gateway 可以先于任何 worker 启动接客户端 submit（任务积在 `tasks:queue`）；worker 可以先于 gateway 启动空跑。
+4. **水平伸缩零对端感知**：新增 1 个 worker = 起 1 个 `gw-task-worker` 进程，自动 join consumer group；新增 1 个 gateway = 起 1 个 `gw-gateway` 进程，自动写 Redis；两边都不需要对端配置变更或注册。
+5. **滚动升级零对端感知**：gateway 滚动重启 = 客户端短暂连接漂移，worker 不感知；worker 滚动重启 = 在跑任务被 lease 回收（参 ADR-T6），gateway 不感知；只要 `entity:task.schema_version` 兼容窗口内即可（参 ADR-T12）。
+
+**验收条件**（实施 plan 必须包含的测试场景）：
+
+- 启 0 worker + 1 gateway，submit 100 个 task → 全部 queued → 再启 2 worker → 100 个全部 succeeded。
+- 启 1 worker + 0 gateway，等 30s 验证 worker 空跑稳定 → 启 1 gateway → submit 1 个 → 1s 内 claim。
+- 启 N gateway + M worker（N、M 各 ≥ 2），每 gateway 各 submit 50 → 全部 succeeded，每个 worker 至少 claim 过 1 个（验证负载分散）。
+- gateway 副本 A 写 submit → worker B claim 执行 → 期间 gateway A 进程被 kill → 客户端通过 gateway B（轮询读 `entity:task`）继续看到终态。
+- worker 副本 A 拿到 task → 进入 running → kill 副本 A → lease 在 `lease_seconds` 内被 worker B 回收 → 任务终态。
+
+**与 ADR-T13 worker 注册协议的关系**：`entity:worker:<id>` 仅供 ops 观测（用户面板看"现在有几个 worker 在跑"），**不参与**业务路由。即使所有 worker 都没注册（极端情况），任务仍按 `tasks:queue` 顺序被任意可达 worker claim。注册协议是 _observability_，不是 _service discovery_。
+
 ### ADR-T15 Gateway 侧 task 路径实现（v3 替换原反代链）
 
-gateway 改动落在 `gw-proxy`（业务逻辑）+ `gw-store`（共享 schema helper）+ `gw-ledger`（freeze）+ `gw-core`（DTO）；**不依赖 `gw-task`**。
+gateway 改动落在 `gw-proxy`（业务编排）+ `gw-task`（业务契约 helper）+ `gw-ledger`（freeze）+ `gw-core`（基础类型）；**不依赖 `gw-task-runtime`**。
 
-1. **task-shape 检测器**（在 `gw-proxy` request_filter 内）：path 表 + body sniff 判定 → `RouteDecision::Vendor` 或 `RouteDecision::Task(TaskKind)`。检测器实现属于 gateway 业务，放 `gw-proxy::filters::request`。
+1. **task-shape 检测器**（在 `gw-proxy::filters::request`）：path 表 + body sniff 判定 → `RouteDecision::Vendor` 或 `RouteDecision::Task(TaskKind)`。
 2. **task 路径 request_filter**（仍在 `gw-proxy`）：
    - auth + permission merge（与 vendor 路径共享）；
    - `gw-ledger::TaskFreezeGuard::try_freeze`（vendor 路径用 `RequestFreezeGuard`）；
    - codec parse_request → IR → render 为 wire JSON（worker 直接用）；
    - 选 vendor + 计算 vendor_key_hint（worker 仍可重选，hint 优先）；
-   - 调 `gw-store::task::submit(entity_fields, queue_payload)` — 这个 helper 在 `gw-store` 内做"HSET + XADD"的 lua 原子化；
+   - 调 `gw-task::contract::submit(entity_fields, queue_payload)` — 这个 helper 在 `gw-task` 内做"HSET + XADD"的 lua 原子化，底层走 `gw-store` 的通用 Redis 客户端；
    - **short-circuit 返回**：跳过 upstream_peer / upstream_request_filter，gateway 直接构造 `{task_id, status=queued, expires_at}` 响应给客户端；用现有 `error_emit` 同款 short-circuit 路径，但语义是"已入队"不是"错误"。
 3. **GET /v1/tasks/:id**：
-   - 调 `gw-store::task::load(task_id)` → 拿 `gw-core::TaskRecord`；
+   - 调 `gw-task::contract::load(task_id)` → 拿 `gw-task::dto::TaskRecord`；
    - 按客户端协议（OpenAI / Anthropic / Gemini）封装；
    - 不存在 → `GW_TASK_NOT_FOUND` 404；
-   - 终态且过 TTL 进 PgSQL `tasks` 表回填（`gw-store::task::load_persistent`）。
+   - 终态且过 TTL 进 PgSQL `tasks` 表回填（`gw-task::contract::load_persistent`）。
 4. **GET /v1/tasks/:id?wait=N**：
-   - 调 `gw-store::task::watch(task_id, wait_ms)`，内部用 `XREAD BLOCK STREAMS events:entity`；
+   - 调 `gw-task::contract::watch(task_id, wait_ms)`，内部用 `XREAD BLOCK STREAMS events:entity`；
    - 命中状态变化 / 超时 → 返回当时 record；
    - 触达上限退出，不持续推。
-5. **POST /v1/tasks/:id/cancel**：调 `gw-store::task::request_cancel(task_id, reason)`，立即 200。
+5. **POST /v1/tasks/:id/cancel**：调 `gw-task::contract::request_cancel(task_id, reason)`，立即 200。
 
-**共享类型放 `gw-core`**：
+**`gw-task` crate 的 API 面**：
 
 ```rust
-// gw-core::task
+// gw-task::dto
 pub struct TaskId(/* UUIDv7 */);
 pub enum TaskStatus { Pending, Queued, Running, Cancelling, Succeeded, Failed, Cancelled }
 pub enum TaskKind   { Image, Video, Audio, Batch, LroResponses, ... }
 pub struct TaskRecord { /* entity:task 解码后形态 */ }
-pub mod codes {
-    pub const GW_TASK_NOT_FOUND: &str = "...";
-    pub const GW_TASK_ALREADY_TERMINAL: &str = "...";
-    pub const GW_TASK_PROVIDER_UNAVAILABLE: &str = "...";
-    pub const GW_TASK_QUOTA_EXCEEDED: &str = "...";
-}
+
+// gw-task::codes  （task 业务错误码，不放 gw-core——gw-core 只放跨业务通用的）
+pub const GW_TASK_NOT_FOUND: &str = "GW_TASK_NOT_FOUND";
+pub const GW_TASK_ALREADY_TERMINAL: &str = "GW_TASK_ALREADY_TERMINAL";
+pub const GW_TASK_PROVIDER_UNAVAILABLE: &str = "GW_TASK_PROVIDER_UNAVAILABLE";
+pub const GW_TASK_QUOTA_EXCEEDED: &str = "GW_TASK_QUOTA_EXCEEDED";
+
+// gw-task::contract  （Redis schema helper；gateway 与 runtime 共用）
+pub async fn submit(redis: &RedisHandle, fields: TaskFields, queue: QueuePayload) -> Result<TaskId, ...>;
+pub async fn load(redis: &RedisHandle, id: &TaskId) -> Result<Option<TaskRecord>, ...>;
+pub async fn watch(redis: &RedisHandle, id: &TaskId, wait_ms: u64) -> Result<Option<TaskRecord>, ...>;
+pub async fn request_cancel(redis: &RedisHandle, id: &TaskId, reason: CancelReason) -> Result<(), ...>;
+// runtime 侧调：
+pub async fn claim(redis: &RedisHandle, consumer: &str) -> Result<Option<Claimed>, ...>;
+pub async fn update_running(...) / settle(...) / recover_lease(...);
+
+// gw-task::scripts  （lua 脚本字符串常量）
+pub const SUBMIT_LUA: &str = "...";
+pub const SETTLE_LUA: &str = "...";
+pub const RECOVER_LEASE_LUA: &str = "...";
 ```
 
-**共享 Redis schema helper 放 `gw-store::task`**：
-
-- `submit(fields, queue_payload) -> TaskId`：HSET + XADD 原子；
-- `load(id) -> Option<TaskRecord>`：HGETALL + schema_version 校验；
-- `request_cancel(id, reason)`：HSET status=cancelling + XADD tasks:cancel；
-- `watch(id, wait_ms) -> Option<TaskRecord>`：XREAD BLOCK；
-- `update_running(id, lease_ms, worker_id)` / `settle(id, terminal, actual)` / `recover_lease(id)`：worker 侧调。
-
-gateway 与 worker 在 helper 层面是同一组函数,但调用集合不同（gateway 用前 4 个,worker 用后 3 个）。两边都通过 `gw-store` 这个共同下层依赖,而不互相 import。
+gateway 与 worker（through `gw-task-runtime`）通过同一份 `gw-task` 看见同一套契约，但两边没有直接 crate 互依——它们的共同点是依赖 `gw-task`，而 `gw-task` 不依赖任何执行体 crate。
 
 ## 4. 未决问题
 
@@ -461,22 +530,47 @@ gateway 与 worker 在 helper 层面是同一组函数,但调用集合不同（g
 5. **取消 vs 计费的精确语义**：cancel 时已渲染 4s 视频，按 4s 还是按 0？需业务侧拍板，决定 worker 是否调 provider `query_partial_usage`。
 6. **跨版本灰度**：worker v1 与 v2 同池消费 `tasks:queue` 时，schema_version 不一致如何处理？v3 默认"新 worker 必须能读旧 schema_version"，反向不支持。需要在 `gw-task` 里固化 schema_version compat matrix。
 7. **adapter 层位置**：原 spec ADR-A1 把 adapter trait 挂 `gw-proxy`，worker 调上游也要用 adapter。**已采纳**：把 adapter 上提到独立 `gw-adapter` crate（依赖 gw-core + gw-store），proxy 与 worker 都引用。这是用户明确允许的共享（"worker 复用 adapter 的 crate 是没有问题的"）。
-8. **`gw-store::task::*` 是否会让 gw-store 变得太"业务"**：原 gw-store 关注通用 Entity / Counter / Append log 协议；新增的 task helper 引入了对具体业务表的认知。可接受的边界：helper 仅做 Redis 字段编解码与 schema_version 校验，不涉及任务状态机决策（决策在 gateway 业务层与 worker 执行层各自实现）。如果发现 gw-store 里出现"任务什么时候该转到 running"这类决策代码，立即视为破窗。
+8. **业务/支撑分离的边界守护**：v3.2 已撤回 `gw-store::task::*`。新原则："`gw-store` 只放通用 Entity/Counter/Append log 协议工具，不承载任何业务 namespace"。task 业务 Redis schema 编解码归 `gw-task`，billing 公式归 `gw-billing`，adapter 归 `gw-adapter`。审查 PR 时凡是给 `gw-store` 加业务命名空间的，一律拒。
+9. **`gw-task` 与 `gw-task-runtime` 拆分边界**：tokio runtime、后台 task、看门狗 leader election 这些"执行体"特征必须留在 `gw-task-runtime`；`gw-task` 必须可以在 gateway 的同步 filter 上下文中调用而不引入 tokio task 泄漏。审查标准：在 `gw-task` 里出现 `tokio::spawn`、`tokio::task::JoinHandle` 长期持有、`tokio::time::sleep` 在循环里、或任何"启动后才能用"的状态，立即视为破窗。
+10. **部署可分离性的回归保护**：ADR-T16 列的 5 个验收场景必须进 e2e 测试套件（即便慢、用 testcontainers），否则隐式假设很容易在重构中悄悄破窗。如果验收测试本身被 ignore，至少要有 lint：grep `entity:worker` / `tasks:queue` / `tasks:cancel` 在 gateway 与 worker binary 配置里出现的硬编码地址，确保两边只配 Redis DSN。
 
 ---
 
-## 架构影响补注（v3.1 同步升级）
+## 架构影响补注（v3.2 同步升级）
 
-v3 撤回反向代理 + v3.1 撤回 `gw-proxy → gw-task` 依赖后，对整体架构判断的影响：
+v3.2 引入"业务化模块单独拆 crate"原则后，对整体架构判断的影响：
 
-1. **`gw-adapter` 抽出**：**硬依赖**——worker 调上游 provider 要用 adapter（OAuth refresh、JWT 签名、kiro EventStream 等）。用户已明确同意此共享：proxy 与 worker 都从 `gw-adapter` import，互不依赖。
-2. **`gw-engine` 抽出**：仍是**建议**而非硬依赖。gateway 的 task 路径与 vendor 路径在 request_filter 阶段共享前半段，目前可以让 gw-proxy 内部把这段抽成 module 处理；engine 抽出可以晚一步做。
-3. **`gw-ledger` FreezeGuard trait 化**：**ADR-T8 的硬依赖**——两套 guard 必须共存共享余额校验。
-4. **`gw-store` 新增 task 命名空间**：把 `gw-task` 原本想做的"Redis schema helper"职责留在 `gw-store`，让 `gw-task` 完全归属 worker 自用。代价是 `gw-store` 多一个业务表的认知；约束见未决问题 #8。
-5. **ADR-018 crate 分层规则** 需要登记一条："`gw-task` 是 worker 私有 library；`gw-proxy` 禁止 import `gw-task`"——这是用户的硬约束，应进 CLAUDE.md 的"things that are intentional"或 ADR-018 表格。
-6. **内部安全契约 ADR-T14 整体删除**——没有跨进程 HTTP，HMAC/版本化 header/私网监听这套防御都不需要。Redis schema_version 替代了"协议版本"职责，仅在 schema 演进时需要。
+1. **业务/支撑分离原则**升级为 workspace 级规则：
+   - **支撑层**（gw-core / gw-codec / gw-codec-macros / gw-store / gw-routing / gw-auth / gw-ledger）：**不允许**含业务 namespace；提供通用机制（IR、Redis 客户端、JWT 验签、计费 trait 等），不知道"任务""视频""图像生成"等业务概念。
+   - **业务层**（gw-adapter / gw-billing / gw-task / 未来新增）：每个业务一个 crate；可以依赖任意支撑层；业务之间互依需 spec 显式登记。
+   - **执行体层**（gw-proxy / gw-task-runtime / 未来新增）：承载 runtime/server/binary 入口；可以依赖支撑层 + 业务层；执行体之间禁止互依（gw-proxy 与 gw-task-runtime 互不依赖）。
+   - **binary 层**（gw-gateway / gw-task-worker）：仅做装配，依赖一个执行体 + 必要业务。
 
-实施次序：先做 `gw-adapter` 抽出 + `gw-ledger` FreezeGuard trait 化 + `gw-store::task` schema helper（重构 plan）→ 再落地 worker（实施 plan）。
+2. **预计新增的业务 crate**（除 gw-task / gw-adapter）：
+   - `gw-billing`：复杂计费公式（video duration / quality / 阶梯 / markup），从 `gw-ledger` 中剥出——`gw-ledger` 仅保留余额账户、Freeze trait、settle 原语等支撑能力；
+   - 后续若 quota 规则、health policy 等成为复杂业务，同样独立成 crate。
+
+3. **`gw-adapter` 抽出**：硬依赖未变；归类为业务 crate。
+
+4. **`gw-ledger` FreezeGuard trait 化**：硬依赖未变；`gw-ledger` 自己仍属支撑层，只暴露 trait + 余额校验原语；具体的"任务级 settle 编排"放 `gw-task`，"video 时长 actual 计算"放 `gw-billing`。
+
+5. **`gw-engine` 抽出**：仍是建议而非硬依赖。gateway 的 task 路径与 vendor 路径在 request_filter 阶段共享前半段，目前可让 `gw-proxy` 内部模块化处理；engine 抽出可以晚一步做。
+
+6. **ADR-018 crate 分层规则** 需要登记以下三条：
+   - "支撑层 crate 禁止引入业务 namespace"；
+   - "执行体之间禁止互依（如 `gw-proxy` 与 `gw-task-runtime`）"；
+   - "业务 crate 与其执行层 crate 应成对存在（如 `gw-task` + `gw-task-runtime`），业务层保持纯 library 形态可在任何上下文用"。
+
+7. **内部安全契约 ADR-T14 整体删除**——没有跨进程 HTTP，HMAC/版本化 header/私网监听这套防御都不需要。Redis schema_version 替代了"协议版本"职责，仅在 schema 演进时需要。
+
+实施次序：
+
+1. **重构 plan**：`gw-adapter` 抽出 + `gw-ledger` FreezeGuard trait 化 + 从 `gw-ledger` 剥出 `gw-billing`（如果时间允许）+ ADR-018 三条新规则进 CLAUDE.md；
+2. **`gw-task` 业务契约 crate** 落地（DTO + Redis schema helper + settle 脚本）；
+3. **`gw-task-runtime` 执行层 crate** 落地（tokio loop + 看门狗）；
+4. **`gw-task-worker` binary** 装配。
+
+`gw-engine` 抽出可与上述任一步并行做。
 
 ---
 
