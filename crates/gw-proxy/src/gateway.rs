@@ -182,6 +182,37 @@ impl ProxyHttp for LlmGateway {
     ) {
         filters::logging::run(session, err, ctx, &self.breakers, &self.ledger).await;
     }
+
+    /// Silence pingora's own ERROR-level log for the gateway's intentional
+    /// short-circuits.
+    ///
+    /// `filters::early::short_circuit` builds an `Error` whose outer
+    /// `etype` is `HTTPStatus(_)` and whose root-cause `etype` is the
+    /// marker `Custom("gw_short_circuit")`. By that point the client has
+    /// already received a vendor-flavoured JSON envelope via
+    /// `error_emit::send_error`, so the `error!("Fail to filter request"
+    /// / "Fail to proxy")` line in `pingora_proxy::lib.rs` is
+    /// double-counting an intentional rejection. We mute only this exact
+    /// shape — any other error (upstream connect refused, upstream
+    /// timeout, an internal sanity-check that bubbles a bare `HTTPStatus`
+    /// without our marker cause) still falls through to the default
+    /// `false` and is logged at ERROR.
+    ///
+    /// The `logging` filter still receives the same `Option<&Error>` and
+    /// keeps `gateway_requests_total{status_class}` partitioning 4xx /
+    /// 5xx, so observability does not regress.
+    fn suppress_error_log(
+        &self,
+        _session: &Session,
+        _ctx: &Self::CTX,
+        error: &pingora::Error,
+    ) -> bool {
+        matches!(error.etype, pingora::ErrorType::HTTPStatus(_))
+            && matches!(
+                error.root_etype(),
+                pingora::ErrorType::Custom(s) if *s == "gw_short_circuit"
+            )
+    }
 }
 
 /// 16-byte random ID encoded as lowercase hex (32 chars).
