@@ -22,8 +22,7 @@ pub async fn verify_jwt(token: &str, store: &EntityStore) -> Result<UserId, Erro
     let hdr = decode_header(token).map_err(|_| auth_err())?;
     let kid = hdr.kid.ok_or_else(auth_err)?;
     let jwk = store
-        .jwks
-        .get(&Kid::from(kid))
+        .jwks_or_load(&Kid::from(kid))
         .await
         .ok_or_else(auth_err)?;
     let key = DecodingKey::from_rsa_pem(jwk.value.pem.as_bytes()).map_err(|_| auth_err())?;

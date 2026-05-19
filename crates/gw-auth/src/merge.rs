@@ -26,25 +26,24 @@ pub async fn merge_permissions(
     global_rpm: u32,
 ) -> Result<MergedPermissions, ErrorIR<'static>> {
     let user = store
-        .user
-        .get(&ctx.user_id)
+        .user_or_load(&ctx.user_id)
         .await
         .ok_or_else(user_not_found)?;
 
     let main = match &user.value.parent_id {
-        Some(p) => store.user.get(p).await.ok_or_else(user_not_found)?,
+        Some(p) => store.user_or_load(p).await.ok_or_else(user_not_found)?,
         None => user.clone(),
     };
 
     let mut groups = Vec::new();
     for gid in &main.value.user_group_ids {
-        if let Some(g) = store.user_group.get(gid).await {
+        if let Some(g) = store.user_group_or_load(gid).await {
             groups.push(g);
         }
     }
 
     let api_key = if let Some(akid) = &ctx.api_key_id {
-        store.apikey.get(akid).await
+        store.apikey_or_load(akid).await
     } else {
         None
     };

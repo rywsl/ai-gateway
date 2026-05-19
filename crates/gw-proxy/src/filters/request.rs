@@ -79,7 +79,7 @@ pub async fn run(
         match verify_apikey(akey, &akid, store).await {
             Ok(()) => {
                 // Resolve the user_id via the api-key entry.
-                match store.apikey.get(&akid).await {
+                match store.apikey_or_load(&akid).await {
                     Some(entry) => Ok((entry.value.user_id.clone(), Some(akid))),
                     None => {
                         let err = ErrorIR {
@@ -121,7 +121,7 @@ pub async fn run(
     let (user_id, api_key_id) = user_id_res?;
 
     // Load the user entry (used by ReqCtx for downstream consumers).
-    let user_entry = match store.user.get(&user_id).await {
+    let user_entry = match store.user_or_load(&user_id).await {
         Some(u) => u,
         None => {
             let err = ErrorIR {

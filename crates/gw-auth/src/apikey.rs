@@ -12,7 +12,7 @@ pub async fn verify_apikey(
     key_id: &ApiKeyId,
     store: &EntityStore,
 ) -> Result<(), ErrorIR<'static>> {
-    let entry = store.apikey.get(key_id).await.ok_or_else(err)?;
+    let entry = store.apikey_or_load(key_id).await.ok_or_else(err)?;
     let provided = sha2_hash(key.as_bytes());
     if provided.ct_eq(&entry.value.hash).into() {
         Ok(())

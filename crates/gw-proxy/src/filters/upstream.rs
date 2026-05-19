@@ -73,13 +73,12 @@ pub async fn pick_peer(
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_model_group")))?;
 
     let group: Arc<gw_core::versioned::Versioned<ModelGroup>> = store
-        .model_group
-        .get(&group_id)
+        .model_group_or_load(&group_id)
         .await
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_model_group_missing")))?;
     // Lazy load pricing too (Phase-4 v1: not yet used in routing decisions but
     // cached on ctx for the logging filter).
-    if let Some(p) = store.pricing.get(&model).await {
+    if let Some(p) = store.pricing_or_load(&model).await {
         ctx.pricing = Some(p);
     }
 
@@ -117,8 +116,7 @@ pub async fn pick_peer(
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?;
     let picked_arc = Arc::clone(picked);
     let vendor = store
-        .vendor
-        .get(&picked_arc.vendor_id)
+        .vendor_or_load(&picked_arc.vendor_id)
         .await
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_vendor_missing")))?;
 
