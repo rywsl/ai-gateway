@@ -8,4 +8,5 @@ pub mod ir;
 pub mod permissions;
 pub mod protocol;
 pub mod traits;
+pub mod usage;
 pub mod versioned;
