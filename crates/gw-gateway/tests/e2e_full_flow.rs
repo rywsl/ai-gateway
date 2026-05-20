@@ -135,7 +135,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
     //    random ports, send a reqwest POST to /v1/chat/completions, and
     //    assert:
     //       - 200 response body conforms to OpenAI ChatCompletion shape.
-    //       - billing:records stream has 1 entry (XLEN == 1).
+    //       - usage:records stream has 1 entry (XLEN == 1).
     //       - DEDUCT.frozen_micro == 0 (settled).
     //       - response headers carry X-Request-Id + X-Gateway-Version.
     //

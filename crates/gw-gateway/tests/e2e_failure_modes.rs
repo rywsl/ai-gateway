@@ -11,8 +11,8 @@
 //! | `merge_permissions_returns_401_when_user_missing` | AC-023-3 | gw-auth |
 //! | `hard_cap_input_tokens_413_at_boundary` | AC-024-2 | gw-auth |
 //! | `hard_cap_input_tokens_passes_at_exact_cap` | AC-024-2 | gw-auth |
-//! | `freeze_guard_double_settle_idempotent` | ADR-004 | gw-ledger |
-//! | `freeze_guard_drop_without_settle_rolls_back` | ADR-004 | gw-ledger |
+//! | `freeze_guard_double_release_idempotent_no_deducted_write` | ADR-004 | gw-ledger |
+//! | `freeze_guard_drop_without_release_rolls_back` | ADR-004 | gw-ledger |
 //! | `codec_parse_error_429_maps_to_rpm_exceeded` | AC-2.6-1 | gw-codec |
 //! | `codec_parse_error_400_invalid_request_normalised` | AC-2.6-2 | gw-codec |
 //! | `rate_limit_guard_emits_429_when_over_budget` | AC-024-1 | gw-auth |
@@ -28,8 +28,8 @@ use gw_auth::{merge_permissions, AuthCtx};
 use gw_codec::{anthropic::Anthropic, openai::OpenAi, ProtocolCodec};
 use gw_core::error::ErrorCategory;
 use gw_core::ids::{ApiKeyId, UserId};
-use gw_core::permissions::MergedPermissions;
-use gw_ledger::FreezeGuard;
+use gw_core::permissions::{MarkupChainSnapshot, MergedPermissions};
+use gw_ledger::{FreezeGuard, RequestFreeze};
 use gw_store::deduction::DEDUCT;
 use gw_store::EntityStore;
 use std::sync::atomic::Ordering;
@@ -82,25 +82,26 @@ fn hard_cap_input_tokens_passes_at_exact_cap() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-004: FreezeGuard lifecycle invariants.
+// C-γ §ADR-Cγ-2: RequestFreeze release is idempotent and never touches
+// deducted_micro.
 // ---------------------------------------------------------------------------
 #[test]
-fn freeze_guard_double_settle_idempotent() {
-    let uid = UserId::from("u-failmodes-double");
-    let g = FreezeGuard::freeze(uid.clone(), 1000);
-    g.settle(700);
-    g.settle(999); // no-op
+fn freeze_guard_double_release_idempotent_no_deducted_write() {
+    let uid = UserId::from("u-failmodes-double-release");
+    let g = RequestFreeze::new(uid.clone(), 1000);
+    g.release();
+    g.release(); // no-op
     let state = DEDUCT.get(&uid).unwrap().clone();
     assert_eq!(state.frozen_micro.load(Ordering::Relaxed), 0);
-    assert_eq!(state.deducted_micro.load(Ordering::Relaxed), 700);
+    assert_eq!(state.deducted_micro.load(Ordering::Relaxed), 0);
 }
 
 #[test]
-fn freeze_guard_drop_without_settle_rolls_back() {
+fn freeze_guard_drop_without_release_rolls_back() {
     let uid = UserId::from("u-failmodes-leak");
     {
-        let _g = FreezeGuard::freeze(uid.clone(), 500);
-    } // dropped without settle
+        let _g = RequestFreeze::new(uid.clone(), 500);
+    } // dropped without release
     let state = DEDUCT.get(&uid).unwrap().clone();
     assert_eq!(state.frozen_micro.load(Ordering::Relaxed), 0);
     assert_eq!(state.deducted_micro.load(Ordering::Relaxed), 0);
@@ -184,7 +185,7 @@ fn rate_limit_guard_emits_429_when_over_budget() {
         rpm_limit: 60,
         tpm_limit: 0,
         max_concurrent_streams: 100,
-        markup_product: 1.0,
+        markup_chain: MarkupChainSnapshot::placeholder(),
     };
     // Burst 120 immediate calls; the governor cell holds at most 60 tokens
     // and refills at 1/sec, so we must hit a `RateLimitError` somewhere
