@@ -299,15 +299,15 @@ mod mutations_bits_tests {
     #[allow(clippy::type_complexity)]
     fn setters() -> Vec<(&'static str, fn(&mut Mutations))> {
         vec![
-            ("max_tokens",      Mutations::set_max_tokens),
-            ("temperature",     Mutations::set_temperature),
-            ("metadata",        Mutations::set_metadata),
-            ("tools",           Mutations::set_tools),
-            ("system_prompt",   Mutations::set_system_prompt),
-            ("messages",        Mutations::set_messages),
+            ("max_tokens", Mutations::set_max_tokens),
+            ("temperature", Mutations::set_temperature),
+            ("metadata", Mutations::set_metadata),
+            ("tools", Mutations::set_tools),
+            ("system_prompt", Mutations::set_system_prompt),
+            ("messages", Mutations::set_messages),
             ("thinking_config", Mutations::set_thinking_config),
             ("response_format", Mutations::set_response_format),
-            ("stream",          Mutations::set_stream),
+            ("stream", Mutations::set_stream),
         ]
     }
 }

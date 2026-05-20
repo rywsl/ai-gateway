@@ -9,7 +9,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{Ident, LitBool, Path, Token, bracketed};
+use syn::{bracketed, Ident, LitBool, Path, Token};
 
 /// `wire_convert_matrix! { schema: <Ident>, wires: [<Path>, ...], stream: <bool>? }`
 ///
@@ -76,7 +76,11 @@ impl Parse for MatrixInput {
                 "wire_convert_matrix! requires a `wires: [<Path>, ...]` key",
             )
         })?;
-        Ok(Self { schema, wires, stream })
+        Ok(Self {
+            schema,
+            wires,
+            stream,
+        })
     }
 }
 
