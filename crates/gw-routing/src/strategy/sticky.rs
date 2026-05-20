@@ -55,7 +55,8 @@ impl Strategy for Sticky {
     fn pick<'a>(
         &self,
         c: &'a [Arc<VendorKey>],
-        b: &BreakerStore,
+        h: &KeyHealthStore,
+        _f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
         if c.is_empty() {
@@ -65,7 +66,7 @@ impl Strategy for Sticky {
             // No conversation context: fall back to first available.
             return c
                 .iter()
-                .find(|k| b.get_or_create(&k.key_id).is_available());
+                .find(|k| h.is_available(&k.key_id, ctx.api_format));
         };
 
         // Look up an existing fresh binding.
@@ -74,7 +75,7 @@ impl Strategy for Sticky {
             let (kid, ts) = entry.value();
             if now.duration_since(*ts) < STICKY_TTL {
                 if let Some(k) = c.iter().find(|k| &k.key_id == kid) {
-                    if b.get_or_create(&k.key_id).is_available() {
+                    if h.is_available(&k.key_id, ctx.api_format) {
                         return Some(k);
                     }
                 }
@@ -85,7 +86,7 @@ impl Strategy for Sticky {
         // Compute a fresh binding over the available set.
         let available: Vec<&Arc<VendorKey>> = c
             .iter()
-            .filter(|k| b.get_or_create(&k.key_id).is_available())
+            .filter(|k| h.is_available(&k.key_id, ctx.api_format))
             .collect();
         if available.is_empty() {
             return None;

@@ -1,10 +1,11 @@
 //! Routing strategy `pick` microbenchmark.
 //!
 //! Benches each of the eight `Strategy` impls over an 8-key candidate slice
-//! with all breakers closed (the happy-path). The slice is held by `Arc` so
+//! with all keys healthy (the happy-path). The slice is held by `Arc` so
 //! the per-iteration overhead is just the strategy's bookkeeping (sort,
-//! atomic counter, hash, etc.). We use a single global `BreakerStore` to
-//! pre-warm the per-key entries.
+//! atomic counter, hash, etc.). We use a global `KeyHealthStore` (all
+//! entries created healthy) and `InFlightStore` pre-warmed with empty
+//! entries so insertion cost is not included in the hot path.
 //!
 //! Spec target: no single strategy P99 > 100 µs at slice-size 8.
 //!
@@ -13,7 +14,8 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use gw_core::entity::*;
 use gw_core::ids::*;
-use gw_routing::breaker::BreakerStore;
+use gw_health::KeyHealthStore;
+use gw_routing::in_flight::InFlightStore;
 use gw_routing::strategy::*;
 use secrecy::SecretString;
 use std::sync::Arc;
@@ -48,11 +50,15 @@ fn candidates_eight() -> Vec<Arc<VendorKey>> {
 
 fn bench_strategy_pick(c: &mut Criterion) {
     let keys = candidates_eight();
-    let breakers = BreakerStore::default();
-    // Pre-warm breaker entries so the first call doesn't pay the dashmap
-    // insertion cost.
-    for k in &keys {
-        let _ = breakers.get_or_create(&k.key_id);
+    let health = KeyHealthStore::default();
+    let in_flight = InFlightStore::default();
+    // Pre-warm both stores so DashMap insertion cost is not in the hot path.
+    // The old single-store BreakerStore covered both concerns in one lookup;
+    // post-split we touch each store explicitly.
+    for k in keys.iter() {
+        let _ = in_flight.get_or_create(&k.key_id);
+        // Warms `KeyHealthStore::by_key_format` via the public read path.
+        let _ = health.is_available(&k.key_id, gw_core::protocol::ProtocolKind::OpenAi);
     }
     let uid = UserId::from("u-bench");
     let model = ModelName::from("gpt-4");
@@ -82,7 +88,12 @@ fn bench_strategy_pick(c: &mut Criterion) {
     c.bench_function("fixed_order_pick_8", |b| {
         let s = FixedOrder;
         b.iter(|| {
-            let picked = s.pick(black_box(&keys), black_box(&breakers), black_box(&ctx_no_hash));
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_no_hash),
+            );
             black_box(picked);
         });
     });
@@ -90,7 +101,12 @@ fn bench_strategy_pick(c: &mut Criterion) {
     c.bench_function("round_robin_pick_8", |b| {
         let s = RoundRobin::new();
         b.iter(|| {
-            let picked = s.pick(black_box(&keys), black_box(&breakers), black_box(&ctx_no_hash));
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_no_hash),
+            );
             black_box(picked);
         });
     });
@@ -98,7 +114,12 @@ fn bench_strategy_pick(c: &mut Criterion) {
     c.bench_function("load_balance_pick_8", |b| {
         let s = LoadBalance;
         b.iter(|| {
-            let picked = s.pick(black_box(&keys), black_box(&breakers), black_box(&ctx_no_hash));
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_no_hash),
+            );
             black_box(picked);
         });
     });
@@ -106,7 +127,12 @@ fn bench_strategy_pick(c: &mut Criterion) {
     c.bench_function("weighted_rr_pick_8", |b| {
         let s = WeightedRr::new();
         b.iter(|| {
-            let picked = s.pick(black_box(&keys), black_box(&breakers), black_box(&ctx_no_hash));
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_no_hash),
+            );
             black_box(picked);
         });
     });
@@ -114,7 +140,12 @@ fn bench_strategy_pick(c: &mut Criterion) {
     c.bench_function("cost_first_pick_8", |b| {
         let s = CostFirst;
         b.iter(|| {
-            let picked = s.pick(black_box(&keys), black_box(&breakers), black_box(&ctx_no_hash));
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_no_hash),
+            );
             black_box(picked);
         });
     });
@@ -122,7 +153,12 @@ fn bench_strategy_pick(c: &mut Criterion) {
     c.bench_function("latency_first_pick_8", |b| {
         let s = LatencyFirst;
         b.iter(|| {
-            let picked = s.pick(black_box(&keys), black_box(&breakers), black_box(&ctx_no_hash));
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_no_hash),
+            );
             black_box(picked);
         });
     });
@@ -130,8 +166,12 @@ fn bench_strategy_pick(c: &mut Criterion) {
     c.bench_function("cache_affinity_pick_8", |b| {
         let s = CacheAffinity;
         b.iter(|| {
-            let picked =
-                s.pick(black_box(&keys), black_box(&breakers), black_box(&ctx_with_hash));
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_with_hash),
+            );
             black_box(picked);
         });
     });
@@ -139,8 +179,12 @@ fn bench_strategy_pick(c: &mut Criterion) {
     c.bench_function("sticky_pick_8", |b| {
         let s = Sticky::default();
         b.iter(|| {
-            let picked =
-                s.pick(black_box(&keys), black_box(&breakers), black_box(&ctx_with_hash));
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_with_hash),
+            );
             black_box(picked);
         });
     });
