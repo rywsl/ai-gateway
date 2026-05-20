@@ -77,7 +77,7 @@ Pingora's `Server::run_forever` is `-> !` and manages its own per-service tokio 
 | `request_body_filter`       | `gateway.rs`            | swaps the cached body in at EOS (otherwise cross-protocol rewrites never reach the wire) |
 | `response_filter`           | `gateway.rs`            | captures upstream status |
 | `response_body_filter`      | `filters::response`     | incremental SSE parsing, usage accumulation |
-| `logging`                   | `filters::logging`      | release freeze (C-γ §ADR-Cγ-2), record breaker outcome, emit `UsageRecord` + `DetailedLog` |
+| `logging`                   | `filters::logging`      | release freeze (C-γ §ADR-Cγ-2), record key-health outcome, emit `UsageRecord` + `DetailedLog` |
 | `suppress_error_log`        | `gateway.rs`            | mutes Pingora's own ERROR line for intentional short-circuits (matches `HTTPStatus` outer + `Custom("gw_short_circuit")` root cause) |
 
 Short-circuits go through `error_emit::send_error`, which sends a vendor-flavoured JSON envelope before returning the marker `Error`.
@@ -89,6 +89,7 @@ gw-core ◄── everything (IR, IDs, error codes)
 gw-codec-macros ◄── gw-codec
 gw-codec        ◄── gw-proxy
 gw-store        ◄── gw-auth, gw-routing, gw-ledger, gw-proxy, gw-gateway
+gw-health       ◄── gw-routing, gw-proxy, gw-gateway
 gw-auth         ◄── gw-proxy
 gw-routing      ◄── gw-proxy
 gw-ledger       ◄── gw-proxy
