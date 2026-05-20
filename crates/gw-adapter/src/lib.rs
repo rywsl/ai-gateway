@@ -16,7 +16,7 @@ pub mod noop;
 pub mod registry;
 pub mod trait_def;
 
-pub use analyzer::{DefaultErrorAnalyzer, UpstreamErrorAnalyzer};
+pub use analyzer::{DefaultErrorAnalyzer, ErrorKind, ErrorOutcome, HeaderView, UpstreamErrorAnalyzer};
 pub use ctx::{AdapterCtx, HeadersAccessor, HeadersMut, UrlAccessor, UrlMut};
 pub use error::AdapterError;
 pub use noop::NoopAdapter;
