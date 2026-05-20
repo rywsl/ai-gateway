@@ -19,5 +19,5 @@ fn routing_no_channel_maps_to_503() {
     let err = envelope_for(codes::GW_ROUTING_NO_AVAILABLE_CHANNEL, "no candidate", 503);
     assert_eq!(err.code, codes::GW_ROUTING_NO_AVAILABLE_CHANNEL);
     assert_eq!(err.status, 503);
-    assert_eq!(err.retryable, true);
+    assert!(err.retryable);
 }

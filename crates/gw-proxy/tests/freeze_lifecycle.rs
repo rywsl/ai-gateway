@@ -1,18 +1,14 @@
-//! FreezeGuard lifecycle integration tests.
+//! RequestFreeze lifecycle integration tests (gw-proxy view).
 //!
-//! These tests exercise the contract gw-proxy's logging filter relies on:
-//! 1. `FreezeGuard::freeze` increments the per-user `DeductionState.frozen`.
-//! 2. `settle(actual)` moves the frozen amount into `deducted` and zeroes
-//!    `frozen` for that guard.
-//! 3. Dropping the guard *without* `settle` rolls back `frozen` (the leak-
-//!    recovered path) so a panicking filter never permanently leaks quota.
+//! Mirrors gw-ledger's own tests but exercised through the proxy's local
+//! re-export so any future refactor of `RequestFreeze` is caught here too.
 //!
-//! Coverage overlaps with gw-ledger's own tests; we keep these here so any
-//! future refactor that moves freeze handling into gw-proxy still has a local
-//! regression net.
+//! Critical invariant (C-γ §ADR-Cγ-1): release MUST NOT touch
+//! deducted_micro. Go is the sole writer of that field via the
+//! usage:records -> cost -> events:counter -> Rust loop (Phase 5).
 
 use gw_core::ids::UserId;
-use gw_ledger::FreezeGuard;
+use gw_ledger::{FreezeGuard, RequestFreeze};
 use gw_store::deduction::DEDUCT;
 use std::sync::atomic::Ordering;
 
@@ -31,63 +27,55 @@ fn frozen(uid: &UserId) -> i64 {
 }
 
 #[test]
-fn settle_moves_frozen_into_deducted() {
-    let uid = UserId::from("freeze_test_user_settle");
+fn release_zeros_frozen_and_leaves_deducted_alone() {
+    let uid = UserId::from("freeze_proxy_release");
     let before_frozen = frozen(&uid);
     let before_deducted = deducted(&uid);
 
-    let guard = FreezeGuard::freeze(uid.clone(), 1_000);
-    assert_eq!(
-        frozen(&uid),
-        before_frozen + 1_000,
-        "freeze should bump frozen by amount"
-    );
+    let guard = RequestFreeze::new(uid.clone(), 1_000);
+    assert_eq!(frozen(&uid), before_frozen + 1_000);
 
-    guard.settle(750);
+    guard.release();
     assert_eq!(
         frozen(&uid),
         before_frozen,
-        "settle should remove the entire freeze"
+        "release must remove the freeze"
     );
     assert_eq!(
         deducted(&uid),
-        before_deducted + 750,
-        "settle should add `actual` to deducted"
+        before_deducted,
+        "Rust never writes deducted_micro"
     );
 }
 
 #[test]
-fn drop_without_settle_rolls_back_frozen() {
-    let uid = UserId::from("freeze_test_user_drop");
+fn drop_without_release_rolls_back_frozen() {
+    let uid = UserId::from("freeze_proxy_drop");
     let before_frozen = frozen(&uid);
 
     {
-        let _guard = FreezeGuard::freeze(uid.clone(), 500);
-        assert_eq!(
-            frozen(&uid),
-            before_frozen + 500,
-            "freeze should be visible while guard is alive"
-        );
-        // `_guard` is dropped here without settle.
+        let _guard = RequestFreeze::new(uid.clone(), 500);
+        assert_eq!(frozen(&uid), before_frozen + 500);
     }
-    assert_eq!(
-        frozen(&uid),
-        before_frozen,
-        "drop without settle must roll the freeze back"
-    );
+    assert_eq!(frozen(&uid), before_frozen);
 }
 
 #[test]
-fn settle_is_idempotent() {
-    let uid = UserId::from("freeze_test_user_idempotent");
+fn double_release_is_idempotent() {
+    let uid = UserId::from("freeze_proxy_double");
     let before_deducted = deducted(&uid);
 
-    let guard = FreezeGuard::freeze(uid.clone(), 100);
-    guard.settle(80);
-    guard.settle(999); // second settle is a no-op.
-    assert_eq!(
-        deducted(&uid),
-        before_deducted + 80,
-        "second settle must not double-add deduction"
-    );
+    let guard = RequestFreeze::new(uid.clone(), 100);
+    guard.release();
+    guard.release();
+    assert_eq!(deducted(&uid), before_deducted);
+}
+
+#[test]
+fn trait_object_release_dispatches() {
+    let uid = UserId::from("freeze_proxy_trait_obj");
+    let g: Box<dyn FreezeGuard> = Box::new(RequestFreeze::new(uid.clone(), 250));
+    assert_eq!(g.freeze_amount(), 250);
+    g.release();
+    assert_eq!(frozen(&uid), 0);
 }

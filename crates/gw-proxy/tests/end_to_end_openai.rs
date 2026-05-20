@@ -8,7 +8,7 @@
 //!     wiremock URL;
 //!   - reqwest client driving requests through the Pingora listener and
 //!     asserting on the round-trip body, status, and side-effects
-//!     (DeductionState.deducted_micro, BillingRecord emission).
+//!     (DeductionState.frozen_micro, UsageRecord emission).
 //!
 //! v1 scope: that wiring is a meaningful project on its own (it pulls
 //! testcontainers + wiremock + pingora-proxy into one tokio runtime). We
