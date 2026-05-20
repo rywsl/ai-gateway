@@ -6,8 +6,10 @@ members = [
     "crates/gw-codec",
     "crates/gw-store",
     "crates/gw-auth",
+    "crates/gw-adapter",
     "crates/gw-routing",
     "crates/gw-ledger",
+    "crates/gw-health",
     "crates/gw-proxy",
     "crates/gw-gateway",
 ]

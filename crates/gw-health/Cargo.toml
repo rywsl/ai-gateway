@@ -1,0 +1,15 @@
+[package]
+name = "gw-health"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gw-core = { path = "../gw-core" }
+dashmap.workspace = true
+parking_lot.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

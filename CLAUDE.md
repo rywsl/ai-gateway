@@ -77,7 +77,7 @@ Pingora's `Server::run_forever` is `-> !` and manages its own per-service tokio 
 | `request_body_filter`       | `gateway.rs`            | swaps the cached body in at EOS (otherwise cross-protocol rewrites never reach the wire) |
 | `response_filter`           | `gateway.rs`            | captures upstream status |
 | `response_body_filter`      | `filters::response`     | incremental SSE parsing, usage accumulation |
-| `logging`                   | `filters::logging`      | settle freeze (ADR-004), record breaker outcome, emit `BillingRecord` + `DetailedLog` |
+| `logging`                   | `filters::logging`      | release freeze (C-γ §ADR-Cγ-2), record key-health outcome, emit `UsageRecord` + `DetailedLog` |
 | `suppress_error_log`        | `gateway.rs`            | mutes Pingora's own ERROR line for intentional short-circuits (matches `HTTPStatus` outer + `Custom("gw_short_circuit")` root cause) |
 
 Short-circuits go through `error_emit::send_error`, which sends a vendor-flavoured JSON envelope before returning the marker `Error`.
@@ -87,8 +87,10 @@ Short-circuits go through `error_emit::send_error`, which sends a vendor-flavour
 ```
 gw-core ◄── everything (IR, IDs, error codes)
 gw-codec-macros ◄── gw-codec
-gw-codec        ◄── gw-proxy
+gw-codec        ◄── gw-proxy, gw-adapter
 gw-store        ◄── gw-auth, gw-routing, gw-ledger, gw-proxy, gw-gateway
+gw-health       ◄── gw-routing, gw-proxy, gw-gateway, gw-adapter
+gw-adapter      ◄── (Phase 3 wires it through gw-proxy)
 gw-auth         ◄── gw-proxy
 gw-routing      ◄── gw-proxy
 gw-ledger       ◄── gw-proxy
@@ -103,6 +105,7 @@ Treat `gw-core` as the type-only ground floor. Anything that pulls a runtime or 
 - **Anthropic SDK incompatibility.** The gateway requires `(x-api-key, x-api-key-id)` together. Anthropic's public protocol uses `x-api-key` alone — porting clients must supply both. Missing either yields `GW_AUTH_INVALID_APIKEY` (deliberately generic).
 - **`trust_xff` defaults to `false`.** With it off, the IP blocklist matches the L4 socket peer (which behind an L7 LB is the LB's IP, not the client). Only enable it behind a trusted L7 LB that strips client-supplied XFF headers, otherwise the blocklist is trivially bypassable.
 - **Distinct 429 codes.** `GW_QUOTA_RPM_EXCEEDED` = gateway tripped per-user RPM; `GW_UPSTREAM_OVERLOADED` = upstream returned 429. Don't collapse them.
+- **`gw-core::ir` not renamed to `gw-core::schema` yet.** Integration spec §2.1 A10 prescribes the rename + `#[non_exhaustive]` strip. Phase 1d landed the *scaffolding* parts of S1 v2 (WireAny enums, wire_convert_matrix! proc-macro skeleton, Mutations upgrade) without breaking the runtime IR path. The strict A10 form — module rename, removal of public constructors / Default impl / Serialize-Deserialize — lands atomically in Phase 2 alongside the wire→wire matrix migration. The `no_ir_runtime_struct` lint stays PENDING in `scripts/check-invariants.sh` until then.
 
 ## v1 gaps to be aware of when extending
 
@@ -114,8 +117,8 @@ Authoritative source: `docs/superpowers/specs/2026-05-20-v2-integration-design.m
 
 Three layers, strict one-way dependency:
 
-- **Supporting layer** (`gw-core`, `gw-codec`, `gw-codec-macros`, `gw-store`, `gw-routing`, `gw-auth`, `gw-ledger`): provide generic mechanism only (IR/schema, Redis client, JWT, FreezeGuard trait, routing primitives). MUST NOT depend on any business or execution crate. MUST NOT introduce business namespaces (`mod task`, `mod billing`, vendor-specific `mod claude_code`, etc.). `gw-store` carries only the generic Entity / Counter / Append-log / Lock / Counter-Event protocols — no `task::*` / `billing::*` namespaces.
-- **Business layer** (`gw-adapter`, `gw-health`, `gw-task`): one crate per business concern. May depend on any supporting crate. Business-to-business dependencies must be registered explicitly in a spec.
+- **Supporting layer** (`gw-core`, `gw-codec`, `gw-codec-macros`, `gw-store`, `gw-auth`, `gw-ledger`): provide generic mechanism only (IR/schema, Redis client, JWT, FreezeGuard trait, routing primitives). MUST NOT depend on any business or execution crate. MUST NOT introduce business namespaces (`mod task`, `mod billing`, vendor-specific `mod claude_code`, etc.). `gw-store` carries only the generic Entity / Counter / Append-log / Lock / Counter-Event protocols — no `task::*` / `billing::*` namespaces.
+- **Business layer** (`gw-adapter`, `gw-health`, `gw-routing`, `gw-task`): one crate per business concern. May depend on any supporting crate. Business-to-business dependencies must be registered explicitly in a spec. `gw-routing` was reclassified from supporting to business in Phase 1c: its `Strategy::pick` signature takes `&KeyHealthStore` from `gw-health`; the crate carries `InFlightStore` + strategy impls only — the multi-dim health / circuit / cooldown state machine lives in `gw-health`.
 - **Execution layer** (`gw-proxy`, `gw-task-runtime`): runtime / server / binary entry points. May depend on supporting + business crates. **Execution crates MUST NOT depend on each other** — `gw-proxy ↔ gw-task-runtime` is forbidden in both directions.
 
 **Billing boundary:** the Rust gateway only *records* usage (`UsageRecord` → `usage:records` stream). The usage→cost formula and markup-chain application live entirely in Go. No Rust code path may compute cost. The `gw-billing` crate is permanently retired and must not reappear.

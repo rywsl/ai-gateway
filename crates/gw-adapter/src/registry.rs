@@ -1,0 +1,62 @@
+//! `AdapterRegistry` — vendor-id → adapter + error-analyzer lookup.
+//!
+//! Built at gateway / worker bootstrap; one shared instance per process.
+
+use crate::analyzer::{DefaultErrorAnalyzer, UpstreamErrorAnalyzer};
+use crate::noop::NoopAdapter;
+use crate::trait_def::UpstreamAdapter;
+use dashmap::DashMap;
+use gw_core::ids::VendorId;
+use std::sync::Arc;
+
+pub struct AdapterRegistry {
+    by_vendor: DashMap<VendorId, Arc<dyn UpstreamAdapter>>,
+    default_adapter: Arc<NoopAdapter>,
+    error_analyzers: DashMap<VendorId, Arc<dyn UpstreamErrorAnalyzer>>,
+    default_error_analyzer: Arc<DefaultErrorAnalyzer>,
+}
+
+impl Default for AdapterRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AdapterRegistry {
+    pub fn new() -> Self {
+        Self {
+            by_vendor: DashMap::new(),
+            default_adapter: Arc::new(NoopAdapter),
+            error_analyzers: DashMap::new(),
+            default_error_analyzer: Arc::new(DefaultErrorAnalyzer),
+        }
+    }
+
+    pub fn register_adapter(&self, vendor: VendorId, adapter: Arc<dyn UpstreamAdapter>) {
+        self.by_vendor.insert(vendor, adapter);
+    }
+
+    pub fn register_error_analyzer(
+        &self,
+        vendor: VendorId,
+        analyzer: Arc<dyn UpstreamErrorAnalyzer>,
+    ) {
+        self.error_analyzers.insert(vendor, analyzer);
+    }
+
+    pub fn for_vendor(&self, v: &VendorId) -> Arc<dyn UpstreamAdapter> {
+        self.by_vendor
+            .get(v)
+            .map(|e| e.value().clone())
+            .unwrap_or_else(|| (self.default_adapter.clone()) as Arc<dyn UpstreamAdapter>)
+    }
+
+    pub fn error_analyzer_for(&self, v: &VendorId) -> Arc<dyn UpstreamErrorAnalyzer> {
+        self.error_analyzers
+            .get(v)
+            .map(|e| e.value().clone())
+            .unwrap_or_else(|| {
+                (self.default_error_analyzer.clone()) as Arc<dyn UpstreamErrorAnalyzer>
+            })
+    }
+}

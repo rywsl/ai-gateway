@@ -1,0 +1,18 @@
+[package]
+name = "gw-adapter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gw-core = { path = "../gw-core" }
+gw-codec = { path = "../gw-codec" }
+gw-health = { path = "../gw-health" }
+async-trait.workspace = true
+thiserror.workspace = true
+secrecy.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

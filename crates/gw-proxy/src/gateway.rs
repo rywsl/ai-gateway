@@ -13,7 +13,8 @@ use bytes::Bytes;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::ids::{RequestId, TraceId};
 use gw_ledger::Ledger;
-use gw_routing::{BreakerStore, RetryConfig};
+use gw_health::KeyHealthStore;
+use gw_routing::in_flight::InFlightStore;
 use gw_store::{CounterStore, EntityStore};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
@@ -25,11 +26,11 @@ use std::time::Duration;
 
 pub struct LlmGateway {
     pub store: Arc<EntityStore>,
-    pub breakers: Arc<BreakerStore>,
+    pub health: Arc<KeyHealthStore>,
+    pub in_flight: Arc<InFlightStore>,
     pub ratelimit: Arc<RateLimitGuard>,
     pub ledger: Arc<Ledger>,
     pub counters: Arc<CounterStore>,
-    pub retry_cfg: RetryConfig,
     pub global_rpm: u32,
     /// When `true`, parse the client IP from the `X-Forwarded-For` header
     /// (using the first / left-most entry, which represents the original
@@ -43,21 +44,21 @@ impl LlmGateway {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<EntityStore>,
-        breakers: Arc<BreakerStore>,
+        health: Arc<KeyHealthStore>,
+        in_flight: Arc<InFlightStore>,
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
-        retry_cfg: RetryConfig,
         global_rpm: u32,
         trust_xff: bool,
     ) -> Self {
         Self {
             store,
-            breakers,
+            health,
+            in_flight,
             ratelimit,
             ledger,
             counters,
-            retry_cfg,
             global_rpm,
             trust_xff,
         }
@@ -106,7 +107,7 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         ctx.phase_start("upstream_peer");
-        let peer = filters::upstream::pick_peer(session, ctx, &self.store, &self.breakers).await?;
+        let peer = filters::upstream::pick_peer(session, ctx, &self.store, &self.health, &self.in_flight).await?;
         ctx.phase_end();
         Ok(peer)
     }
@@ -180,7 +181,7 @@ impl ProxyHttp for LlmGateway {
         err: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
-        filters::logging::run(session, err, ctx, &self.breakers, &self.ledger).await;
+        filters::logging::run(session, err, ctx, &self.health, &self.ledger).await;
     }
 
     /// Silence pingora's own ERROR-level log for the gateway's intentional

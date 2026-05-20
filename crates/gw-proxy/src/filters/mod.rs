@@ -8,7 +8,7 @@
 //! - [`upstream`] — pick a vendor key, render upstream body, build `HttpPeer`,
 //!   inject `Authorization`.
 //! - [`response`] — incremental SSE parsing + usage accumulation.
-//! - [`logging`] — release freeze, record breaker outcome, emit UsageRecord
+//! - [`logging`] — release freeze, record key-health outcome, emit UsageRecord
 //!   and DetailedLog.
 
 pub mod early;

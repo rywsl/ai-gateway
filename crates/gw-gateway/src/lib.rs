@@ -41,9 +41,10 @@ pub mod observability;
 
 use anyhow::Context;
 use gw_auth::ratelimit::RateLimitGuard;
+use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
-use gw_routing::{BreakerStore, RetryConfig};
+use gw_routing::in_flight::InFlightStore;
 use gw_store::{CounterStore, EntityStore};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,7 +53,8 @@ use std::time::Duration;
 /// `LlmGateway` payload. The fields mirror `LlmGateway`'s constructor.
 struct Wired {
     store: Arc<EntityStore>,
-    breakers: Arc<BreakerStore>,
+    health: Arc<KeyHealthStore>,
+    in_flight: Arc<InFlightStore>,
     ratelimit: Arc<RateLimitGuard>,
     ledger: Arc<Ledger>,
     counters: Arc<CounterStore>,
@@ -135,11 +137,11 @@ pub fn run() -> anyhow::Result<()> {
 
     let gw = LlmGateway::new(
         wired.store,
-        wired.breakers,
+        wired.health,
+        wired.in_flight,
         wired.ratelimit,
         wired.ledger,
         wired.counters,
-        RetryConfig::default(),
         wired.global_rpm,
         wired.trust_xff,
     );
@@ -197,7 +199,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         loader,
         std::time::Duration::from_millis(cfg.loader.cold_load_timeout_ms),
     ));
-    let breakers = Arc::new(BreakerStore::default());
+    let health = Arc::new(KeyHealthStore::default());
+    let in_flight = Arc::new(InFlightStore::default());
     let ratelimit = Arc::new(RateLimitGuard::new());
 
     let counters = Arc::new(CounterStore {
@@ -252,7 +255,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
 
     Ok(Wired {
         store,
-        breakers,
+        health,
+        in_flight,
         ratelimit,
         ledger,
         counters,

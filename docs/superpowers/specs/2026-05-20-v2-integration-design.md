@@ -110,13 +110,13 @@
   gw-core         ◄── 全部
   gw-codec / gw-codec-macros
   gw-store        （Entity / Counter / Append log / Lock / Counter Event 5 协议；不持业务 namespace）
-  gw-routing      （含 in_flight，不含 health）
   gw-auth         （含 ratelimit、含 MergedPermissions.markup_chain）
   gw-ledger       （含 FreezeGuard trait + RequestFreeze + TaskFreeze）
 
 业务层（一业务一 crate）：
   gw-adapter      （UpstreamAdapter v2 + UpstreamErrorAnalyzer + OAuthCache）
   gw-health       （KeyHealthStore）
+  gw-routing      （含 in_flight + 8 种 Strategy；Strategy::pick 取 &KeyHealthStore，Phase 1c 由支撑层升入业务层 [^routing-tier]）
   gw-task         （DTO + Redis schema helper + lua 字符串；纯 library）
 
 执行体层（互不依赖）：
@@ -129,6 +129,8 @@
   - 支撑层引入业务 namespace（task::* / billing::* / health::* / adapter::vendor）
   - gw-billing crate 任何形式复活
 ```
+
+[^routing-tier]: **Layer reclassification** (Phase 1c, commit `8032b08`): `gw-routing` was originally listed as 支撑层 in this section but its `Strategy::pick` signature took `&KeyHealthStore` from the new business-layer `gw-health`, creating a structural 支撑→业务 edge that the C-1 forbidden-edges rule rejects. Two solutions were considered: (a) reverse-inversion via a trait in `gw-core` (`trait KeyAvailability`) so `gw-routing` keeps its supporting status, or (b) reclassify `gw-routing` to business-layer. Option (b) was chosen because §3 C-7 already designates `gw-health::KeyHealthStore` ↔ `gw-routing` selection as an explicit coupling point — extra indirection would add no value. Future work that needs a routing crate without health coupling can revisit (a).
 
 ### C-2 错误码
 
@@ -398,7 +400,7 @@ Phase 1  脚手架（无业务）
 
 | Lint 名 | 形式 | 触发条件（违例） |
 |---|---|---|
-| `crate_layering` | `git grep -nE 'task::\|billing::\|health::\|adapter::vendor' crates/{gw-core,gw-codec,gw-codec-macros,gw-store,gw-routing,gw-auth,gw-ledger}/src` 应为空 [^crate-layering-impl] | 支撑层 crate 引入业务 namespace |
+| `crate_layering` | `git grep -nE 'task::\|billing::\|health::\|adapter::vendor' crates/{gw-core,gw-codec,gw-codec-macros,gw-store,gw-auth,gw-ledger}/src` 应为空 [^crate-layering-impl] (`gw-routing` excluded since Phase 1c reclassification — see [^routing-tier]) | 支撑层 crate 引入业务 namespace |
 | `no_billing_crate` | `git grep -n 'gw-billing' Cargo.toml crates/*/Cargo.toml` 应为空 | gw-billing 复活 |
 | `no_legacy_breaker` | `git grep -nE '\bBreakerState\b\|\bBreakerStore\b' crates/` 应为空（除 gw-health 内部 SlidingWindow） | breaker 残留 |
 | `no_legacy_retry` | `find crates -path '*gw-routing/src/retry.rs'` 应为空 | retry.rs 残留 |
@@ -433,7 +435,17 @@ Phase 1  脚手架（无业务）
   How to apply: <落点 phase / spec / plan>
 ```
 
-（首次提交时为空。）
+- 2026-05-20  Bm2 re-timing: `PickCtx::api_format` + Strategy uses `KeyHealthStore::is_available(key, fmt)`
+  Why: integration spec §2.3 Bm2 placed this in Phase 4, but Phase 1c (A2) deletes `gw-routing::breaker.rs`, which forces strategies onto `KeyHealthStore::is_available` immediately. Without `api_format` on `PickCtx` the multi-dim lookup has no format input. The field lands in Phase 1c rather than Phase 4.
+  How to apply: no follow-up needed — the field is plumbed end-to-end as of Phase 1c. Phase 4 R-AB / R-E build on top with no further structural change.
+
+- 2026-05-20  `gw-routing` layer reclassification: supporting → business
+  Why: `Strategy::pick(_, &KeyHealthStore, &InFlightStore, _)` is the new signature after Phase 1c A2. `KeyHealthStore` lives in `gw-health` (business layer), so `gw-routing` cannot be supporting-layer without violating the C-1 "support→business forbidden" rule. C-7 already designates `gw-health::KeyHealthStore` ↔ `gw-routing` selection as an intentional coupling point. The simpler resolution is to reclassify `gw-routing` to business. Dependency inversion via a `gw-core::KeyAvailability` trait remains viable for a future routing-only deployment.
+  How to apply: §3 C-1 dependency graph + §5.2 `crate_layering` lint table updated (Phase 1c, commit `8032b08`). `CLAUDE.md` and `scripts/check-invariants.sh` carry the same classification. No code-side follow-up.
+
+- 2026-05-20  A10 strict-form re-timing: schema rename + non_exhaustive strip moves to Phase 2
+  Why: A10 prescribes `gw-core::ir → gw-core::schema` + `#[non_exhaustive]` on every IR struct, which forbids the public Default/constructor calls that the runtime via.rs handwritten From/TryFrom impls currently rely on. Phase 1d cannot strip those without simultaneously migrating the runtime onto wire→wire (codec S1 v2 N² conversions), which is Phase 2's scope. The Phase 1d-shipped pieces of S1 v2 (Mutations upgrade, WireAny enum, wire_convert_matrix! proc-macro scaffold) are framework-only and do not touch the runtime IR path. Phase 2 lands the rename + strip atomically with the wire→wire migration; the `no_ir_runtime_struct` lint activates at Phase 2 exit.
+  How to apply: Phase 2 plan must include (1) the module rename, (2) the constructor strip, (3) activation of `no_ir_runtime_struct` in scripts/check-invariants.sh. Phase 1 exit gate text in §4.2 is read as "scaffolding complete + A1/A8/A9/A11 done; A10 strict form re-timed to Phase 2 exit per this amendment".
 
 ---
 

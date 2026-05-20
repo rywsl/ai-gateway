@@ -8,7 +8,7 @@
 //!     wiremock URL;
 //!   - reqwest client driving requests through the Pingora listener and
 //!     asserting on the round-trip body, status, and side-effects
-//!     (DeductionState.deducted_micro, BillingRecord emission).
+//!     (DeductionState.frozen_micro, UsageRecord emission).
 //!
 //! v1 scope: that wiring is a meaningful project on its own (it pulls
 //! testcontainers + wiremock + pingora-proxy into one tokio runtime). We
@@ -23,9 +23,10 @@
 use std::sync::Arc;
 
 use gw_auth::ratelimit::RateLimitGuard;
+use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
-use gw_routing::{BreakerStore, RetryConfig};
+use gw_routing::in_flight::InFlightStore;
 use gw_store::{CounterStore, EntityStore};
 
 /// Builds a `LlmGateway` whose collaborators are all in-memory defaults.
@@ -35,7 +36,8 @@ fn build_test_gateway() -> Option<LlmGateway> {
     // Ledger requires a RedisCtx. For v1 we skip when no redis is reachable;
     // the test is run with `--ignored` once the harness is wired.
     let _store: Arc<EntityStore> = Arc::new(EntityStore::new());
-    let _breakers: Arc<BreakerStore> = Arc::new(BreakerStore::default());
+    let _health: Arc<KeyHealthStore> = Arc::new(KeyHealthStore::default());
+    let _in_flight: Arc<InFlightStore> = Arc::new(InFlightStore::default());
     let _ratelimit: Arc<RateLimitGuard> = Arc::new(RateLimitGuard::new());
     // Building a Ledger requires Redis; we return None here so the smoke
     // build doesn't try to start one. The end_to_end_smoke test below is
@@ -61,16 +63,16 @@ fn llm_gateway_constructor_signature_smoke() {
     #[allow(clippy::too_many_arguments)]
     fn _accepts(
         store: Arc<EntityStore>,
-        breakers: Arc<BreakerStore>,
+        health: Arc<KeyHealthStore>,
+        in_flight: Arc<InFlightStore>,
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
-        retry_cfg: RetryConfig,
         global_rpm: u32,
         trust_xff: bool,
     ) -> LlmGateway {
         LlmGateway::new(
-            store, breakers, ratelimit, ledger, counters, retry_cfg, global_rpm, trust_xff,
+            store, health, in_flight, ratelimit, ledger, counters, global_rpm, trust_xff,
         )
     }
     // Do not call it — `Ledger::start` would need a live Redis. We only need

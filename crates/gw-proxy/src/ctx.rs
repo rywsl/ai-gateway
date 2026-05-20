@@ -19,14 +19,14 @@ use gw_core::ids::{ApiKeyId, ModelName, RequestId, TraceId, UserId};
 use gw_core::permissions::MergedPermissions;
 use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
-use gw_routing::InFlightGuard;
+use gw_routing::in_flight::InFlightGuard;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 /// Mutable accumulator for token-usage seen on either the unary-response path
-/// or in stream `Usage` events. The settle/logging filter consumes this to
-/// compute final cost.
+/// or in stream `Usage` events. The `logging` filter reads these counters
+/// into the `UsageRecord` emitted to the usage stream.
 pub struct UsageAccumulator {
     pub input_tokens: u32,
     pub output_tokens: u32,

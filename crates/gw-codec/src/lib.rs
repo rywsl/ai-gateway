@@ -9,13 +9,15 @@
 //! `&[(String, String)]`. Callers in `gw-proxy` / `gw-gateway` adapt their
 //! native header types to this slice form (cheap: borrow-only).
 
-pub mod any;
 pub mod anthropic;
+pub mod any;
 pub(crate) mod common;
 pub mod gemini;
 pub mod openai;
 pub mod passthrough;
 pub mod trait_def;
+pub mod wire;
 
 pub use any::AnyCodec;
 pub use trait_def::{Headers, ProtocolCodec};
+pub use wire::{WireAnyRequest, WireAnyResponse, WireAnyStreamChunk};

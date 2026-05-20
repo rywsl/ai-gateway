@@ -1,0 +1,26 @@
+//! `gw-adapter` — vendor-specific upstream rewrite hooks.
+//!
+//! Per integration spec §3 C-1 this is a **business-layer** crate. It
+//! provides the `UpstreamAdapter` v2 trait (4 hooks + `transport_profile`),
+//! an `AdapterCtx` runtime-agnostic carrier, a `NoopAdapter` default that
+//! preserves the legacy `x-api-key` injection behavior, an `AdapterRegistry`
+//! for vendor lookup, and an `UpstreamErrorAnalyzer` trait skeleton (full
+//! K-B vendor analyzers ship in Phase 3).
+//!
+//! Spec: `docs/superpowers/specs/2026-05-19-adapter-a-t0-trait-v2.md`.
+
+pub mod analyzer;
+pub mod ctx;
+pub mod error;
+pub mod noop;
+pub mod registry;
+pub mod trait_def;
+
+pub use analyzer::{
+    DefaultErrorAnalyzer, ErrorKind, ErrorOutcome, HeaderView, UpstreamErrorAnalyzer,
+};
+pub use ctx::{AdapterCtx, HeadersAccessor, HeadersMut, UrlAccessor, UrlMut};
+pub use error::AdapterError;
+pub use noop::NoopAdapter;
+pub use registry::AdapterRegistry;
+pub use trait_def::{ChromeVersion, TransportProfile, UpstreamAdapter};

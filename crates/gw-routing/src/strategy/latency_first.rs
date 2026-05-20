@@ -4,7 +4,7 @@
 //! so this strategy falls back to "first available". The eventual design (per
 //! plan ADR-009) is to maintain a per-key TTFT histogram and pick the key with
 //! the lowest P50. TODO(v2): add a `LatencyTracker` (likely sibling of
-//! `BreakerStore`) and plumb it through `PickCtx` or the strategy struct.
+//! `KeyHealthStore`) and plumb it through `PickCtx` or the strategy struct.
 
 use super::*;
 
@@ -18,12 +18,13 @@ impl Strategy for LatencyFirst {
     fn pick<'a>(
         &self,
         candidates: &'a [Arc<VendorKey>],
-        b: &BreakerStore,
-        _ctx: &PickCtx<'_>,
+        h: &KeyHealthStore,
+        _f: &InFlightStore,
+        ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
         // TODO(v2): pick lowest P50 TTFT. For now, first-available.
         candidates
             .iter()
-            .find(|k| b.get_or_create(&k.key_id).is_available())
+            .find(|k| h.is_available(&k.key_id, ctx.api_format))
     }
 }

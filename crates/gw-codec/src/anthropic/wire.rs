@@ -3,18 +3,14 @@
 //! v1 scope: `model / messages (user|assistant) / system / max_tokens /
 //! temperature / stream`. Tool use is not yet round-tripped through here.
 
-use gw_codec_macros::IrConvert;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-#[derive(Debug, Deserialize, Serialize, IrConvert)]
-#[ir(target = "RequestIR", direction = "both")]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AnthropicRequest<'a> {
-    #[ir(map = "model")]
     #[serde(borrow)]
     pub model: Cow<'a, str>,
 
-    #[ir(map = "messages", via = "anthropic_msg_vec")]
     #[serde(borrow)]
     pub messages: Vec<AnthropicMessage<'a>>,
 
@@ -25,14 +21,11 @@ pub struct AnthropicRequest<'a> {
 
     /// Anthropic requires `max_tokens` (no default). We render it on the way
     /// out — if missing from IR we fall back to a permissive ceiling.
-    #[ir(map = "max_tokens")]
     pub max_tokens: u32,
 
-    #[ir(map = "temperature")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 
-    #[ir(map = "stream", default = "false")]
     #[serde(default)]
     pub stream: bool,
 }
