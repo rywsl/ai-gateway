@@ -87,9 +87,10 @@ Short-circuits go through `error_emit::send_error`, which sends a vendor-flavour
 ```
 gw-core ◄── everything (IR, IDs, error codes)
 gw-codec-macros ◄── gw-codec
-gw-codec        ◄── gw-proxy
+gw-codec        ◄── gw-proxy, gw-adapter
 gw-store        ◄── gw-auth, gw-routing, gw-ledger, gw-proxy, gw-gateway
-gw-health       ◄── gw-routing, gw-proxy, gw-gateway
+gw-health       ◄── gw-routing, gw-proxy, gw-gateway, gw-adapter
+gw-adapter      ◄── (Phase 3 wires it through gw-proxy)
 gw-auth         ◄── gw-proxy
 gw-routing      ◄── gw-proxy
 gw-ledger       ◄── gw-proxy
@@ -104,6 +105,7 @@ Treat `gw-core` as the type-only ground floor. Anything that pulls a runtime or 
 - **Anthropic SDK incompatibility.** The gateway requires `(x-api-key, x-api-key-id)` together. Anthropic's public protocol uses `x-api-key` alone — porting clients must supply both. Missing either yields `GW_AUTH_INVALID_APIKEY` (deliberately generic).
 - **`trust_xff` defaults to `false`.** With it off, the IP blocklist matches the L4 socket peer (which behind an L7 LB is the LB's IP, not the client). Only enable it behind a trusted L7 LB that strips client-supplied XFF headers, otherwise the blocklist is trivially bypassable.
 - **Distinct 429 codes.** `GW_QUOTA_RPM_EXCEEDED` = gateway tripped per-user RPM; `GW_UPSTREAM_OVERLOADED` = upstream returned 429. Don't collapse them.
+- **`gw-core::ir` not renamed to `gw-core::schema` yet.** Integration spec §2.1 A10 prescribes the rename + `#[non_exhaustive]` strip. Phase 1d landed the *scaffolding* parts of S1 v2 (WireAny enums, wire_convert_matrix! proc-macro skeleton, Mutations upgrade) without breaking the runtime IR path. The strict A10 form — module rename, removal of public constructors / Default impl / Serialize-Deserialize — lands atomically in Phase 2 alongside the wire→wire matrix migration. The `no_ir_runtime_struct` lint stays PENDING in `scripts/check-invariants.sh` until then.
 
 ## v1 gaps to be aware of when extending
 
