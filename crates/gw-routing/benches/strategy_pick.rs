@@ -53,7 +53,7 @@ fn bench_strategy_pick(c: &mut Criterion) {
     let health = KeyHealthStore::default();
     let in_flight = InFlightStore::default();
     // Pre-warm both stores so DashMap insertion cost is not in the hot path.
-    // The old single-store BreakerStore covered both concerns in one lookup;
+    // The old single-store breaker covered both concerns in one lookup;
     // post-split we touch each store explicitly.
     for k in keys.iter() {
         let _ = in_flight.get_or_create(&k.key_id);
