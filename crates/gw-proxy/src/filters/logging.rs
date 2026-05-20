@@ -106,10 +106,15 @@ pub async fn run(
         // upstream_codec is set by upstream_request_filter (rewrite_request),
         // which runs after pick_peer. If rewrite_request fails before
         // committing the codec, picked_vendor_key is Some while
-        // upstream_codec is None. The OpenAi fallback here is best-effort —
-        // KeyHealthStore::record ignores api_format in v1 anyway; Phase 3
-        // K-B will need a more reliable source if it acts on per-format
-        // health.
+        // upstream_codec is None. The OpenAi fallback here is best-effort.
+        //
+        // Phase 3 K-B precondition: KeyHealthStore::record currently ignores
+        // api_format in v1, but once K-B acts on per-format health state
+        // (separate buckets per ApiFormat) a stale OpenAi fallback would
+        // silently contaminate the wrong (key, OpenAi) bucket for a key that
+        // actually served Anthropic traffic. Before K-B lands, a reliable
+        // api_format source must be established at this call site (e.g.
+        // capture it on ReqCtx during pick_peer).
         let api_fmt = ctx
             .upstream_codec
             .as_ref()
