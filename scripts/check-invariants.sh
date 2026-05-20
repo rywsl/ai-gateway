@@ -27,7 +27,7 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=1; }
 # Execution crates MUST NOT depend on each other.
 # ---------------------------------------------------------------------------
 echo "[crate_layering] supporting-layer must not depend on business/execution crates"
-SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-routing gw-auth gw-ledger"
+SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-auth gw-ledger"
 FORBIDDEN_FOR_SUPPORTING="gw-adapter gw-health gw-task gw-task-runtime gw-proxy gw-billing gw-gateway gw-task-worker"
 if command -v cargo >/dev/null && command -v jq >/dev/null; then
   meta="$(cargo metadata --no-deps --format-version 1 2>/dev/null)"
@@ -45,6 +45,15 @@ if command -v cargo >/dev/null && command -v jq >/dev/null; then
   if echo "$proxy_deps" | grep -qx "gw-task-runtime"; then
     bad "gw-proxy depends on gw-task-runtime (execution ↔ execution forbidden)"
   fi
+  # gw-routing is business-layer as of Phase 1c (depends on gw-health).
+  # Verify it does not depend on any execution crate.
+  FORBIDDEN_FOR_ROUTING="gw-proxy gw-gateway gw-task-runtime gw-task-worker"
+  routing_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-routing") | .dependencies[] | select(.kind == null) | .name')"
+  for forb in $FORBIDDEN_FOR_ROUTING; do
+    if echo "$routing_deps" | grep -qx "$forb"; then
+      bad "gw-routing depends on $forb (business → execution forbidden)"
+    fi
+  done
   [ "$fail" -eq 0 ] && ok "no forbidden supporting/execution edges"
 else
   note "skipped: cargo + jq required"
@@ -142,6 +151,16 @@ else
   ok "no markup_product reference"
 fi
 
+# ---------------------------------------------------------------------------
+# no_legacy_breaker (§5.2) — gw-health replaces breaker.rs.
+# ---------------------------------------------------------------------------
+echo "[no_legacy_breaker] BreakerState / BreakerStore must not appear"
+if grep -rnE '\bBreakerState\b|\bBreakerStore\b' crates/ 2>/dev/null; then
+  bad "BreakerState / BreakerStore remains"
+else
+  ok "no breaker types remain"
+fi
+
 # ===========================================================================
 # PENDING lints — target code has not landed yet. Uncomment in the named phase.
 # ===========================================================================
@@ -151,9 +170,6 @@ fi
 #
 # # no_legacy_retry (Phase 4: R-E failover replaces retry.rs)
 # [ -f crates/gw-routing/src/retry.rs ] && bad "retry.rs still present"
-#
-# # no_legacy_breaker (Phase 1c: gw-health replaces breaker.rs)
-# grep -rnE '\bBreakerState\b|\bBreakerStore\b' crates/ && bad "breaker types remain outside gw-health"
 #
 # # no_patch_body (Phase 1c: adapter trait v2 has no patch_body / BodyPatch)
 # grep -rnE '\bfn patch_body\b|\bBodyPatch::' crates/ && bad "patch_body / BodyPatch remains"

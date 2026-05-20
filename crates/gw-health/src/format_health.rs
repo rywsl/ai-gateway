@@ -8,7 +8,8 @@
 //!   directives.
 //!
 //! Trip rule (sliding window): ≥20 samples and >50% failure rate ⇒
-//! `closed → open` for 60s. Same numbers as the retired `BreakerState`.
+//! `closed → open` for 60s. Same numbers as the retired single-dim
+//! circuit (ADR-008 carried over unchanged).
 //!
 //! Cooldown is OR'd with circuit state in `is_available`: either being
 //! non-available makes the key unavailable.
@@ -19,7 +20,8 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Threshold parameters lifted verbatim from the retired `BreakerState`.
+/// Threshold parameters lifted verbatim from the retired single-dim
+/// circuit (ADR-008).
 const SAMPLE_FLOOR: usize = 20;
 const FAILURE_RATE_TRIP: f32 = 0.5;
 const OPEN_HOLD_MS: u64 = 60_000;
