@@ -8,6 +8,7 @@ members = [
     "crates/gw-auth",
     "crates/gw-routing",
     "crates/gw-ledger",
+    "crates/gw-health",
     "crates/gw-proxy",
     "crates/gw-gateway",
 ]

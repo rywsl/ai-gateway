@@ -17,3 +17,9 @@ impl ProtocolKind {
         }
     }
 }
+
+/// `ApiFormat` is a v1 alias for `ProtocolKind` per integration spec §2.3
+/// Bm5 (three buckets: openai / anthropic / gemini). Future refinement
+/// (e.g. `openai_chat`, `openai_responses`, `openai_cli`) may shadow this
+/// alias with a distinct enum.
+pub type ApiFormat = ProtocolKind;
