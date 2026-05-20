@@ -77,7 +77,7 @@ Pingora's `Server::run_forever` is `-> !` and manages its own per-service tokio 
 | `request_body_filter`       | `gateway.rs`            | swaps the cached body in at EOS (otherwise cross-protocol rewrites never reach the wire) |
 | `response_filter`           | `gateway.rs`            | captures upstream status |
 | `response_body_filter`      | `filters::response`     | incremental SSE parsing, usage accumulation |
-| `logging`                   | `filters::logging`      | settle freeze (ADR-004), record breaker outcome, emit `BillingRecord` + `DetailedLog` |
+| `logging`                   | `filters::logging`      | release freeze (C-γ §ADR-Cγ-2), record breaker outcome, emit `UsageRecord` + `DetailedLog` |
 | `suppress_error_log`        | `gateway.rs`            | mutes Pingora's own ERROR line for intentional short-circuits (matches `HTTPStatus` outer + `Custom("gw_short_circuit")` root cause) |
 
 Short-circuits go through `error_emit::send_error`, which sends a vendor-flavoured JSON envelope before returning the marker `Error`.

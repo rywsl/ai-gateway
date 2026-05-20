@@ -6,8 +6,8 @@ use std::net::IpAddr;
 /// Snapshot of the 4-tier markup chain plus its scalar product.
 ///
 /// Phase 1b: the four tier fields are populated as 1.0 placeholders by
-/// `merge_permissions`; only `product` carries the real value (== the old
-/// `markup_product`). Phase 5 wires the real per-tier values through.
+/// `merge_permissions`; only `product` carries the real value. Phase 5
+/// wires the real per-tier values through.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MarkupChainSnapshot {
     pub user_group_markup: f32,
@@ -15,9 +15,9 @@ pub struct MarkupChainSnapshot {
     pub vendor_markup: f32,
     pub model_markup: f32,
     /// Pre-computed product of all applicable markup tiers — the value Go
-    /// needs to (re-)compute cost. In Phase 1b this equals the legacy
-    /// `markup_product` scalar; the four per-tier fields above are populated
-    /// in Phase 5 (Bm1) and will then satisfy the invariant
+    /// needs to (re-)compute cost. In Phase 1b this is the single combined
+    /// scalar; the four per-tier fields above are populated in Phase 5 (Bm1)
+    /// and will then satisfy the invariant
     /// `product == user_group_markup * api_key_markup * vendor_markup * model_markup`.
     pub product: f32,
 }
