@@ -1,5 +1,5 @@
 //! Detailed per-request log record, written by the `logging` filter alongside
-//! the (cheaper) `BillingRecord`. v1 captures the structured fields the spec
+//! the (cheaper) `UsageRecord`. v1 captures the structured fields the spec
 //! calls out; redaction is delegated to a user-supplied [`Redactor`] before
 //! the record reaches the sink.
 
