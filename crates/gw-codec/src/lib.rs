@@ -16,6 +16,8 @@ pub mod gemini;
 pub mod openai;
 pub mod passthrough;
 pub mod trait_def;
+pub mod wire;
 
 pub use any::AnyCodec;
 pub use trait_def::{Headers, ProtocolCodec};
+pub use wire::{WireAnyRequest, WireAnyResponse, WireAnyStreamChunk};
