@@ -41,13 +41,14 @@ pub enum FreezeKind {
 pub trait FreezeGuard: Send + Sync {
     fn kind(&self) -> FreezeKind;
     fn freeze_amount(&self) -> u64;
+    fn uid(&self) -> &UserId;
     fn release(&self);
 }
 
 /// Per-request freeze. Mutates the in-process `DeductionState.frozen_micro`
 /// only — Redis sync is Phase 5 (C-γ §ADR-Cγ-3) work.
 pub struct RequestFreeze {
-    pub uid: UserId,
+    pub(crate) uid: UserId,
     pub(crate) freeze_amount: u64,
     pub(crate) released: AtomicBool,
     pub(crate) state: Arc<DeductionState>,
@@ -90,6 +91,10 @@ impl FreezeGuard for RequestFreeze {
         self.freeze_amount
     }
 
+    fn uid(&self) -> &UserId {
+        &self.uid
+    }
+
     fn release(&self) {
         if self
             .released
@@ -126,7 +131,7 @@ impl Drop for RequestFreeze {
 /// crates can name the type. Construction is restricted to `gw-task-runtime`
 /// in Phase 6 — there is no public constructor here.
 pub struct TaskFreeze {
-    pub uid: UserId,
+    pub(crate) uid: UserId,
     pub(crate) freeze_amount: u64,
     pub(crate) released: AtomicBool,
 }
@@ -138,6 +143,10 @@ impl FreezeGuard for TaskFreeze {
 
     fn freeze_amount(&self) -> u64 {
         self.freeze_amount
+    }
+
+    fn uid(&self) -> &UserId {
+        &self.uid
     }
 
     fn release(&self) {

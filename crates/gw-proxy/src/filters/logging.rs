@@ -109,10 +109,11 @@ pub async fn run(
     // ---------------------------------------------------------------------
     // UsageRecord -> ledger.try_send.
     //
-    // Payer semantics: the flusher debits `counter:user:{user_id}:balance_micro`,
-    // so `user_id` MUST be the *effective payer* — that is, the parent account
-    // for a sub-account request, or the user itself otherwise. The originating
-    // sub-account (when different) is recorded in `child_id` for audit.
+    // Payer semantics: Go consumes `usage:records` and debits the balance
+    // counter, so `user_id` MUST be the *effective payer* — that is, the
+    // parent account for a sub-account request, or the user itself
+    // otherwise. The originating sub-account (when different) is recorded
+    // in `child_id` for audit.
     // ---------------------------------------------------------------------
     let auth_user_id = ctx
         .merged_perm
