@@ -47,7 +47,8 @@ impl Strategy for WeightedRr {
     fn pick<'a>(
         &self,
         c: &'a [Arc<VendorKey>],
-        b: &BreakerStore,
+        h: &KeyHealthStore,
+        _f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
         if c.is_empty() {
@@ -59,7 +60,7 @@ impl Strategy for WeightedRr {
             // All weights zero — degenerate; fall back to the first available.
             return c
                 .iter()
-                .find(|k| b.get_or_create(&k.key_id).is_available());
+                .find(|k| h.is_available(&k.key_id, ctx.api_format));
         }
 
         // Phase 1: bump every current[i] by weight[i].
@@ -75,7 +76,7 @@ impl Strategy for WeightedRr {
         let mut best_idx: Option<usize> = None;
         let mut best_val: i32 = i32::MIN;
         for (i, k) in c.iter().enumerate() {
-            if !b.get_or_create(&k.key_id).is_available() {
+            if !h.is_available(&k.key_id, ctx.api_format) {
                 continue;
             }
             let cur = self

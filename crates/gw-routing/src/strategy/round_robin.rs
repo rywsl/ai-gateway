@@ -1,5 +1,5 @@
 //! `RoundRobin` strategy: per-model atomic counter rotating through candidates.
-//! Skips keys whose breaker is open; falls back through up to `candidates.len()`
+//! Skips keys whose health is unavailable; falls back through up to `candidates.len()`
 //! positions before giving up.
 
 use super::*;
@@ -33,7 +33,8 @@ impl Strategy for RoundRobin {
     fn pick<'a>(
         &self,
         c: &'a [Arc<VendorKey>],
-        b: &BreakerStore,
+        h: &KeyHealthStore,
+        _f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
         if c.is_empty() {
@@ -45,7 +46,7 @@ impl Strategy for RoundRobin {
             .or_insert_with(|| AtomicUsize::new(0));
         for _ in 0..c.len() {
             let idx = counter.fetch_add(1, Ordering::Relaxed) % c.len();
-            if b.get_or_create(&c[idx].key_id).is_available() {
+            if h.is_available(&c[idx].key_id, ctx.api_format) {
                 return Some(&c[idx]);
             }
         }

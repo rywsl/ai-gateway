@@ -19,7 +19,8 @@ impl Strategy for CacheAffinity {
     fn pick<'a>(
         &self,
         c: &'a [Arc<VendorKey>],
-        b: &BreakerStore,
+        h: &KeyHealthStore,
+        _f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
         // Without a message hash there is no meaningful prefix-cache affinity to
@@ -27,7 +28,7 @@ impl Strategy for CacheAffinity {
         // given model to one key. Degrade to first-available instead.
         let Some(msg_hash) = ctx.message_hash else {
             for k in c {
-                if b.get_or_create(&k.key_id).is_available() {
+                if h.is_available(&k.key_id, ctx.api_format) {
                     return Some(k);
                 }
             }
@@ -38,7 +39,7 @@ impl Strategy for CacheAffinity {
         // a stable, contiguous index space.
         let available: Vec<&Arc<VendorKey>> = c
             .iter()
-            .filter(|k| b.get_or_create(&k.key_id).is_available())
+            .filter(|k| h.is_available(&k.key_id, ctx.api_format))
             .collect();
         if available.is_empty() {
             return None;
@@ -51,8 +52,8 @@ impl Strategy for CacheAffinity {
         let digest = hasher.finalize();
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&digest[..8]);
-        let h = u64::from_le_bytes(bytes);
-        let idx = (h % available.len() as u64) as usize;
+        let h_val = u64::from_le_bytes(bytes);
+        let idx = (h_val % available.len() as u64) as usize;
 
         // We need to return a reference into the original `c` slice (`&'a`),
         // not into our temporary `available` vec.

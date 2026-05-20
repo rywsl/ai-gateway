@@ -1,9 +1,11 @@
-//! Selection strategies (ADR-009). 8 variants implementing the [`Strategy`] trait,
-//! plus a dispatching [`StrategyAny`] enum used by the routing pipeline.
+//! Selection strategies (ADR-009). 8 variants implementing the [`Strategy`]
+//! trait, plus a dispatching [`StrategyAny`] enum used by the routing pipeline.
 
-use crate::breaker::BreakerStore;
+use crate::in_flight::InFlightStore;
 use gw_core::entity::VendorKey;
 use gw_core::ids::*;
+use gw_core::protocol::ApiFormat;
+use gw_health::KeyHealthStore;
 use std::sync::Arc;
 
 pub mod cache_affinity;
@@ -21,11 +23,7 @@ pub struct PickCtx<'a> {
     pub model: &'a ModelName,
     pub conversation_id: Option<&'a str>,
     pub message_hash: Option<u64>,
-    /// API format the strategy is selecting for. Threaded into
-    /// `KeyHealthStore::is_available(key, fmt)` in Task 4 so the
-    /// multi-dim health check has the format dimension. Per integration
-    /// spec §2.3 Bm5, this is `ProtocolKind` in v1.
-    pub api_format: gw_core::protocol::ApiFormat,
+    pub api_format: ApiFormat,
 }
 
 /// Pluggable selection strategy. Implementors must be `Send + Sync` because the
@@ -35,7 +33,8 @@ pub trait Strategy: Send + Sync {
     fn pick<'a>(
         &self,
         candidates: &'a [Arc<VendorKey>],
-        breakers: &BreakerStore,
+        health: &KeyHealthStore,
+        in_flight: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>>;
 }
@@ -70,18 +69,19 @@ impl Strategy for StrategyAny {
     fn pick<'a>(
         &self,
         c: &'a [Arc<VendorKey>],
-        b: &BreakerStore,
+        h: &KeyHealthStore,
+        f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
         match self {
-            StrategyAny::FixedOrder(s) => s.pick(c, b, ctx),
-            StrategyAny::RoundRobin(s) => s.pick(c, b, ctx),
-            StrategyAny::LoadBalance(s) => s.pick(c, b, ctx),
-            StrategyAny::WeightedRr(s) => s.pick(c, b, ctx),
-            StrategyAny::CostFirst(s) => s.pick(c, b, ctx),
-            StrategyAny::LatencyFirst(s) => s.pick(c, b, ctx),
-            StrategyAny::CacheAffinity(s) => s.pick(c, b, ctx),
-            StrategyAny::Sticky(s) => s.pick(c, b, ctx),
+            StrategyAny::FixedOrder(s) => s.pick(c, h, f, ctx),
+            StrategyAny::RoundRobin(s) => s.pick(c, h, f, ctx),
+            StrategyAny::LoadBalance(s) => s.pick(c, h, f, ctx),
+            StrategyAny::WeightedRr(s) => s.pick(c, h, f, ctx),
+            StrategyAny::CostFirst(s) => s.pick(c, h, f, ctx),
+            StrategyAny::LatencyFirst(s) => s.pick(c, h, f, ctx),
+            StrategyAny::CacheAffinity(s) => s.pick(c, h, f, ctx),
+            StrategyAny::Sticky(s) => s.pick(c, h, f, ctx),
         }
     }
 }

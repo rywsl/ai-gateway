@@ -9,8 +9,12 @@
 //! 4. the caller's `MergedPermissions.allowed_channels` is either empty (no
 //!    channel allowlist) or contains this key,
 //! 5. the key's in-flight count is under the per-key cap.
+//!
+//! Health/circuit checks happen *later* inside `Strategy::pick` via
+//! `KeyHealthStore::is_available` — candidate filtering is the cheap
+//! upstream step.
 
-use crate::breaker::BreakerStore;
+use crate::in_flight::InFlightStore;
 use gw_core::entity::{KeyStatus, ModelGroup, VendorKey};
 use gw_core::ids::ModelName;
 use gw_core::permissions::MergedPermissions;
@@ -24,9 +28,9 @@ pub async fn get_candidate_keys(
     model: &ModelName,
     target_protocol: ProtocolKind,
     perm: &MergedPermissions,
-    breakers: &BreakerStore,
+    in_flight: &InFlightStore,
     store: &EntityStore,
-    breaker_in_flight_per_key: u32,
+    in_flight_per_key: u32,
 ) -> Vec<Arc<VendorKey>> {
     let mut out = Vec::with_capacity(group.vendor_key_ids.len());
     for kid in &group.vendor_key_ids {
@@ -46,12 +50,9 @@ pub async fn get_candidate_keys(
         if !perm.allowed_channels.is_empty() && !perm.allowed_channels.contains(&key.key_id) {
             continue;
         }
-        if breakers.in_flight(&key.key_id) >= breaker_in_flight_per_key {
+        if in_flight.count(&key.key_id) >= in_flight_per_key {
             continue;
         }
-        // Rebuild as Arc<VendorKey>: the store yields Arc<Versioned<VendorKey>>,
-        // and VendorKey is not Clone (holds SecretString). We clone the secret
-        // string contents explicitly via ExposeSecret.
         out.push(Arc::new(VendorKey {
             key_id: key.key_id.clone(),
             vendor_id: key.vendor_id.clone(),
