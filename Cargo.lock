@@ -1602,7 +1602,6 @@ dependencies = [
  "gw-health",
  "gw-store",
  "metrics",
- "parking_lot",
  "rand 0.8.6",
  "secrecy",
  "serde",

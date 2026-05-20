@@ -1,6 +1,8 @@
 //! gw-health: multi-dim KeyHealth state machine (`(KeyId, ApiFormat) →
-//! FormatHealth`). Replaces `gw-routing::breaker::BreakerStore` per
-//! integration spec §2 表 A A2 + K-A ADR-KA-1.
+//! FormatHealth`). Lands the K-A multi-dim per-(key, format) circuit +
+//! cooldown design per integration spec §2 表 A A2 + K-A ADR-KA-1
+//! (replaces the retired single-dim circuit that previously lived in
+//! gw-routing).
 //!
 //! No persistence in v1 (per K-A ADR-KA-11): each gateway replica
 //! maintains its own snapshot.
