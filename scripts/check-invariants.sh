@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Invariant lint harness for the v2 integration.
+# Authoritative spec: docs/superpowers/specs/2026-05-20-v2-integration-design.md §3 / §5.2.
+#
+# Each check below is one §5.2 lint. Checks that are GREEN at the current
+# phase run unconditionally. Checks whose target code has not landed yet are
+# kept as PENDING blocks (commented), labelled with the phase that activates
+# them, so the full target set stays visible to reviewers.
+#
+# Usage: bash scripts/check-invariants.sh
+# Exit 0 = all active invariants hold; non-zero = a violation was found.
+
+# Note: `-e` is intentionally omitted — many grep-based lints below use the
+# pattern `grep ... && bad ...`, which relies on grep's non-zero "no match"
+# exit not being treated as fatal. The `cd` above is hard-guarded instead.
+set -uo pipefail
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to repo root" >&2; exit 2; }
+
+fail=0
+note() { printf '  \033[33m%s\033[0m\n' "$*"; }
+ok()   { printf '  \033[32mok\033[0m   %s\n' "$*"; }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=1; }
+
+# ---------------------------------------------------------------------------
+# crate_layering (§5.2) — dependency-edge form (robust; no string false-positives)
+# Supporting crates MUST NOT depend on business/execution crates.
+# Execution crates MUST NOT depend on each other.
+# ---------------------------------------------------------------------------
+echo "[crate_layering] supporting-layer must not depend on business/execution crates"
+SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-routing gw-auth gw-ledger"
+FORBIDDEN_FOR_SUPPORTING="gw-adapter gw-health gw-task gw-task-runtime gw-proxy gw-billing gw-gateway gw-task-worker"
+if command -v cargo >/dev/null && command -v jq >/dev/null; then
+  meta="$(cargo metadata --no-deps --format-version 1 2>/dev/null)"
+  for crate in $SUPPORTING; do
+    deps="$(echo "$meta" | jq -r --arg c "$crate" \
+      '.packages[] | select(.name==$c) | .dependencies[] | select(.kind == null) | .name')"
+    for forb in $FORBIDDEN_FOR_SUPPORTING; do
+      if echo "$deps" | grep -qx "$forb"; then
+        bad "$crate depends on $forb (supporting → business/execution forbidden)"
+      fi
+    done
+  done
+  # Execution crates must not depend on each other.
+  proxy_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-proxy") | .dependencies[] | select(.kind == null) | .name')"
+  if echo "$proxy_deps" | grep -qx "gw-task-runtime"; then
+    bad "gw-proxy depends on gw-task-runtime (execution ↔ execution forbidden)"
+  fi
+  [ "$fail" -eq 0 ] && ok "no forbidden supporting/execution edges"
+else
+  note "skipped: cargo + jq required"
+fi
+
+# ---------------------------------------------------------------------------
+# no_billing_crate (§5.2) — gw-billing must never exist as a crate.
+# ---------------------------------------------------------------------------
+echo "[no_billing_crate] gw-billing must not be a workspace member or dependency"
+if grep -rn 'gw-billing' Cargo.toml crates/*/Cargo.toml 2>/dev/null; then
+  bad "gw-billing referenced in a Cargo.toml"
+else
+  ok "no gw-billing crate reference"
+fi
+
+# ---------------------------------------------------------------------------
+# no_proxy_worker_dep (§5.2) — gw-proxy and gw-task-runtime must not interdepend.
+# (gw-task-runtime does not exist yet; this trivially holds but we assert it so
+#  the check is live the moment that crate appears.)
+# ---------------------------------------------------------------------------
+echo "[no_proxy_worker_dep] gw-proxy must not depend on gw-task-runtime"
+if grep -rn 'gw-task-runtime' crates/gw-proxy/Cargo.toml 2>/dev/null; then
+  bad "gw-proxy/Cargo.toml references gw-task-runtime"
+else
+  ok "gw-proxy does not depend on gw-task-runtime"
+fi
+
+# ---------------------------------------------------------------------------
+# no_worker_addr_config / no_gateway_addr_config (§5.2, C-8)
+# gateway config/code must not name a worker address, and vice versa.
+# gw-task-worker does not exist yet, so only the gateway side is checkable now.
+# ---------------------------------------------------------------------------
+echo "[no_worker_addr_config] gateway must not hardcode a worker host/port"
+if grep -rnE '(^|[^[:alnum:]_])(worker[_-]?host|worker[_-]?port|TASK_WORKER_(URL|HOST))([^[:alnum:]_]|$)' config/ crates/gw-gateway 2>/dev/null; then
+  bad "gateway config/code names a worker address"
+else
+  ok "gateway carries no worker address"
+fi
+
+# ===========================================================================
+# PENDING lints — target code has not landed yet. Uncomment in the named phase.
+# ===========================================================================
+#
+# # no_gateway_addr_config (Phase 6: activates with gw-task-worker; symmetric to no_worker_addr_config)
+# grep -rnE '(^|[^[:alnum:]_])(gateway[_-]?host|gateway[_-]?port|GATEWAY_(URL|HOST))([^[:alnum:]_]|$)' crates/gw-task-worker 2>/dev/null && bad "worker config/code names a gateway address"
+#
+# # no_legacy_retry (Phase 4: R-E failover replaces retry.rs)
+# [ -f crates/gw-routing/src/retry.rs ] && bad "retry.rs still present"
+#
+# # no_legacy_breaker (Phase 1c: gw-health replaces breaker.rs)
+# grep -rnE '\bBreakerState\b|\bBreakerStore\b' crates/ && bad "breaker types remain outside gw-health"
+#
+# # no_cost_micro (Phase 1b: UsageRecord drops cost_micro)
+# grep -rnE '\bcost_micro\b' crates/ && bad "cost_micro field remains"
+#
+# # no_billing_records_stream (Phase 5: C-α renames stream to usage:records)
+# grep -rn '"billing:records"' crates/ && bad "billing:records stream name remains"
+#
+# # no_freezeguard_settle (Phase 1b: FreezeGuard::release replaces settle)
+# grep -rnE '\.settle\(.*actual|FreezeGuard::settle\(' crates/ && bad "FreezeGuard::settle remains"
+#
+# # no_markup_product_scalar (Phase 5: MarkupChainSnapshot replaces markup_product)
+# grep -rnE '\bmarkup_product\b' crates/ && bad "markup_product scalar remains"
+#
+# # no_patch_body (Phase 1c: adapter trait v2 has no patch_body / BodyPatch)
+# grep -rnE '\bfn patch_body\b|\bBodyPatch::' crates/ && bad "patch_body / BodyPatch remains"
+#
+# # no_ir_runtime_struct (Phase 1d: codec S1 v2 schema is compile-time only)
+# grep -rnE 'IrRequest::new|IrResponse::new|IrRequest::default|IrResponse::default' crates/ && bad "IR runtime instantiation remains"
+#
+# # deploy_e2e_matrix (Phase 6/7: ADR-T16 acceptance tests)
+# for t in 1g_0w 0g_1w n_m gateway_kill worker_kill; do
+#   grep -rq "e2e_deploy_matrix_$t" crates/ || bad "missing deploy matrix test: $t"
+# done
+
+if [ "$fail" -ne 0 ]; then
+  echo "INVARIANT CHECK FAILED"
+  exit 1
+fi
+echo "all active invariants hold"

@@ -4,13 +4,21 @@
 //! the namespace (key prefix), the row-fetch SQL, and a `decode_fn` that
 //! materialises the JSON payload into the target type.
 
-use super::encrypt::KekCache;
-use super::redis_client::RedisCtx;
+use std::sync::Arc;
+
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::RedisMap;
-use gw_core::versioned::Versioned;
+use secrecy::SecretString;
 use sqlx::PgPool;
-use std::sync::Arc;
+
+use gw_core::entity::{
+    ApiKeyEntry, JwksEntry, ModelGroup, Pricing, UserEntry, UserGroup, Vendor, VendorKey,
+};
+use gw_core::ids::{ApiKeyId, Group, Kid, KeyId, ModelName, UserGroupId, UserId, VendorId};
+use gw_core::versioned::Versioned;
+
+use crate::encrypt::{decrypt, EncryptedKey, KekCache};
+use super::redis_client::RedisCtx;
 
 #[derive(Clone)]
 pub struct LoaderCtx {
@@ -84,3 +92,151 @@ fn ttl_for(ns: &str) -> u64 {
         _ => 300,
     }
 }
+
+/// Wire shape of a `vendor_keys.payload` row. The plaintext `api_key` is held
+/// encrypted on disk under `api_key_enc`; decryption happens at decode time so
+/// the cache always stores the decrypted form.
+#[derive(serde::Deserialize)]
+struct VendorKeyRow {
+    key_id: KeyId,
+    vendor_id: VendorId,
+    api_key_enc: EncryptedKey,
+    #[serde(default)]
+    accessible_models: Vec<ModelName>,
+    #[serde(default)]
+    model_mapping: std::collections::HashMap<ModelName, String>,
+    #[serde(default)]
+    accessible_endpoints: Vec<gw_core::protocol::ProtocolKind>,
+    #[serde(default)]
+    protocol_conversion: bool,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default)]
+    weight: u32,
+    #[serde(default)]
+    rpm_limit: u32,
+    #[serde(default)]
+    tpm_limit: u32,
+    #[serde(default)]
+    max_usage_count: Option<u64>,
+    #[serde(default)]
+    proxy: Option<url::Url>,
+    #[serde(default)]
+    ip_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    expires_at: Option<time::OffsetDateTime>,
+    status: gw_core::entity::KeyStatus,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
+const USER_GROUP_SQL: &str =
+    "SELECT payload, version FROM user_groups WHERE id = $1 AND deleted_at IS NULL";
+const API_KEY_SQL: &str =
+    "SELECT payload, version FROM api_keys WHERE id = $1 AND deleted_at IS NULL";
+const VENDOR_SQL: &str =
+    "SELECT payload, version FROM vendors WHERE id = $1 AND deleted_at IS NULL";
+const VENDOR_KEY_SQL: &str =
+    "SELECT payload, version FROM vendor_keys WHERE id = $1 AND deleted_at IS NULL";
+const MODEL_GROUP_SQL: &str =
+    "SELECT payload, version FROM model_groups WHERE id = $1 AND deleted_at IS NULL";
+const PRICING_SQL: &str =
+    "SELECT payload, version FROM pricings WHERE id = $1 AND deleted_at IS NULL";
+const JWKS_SQL: &str = "SELECT payload, version FROM jwks WHERE id = $1 AND deleted_at IS NULL";
+
+pub async fn load_user(ctx: &LoaderCtx, id: &UserId) -> anyhow::Result<Versioned<UserEntry>> {
+    load_entity(ctx, "user", id.as_ref(), USER_SQL, |v| {
+        serde_json::from_value::<UserEntry>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+pub async fn load_user_group(
+    ctx: &LoaderCtx,
+    id: &UserGroupId,
+) -> anyhow::Result<Versioned<UserGroup>> {
+    load_entity(ctx, "user_group", id.as_ref(), USER_GROUP_SQL, |v| {
+        serde_json::from_value::<UserGroup>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+pub async fn load_apikey(
+    ctx: &LoaderCtx,
+    id: &ApiKeyId,
+) -> anyhow::Result<Versioned<ApiKeyEntry>> {
+    load_entity(ctx, "apikey", id.as_ref(), API_KEY_SQL, |v| {
+        serde_json::from_value::<ApiKeyEntry>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+pub async fn load_vendor(ctx: &LoaderCtx, id: &VendorId) -> anyhow::Result<Versioned<Vendor>> {
+    load_entity(ctx, "vendor", id.as_ref(), VENDOR_SQL, |v| {
+        serde_json::from_value::<Vendor>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+pub async fn load_vendor_key(
+    ctx: &LoaderCtx,
+    id: &KeyId,
+) -> anyhow::Result<Versioned<VendorKey>> {
+    let kek = ctx.kek.clone();
+    load_entity(ctx, "vendor_key", id.as_ref(), VENDOR_KEY_SQL, move |v| {
+        let row: VendorKeyRow = serde_json::from_value(v.clone())?;
+        let secret: SecretString = decrypt(&row.api_key_enc, &kek)?;
+        Ok(VendorKey {
+            key_id: row.key_id,
+            vendor_id: row.vendor_id,
+            api_key: secret,
+            accessible_models: row.accessible_models,
+            model_mapping: row.model_mapping,
+            accessible_endpoints: row.accessible_endpoints,
+            protocol_conversion: row.protocol_conversion,
+            priority: row.priority,
+            weight: row.weight,
+            rpm_limit: row.rpm_limit,
+            tpm_limit: row.tpm_limit,
+            max_usage_count: row.max_usage_count,
+            proxy: row.proxy,
+            ip_allowlist: row.ip_allowlist,
+            expires_at: row.expires_at,
+            status: row.status,
+            tags: row.tags,
+        })
+    })
+    .await
+}
+
+pub async fn load_model_group(
+    ctx: &LoaderCtx,
+    id: &Group,
+) -> anyhow::Result<Versioned<ModelGroup>> {
+    load_entity(ctx, "model_group", id.as_ref(), MODEL_GROUP_SQL, |v| {
+        serde_json::from_value::<ModelGroup>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+pub async fn load_pricing(
+    ctx: &LoaderCtx,
+    id: &ModelName,
+) -> anyhow::Result<Versioned<Pricing>> {
+    load_entity(ctx, "pricing", id.as_ref(), PRICING_SQL, |v| {
+        serde_json::from_value::<Pricing>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+pub async fn load_jwks(ctx: &LoaderCtx, id: &Kid) -> anyhow::Result<Versioned<JwksEntry>> {
+    load_entity(ctx, "jwks", id.as_ref(), JWKS_SQL, |v| {
+        serde_json::from_value::<JwksEntry>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+// Note: IpBlockEntry has no cold-loader-by-id; its consumer iterates the
+// whole snapshot via `EntityStore::ipblock_snapshot`. v1 accepts an empty
+// runtime list; preload-from-PG is a follow-up.

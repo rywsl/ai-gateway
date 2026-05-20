@@ -30,7 +30,7 @@ pub async fn get_candidate_keys(
 ) -> Vec<Arc<VendorKey>> {
     let mut out = Vec::with_capacity(group.vendor_key_ids.len());
     for kid in &group.vendor_key_ids {
-        let Some(v) = store.vendor_key.get(kid).await else {
+        let Some(v) = store.vendor_key_or_load(kid).await else {
             continue;
         };
         let key = &*v.value;

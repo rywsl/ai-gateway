@@ -6,6 +6,13 @@
 //!
 //! ## Bootstrap shape
 //!
+//! [`bootstrap`] constructs a [`gw_store::LoaderCtx`] from the KMS-backed KEK
+//! cache, the Redis pool, and the PgSQL pool, then hands it to
+//! [`gw_store::EntityStore::with_loader`] so cache misses on the hot path
+//! cold-load from Redis L1 → PG L2. It also starts the
+//! [`gw_store::stream_consumer::StreamConsumer`] so cross-pod invalidation
+//! events keep caches fresh.
+//!
 //! Pingora's [`pingora::server::Server::run_forever`] consumes the server and
 //! never returns (`-> !`), and it manages its own internal tokio runtimes per
 //! service. Our long-lived background tasks (Ledger flusher, health server,
@@ -115,8 +122,10 @@ pub fn run() -> anyhow::Result<()> {
     let wired = rx
         .recv()
         .context("bootstrap thread exited before signalling")??;
-    // The bootstrap thread now parks on `pending`; we intentionally leak the
-    // handle. Dropping the JoinHandle does not terminate the thread.
+    // Detach the bootstrap thread. Dropping its JoinHandle does not stop the
+    // thread — the runtime inside it is parked on `pending()`, keeping the
+    // background tasks (Ledger flusher, health server, StreamConsumer) alive
+    // for the process lifetime.
     std::mem::drop(bootstrap_handle);
 
     // Pingora server lives on the main thread and never returns.
@@ -161,12 +170,11 @@ pub fn run() -> anyhow::Result<()> {
 
 async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // 1. KMS — load and validate KEK material so config errors surface at
-    // startup. The cache is dropped at the end of this function; when the
-    // loader path is wired to consume encrypted vendor keys, promote
-    // `kek_cache` into the `Wired` struct so it survives across `bootstrap()`.
-    let _kek_cache = kms::init(cfg).await.context("KMS init failed")?;
+    // startup. The cache is moved into LoaderCtx so vendor_key decryption
+    // works on the hot path.
+    let kek_cache = kms::init(cfg).await.context("KMS init failed")?;
 
-    // 2. Storage clients. Both calls validate connectivity before returning.
+    // 2. Storage clients.
     let redis = gw_store::redis_client::RedisCtx::connect(
         cfg.redis.url_str(),
         cfg.redis.pool_size,
@@ -177,26 +185,26 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let pg = gw_store::pg_client::connect(cfg.pgsql.url_str(), cfg.pgsql.max_connections)
         .await
         .context("postgres connect failed")?;
-    // Pg pool is held for future loader use; loader runs on demand from
-    // proxy filters and will pull a connection from the pool there.
-    let _ = pg;
 
-    // 3. In-memory caches and guards.
-    let store = Arc::new(EntityStore::new());
+    // 3. EntityStore with loader. Cache misses on the *_or_load methods now
+    // fall through to Redis L1 -> PG L2 -> Redis write-back.
+    let loader = gw_store::LoaderCtx {
+        redis: redis.clone(),
+        pg,
+        kek: kek_cache,
+    };
+    let store = Arc::new(gw_store::EntityStore::with_loader_and_timeout(
+        loader,
+        std::time::Duration::from_millis(cfg.loader.cold_load_timeout_ms),
+    ));
     let breakers = Arc::new(BreakerStore::default());
     let ratelimit = Arc::new(RateLimitGuard::new());
 
-    // Counter store — shared Redis-backed read/write surface for the balance
-    // enforcement check in `request_filter` and the per-user TPM / RPM
-    // counters the ledger flusher debits. Cloning `RedisCtx` is cheap (just
-    // bumps an `Arc<RedisPool>`).
     let counters = Arc::new(CounterStore {
         redis: redis.clone(),
     });
 
-    // 4. Ledger flusher — spawns a long-lived `tokio::spawn` on the current
-    // runtime. The runtime is parked (not dropped) once bootstrap completes
-    // so this task continues running.
+    // 4. Ledger flusher.
     let ledger = Arc::new(Ledger::start(
         redis.clone(),
         cfg.ledger.channel_capacity,
@@ -204,9 +212,33 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         Duration::from_millis(cfg.ledger.flush_interval_ms),
     ));
 
-    // 5. Health server. Spawned before returning so /livez is reachable
-    // immediately; /readyz will return 503 until the main thread flips
-    // `health::READY` right before `server.run_forever()`.
+    // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
+    // The consumer's join handle is intentionally dropped: the task lives for
+    // the life of the bootstrap runtime (which itself is parked on pending()).
+    let consumer = Arc::new(gw_store::stream_consumer::StreamConsumer {
+        redis: redis.clone(),
+        store: store.clone(),
+        instance_id: format!("gw-{}", std::process::id()),
+    });
+    match consumer.start().await {
+        Ok(_handle) => {
+            tracing::info!(
+                target: "gw_gateway",
+                "stream consumer started (events:entity, events:counter) with XREADGROUP invalidate-on-event"
+            );
+        }
+        Err(e) => {
+            // Non-fatal: TTL-based eviction will keep caches fresh on a longer
+            // horizon. Log and proceed.
+            tracing::warn!(
+                target: "gw_gateway",
+                error = %e,
+                "stream consumer failed to start; falling back to TTL-only invalidation"
+            );
+        }
+    }
+
+    // 6. Health server.
     let health_port = cfg.server.health_port;
     tokio::spawn(async move {
         if let Err(e) = health::run_health_server(health_port).await {

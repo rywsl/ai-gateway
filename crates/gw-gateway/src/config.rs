@@ -28,6 +28,8 @@ pub struct Config {
     pub debug: DebugCfg,
     #[serde(default)]
     pub security: SecurityCfg,
+    #[serde(default)]
+    pub loader: LoaderCfg,
     // TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
     // `HardCapCfg` defaults. Once it accepts caller-supplied caps, reintroduce
     // an `[auth]` section here and thread `hard_cap_max_input_tokens` /
@@ -102,6 +104,38 @@ pub struct DebugCfg {
 pub struct SecurityCfg {
     #[serde(default)]
     pub trust_xff: bool,
+}
+
+/// Cold-loader (EntityStore) settings.
+///
+/// `cold_load_timeout_ms` bounds how long an `EntityStore::*_or_load` call
+/// will wait on the Redis L1 → Postgres L2 → write-back loader future before
+/// giving up. Without a deadline, a stalled Postgres (network glitch, lock
+/// contention, etc.) makes every cache miss block indefinitely; with one,
+/// the miss resolves to `None` (treated as "entity not found") and the
+/// `gateway_cold_load_timeout_total{ns}` counter increments so an operator
+/// can see the storm. The default 2000 ms is generous for healthy
+/// deployments and tight enough to keep tail latency bounded under failure.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoaderCfg {
+    /// Per-cold-load deadline in milliseconds. After this, the cache miss
+    /// resolves to `None` (treated as "entity not found") and a
+    /// `gateway_cold_load_timeout_total{ns}` counter increments. Default
+    /// 2000 ms.
+    #[serde(default = "default_cold_load_timeout_ms")]
+    pub cold_load_timeout_ms: u64,
+}
+
+fn default_cold_load_timeout_ms() -> u64 {
+    2_000
+}
+
+impl Default for LoaderCfg {
+    fn default() -> Self {
+        Self {
+            cold_load_timeout_ms: default_cold_load_timeout_ms(),
+        }
+    }
 }
 
 impl RedisCfg {

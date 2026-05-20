@@ -4,13 +4,73 @@
 //! - user / user_group / apikey / ipblock: 300s TTL
 //! - vendor / vendor_key / model_group / pricing: 1800s TTL
 //! - jwks: 3600s TTL
+//!
+//! Hot-path callers should use the `*_or_load` methods, which dedupe concurrent
+//! loads via Moka's `try_get_with_by_ref` and fall through to the Redis→PG
+//! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
+use crate::loader::{
+    load_apikey, load_jwks, load_model_group, load_pricing, load_user, load_user_group,
+    load_vendor, load_vendor_key, LoaderCtx,
+};
 use gw_core::entity::*;
 use gw_core::ids::*;
 use gw_core::versioned::Versioned;
 use moka::future::Cache;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::timeout;
+
+/// Default per-cold-load deadline. Bootstrap can override this via
+/// `EntityStore::with_loader_and_timeout` (wired from
+/// `gw-gateway` `LoaderCfg::cold_load_timeout_ms`, default 2000 ms).
+const DEFAULT_COLD_LOAD_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Sentinel error used to drive Moka's `try_get_with_by_ref` Err arm without
+/// caching the failure. The real diagnostic is emitted by
+/// `with_cold_load_timeout` as a `tracing::warn`; this string is never user-
+/// or log-facing on its own.
+const COLD_LOAD_MISS_SENTINEL: &str = "cold-load miss (timeout or loader error); see warn log";
+
+/// Cold-load timeout wrapper.
+///
+/// Wraps a loader future with `tokio::time::timeout(deadline, fut)`. On
+/// timeout, increments `gateway_cold_load_timeout_total{ns}` and returns
+/// `None`. On `Err(_)`, returns `None` and lets the loader's own
+/// `tracing::warn` carry the underlying message. On `Ok(v)`, returns
+/// `Some(v)`.
+pub async fn with_cold_load_timeout<T>(
+    ns: &'static str,
+    deadline: Duration,
+    fut: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Option<T> {
+    match timeout(deadline, fut).await {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "gw_store::loader",
+                ns = %ns,
+                error = %e,
+                "cold loader returned error"
+            );
+            None
+        }
+        Err(_elapsed) => {
+            metrics::counter!(
+                "gateway_cold_load_timeout_total",
+                "ns" => ns,
+            )
+            .increment(1);
+            tracing::warn!(
+                target: "gw_store::loader",
+                ns = %ns,
+                deadline_ms = deadline.as_millis() as u64,
+                "cold loader timed out"
+            );
+            None
+        }
+    }
+}
 
 pub struct EntityStore {
     pub user: Cache<UserId, Arc<Versioned<UserEntry>>>,
@@ -22,6 +82,13 @@ pub struct EntityStore {
     pub pricing: Cache<ModelName, Arc<Versioned<Pricing>>>,
     pub jwks: Cache<Kid, Arc<Versioned<JwksEntry>>>,
     pub ipblock: Cache<String, Arc<Versioned<IpBlockEntry>>>,
+    /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
+    /// `None` for unit tests that pre-populate caches by hand.
+    loader: Option<Arc<LoaderCtx>>,
+    /// Per-cold-load deadline. If a loader future hasn't resolved by this
+    /// duration, the miss returns `None` and bumps
+    /// `gateway_cold_load_timeout_total{ns}`. Defaults to 2s.
+    cold_load_timeout: Duration,
 }
 
 impl Default for EntityStore {
@@ -32,6 +99,18 @@ impl Default for EntityStore {
 
 impl EntityStore {
     pub fn new() -> Self {
+        Self::build(None, DEFAULT_COLD_LOAD_TIMEOUT)
+    }
+
+    pub fn with_loader(ctx: LoaderCtx) -> Self {
+        Self::with_loader_and_timeout(ctx, DEFAULT_COLD_LOAD_TIMEOUT)
+    }
+
+    pub fn with_loader_and_timeout(ctx: LoaderCtx, cold_load_timeout: Duration) -> Self {
+        Self::build(Some(Arc::new(ctx)), cold_load_timeout)
+    }
+
+    fn build(loader: Option<Arc<LoaderCtx>>, cold_load_timeout: Duration) -> Self {
         Self {
             user: Cache::builder()
                 .max_capacity(1_000_000)
@@ -69,6 +148,8 @@ impl EntityStore {
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(300))
                 .build(),
+            loader,
+            cold_load_timeout,
         }
     }
 
@@ -80,5 +161,180 @@ impl EntityStore {
             .iter()
             .map(|(k, v)| ((*k).clone(), v))
             .collect()
+    }
+
+    pub async fn user_or_load(&self, id: &UserId) -> Option<Arc<Versioned<UserEntry>>> {
+        if let Some(hit) = self.user.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.user
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("user", deadline, async move {
+                    load_user(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn user_group_or_load(
+        &self,
+        id: &UserGroupId,
+    ) -> Option<Arc<Versioned<UserGroup>>> {
+        if let Some(hit) = self.user_group.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.user_group
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("user_group", deadline, async move {
+                    load_user_group(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn apikey_or_load(
+        &self,
+        id: &ApiKeyId,
+    ) -> Option<Arc<Versioned<ApiKeyEntry>>> {
+        if let Some(hit) = self.apikey.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.apikey
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("apikey", deadline, async move {
+                    load_apikey(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn vendor_or_load(&self, id: &VendorId) -> Option<Arc<Versioned<Vendor>>> {
+        if let Some(hit) = self.vendor.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.vendor
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("vendor", deadline, async move {
+                    load_vendor(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn vendor_key_or_load(
+        &self,
+        id: &KeyId,
+    ) -> Option<Arc<Versioned<VendorKey>>> {
+        if let Some(hit) = self.vendor_key.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.vendor_key
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("vendor_key", deadline, async move {
+                    load_vendor_key(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn model_group_or_load(
+        &self,
+        id: &Group,
+    ) -> Option<Arc<Versioned<ModelGroup>>> {
+        if let Some(hit) = self.model_group.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.model_group
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("model_group", deadline, async move {
+                    load_model_group(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn pricing_or_load(
+        &self,
+        id: &ModelName,
+    ) -> Option<Arc<Versioned<Pricing>>> {
+        if let Some(hit) = self.pricing.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.pricing
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("pricing", deadline, async move {
+                    load_pricing(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn jwks_or_load(&self, id: &Kid) -> Option<Arc<Versioned<JwksEntry>>> {
+        if let Some(hit) = self.jwks.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.jwks
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("jwks", deadline, async move {
+                    load_jwks(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
     }
 }

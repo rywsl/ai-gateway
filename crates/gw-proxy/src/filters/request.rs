@@ -79,7 +79,7 @@ pub async fn run(
         match verify_apikey(akey, &akid, store).await {
             Ok(()) => {
                 // Resolve the user_id via the api-key entry.
-                match store.apikey.get(&akid).await {
+                match store.apikey_or_load(&akid).await {
                     Some(entry) => Ok((entry.value.user_id.clone(), Some(akid))),
                     None => {
                         let err = ErrorIR {
@@ -121,7 +121,7 @@ pub async fn run(
     let (user_id, api_key_id) = user_id_res?;
 
     // Load the user entry (used by ReqCtx for downstream consumers).
-    let user_entry = match store.user.get(&user_id).await {
+    let user_entry = match store.user_or_load(&user_id).await {
         Some(u) => u,
         None => {
             let err = ErrorIR {
@@ -225,7 +225,7 @@ pub async fn run(
     // 4b. v1 limitation: reject non-stream completions outright. The codec
     //     `parse_response` method is `unimplemented!()` for every protocol
     //     in v1 scope, which means a non-stream path through `logging`
-    //     would settle the freeze at `cost_micro = 0` (no usage observed)
+    //     would release the freeze (Rust never computes cost; cost lives in Go)
     //     and the user would be billed nothing. Surfacing a clear 400 here
     //     fails closed and avoids silent free traffic; v1.1 lifts this once
     //     `parse_response` lands per the codec contract.
@@ -382,18 +382,18 @@ pub async fn run(
     // freeze-estimate is computed once we have pricing; for now we freeze a
     // conservative placeholder so the user is gated against runaway parallel
     // requests. The real per-token cost is settled in `logging`.
-    let freeze_estimate_micro = freeze_estimate(est_input_tokens, &merged.markup_product);
+    let freeze_estimate_micro = freeze_estimate(est_input_tokens, merged.markup_chain.product);
     if let Err(err) = check_cost(freeze_estimate_micro, &hc_cfg) {
         emit_and_bail(session, ctx, &err, &request_id).await?;
         unreachable!()
     }
 
     // ---------------------------------------------------------------------
-    // 10. FreezeGuard. On drop without `settle` the destructor rolls back
-    //     the frozen amount.
+    // 10. RequestFreeze. On drop without `release()` the destructor rolls
+    //     back the frozen amount (leak-recovered metric increments).
     // ---------------------------------------------------------------------
-    use gw_ledger::FreezeGuard;
-    let guard = FreezeGuard::freeze(merged.effective_user_id.clone(), freeze_estimate_micro);
+    use gw_ledger::RequestFreeze;
+    let guard = RequestFreeze::new(merged.effective_user_id.clone(), freeze_estimate_micro);
     ctx.freeze_guard = Some(guard);
 
     ctx.merged_perm = Some(merged);
@@ -403,7 +403,7 @@ pub async fn run(
 
 /// Estimate a conservative freeze (in micro-units) before pricing is loaded.
 /// We use a flat 1 micro per estimated token times the markup product.
-fn freeze_estimate(est_input_tokens: u32, markup: &f32) -> u64 {
+fn freeze_estimate(est_input_tokens: u32, markup: f32) -> u64 {
     let base = est_input_tokens as u64;
     let with_markup = (base as f32 * markup.max(1.0)) as u64;
     with_markup.max(1)

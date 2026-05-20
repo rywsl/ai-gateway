@@ -15,11 +15,14 @@
 //! 3. Inject `Authorization` per the vendor's `auth_template`.
 
 use crate::ctx::ReqCtx;
+use crate::error_emit;
+use crate::filters::early::{pick_emit_codec, short_circuit, with_request_id};
 use crate::timeouts::Timeouts;
 use bytes::BytesMut;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
 use gw_core::entity::{ModelGroup, StrategyKind};
+use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::Mutations;
 use gw_routing::candidates::get_candidate_keys;
 use gw_routing::strategy::{
@@ -34,18 +37,69 @@ use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, Result};
 use pingora_proxy::Session;
 use secrecy::ExposeSecret;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 /// Per-key in-flight cap used by the candidate filter. v1: 1024; v2 will move
 /// this into config.
 const PER_KEY_INFLIGHT_CAP: u32 = 1024;
 
+/// Build an `ErrorIR` for an upstream-filter short-circuit.
+///
+/// Categories chosen so the wire status + `Retry-After` headers reflect the
+/// failure shape clients should react to:
+/// - `GW_BACKEND_UNAVAILABLE` (no model_group / vendor configured) → 503
+///   `UpstreamError`, retryable after 5 s once an operator seeds config.
+/// - `GW_ROUTING_NO_AVAILABLE_CHANNEL` (all candidates filtered out) → 503,
+///   retryable after 5 s once breakers close or capacity frees.
+pub fn envelope_for(code: &'static str, message: &'static str, status: u16) -> ErrorIR<'static> {
+    let category = match status {
+        400..=499 => ErrorCategory::ClientBadRequest,
+        500..=599 => ErrorCategory::UpstreamError,
+        _ => ErrorCategory::GatewayInternal,
+    };
+    let retryable = matches!(status, 502 | 503 | 504 | 429);
+    let retry_after_secs = if retryable { Some(5) } else { None };
+    ErrorIR {
+        category,
+        status,
+        upstream_status: None,
+        code: Cow::Borrowed(code),
+        message: Cow::Borrowed(message),
+        retryable,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs,
+    }
+}
+
+/// Render an envelope to the client via the client codec, then return a
+/// short-circuit `Err` for pingora.
+async fn emit_envelope_and_bail<T>(
+    session: &mut Session,
+    ctx: &ReqCtx,
+    err: ErrorIR<'static>,
+) -> Result<T> {
+    let codec = pick_emit_codec(&ctx.client_codec);
+    let scoped = with_request_id(&err, &ctx.request_id.0);
+    error_emit::send_error(session, &codec, &scoped).await;
+    Err(short_circuit(err.status))
+}
+
 pub async fn pick_peer(
-    _session: &mut Session,
+    session: &mut Session,
     ctx: &mut ReqCtx,
     store: &Arc<EntityStore>,
     breakers: &Arc<BreakerStore>,
 ) -> Result<Box<HttpPeer>> {
+    // The remaining `ErrorType::Custom(...)` short-circuits in this function
+    // stay as bare-500 errors (no JSON envelope) on purpose. They signal
+    // internal invariants that should never trip if the earlier filter stages
+    // did their job (e.g. `early_request_filter` should always have set
+    // `ctx.client_codec`; `request_filter` should always have set
+    // `ctx.model`/`ctx.merged_perm`). Wrapping them in a vendor-flavoured
+    // envelope would hide the underlying defect; the empty-body 500 keeps
+    // them loud in pingora's logs so the root cause is easy to spot.
     let model = ctx
         .model
         .as_ref()
@@ -66,20 +120,47 @@ pub async fn pick_peer(
     // Pick the model_group: forced_model_group from permissions wins;
     // otherwise we fall back to the first allowed group (alphabetical).
     // -------------------------------------------------------------
-    let group_id = perm
+    let group_id = match perm
         .forced_model_group
         .clone()
         .or_else(|| perm.allowed_groups.iter().next().cloned())
-        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_model_group")))?;
+    {
+        Some(id) => id,
+        None => {
+            return emit_envelope_and_bail(
+                session,
+                ctx,
+                envelope_for(
+                    codes::GW_BACKEND_UNAVAILABLE,
+                    "no model_group configured for this user",
+                    503,
+                ),
+            )
+            .await;
+        }
+    };
 
-    let group: Arc<gw_core::versioned::Versioned<ModelGroup>> = store
-        .model_group
-        .get(&group_id)
+    let group: Arc<gw_core::versioned::Versioned<ModelGroup>> = match store
+        .model_group_or_load(&group_id)
         .await
-        .ok_or_else(|| Error::new(ErrorType::Custom("gw_model_group_missing")))?;
+    {
+        Some(g) => g,
+        None => {
+            return emit_envelope_and_bail(
+                session,
+                ctx,
+                envelope_for(
+                    codes::GW_BACKEND_UNAVAILABLE,
+                    "model_group not found",
+                    503,
+                ),
+            )
+            .await;
+        }
+    };
     // Lazy load pricing too (Phase-4 v1: not yet used in routing decisions but
     // cached on ctx for the logging filter).
-    if let Some(p) = store.pricing.get(&model).await {
+    if let Some(p) = store.pricing_or_load(&model).await {
         ctx.pricing = Some(p);
     }
 
@@ -97,9 +178,16 @@ pub async fn pick_peer(
     )
     .await;
     if candidates.is_empty() {
-        return Err(Error::new(ErrorType::Custom(
-            "gw_routing_no_available_channel",
-        )));
+        return emit_envelope_and_bail(
+            session,
+            ctx,
+            envelope_for(
+                codes::GW_ROUTING_NO_AVAILABLE_CHANNEL,
+                "no available channel for the requested model",
+                503,
+            ),
+        )
+        .await;
     }
 
     // -------------------------------------------------------------
@@ -116,11 +204,21 @@ pub async fn pick_peer(
         .pick(&candidates, breakers, &pick_ctx)
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?;
     let picked_arc = Arc::clone(picked);
-    let vendor = store
-        .vendor
-        .get(&picked_arc.vendor_id)
-        .await
-        .ok_or_else(|| Error::new(ErrorType::Custom("gw_vendor_missing")))?;
+    let vendor = match store.vendor_or_load(&picked_arc.vendor_id).await {
+        Some(v) => v,
+        None => {
+            return emit_envelope_and_bail(
+                session,
+                ctx,
+                envelope_for(
+                    codes::GW_BACKEND_UNAVAILABLE,
+                    "vendor record missing for selected key",
+                    503,
+                ),
+            )
+            .await;
+        }
+    };
 
     let base = vendor
         .value
