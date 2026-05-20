@@ -39,6 +39,7 @@ fn fixed_order_picks_highest_priority() {
         model: &ModelName::from("m"),
         conversation_id: None,
         message_hash: None,
+        api_format: gw_core::protocol::ProtocolKind::OpenAi,
     };
     let picked = FixedOrder.pick(&keys, &b, &ctx).unwrap();
     assert_eq!(picked.key_id.as_ref(), "b");
@@ -55,6 +56,7 @@ fn round_robin_rotates_through_three_keys() {
         model: &ModelName::from("m"),
         conversation_id: None,
         message_hash: None,
+        api_format: gw_core::protocol::ProtocolKind::OpenAi,
     };
     let p1 = rr.pick(&keys, &b, &ctx).unwrap().key_id.clone();
     let p2 = rr.pick(&keys, &b, &ctx).unwrap().key_id.clone();
@@ -76,6 +78,7 @@ fn cost_first_picks_highest_priority_proxy() {
         model: &ModelName::from("m"),
         conversation_id: None,
         message_hash: None,
+        api_format: gw_core::protocol::ProtocolKind::OpenAi,
     };
     let picked = CostFirst.pick(&keys, &b, &ctx).unwrap();
     assert_eq!(picked.key_id.as_ref(), "b");

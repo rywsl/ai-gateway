@@ -199,6 +199,7 @@ pub async fn pick_peer(
         model: &model,
         conversation_id: None,
         message_hash: None,
+        api_format: client_codec_kind,
     };
     let picked = strategy
         .pick(&candidates, breakers, &pick_ctx)

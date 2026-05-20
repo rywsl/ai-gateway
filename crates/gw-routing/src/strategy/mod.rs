@@ -21,6 +21,11 @@ pub struct PickCtx<'a> {
     pub model: &'a ModelName,
     pub conversation_id: Option<&'a str>,
     pub message_hash: Option<u64>,
+    /// API format the strategy is selecting for. Threaded into
+    /// `KeyHealthStore::is_available(key, fmt)` in Task 4 so the
+    /// multi-dim health check has the format dimension. Per integration
+    /// spec §2.3 Bm5, this is `ProtocolKind` in v1.
+    pub api_format: gw_core::protocol::ApiFormat,
 }
 
 /// Pluggable selection strategy. Implementors must be `Send + Sync` because the
