@@ -10,8 +10,11 @@
 # Usage: bash scripts/check-invariants.sh
 # Exit 0 = all active invariants hold; non-zero = a violation was found.
 
+# Note: `-e` is intentionally omitted — many grep-based lints below use the
+# pattern `grep ... && bad ...`, which relies on grep's non-zero "no match"
+# exit not being treated as fatal. The `cd` above is hard-guarded instead.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to repo root" >&2; exit 2; }
 
 fail=0
 note() { printf '  \033[33m%s\033[0m\n' "$*"; }
@@ -30,7 +33,7 @@ if command -v cargo >/dev/null && command -v jq >/dev/null; then
   meta="$(cargo metadata --no-deps --format-version 1 2>/dev/null)"
   for crate in $SUPPORTING; do
     deps="$(echo "$meta" | jq -r --arg c "$crate" \
-      '.packages[] | select(.name==$c) | .dependencies[].name')"
+      '.packages[] | select(.name==$c) | .dependencies[] | select(.kind == null) | .name')"
     for forb in $FORBIDDEN_FOR_SUPPORTING; do
       if echo "$deps" | grep -qx "$forb"; then
         bad "$crate depends on $forb (supporting → business/execution forbidden)"
@@ -38,7 +41,7 @@ if command -v cargo >/dev/null && command -v jq >/dev/null; then
     done
   done
   # Execution crates must not depend on each other.
-  proxy_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-proxy") | .dependencies[].name')"
+  proxy_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-proxy") | .dependencies[] | select(.kind == null) | .name')"
   if echo "$proxy_deps" | grep -qx "gw-task-runtime"; then
     bad "gw-proxy depends on gw-task-runtime (execution ↔ execution forbidden)"
   fi
@@ -75,7 +78,7 @@ fi
 # gw-task-worker does not exist yet, so only the gateway side is checkable now.
 # ---------------------------------------------------------------------------
 echo "[no_worker_addr_config] gateway must not hardcode a worker host/port"
-if grep -rnE 'worker[_-]?host|worker[_-]?port|TASK_WORKER_(URL|HOST)' config/ crates/gw-gateway 2>/dev/null; then
+if grep -rnE '(^|[^[:alnum:]_])(worker[_-]?host|worker[_-]?port|TASK_WORKER_(URL|HOST))([^[:alnum:]_]|$)' config/ crates/gw-gateway 2>/dev/null; then
   bad "gateway config/code names a worker address"
 else
   ok "gateway carries no worker address"
@@ -94,7 +97,7 @@ fi
 # # no_cost_micro (Phase 1b: UsageRecord drops cost_micro)
 # grep -rnE '\bcost_micro\b' crates/ && bad "cost_micro field remains"
 #
-# # no_billing_records_stream (Phase 1b: stream renamed usage:records)
+# # no_billing_records_stream (Phase 5: C-α renames stream to usage:records)
 # grep -rn '"billing:records"' crates/ && bad "billing:records stream name remains"
 #
 # # no_freezeguard_settle (Phase 1b: FreezeGuard::release replaces settle)
