@@ -1437,6 +1437,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gw-adapter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "gw-codec",
+ "gw-core",
+ "gw-health",
+ "secrecy",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "gw-auth"
 version = "0.1.0"
 dependencies = [
