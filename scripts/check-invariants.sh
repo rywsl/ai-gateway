@@ -161,6 +161,26 @@ else
   ok "no breaker types remain"
 fi
 
+# ---------------------------------------------------------------------------
+# no_legacy_retry (§5.2) — retry.rs deleted; failover lives in Phase 4 R-E.
+# ---------------------------------------------------------------------------
+echo "[no_legacy_retry] gw-routing/src/retry.rs must not exist"
+if [ -f crates/gw-routing/src/retry.rs ]; then
+  bad "crates/gw-routing/src/retry.rs still present"
+else
+  ok "no retry.rs"
+fi
+
+# ---------------------------------------------------------------------------
+# no_patch_body (§5.2) — adapter trait v2 has no patch_body / BodyPatch.
+# ---------------------------------------------------------------------------
+echo "[no_patch_body] patch_body / BodyPatch must not appear"
+if grep -rnE '\bfn patch_body\b|\bBodyPatch::' crates/ 2>/dev/null; then
+  bad "patch_body / BodyPatch remains"
+else
+  ok "no patch_body / BodyPatch references"
+fi
+
 # ===========================================================================
 # PENDING lints — target code has not landed yet. Uncomment in the named phase.
 # ===========================================================================
@@ -168,13 +188,7 @@ fi
 # # no_gateway_addr_config (Phase 6: activates with gw-task-worker; symmetric to no_worker_addr_config)
 # grep -rnE '(^|[^[:alnum:]_])(gateway[_-]?host|gateway[_-]?port|GATEWAY_(URL|HOST))([^[:alnum:]_]|$)' crates/gw-task-worker 2>/dev/null && bad "worker config/code names a gateway address"
 #
-# # no_legacy_retry (Phase 4: R-E failover replaces retry.rs)
-# [ -f crates/gw-routing/src/retry.rs ] && bad "retry.rs still present"
-#
-# # no_patch_body (Phase 1c: adapter trait v2 has no patch_body / BodyPatch)
-# grep -rnE '\bfn patch_body\b|\bBodyPatch::' crates/ && bad "patch_body / BodyPatch remains"
-#
-# # no_ir_runtime_struct (Phase 1d: codec S1 v2 schema is compile-time only)
+# # no_ir_runtime_struct (Phase 2: codec S1 v2 schema is compile-time only; A10 strict form re-timed)
 # grep -rnE 'IrRequest::new|IrResponse::new|IrRequest::default|IrResponse::default' crates/ && bad "IR runtime instantiation remains"
 #
 # # deploy_e2e_matrix (Phase 6/7: ADR-T16 acceptance tests)

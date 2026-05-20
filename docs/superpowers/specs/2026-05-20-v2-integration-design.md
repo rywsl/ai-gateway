@@ -443,6 +443,10 @@ Phase 1  脚手架（无业务）
   Why: `Strategy::pick(_, &KeyHealthStore, &InFlightStore, _)` is the new signature after Phase 1c A2. `KeyHealthStore` lives in `gw-health` (business layer), so `gw-routing` cannot be supporting-layer without violating the C-1 "support→business forbidden" rule. C-7 already designates `gw-health::KeyHealthStore` ↔ `gw-routing` selection as an intentional coupling point. The simpler resolution is to reclassify `gw-routing` to business. Dependency inversion via a `gw-core::KeyAvailability` trait remains viable for a future routing-only deployment.
   How to apply: §3 C-1 dependency graph + §5.2 `crate_layering` lint table updated (Phase 1c, commit `8032b08`). `CLAUDE.md` and `scripts/check-invariants.sh` carry the same classification. No code-side follow-up.
 
+- 2026-05-20  A10 strict-form re-timing: schema rename + non_exhaustive strip moves to Phase 2
+  Why: A10 prescribes `gw-core::ir → gw-core::schema` + `#[non_exhaustive]` on every IR struct, which forbids the public Default/constructor calls that the runtime via.rs handwritten From/TryFrom impls currently rely on. Phase 1d cannot strip those without simultaneously migrating the runtime onto wire→wire (codec S1 v2 N² conversions), which is Phase 2's scope. The Phase 1d-shipped pieces of S1 v2 (Mutations upgrade, WireAny enum, wire_convert_matrix! proc-macro scaffold) are framework-only and do not touch the runtime IR path. Phase 2 lands the rename + strip atomically with the wire→wire migration; the `no_ir_runtime_struct` lint activates at Phase 2 exit.
+  How to apply: Phase 2 plan must include (1) the module rename, (2) the constructor strip, (3) activation of `no_ir_runtime_struct` in scripts/check-invariants.sh. Phase 1 exit gate text in §4.2 is read as "scaffolding complete + A1/A8/A9/A11 done; A10 strict form re-timed to Phase 2 exit per this amendment".
+
 ---
 
 > 本 spec 是 v2 周期 33 份 5-19 spec 之间的整合权威。任何后续 phase plan 与具体 spec 实施都以本 spec §2 / §3 为锁定面；若发生新冲突，先在表 E 登记决议再实施。
