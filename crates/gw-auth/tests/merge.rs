@@ -208,5 +208,5 @@ async fn markup_is_product_of_tiers() {
     };
     let perm = merge_permissions(&ctx, &store, 0).await.unwrap();
     // user * main(==user) * group * apikey = 1.5 * 1.5 * 2.0 * 3.0 = 13.5
-    assert!((perm.markup_product - 13.5).abs() < 1e-4);
+    assert!((perm.markup_chain.product - 13.5).abs() < 1e-4);
 }

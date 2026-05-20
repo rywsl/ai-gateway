@@ -18,4 +18,5 @@ pub struct AuthCtx {
 }
 
 pub use merge::merge_permissions;
+pub use merge::MarkupChainSnapshot;
 pub use ratelimit::{RateLimitGuard, RateLimitTicket, StreamSlot};

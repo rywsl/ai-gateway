@@ -18,6 +18,8 @@ use gw_store::EntityStore;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+pub use gw_core::permissions::MarkupChainSnapshot;
+
 use crate::AuthCtx;
 
 pub async fn merge_permissions(
@@ -145,7 +147,15 @@ pub async fn merge_permissions(
         rpm_limit: rpm,
         tpm_limit: tpm,
         max_concurrent_streams: main.value.max_concurrent_streams,
-        markup_product: markup,
+        markup_chain: MarkupChainSnapshot {
+            // Phase 1b: per-tier values left as 1.0 placeholders.
+            // Phase 5 (Bm1) populates these from the actual entity reads above.
+            user_group_markup: 1.0,
+            api_key_markup: 1.0,
+            vendor_markup: 1.0,
+            model_markup: 1.0,
+            product: markup,
+        },
     })
 }
 

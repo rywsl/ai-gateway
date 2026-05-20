@@ -2,7 +2,7 @@
 
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::ids::UserId;
-use gw_core::permissions::MergedPermissions;
+use gw_core::permissions::{MarkupChainSnapshot, MergedPermissions};
 use std::collections::HashSet;
 
 fn perm(rpm: u32) -> MergedPermissions {
@@ -17,7 +17,7 @@ fn perm(rpm: u32) -> MergedPermissions {
         rpm_limit: rpm,
         tpm_limit: 0,
         max_concurrent_streams: 100,
-        markup_product: 1.0,
+        markup_chain: MarkupChainSnapshot::placeholder(),
     }
 }
 
