@@ -88,6 +88,9 @@ fi
 # PENDING lints — target code has not landed yet. Uncomment in the named phase.
 # ===========================================================================
 #
+# # no_gateway_addr_config (Phase 6: activates with gw-task-worker; symmetric to no_worker_addr_config)
+# grep -rnE '(^|[^[:alnum:]_])(gateway[_-]?host|gateway[_-]?port|GATEWAY_(URL|HOST))([^[:alnum:]_]|$)' crates/gw-task-worker 2>/dev/null && bad "worker config/code names a gateway address"
+#
 # # no_legacy_retry (Phase 4: R-E failover replaces retry.rs)
 # [ -f crates/gw-routing/src/retry.rs ] && bad "retry.rs still present"
 #

@@ -398,7 +398,7 @@ Phase 1  脚手架（无业务）
 
 | Lint 名 | 形式 | 触发条件（违例） |
 |---|---|---|
-| `crate_layering` | `git grep -nE 'task::\|billing::\|health::\|adapter::vendor' crates/{gw-core,gw-codec,gw-codec-macros,gw-store,gw-routing,gw-auth,gw-ledger}/src` 应为空 | 支撑层 crate 引入业务 namespace |
+| `crate_layering` | `git grep -nE 'task::\|billing::\|health::\|adapter::vendor' crates/{gw-core,gw-codec,gw-codec-macros,gw-store,gw-routing,gw-auth,gw-ledger}/src` 应为空 [^crate-layering-impl] | 支撑层 crate 引入业务 namespace |
 | `no_billing_crate` | `git grep -n 'gw-billing' Cargo.toml crates/*/Cargo.toml` 应为空 | gw-billing 复活 |
 | `no_legacy_breaker` | `git grep -nE '\bBreakerState\b\|\bBreakerStore\b' crates/` 应为空（除 gw-health 内部 SlidingWindow） | breaker 残留 |
 | `no_legacy_retry` | `find crates -path '*gw-routing/src/retry.rs'` 应为空 | retry.rs 残留 |
@@ -412,6 +412,8 @@ Phase 1  脚手架（无业务）
 | `deploy_e2e_matrix` | 测试名 `e2e_deploy_matrix_{1g_0w,0g_1w,n_m,gateway_kill,worker_kill}` 全部存在 | ADR-T16 验收测试缺失 |
 | `no_ir_runtime_struct` | `git grep -nE 'IrRequest::new\|IrResponse::new\|IrRequest::default\|IrResponse::default' crates/` 应为空 | codec S1 v2 schema 被运行时实例化 |
 | `no_markup_product_scalar` | `git grep -nE '\bmarkup_product\b' crates/` 应为空（应为 markup_chain） | 旧 markup 单标量 |
+
+[^crate-layering-impl]: **Implementation note** (Phase 1a `0fb1131`): the actual `scripts/check-invariants.sh` implements `crate_layering` as a `cargo metadata --no-deps` dependency-edge check filtered by `select(.kind == null)`, not a string `git grep`. The grep form false-positives at HEAD on legitimate occurrences like `tokio::task::` and `crate::billing::BillingRecord`. The dependency-edge form is strictly stronger (catches a forbidden edge before it shows up in source) and false-positive-free against dev/build dependencies.
 
 ### §5.3 滚动 review 节点
 
