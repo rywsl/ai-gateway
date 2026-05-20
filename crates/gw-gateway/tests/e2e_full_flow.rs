@@ -31,9 +31,11 @@ use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
 
 use gw_auth::ratelimit::RateLimitGuard;
+use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
-use gw_routing::{BreakerStore, RetryConfig};
+use gw_routing::in_flight::InFlightStore;
+use gw_routing::RetryConfig;
 use gw_store::{CounterStore, EntityStore};
 
 const MIGRATION: &str = include_str!("../../gw-store/migrations/0001_initial.sql");
@@ -103,7 +105,8 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         .expect("redis connect");
 
     let store: Arc<EntityStore> = Arc::new(EntityStore::new());
-    let breakers: Arc<BreakerStore> = Arc::new(BreakerStore::default());
+    let health: Arc<KeyHealthStore> = Arc::new(KeyHealthStore::default());
+    let in_flight: Arc<InFlightStore> = Arc::new(InFlightStore::default());
     let ratelimit: Arc<RateLimitGuard> = Arc::new(RateLimitGuard::new());
     let ledger: Arc<Ledger> = Arc::new(Ledger::start(
         redis.clone(),
@@ -121,7 +124,8 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
     // -----------------------------------------------------------------
     let _gw = LlmGateway::new(
         store.clone(),
-        breakers.clone(),
+        health.clone(),
+        in_flight.clone(),
         ratelimit.clone(),
         ledger.clone(),
         counters.clone(),

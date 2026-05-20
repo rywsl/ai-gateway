@@ -19,7 +19,7 @@ use gw_core::ids::{ApiKeyId, ModelName, RequestId, TraceId, UserId};
 use gw_core::permissions::MergedPermissions;
 use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
-use gw_routing::InFlightGuard;
+use gw_routing::in_flight::InFlightGuard;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
