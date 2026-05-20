@@ -107,3 +107,17 @@ Treat `gw-core` as the type-only ground floor. Anything that pulls a runtime or 
 ## v1 gaps to be aware of when extending
 
 `expires_at`, `ip_allowlist`, `daily_quota_tokens`, `Vendor.timeout_overrides`, `Pricing.model_markup`, JWT `iss`/`aud`/`nbf` validation, mandatory HMAC, cross-protocol *response* body re-render, multi-event SSE buffering, retry executor on the proxy hot path, and DLQ for billing flush failures are all explicitly deferred — see the "Known gaps" list in `README.md`. The `Sticky` strategy leaks assignment-map entries (no TTL sweep) and `crates/gw-gateway/tests/e2e_full_flow.rs` is the full Pingora + wiremock + reqwest harness but is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`.
+
+## Crate layering rules (v2 integration)
+
+Authoritative source: `docs/superpowers/specs/2026-05-20-v2-integration-design.md` §3 C-1. Enforced by `scripts/check-invariants.sh`.
+
+Three layers, strict one-way dependency:
+
+- **Supporting layer** (`gw-core`, `gw-codec`, `gw-codec-macros`, `gw-store`, `gw-routing`, `gw-auth`, `gw-ledger`): provide generic mechanism only (IR/schema, Redis client, JWT, FreezeGuard trait, routing primitives). MUST NOT depend on any business or execution crate. MUST NOT introduce business namespaces (`mod task`, `mod billing`, vendor-specific `mod claude_code`, etc.). `gw-store` carries only the generic Entity / Counter / Append-log / Lock / Counter-Event protocols — no `task::*` / `billing::*` namespaces.
+- **Business layer** (`gw-adapter`, `gw-health`, `gw-task`): one crate per business concern. May depend on any supporting crate. Business-to-business dependencies must be registered explicitly in a spec.
+- **Execution layer** (`gw-proxy`, `gw-task-runtime`): runtime / server / binary entry points. May depend on supporting + business crates. **Execution crates MUST NOT depend on each other** — `gw-proxy ↔ gw-task-runtime` is forbidden in both directions.
+
+**Billing boundary:** the Rust gateway only *records* usage (`UsageRecord` → `usage:records` stream). The usage→cost formula and markup-chain application live entirely in Go. No Rust code path may compute cost. The `gw-billing` crate is permanently retired and must not reappear.
+
+**Hard deployment guarantee** (worker spec ADR-T16): gateway config/args/code carry no worker host/port; worker config/args/code carry no gateway host/port. The only coupling surface is a shared Redis namespace (+ KMS KEK, optional shared PgSQL). Any N-gateway × M-worker topology must work with zero peer-awareness.
