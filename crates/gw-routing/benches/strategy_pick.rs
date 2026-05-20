@@ -63,12 +63,14 @@ fn bench_strategy_pick(c: &mut Criterion) {
         model: &model,
         conversation_id: None,
         message_hash: None,
+        api_format: gw_core::protocol::ProtocolKind::OpenAi,
     };
     let ctx_with_hash = PickCtx {
         user_id: &uid,
         model: &model,
         conversation_id: Some(conv),
         message_hash: Some(0xdead_beef_dead_beef),
+        api_format: gw_core::protocol::ProtocolKind::OpenAi,
     };
 
     use gw_routing::strategy::{
