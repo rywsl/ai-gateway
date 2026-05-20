@@ -45,7 +45,6 @@ use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
 use gw_routing::in_flight::InFlightStore;
-use gw_routing::RetryConfig;
 use gw_store::{CounterStore, EntityStore};
 use std::sync::Arc;
 use std::time::Duration;
@@ -143,7 +142,6 @@ pub fn run() -> anyhow::Result<()> {
         wired.ratelimit,
         wired.ledger,
         wired.counters,
-        RetryConfig::default(),
         wired.global_rpm,
         wired.trust_xff,
     );

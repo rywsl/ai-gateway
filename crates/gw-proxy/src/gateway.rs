@@ -15,7 +15,6 @@ use gw_core::ids::{RequestId, TraceId};
 use gw_ledger::Ledger;
 use gw_health::KeyHealthStore;
 use gw_routing::in_flight::InFlightStore;
-use gw_routing::RetryConfig;
 use gw_store::{CounterStore, EntityStore};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
@@ -32,7 +31,6 @@ pub struct LlmGateway {
     pub ratelimit: Arc<RateLimitGuard>,
     pub ledger: Arc<Ledger>,
     pub counters: Arc<CounterStore>,
-    pub retry_cfg: RetryConfig,
     pub global_rpm: u32,
     /// When `true`, parse the client IP from the `X-Forwarded-For` header
     /// (using the first / left-most entry, which represents the original
@@ -51,7 +49,6 @@ impl LlmGateway {
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
-        retry_cfg: RetryConfig,
         global_rpm: u32,
         trust_xff: bool,
     ) -> Self {
@@ -62,7 +59,6 @@ impl LlmGateway {
             ratelimit,
             ledger,
             counters,
-            retry_cfg,
             global_rpm,
             trust_xff,
         }

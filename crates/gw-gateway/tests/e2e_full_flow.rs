@@ -35,7 +35,6 @@ use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
 use gw_routing::in_flight::InFlightStore;
-use gw_routing::RetryConfig;
 use gw_store::{CounterStore, EntityStore};
 
 const MIGRATION: &str = include_str!("../../gw-store/migrations/0001_initial.sql");
@@ -129,7 +128,6 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         ratelimit.clone(),
         ledger.clone(),
         counters.clone(),
-        RetryConfig::default(),
         100_000,
         false,
     );

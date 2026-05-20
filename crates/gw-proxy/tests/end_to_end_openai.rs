@@ -27,7 +27,6 @@ use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
 use gw_routing::in_flight::InFlightStore;
-use gw_routing::RetryConfig;
 use gw_store::{CounterStore, EntityStore};
 
 /// Builds a `LlmGateway` whose collaborators are all in-memory defaults.
@@ -69,12 +68,11 @@ fn llm_gateway_constructor_signature_smoke() {
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
-        retry_cfg: RetryConfig,
         global_rpm: u32,
         trust_xff: bool,
     ) -> LlmGateway {
         LlmGateway::new(
-            store, health, in_flight, ratelimit, ledger, counters, retry_cfg, global_rpm, trust_xff,
+            store, health, in_flight, ratelimit, ledger, counters, global_rpm, trust_xff,
         )
     }
     // Do not call it — `Ledger::start` would need a live Redis. We only need
