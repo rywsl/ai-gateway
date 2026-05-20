@@ -1,19 +1,20 @@
-//! gw-routing: 候选 Key 过滤、选择策略（8 种）、熔断器与重试执行器。
+//! gw-routing: 候选 Key 过滤、选择策略（8 种）、in-flight 计数与重试预算。
 //!
 //! 主要导出：
-//! - [`BreakerStore`] / [`BreakerState`] —— 30s 滑动窗口 + half-open 熔断 (ADR-008)
-//! - [`InFlightStore`] / [`InFlightCounter`] —— per-key in-flight counter
-//!   (split from `breaker` per K-A ADR-KA-8 in Phase 1c).
-//! - [`Strategy`] / [`StrategyAny`] / [`PickCtx`] —— 8 种策略 (ADR-009)
-//! - [`RetryConfig`] / [`RetryMode`] / [`RetryExecutor`] —— 重试预算与退避 (ADR-022)
+//! - [`InFlightStore`] / [`InFlightGuard`] / [`InFlightCounter`] —— per-key
+//!   in-flight counter (extracted from the retired `breaker` module per
+//!   K-A ADR-KA-8).
+//! - [`Strategy`] / [`StrategyAny`] / [`PickCtx`] —— 8 种策略 (ADR-009),
+//!   now taking `&KeyHealthStore` + `&InFlightStore` (the retired single-store
+//!   breaker is split: health → `gw-health`, in-flight → this crate).
+//! - [`RetryConfig`] / [`RetryMode`] / [`RetryExecutor`] —— 重试预算与退避
+//!   (ADR-022). Phase 4 R-E replaces this with `failover.rs`.
 
-pub mod breaker;
 pub mod candidates;
 pub mod in_flight;
 pub mod retry;
 pub mod strategy;
 
-pub use breaker::{BreakerState, BreakerStore, InFlightGuard};
-pub use in_flight::{InFlightCounter, InFlightStore};
+pub use in_flight::{InFlightCounter, InFlightGuard, InFlightStore};
 pub use retry::{RetryConfig, RetryExecutor, RetryMode};
 pub use strategy::{PickCtx, Strategy, StrategyAny};

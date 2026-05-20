@@ -11,7 +11,6 @@ gw-health = { path = "../gw-health" }
 gw-store = { path = "../gw-store" }
 serde.workspace = true
 tokio.workspace = true
-parking_lot.workspace = true
 dashmap.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
