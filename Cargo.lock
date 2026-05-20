@@ -1511,6 +1511,7 @@ dependencies = [
  "gw-auth",
  "gw-codec",
  "gw-core",
+ "gw-health",
  "gw-ledger",
  "gw-proxy",
  "gw-routing",
@@ -1531,6 +1532,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "gw-health"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "gw-core",
+ "metrics",
+ "parking_lot",
+ "tokio",
 ]
 
 [[package]]
@@ -1560,6 +1572,7 @@ dependencies = [
  "gw-auth",
  "gw-codec",
  "gw-core",
+ "gw-health",
  "gw-ledger",
  "gw-routing",
  "gw-store",
@@ -1586,6 +1599,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "gw-core",
+ "gw-health",
  "gw-store",
  "metrics",
  "parking_lot",

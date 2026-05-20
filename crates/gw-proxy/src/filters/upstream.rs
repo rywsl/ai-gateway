@@ -30,7 +30,9 @@ use gw_routing::strategy::{
     latency_first::LatencyFirst, load_balance::LoadBalance, round_robin::RoundRobin,
     sticky::Sticky, weighted_rr::WeightedRr,
 };
-use gw_routing::{BreakerStore, InFlightGuard, PickCtx, Strategy, StrategyAny};
+use gw_health::KeyHealthStore;
+use gw_routing::in_flight::{InFlightGuard, InFlightStore};
+use gw_routing::{PickCtx, Strategy, StrategyAny};
 use gw_store::EntityStore;
 use pingora::http::RequestHeader;
 use pingora::upstreams::peer::HttpPeer;
@@ -51,7 +53,7 @@ const PER_KEY_INFLIGHT_CAP: u32 = 1024;
 /// - `GW_BACKEND_UNAVAILABLE` (no model_group / vendor configured) → 503
 ///   `UpstreamError`, retryable after 5 s once an operator seeds config.
 /// - `GW_ROUTING_NO_AVAILABLE_CHANNEL` (all candidates filtered out) → 503,
-///   retryable after 5 s once breakers close or capacity frees.
+///   retryable after 5 s once the circuit closes or capacity frees.
 pub fn envelope_for(code: &'static str, message: &'static str, status: u16) -> ErrorIR<'static> {
     let category = match status {
         400..=499 => ErrorCategory::ClientBadRequest,
@@ -90,7 +92,8 @@ pub async fn pick_peer(
     session: &mut Session,
     ctx: &mut ReqCtx,
     store: &Arc<EntityStore>,
-    breakers: &Arc<BreakerStore>,
+    health: &Arc<KeyHealthStore>,
+    in_flight: &Arc<InFlightStore>,
 ) -> Result<Box<HttpPeer>> {
     // The remaining `ErrorType::Custom(...)` short-circuits in this function
     // stay as bare-500 errors (no JSON envelope) on purpose. They signal
@@ -172,7 +175,7 @@ pub async fn pick_peer(
         &model,
         client_codec_kind,
         &perm,
-        breakers,
+        in_flight,
         store,
         PER_KEY_INFLIGHT_CAP,
     )
@@ -202,7 +205,7 @@ pub async fn pick_peer(
         api_format: client_codec_kind,
     };
     let picked = strategy
-        .pick(&candidates, breakers, &pick_ctx)
+        .pick(&candidates, health, in_flight, &pick_ctx)
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?;
     let picked_arc = Arc::clone(picked);
     let vendor = match store.vendor_or_load(&picked_arc.vendor_id).await {
@@ -261,11 +264,11 @@ pub async fn pick_peer(
 
     // Install the in-flight RAII guard now that we've committed to a key.
     // The Drop impl decrements the counter on every termination path
-    // (success, error, cancel) — see `gw_routing::InFlightGuard`. This is
+    // (success, error, cancel) — see `gw_routing::in_flight::InFlightGuard`. This is
     // what makes `LoadBalance::pick` and `get_candidate_keys`'s per-key
     // in-flight cap (PER_KEY_INFLIGHT_CAP = 1024) actually observe traffic.
-    let breaker = breakers.get_or_create(&picked_arc.key_id);
-    ctx.inflight_guard = Some(InFlightGuard::new(breaker));
+    let counter = in_flight.get_or_create(&picked_arc.key_id);
+    ctx.inflight_guard = Some(InFlightGuard::new(counter));
 
     Ok(Box::new(peer))
 }

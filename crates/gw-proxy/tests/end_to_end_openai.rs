@@ -23,9 +23,11 @@
 use std::sync::Arc;
 
 use gw_auth::ratelimit::RateLimitGuard;
+use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
-use gw_routing::{BreakerStore, RetryConfig};
+use gw_routing::in_flight::InFlightStore;
+use gw_routing::RetryConfig;
 use gw_store::{CounterStore, EntityStore};
 
 /// Builds a `LlmGateway` whose collaborators are all in-memory defaults.
@@ -35,7 +37,8 @@ fn build_test_gateway() -> Option<LlmGateway> {
     // Ledger requires a RedisCtx. For v1 we skip when no redis is reachable;
     // the test is run with `--ignored` once the harness is wired.
     let _store: Arc<EntityStore> = Arc::new(EntityStore::new());
-    let _breakers: Arc<BreakerStore> = Arc::new(BreakerStore::default());
+    let _health: Arc<KeyHealthStore> = Arc::new(KeyHealthStore::default());
+    let _in_flight: Arc<InFlightStore> = Arc::new(InFlightStore::default());
     let _ratelimit: Arc<RateLimitGuard> = Arc::new(RateLimitGuard::new());
     // Building a Ledger requires Redis; we return None here so the smoke
     // build doesn't try to start one. The end_to_end_smoke test below is
@@ -61,7 +64,8 @@ fn llm_gateway_constructor_signature_smoke() {
     #[allow(clippy::too_many_arguments)]
     fn _accepts(
         store: Arc<EntityStore>,
-        breakers: Arc<BreakerStore>,
+        health: Arc<KeyHealthStore>,
+        in_flight: Arc<InFlightStore>,
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
@@ -70,7 +74,7 @@ fn llm_gateway_constructor_signature_smoke() {
         trust_xff: bool,
     ) -> LlmGateway {
         LlmGateway::new(
-            store, breakers, ratelimit, ledger, counters, retry_cfg, global_rpm, trust_xff,
+            store, health, in_flight, ratelimit, ledger, counters, retry_cfg, global_rpm, trust_xff,
         )
     }
     // Do not call it — `Ledger::start` would need a live Redis. We only need

@@ -1,14 +1,14 @@
-//! `logging` — final filter: release freeze, record breaker outcome, emit
+//! `logging` — final filter: release freeze, record key-health outcome, emit
 //! UsageRecord + DetailedLog, optionally emit debug trace.
 
 use crate::ctx::ReqCtx;
 use crate::detailed_log::{redacted_preview, DetailedLogRecord};
+use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::traits::Redactor;
+use gw_core::usage::UsageSnapshot;
+use gw_health::{KeyHealthStore, OutcomeKind};
 use gw_ledger::usage::{UsageRecord, UsageSource, UsageStatus};
 use gw_ledger::{FreezeGuard, Ledger};
-use gw_core::permissions::MarkupChainSnapshot;
-use gw_core::usage::UsageSnapshot;
-use gw_routing::BreakerStore;
 use pingora::ErrorType;
 use pingora_proxy::Session;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ pub async fn run(
     _session: &mut Session,
     err: Option<&pingora::Error>,
     ctx: &mut ReqCtx,
-    breakers: &Arc<BreakerStore>,
+    health: &Arc<KeyHealthStore>,
     ledger: &Arc<Ledger>,
 ) {
     let now = std::time::Instant::now();
@@ -97,13 +97,33 @@ pub async fn run(
     }
 
     // ---------------------------------------------------------------------
-    // Breaker bookkeeping. We treat a non-error status from upstream as
-    // success, otherwise failure. The picked key's BreakerState is fetched
-    // on demand.
+    // Key-health bookkeeping. We treat a non-error status from upstream as
+    // success, otherwise failure. The picked key's FormatHealth is fetched
+    // on demand (multi-dim: key + api_format).
     // ---------------------------------------------------------------------
     let ok = err.is_none() && matches!(ctx.upstream_status, Some(s) if (200..400).contains(&s));
     if let Some(pk) = ctx.picked_vendor_key.as_ref() {
-        breakers.get_or_create(&pk.key_id).record(ok);
+        // upstream_codec is set by upstream_request_filter (rewrite_request),
+        // which runs after pick_peer. If rewrite_request fails before
+        // committing the codec, picked_vendor_key is Some while
+        // upstream_codec is None. The OpenAi fallback here is best-effort —
+        // KeyHealthStore::record ignores api_format in v1 anyway; Phase 3
+        // K-B will need a more reliable source if it acts on per-format
+        // health.
+        let api_fmt = ctx
+            .upstream_codec
+            .as_ref()
+            .map(|c| c.kind())
+            .unwrap_or(gw_core::protocol::ProtocolKind::OpenAi);
+        let outcome = if ok {
+            OutcomeKind::Success
+        } else {
+            OutcomeKind::Failure {
+                http_status: ctx.upstream_status.unwrap_or(0),
+                retry_after_secs: None,
+            }
+        };
+        health.record(&pk.key_id, api_fmt, outcome);
     }
 
     // ---------------------------------------------------------------------
@@ -127,9 +147,12 @@ pub async fn run(
         .or_else(|| auth_user_id.clone());
     let model = ctx.model.clone();
     let picked = ctx.picked_vendor_key.as_ref();
-    if let (Some(auth_user_id), Some(effective), Some(model), Some(picked)) =
-        (auth_user_id, effective_user_id.clone(), model.clone(), picked)
-    {
+    if let (Some(auth_user_id), Some(effective), Some(model), Some(picked)) = (
+        auth_user_id,
+        effective_user_id.clone(),
+        model.clone(),
+        picked,
+    ) {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
