@@ -73,10 +73,22 @@ pub trait UrlAccessor: Send {
 }
 
 impl UrlMut<'_> {
-    pub fn scheme(&self) -> &str { self.inner.scheme() }
-    pub fn host(&self)   -> &str { self.inner.host() }
-    pub fn path(&self)   -> &str { self.inner.path() }
-    pub fn set_scheme(&mut self, s: &str) { self.inner.set_scheme(s); }
-    pub fn set_host(&mut self,   h: &str) { self.inner.set_host(h); }
-    pub fn set_path(&mut self,   p: &str) { self.inner.set_path(p); }
+    pub fn scheme(&self) -> &str {
+        self.inner.scheme()
+    }
+    pub fn host(&self) -> &str {
+        self.inner.host()
+    }
+    pub fn path(&self) -> &str {
+        self.inner.path()
+    }
+    pub fn set_scheme(&mut self, s: &str) {
+        self.inner.set_scheme(s);
+    }
+    pub fn set_host(&mut self, h: &str) {
+        self.inner.set_host(h);
+    }
+    pub fn set_path(&mut self, p: &str) {
+        self.inner.set_path(p);
+    }
 }

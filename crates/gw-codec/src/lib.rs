@@ -9,8 +9,8 @@
 //! `&[(String, String)]`. Callers in `gw-proxy` / `gw-gateway` adapt their
 //! native header types to this slice form (cheap: borrow-only).
 
-pub mod any;
 pub mod anthropic;
+pub mod any;
 pub(crate) mod common;
 pub mod gemini;
 pub mod openai;

@@ -3,7 +3,9 @@
 
 use async_trait::async_trait;
 use gw_adapter::analyzer::{ErrorOutcome, HeaderView};
-use gw_adapter::{AdapterCtx, AdapterError, AdapterRegistry, UpstreamAdapter, UpstreamErrorAnalyzer};
+use gw_adapter::{
+    AdapterCtx, AdapterError, AdapterRegistry, UpstreamAdapter, UpstreamErrorAnalyzer,
+};
 use gw_core::ids::VendorId;
 use std::sync::Arc;
 

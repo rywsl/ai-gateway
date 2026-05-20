@@ -49,7 +49,9 @@ impl UpstreamErrorAnalyzer for DefaultErrorAnalyzer {
         // Phase 1d skeleton: only the universally-safe Retry-After header
         // is parsed. Vendor-specific extraction (gemini quota headers,
         // codex headers, etc.) lands in Phase 3.
-        let retry_after_secs = headers.get("retry-after").and_then(|s| s.parse::<u32>().ok());
+        let retry_after_secs = headers
+            .get("retry-after")
+            .and_then(|s| s.parse::<u32>().ok());
         let kind = match status {
             401 | 403 => Some(ErrorKind::Authentication),
             429 => Some(ErrorKind::RateLimit),
