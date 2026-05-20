@@ -1,52 +1,41 @@
 //! OpenAI wire-format structs.
 //!
-//! `#[derive(IrConvert)]` is present for documentation/forward-compatibility:
-//! the actual `From` / `TryFrom` impls live in `via.rs` (hand-written for v1,
-//! see `gw-codec-macros/src/lib.rs` for the rationale).
+//! The actual `From` / `TryFrom` impls live in `via.rs` (hand-written for
+//! v1). Codec S1 v2 (`wire_convert_matrix!`, Phase 2) will reintroduce
+//! attribute-driven codegen at that boundary.
 
-use gw_codec_macros::IrConvert;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize, Serialize, IrConvert)]
-#[ir(target = "RequestIR", direction = "both")]
+#[derive(Debug, Deserialize, Serialize)]
 // TODO(v2): add explicit tools/tool_choice fields; for v1 they round-trip through `extra`.
 pub struct OpenAiRequest<'a> {
-    #[ir(map = "model")]
     #[serde(borrow)]
     pub model: Cow<'a, str>,
 
-    #[ir(map = "messages", via = "openai_msg_vec")]
     #[serde(borrow)]
     pub messages: Vec<OpenAiMessage<'a>>,
 
-    #[ir(map = "stream", default = "false")]
     #[serde(default)]
     pub stream: bool,
 
-    #[ir(map = "max_tokens")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
 
-    #[ir(map = "temperature")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 
-    #[ir(map = "top_p")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
 
-    #[ir(map = "stop")]
     #[serde(default, borrow, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<Cow<'a, str>>>,
 
-    #[ir(map = "metadata.openai_logit_bias")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logit_bias: Option<HashMap<String, f32>>,
 
-    #[ir(extensions)]
     #[serde(flatten)]
     pub extra: HashMap<String, Box<RawValue>>,
 }
