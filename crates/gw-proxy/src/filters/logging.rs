@@ -1,11 +1,13 @@
-//! `logging` — final filter: settle freeze, record breaker outcome, emit
-//! BillingRecord + DetailedLog, optionally emit debug trace.
+//! `logging` — final filter: release freeze, record breaker outcome, emit
+//! UsageRecord + DetailedLog, optionally emit debug trace.
 
 use crate::ctx::ReqCtx;
 use crate::detailed_log::{redacted_preview, DetailedLogRecord};
 use gw_core::traits::Redactor;
-use gw_ledger::billing::{BillingRecord, BillingStatus, UsageSource};
-use gw_ledger::Ledger;
+use gw_ledger::usage::{UsageRecord, UsageSource, UsageStatus};
+use gw_ledger::{FreezeGuard, Ledger};
+use gw_core::permissions::MarkupChainSnapshot;
+use gw_core::usage::UsageSnapshot;
 use gw_routing::BreakerStore;
 use pingora::ErrorType;
 use pingora_proxy::Session;
@@ -69,7 +71,7 @@ pub async fn run(
     // Unconditional request counter. Pingora fires `logging` for every
     // completed request, including short-circuit responses from
     // `request_filter` (4xx auth/codec/rate-limit failures). The
-    // BillingRecord/TPM emit path further down is gated on a 4-tuple of
+    // UsageRecord/TPM emit path further down is gated on a 4-tuple of
     // `Some(..)` that is only populated once routing succeeds, so without
     // this counter a gateway that has only served 401s renders an empty
     // `/metrics` body. Emit early so any request hitting the proxy lights
@@ -85,26 +87,13 @@ pub async fn run(
     .increment(1);
 
     // ---------------------------------------------------------------------
-    // Compute the real cost (micro) using ctx.usage + (optional) pricing.
-    // The freeze guard, if present, is settled with this number. If there's
-    // no pricing we charge nothing — gw-proxy defers conservative-fallback
-    // accounting to gw-ledger's flusher.
+    // Release the freeze (release-only per C-γ §ADR-Cγ-2 — Rust no longer
+    // computes cost; Go consumes usage:records and computes cost). Drop
+    // would do the same if we forgot, but we release explicitly here so
+    // the leak-metric stays clean.
     // ---------------------------------------------------------------------
-    let cost_micro = if let Some(p) = ctx.pricing.as_ref() {
-        let in_cost = ctx.usage.input_tokens as u64 * p.value.input_price_micro_per_token;
-        let out_cost = ctx.usage.output_tokens as u64 * p.value.output_price_micro_per_token;
-        let raw = in_cost + out_cost;
-        let markup = ctx
-            .merged_perm
-            .as_ref()
-            .map(|m| m.markup_product.max(1.0))
-            .unwrap_or(1.0);
-        ((raw as f32) * markup) as u64
-    } else {
-        0
-    };
     if let Some(g) = ctx.freeze_guard.as_ref() {
-        g.settle(cost_micro);
+        g.release();
     }
 
     // ---------------------------------------------------------------------
@@ -118,7 +107,7 @@ pub async fn run(
     }
 
     // ---------------------------------------------------------------------
-    // BillingRecord -> ledger.try_send.
+    // UsageRecord -> ledger.try_send.
     //
     // Payer semantics: the flusher debits `counter:user:{user_id}:balance_micro`,
     // so `user_id` MUST be the *effective payer* — that is, the parent account
@@ -153,13 +142,11 @@ pub async fn run(
             _ => None,
         };
         let is_subaccount = effective != auth_user_id;
-        let rec = BillingRecord {
+        let rec = UsageRecord {
             ts_ms: now_ms,
             request_id: ctx.request_id.0.clone(),
             trace_id: ctx.trace_id.0.clone(),
-            // PAYER — flusher debits this user's balance counter.
             user_id: effective.clone(),
-            // Request originator when it differs from the payer (sub-account).
             child_id: if is_subaccount {
                 Some(auth_user_id.clone())
             } else {
@@ -180,26 +167,22 @@ pub async fn run(
             vendor_id: picked.vendor_id.clone(),
             vendor_key_id: picked.key_id.clone(),
             status: if ok {
-                BillingStatus::Ok
+                UsageStatus::Ok
             } else {
-                BillingStatus::Error
+                UsageStatus::Error
             },
             error_code: err.map(|e| format!("{:?}", e.etype)),
             http_status: ctx.upstream_status.unwrap_or(0),
-            input_tokens: ctx.usage.input_tokens,
-            output_tokens: ctx.usage.output_tokens,
-            cached_tokens: ctx.usage.cached_tokens,
-            cost_micro,
-            freeze_amount_micro: ctx
-                .freeze_guard
-                .as_ref()
-                .map(|g| g.freeze_amount)
-                .unwrap_or(0),
-            markup_product: ctx
-                .merged_perm
-                .as_ref()
-                .map(|m| m.markup_product)
-                .unwrap_or(1.0),
+            usage: UsageSnapshot {
+                input_tokens: ctx.usage.input_tokens,
+                output_tokens: ctx.usage.output_tokens,
+                cache_read_input_tokens: ctx.usage.cached_tokens,
+                // Phase 2 (codec S4 extract_usage_any) populates the
+                // remaining three fields directly from upstream wire.
+                cache_creation_input_tokens: None,
+                thinking_tokens: None,
+                multimodal_input_tokens: None,
+            },
             usage_source: if ctx.usage.output_tokens > 0 {
                 UsageSource::Upstream
             } else {
@@ -209,6 +192,19 @@ pub async fn run(
             latency_ms,
             ttft_ms,
             is_stream: ctx.is_stream,
+            // Use the trait method (the field is pub(crate) on RequestFreeze).
+            freeze_amount_micro: ctx
+                .freeze_guard
+                .as_ref()
+                .map(|g| g.freeze_amount())
+                .unwrap_or(0),
+            // Phase 5 (C-β) sources real version from entity:estimate_pricing.
+            estimate_pricing_version: 0,
+            markup_chain_snapshot: ctx
+                .merged_perm
+                .as_ref()
+                .map(|m| m.markup_chain)
+                .unwrap_or_else(MarkupChainSnapshot::placeholder),
         };
         let _ = ledger.try_send(rec);
 

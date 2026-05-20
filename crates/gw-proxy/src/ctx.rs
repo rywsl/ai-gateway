@@ -6,7 +6,7 @@
 //! `request_filter` writes `user` / `merged_perm` / `freeze_guard`, …).
 //!
 //! Lifetime: a single `ReqCtx` lives from request acceptance through `logging`.
-//! `Drop` of the embedded [`FreezeGuard`] and [`StreamSlot`] enforces the
+//! `Drop` of the embedded [`RequestFreeze`] and [`StreamSlot`] enforces the
 //! ADR-004 freeze-rollback and ADR-024 stream-slot-release contracts even on
 //! cancellation paths.
 
@@ -18,7 +18,7 @@ use gw_core::entity::{Pricing, UserEntry, Vendor, VendorKey};
 use gw_core::ids::{ApiKeyId, ModelName, RequestId, TraceId, UserId};
 use gw_core::permissions::MergedPermissions;
 use gw_core::versioned::Versioned;
-use gw_ledger::FreezeGuard;
+use gw_ledger::RequestFreeze;
 use gw_routing::InFlightGuard;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -66,7 +66,7 @@ pub struct ReqCtx {
     // --- Lifecycle / ledger ---
     pub timing: ReqTiming,
     pub usage: UsageAccumulator,
-    pub freeze_guard: Option<FreezeGuard>,
+    pub freeze_guard: Option<RequestFreeze>,
     pub stream_slot: Option<StreamSlot>,
     pub bytes_sent_to_client: AtomicU64,
     /// RAII handle on the picked vendor key's in-flight counter. Held by the
