@@ -3,12 +3,10 @@
 //! v1 scope: `contents (role + parts.text) / systemInstruction /
 //! generationConfig.{maxOutputTokens,temperature}`.
 
-use gw_codec_macros::IrConvert;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-#[derive(Debug, Deserialize, Serialize, IrConvert)]
-#[ir(target = "RequestIR", direction = "both")]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiRequest<'a> {
     /// Gemini omits an explicit `model` field in the request body — the
@@ -18,7 +16,6 @@ pub struct GeminiRequest<'a> {
     #[serde(skip)]
     pub model: Cow<'a, str>,
 
-    #[ir(map = "messages", via = "gemini_contents")]
     #[serde(borrow)]
     pub contents: Vec<GeminiContent<'a>>,
 
