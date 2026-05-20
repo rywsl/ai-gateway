@@ -1,5 +1,8 @@
 # A-T0 — Adapter Trait v2(对齐 codec v2)（v2026-05-19）
 
+> **Integration status**: integrated by [2026-05-20-v2-integration-design.md](./2026-05-20-v2-integration-design.md). See §2 表 A / 表 B / 表 D and §3 不变量 for cross-spec resolutions and authoritative type / stream / metric locations.
+
+
 - **日期**：2026-05-19
 - **状态**：Draft(v2 重写,撤回 [2026-05-19-adapter-layer-design.md](./2026-05-19-adapter-layer-design.md) 的 ADR-A2 BodyPatch 部分)
 - **作者**：协作设计(Claude + 用户)

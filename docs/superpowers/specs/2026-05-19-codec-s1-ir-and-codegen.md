@@ -1,5 +1,8 @@
 # Codec S1 — 编译期 Schema + N² Wire 直转 Codegen（v2026-05-19，v2 重写）
 
+> **Integration status**: integrated by [2026-05-20-v2-integration-design.md](./2026-05-20-v2-integration-design.md). See §2 表 A / 表 B / 表 D and §3 不变量 for cross-spec resolutions and authoritative type / stream / metric locations.
+
+
 - **日期**：2026-05-19
 - **状态**：Draft（v2 重写，撤回 v1）
 - **作者**：协作设计（Claude + 用户）
