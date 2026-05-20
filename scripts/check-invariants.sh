@@ -84,6 +84,64 @@ else
   ok "gateway carries no worker address"
 fi
 
+# ---------------------------------------------------------------------------
+# no_cost_micro (§5.2) — Rust no longer computes cost.
+#
+# Whitelist: test absence-assertions of the form
+# `assert!(!s.contains("cost_micro"), …)` that verify the field is gone.
+# Real violations (`pub cost_micro: u64`, `.cost_micro`, etc.) still trip.
+# ---------------------------------------------------------------------------
+echo "[no_cost_micro] no cost_micro field in workspace"
+if grep -rnE '\bcost_micro\b' crates/ 2>/dev/null \
+    | grep -vE 'assert!\(!.*\.contains\("cost_micro"\)' \
+    | grep -q .
+then
+  grep -rnE '\bcost_micro\b' crates/ 2>/dev/null \
+      | grep -vE 'assert!\(!.*\.contains\("cost_micro"\)'
+  bad "cost_micro field remains"
+else
+  ok "no cost_micro field"
+fi
+
+# ---------------------------------------------------------------------------
+# NOTE: the three lints below use bare `grep ... && bad` with no exclusion
+# filter. They are clean today because no test asserts absence of these
+# names. If future test code adds `assert!(!s.contains("billing:records"))`,
+# `assert!(!s.contains("markup_product"))`, or
+# `assert!(!s.contains("FreezeGuard::settle"))`, mirror the no_cost_micro
+# whitelist pattern above to avoid a false positive.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# no_billing_records_stream (§5.2) — stream renamed to usage:records.
+# ---------------------------------------------------------------------------
+echo "[no_billing_records_stream] billing:records stream name must not appear"
+if grep -rn '"billing:records"' crates/ 2>/dev/null; then
+  bad "billing:records stream name remains"
+else
+  ok "no billing:records reference"
+fi
+
+# ---------------------------------------------------------------------------
+# no_freezeguard_settle (§5.2) — FreezeGuard::release replaces settle.
+# ---------------------------------------------------------------------------
+echo "[no_freezeguard_settle] FreezeGuard::settle must be absent"
+if grep -rnE '\.settle\(.*actual|FreezeGuard::settle\(' crates/ 2>/dev/null; then
+  bad "FreezeGuard::settle remains"
+else
+  ok "no FreezeGuard::settle reference"
+fi
+
+# ---------------------------------------------------------------------------
+# no_markup_product_scalar (§5.2) — MergedPermissions field is markup_chain.
+# ---------------------------------------------------------------------------
+echo "[no_markup_product_scalar] markup_product scalar must be absent"
+if grep -rnE '\bmarkup_product\b' crates/ 2>/dev/null; then
+  bad "markup_product scalar remains"
+else
+  ok "no markup_product reference"
+fi
+
 # ===========================================================================
 # PENDING lints — target code has not landed yet. Uncomment in the named phase.
 # ===========================================================================
@@ -96,18 +154,6 @@ fi
 #
 # # no_legacy_breaker (Phase 1c: gw-health replaces breaker.rs)
 # grep -rnE '\bBreakerState\b|\bBreakerStore\b' crates/ && bad "breaker types remain outside gw-health"
-#
-# # no_cost_micro (Phase 1b: UsageRecord drops cost_micro)
-# grep -rnE '\bcost_micro\b' crates/ && bad "cost_micro field remains"
-#
-# # no_billing_records_stream (Phase 5: C-α renames stream to usage:records)
-# grep -rn '"billing:records"' crates/ && bad "billing:records stream name remains"
-#
-# # no_freezeguard_settle (Phase 1b: FreezeGuard::release replaces settle)
-# grep -rnE '\.settle\(.*actual|FreezeGuard::settle\(' crates/ && bad "FreezeGuard::settle remains"
-#
-# # no_markup_product_scalar (Phase 5: MarkupChainSnapshot replaces markup_product)
-# grep -rnE '\bmarkup_product\b' crates/ && bad "markup_product scalar remains"
 #
 # # no_patch_body (Phase 1c: adapter trait v2 has no patch_body / BodyPatch)
 # grep -rnE '\bfn patch_body\b|\bBodyPatch::' crates/ && bad "patch_body / BodyPatch remains"

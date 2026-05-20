@@ -110,7 +110,7 @@ mod tests {
             markup_chain_snapshot: MarkupChainSnapshot::placeholder(),
         };
         let s = serde_json::to_string(&rec).unwrap();
-        // Smoke: critical fields appear, cost_micro is GONE.
+        // Smoke: critical fields appear; the retired field is GONE.
         assert!(s.contains("\"usage\""));
         assert!(s.contains("\"input_tokens\":100"));
         assert!(s.contains("\"markup_chain_snapshot\""));
