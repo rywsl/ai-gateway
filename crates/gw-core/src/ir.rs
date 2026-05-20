@@ -242,4 +242,72 @@ impl Mutations {
     pub fn set_tools(&mut self) {
         self.fields |= 1 << 3;
     }
+    pub fn set_system_prompt(&mut self) {
+        self.fields |= 1 << 4;
+    }
+    pub fn set_messages(&mut self) {
+        self.fields |= 1 << 5;
+    }
+    pub fn set_thinking_config(&mut self) {
+        self.fields |= 1 << 6;
+    }
+    pub fn set_response_format(&mut self) {
+        self.fields |= 1 << 7;
+    }
+    pub fn set_stream(&mut self) {
+        self.fields |= 1 << 8;
+    }
+}
+
+#[cfg(test)]
+mod mutations_bits_tests {
+    use super::Mutations;
+
+    #[test]
+    fn empty_by_default() {
+        let m = Mutations::default();
+        assert!(m.is_empty());
+        assert_eq!(m.fields, 0);
+    }
+
+    #[test]
+    fn each_setter_uses_a_distinct_bit() {
+        let mut bits = std::collections::HashSet::new();
+        for (name, setter) in setters() {
+            let mut m = Mutations::default();
+            setter(&mut m);
+            assert!(!m.is_empty(), "{name} did not flip any bit");
+            assert!(
+                m.fields.count_ones() == 1,
+                "{name} flipped more than one bit"
+            );
+            assert!(
+                bits.insert(m.fields),
+                "{name} flipped a bit another setter already owns"
+            );
+        }
+    }
+
+    #[test]
+    fn setters_are_idempotent() {
+        let mut m = Mutations::default();
+        m.set_max_tokens();
+        m.set_max_tokens();
+        assert_eq!(m.fields.count_ones(), 1);
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setters() -> Vec<(&'static str, fn(&mut Mutations))> {
+        vec![
+            ("max_tokens",      Mutations::set_max_tokens),
+            ("temperature",     Mutations::set_temperature),
+            ("metadata",        Mutations::set_metadata),
+            ("tools",           Mutations::set_tools),
+            ("system_prompt",   Mutations::set_system_prompt),
+            ("messages",        Mutations::set_messages),
+            ("thinking_config", Mutations::set_thinking_config),
+            ("response_format", Mutations::set_response_format),
+            ("stream",          Mutations::set_stream),
+        ]
+    }
 }
