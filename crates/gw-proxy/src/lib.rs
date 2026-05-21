@@ -9,6 +9,7 @@
 
 pub mod ctx;
 pub mod detailed_log;
+pub mod error;
 pub mod error_emit;
 pub mod filters;
 pub mod gateway;

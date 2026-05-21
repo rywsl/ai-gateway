@@ -3,3 +3,8 @@
 //! / safe_dns / target_filter and the WebSocket transport (T3-G).
 
 pub mod frame;
+pub mod pool;
+pub mod resolver;
+pub mod safe_dns;
+pub mod target_filter;
+pub mod transport;

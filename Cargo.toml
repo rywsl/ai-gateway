@@ -71,6 +71,9 @@ hex = "0.4"
 brotli = "7"
 flate2 = "1"
 regex = "1"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls", "tokio-runtime"] }
 
 # 可观测
 tracing = "0.1"

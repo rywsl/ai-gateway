@@ -2,6 +2,7 @@
 //! (ADR-004 + C-γ §ADR-Cγ-2), mpsc-backed usage-record flusher with Redis
 //! pipeline, and detailed-log sink trait.
 
+pub mod detailed_stream;
 pub mod flusher;
 pub mod freeze;
 pub mod log_sink;
