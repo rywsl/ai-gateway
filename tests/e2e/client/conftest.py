@@ -21,11 +21,67 @@ scenario files start hitting a live gateway with pair-header auth.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from typing import Any, Optional
 
+import httpx
 import pytest
 import requests
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+
+# ---------------------------------------------------------------------------
+# Crypto / encoding helpers (used by E3-B+ scenarios to seed vendor_keys +
+# api_keys against the gateway's KEK + sha256 contracts).
+#
+# The gateway decrypts vendor-key plaintext at load-time using AES-256-GCM
+# with the KEK indexed by `kek_kid`. The default KEK_HEX matches the value
+# the docker-compose stack injects into the gateway container; override via
+# the GW_KEK_HEX env var for one-off testing against a custom-KEK deployment.
+# ---------------------------------------------------------------------------
+
+
+KEK_HEX = os.environ.get("GW_KEK_HEX", "deadbeef" * 8)
+
+
+def sha256_bytes(plaintext: str) -> list[int]:
+    """Return the 32 raw bytes of sha256(plaintext) as a list of ints.
+
+    The api_keys row stores `hash` as `Vec<u8>` — serde_json deserializes
+    Vec<u8> from a JSON array of integers (NOT base64, NOT hex). This
+    helper produces the exact shape `serde_json` accepts.
+    """
+    return list(hashlib.sha256(plaintext.encode("utf-8")).digest())
+
+
+def encrypt_upstream_key(
+    plaintext: str,
+    kek_hex: str = KEK_HEX,
+    kek_kid: str = "primary",
+) -> dict:
+    """Encrypt an upstream vendor key into the gateway's `EncryptedKey` shape.
+
+    AES-256-GCM with a fresh 12-byte nonce, NO associated data. The
+    `cryptography` library returns `ciphertext || tag` (last 16 bytes are
+    the tag) — the gateway expects them stored separately, so we split.
+    All byte vectors are emitted as JSON arrays of ints to satisfy serde's
+    `Vec<u8>` deserializer.
+    """
+    kek_bytes = bytes.fromhex(kek_hex)
+    if len(kek_bytes) != 32:
+        raise ValueError(
+            f"KEK must decode to 32 bytes (got {len(kek_bytes)}); check GW_KEK_HEX"
+        )
+    nonce = os.urandom(12)
+    out = AESGCM(kek_bytes).encrypt(nonce, plaintext.encode("utf-8"), None)
+    ciphertext, auth_tag = out[:-16], out[-16:]
+    return {
+        "ciphertext": list(ciphertext),
+        "nonce": list(nonce),
+        "auth_tag": list(auth_tag),
+        "kek_kid": kek_kid,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -320,3 +376,435 @@ def isolate_state(
     fake_web.reset()
     fake_upstream.reset_scenario()
     yield
+
+
+# ---------------------------------------------------------------------------
+# SDK client builders (pair-auth: x-api-key + x-api-key-id, NEVER Bearer).
+#
+# Gateway auth precedence (crates/gw-proxy/src/filters/request.rs):
+#   if Authorization: Bearer present -> JWT path (will FAIL for an api key);
+#   else if x-api-key-id AND x-api-key present -> pair api-key auth.
+# So every helper here must guarantee NO Authorization header reaches the
+# gateway, and MUST send the pair.
+# ---------------------------------------------------------------------------
+
+
+def _pair_auth_request_hook(api_key: str, key_id: str):
+    """httpx event hook that strips any Authorization header the SDK may
+    have attached and sets the gateway's pair-auth headers in its place."""
+
+    def _hook(request: "httpx.Request") -> None:  # type: ignore[name-defined]
+        # delete any flavor of "authorization" the SDK injected
+        for h in list(request.headers.keys()):
+            if h.lower() == "authorization":
+                del request.headers[h]
+        request.headers["x-api-key"] = api_key
+        request.headers["x-api-key-id"] = key_id
+
+    return _hook
+
+
+def make_openai_client(gateway_url: str, api_key: str, key_id: str):
+    """openai.OpenAI() pointed at the gateway with pair-auth.
+
+    The openai SDK ALWAYS sends `Authorization: Bearer <api_key>`. The
+    request-hook below deletes that header and substitutes the gateway's
+    pair. `api_key="unused"` keeps the SDK's local validation happy.
+    """
+    import openai  # local import so test collection works even if SDK missing
+
+    transport = httpx.Client(
+        event_hooks={"request": [_pair_auth_request_hook(api_key, key_id)]},
+        timeout=30.0,
+    )
+    return openai.OpenAI(
+        base_url=f"{gateway_url.rstrip('/')}/v1",
+        api_key="unused",
+        http_client=transport,
+        max_retries=0,
+    )
+
+
+def make_anthropic_client(gateway_url: str, api_key: str, key_id: str):
+    """anthropic.Anthropic() pointed at the gateway with pair-auth.
+
+    The anthropic SDK natively sends `x-api-key: <api_key>` and does NOT
+    set Authorization, so we'd ordinarily only need `default_headers` for
+    x-api-key-id. To be defensive against future SDK changes (and tool
+    polyfills that may inject Authorization), we install the same strip
+    hook used for openai.
+    """
+    import anthropic
+
+    transport = httpx.Client(
+        event_hooks={"request": [_pair_auth_request_hook(api_key, key_id)]},
+        timeout=30.0,
+    )
+    return anthropic.Anthropic(
+        base_url=gateway_url.rstrip("/"),
+        api_key=api_key,
+        default_headers={"x-api-key-id": key_id},
+        http_client=transport,
+        max_retries=0,
+    )
+
+
+def make_gemini_client(gateway_url: str, api_key: str, key_id: str):
+    """google-genai Client pointed at the gateway with pair-auth.
+
+    The google-genai SDK sends `x-goog-api-key` by default (Authorization
+    is NOT set). The gateway ignores `x-goog-api-key`, so we override
+    `http_options.headers` with the pair AND we strip Authorization
+    defensively via the SDK's own header dict (it doesn't expose request
+    hooks). Per ADR-E3-B-1 in the spec, we have the option of dropping
+    the SDK and driving Gemini with raw httpx — but the SDK path is
+    preferred for symmetry with the other two scenarios.
+    """
+    from google import genai
+    from google.genai import types
+
+    http_opts = types.HttpOptions(
+        base_url=gateway_url.rstrip("/"),
+        headers={
+            "x-api-key": api_key,
+            "x-api-key-id": key_id,
+        },
+    )
+    # api_key kw must be set (SDK validates), but we override headers above.
+    return genai.Client(api_key=api_key, http_options=http_opts)
+
+
+# ---------------------------------------------------------------------------
+# Entity-row seeding primitives. Each function writes EXACTLY ONE row to the
+# fake control plane in the shape that crates/gw-store/src/loader.rs (and
+# crates/gw-core/src/entity.rs) deserialize. They are intentionally composable
+# so future scenario suites (E4-C multi-key/non-fixed-strategy, E4-D
+# cross-protocol with protocol_conversion=true, E4-A/B negative auth paths)
+# can build on them without copy-pasting payloads.
+#
+# Defaults intentionally mirror the happy-path values that the original
+# inline `seed_passthrough` body used, so the byte-for-byte payload shape
+# the gateway sees is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def seed_user_apikey(
+    fake_web: "FakeWebClient",
+    *,
+    user_id: str,
+    api_key_id: str,
+    api_key_plaintext: str,
+    allowed_groups: list[str],
+    # ---- user-row knobs (E4-A/B will flex these) -------------------------
+    parent_id: Optional[str] = None,
+    tier: str = "standard",
+    user_status: str = "active",
+    allowed_models: Optional[list[str]] = None,
+    allowed_channels: Optional[list[str]] = None,
+    rpm_limit: int = 1000,
+    tpm_limit: int = 0,
+    max_concurrent_streams: int = 100,
+    daily_quota_tokens: int = 0,
+    user_group_ids: Optional[list[str]] = None,
+    user_markup: float = 1.0,
+    debug_enabled: bool = False,
+    # ---- api_key-row knobs (E4-A/B negative paths) -----------------------
+    api_key_status: str = "active",
+    api_key_allowed_models: Optional[list[str]] = None,
+    api_key_allowed_channels: Optional[list[str]] = None,
+    api_key_rpm_limit: int = 0,
+    api_key_tpm_limit: int = 0,
+    api_key_markup: float = 1.0,
+    ip_allowlist: Optional[list[str]] = None,
+    expires_at: Optional[str] = None,
+    signature_required: bool = False,
+    signature_algo: str = "hmac_sha256",
+    force_capabilities: Optional[list[str]] = None,
+    match_mode_exclusive: bool = False,
+) -> None:
+    """Write the `users` and `api_keys` rows for one pair-auth principal.
+
+    All non-defaulted knobs default to the happy-path values; flex the
+    expiry / ip_allowlist / signature_required / daily_quota_tokens
+    arguments to exercise the E4-A/B negative-path scenarios.
+    """
+    fake_web.put_entity(
+        "users",
+        user_id,
+        {
+            "user_id": user_id,
+            "parent_id": parent_id,
+            "tier": tier,
+            "status": user_status,
+            "allowed_models": allowed_models if allowed_models is not None else [],
+            "allowed_channels": (
+                allowed_channels if allowed_channels is not None else []
+            ),
+            "allowed_groups": allowed_groups,
+            "rpm_limit": rpm_limit,
+            "tpm_limit": tpm_limit,
+            "max_concurrent_streams": max_concurrent_streams,
+            "daily_quota_tokens": daily_quota_tokens,
+            "user_group_ids": user_group_ids if user_group_ids is not None else [],
+            "markup": user_markup,
+            "debug_enabled": debug_enabled,
+        },
+    )
+    fake_web.put_entity(
+        "api_keys",
+        api_key_id,
+        {
+            "key_id": api_key_id,
+            "user_id": user_id,
+            "status": api_key_status,
+            "hash": sha256_bytes(api_key_plaintext),
+            "allowed_models": (
+                api_key_allowed_models if api_key_allowed_models is not None else []
+            ),
+            "allowed_channels": (
+                api_key_allowed_channels
+                if api_key_allowed_channels is not None
+                else []
+            ),
+            "rpm_limit": api_key_rpm_limit,
+            "tpm_limit": api_key_tpm_limit,
+            "markup": api_key_markup,
+            "ip_allowlist": ip_allowlist,
+            "expires_at": expires_at,
+            "signature_required": signature_required,
+            "signature_algo": signature_algo,
+            "force_capabilities": (
+                force_capabilities if force_capabilities is not None else []
+            ),
+            "match_mode_exclusive": match_mode_exclusive,
+        },
+    )
+
+
+def seed_vendor(
+    fake_web: "FakeWebClient",
+    *,
+    vendor_id: str,
+    base_urls: Optional[list[str]] = None,
+    display_name: Optional[str] = None,
+    auth_template: str = "Bearer {api_key}",
+    timeout_overrides: Optional[dict] = None,
+    default_proxy: Optional[str] = None,
+) -> None:
+    """Write a single `vendors` row.
+
+    `base_urls` defaults to `["http://fake-upstream:9000"]` (the docker-compose
+    in-network DNS name for the fake upstream's business port).
+    `display_name` defaults to `vendor_id` to match the happy-path payload.
+    """
+    fake_web.put_entity(
+        "vendors",
+        vendor_id,
+        {
+            "id": vendor_id,
+            "display_name": display_name if display_name is not None else vendor_id,
+            "base_urls": (
+                base_urls if base_urls is not None else ["http://fake-upstream:9000"]
+            ),
+            "auth_template": auth_template,
+            "timeout_overrides": timeout_overrides,
+            "default_proxy": default_proxy,
+        },
+    )
+
+
+def seed_vendor_key(
+    fake_web: "FakeWebClient",
+    *,
+    key_id: str,
+    vendor_id: str,
+    model: str,
+    accessible_endpoints: list[str],
+    upstream_key: str = "sk-up",
+    protocol_conversion: bool = False,
+    status: str = "active",
+    forced_capabilities: Optional[list[str]] = None,
+    exclusive_capability_match: bool = False,
+    weight: int = 1,
+    priority: int = 0,
+    accessible_models: Optional[list[str]] = None,
+    model_mapping: Optional[dict] = None,
+    rpm_limit: int = 0,
+    tpm_limit: int = 0,
+    max_usage_count: Optional[int] = None,
+    proxy: Optional[str] = None,
+    ip_allowlist: Optional[list[str]] = None,
+    expires_at: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+) -> None:
+    """Write a single `vendor_keys` row.
+
+    `accessible_endpoints` is REQUIRED — callers pass `["open_ai"]`,
+    `["anthropic"]`, `["gemini"]`, or (for E4-D cross-protocol) any
+    combination thereof. `accessible_models` defaults to `[model]` to
+    match the happy-path payload; pass an explicit list to widen.
+    """
+    fake_web.put_entity(
+        "vendor_keys",
+        key_id,
+        {
+            "key_id": key_id,
+            "vendor_id": vendor_id,
+            "api_key_enc": encrypt_upstream_key(upstream_key),
+            "accessible_models": (
+                accessible_models if accessible_models is not None else [model]
+            ),
+            "model_mapping": model_mapping if model_mapping is not None else {},
+            "accessible_endpoints": accessible_endpoints,
+            "protocol_conversion": protocol_conversion,
+            "priority": priority,
+            "weight": weight,
+            "rpm_limit": rpm_limit,
+            "tpm_limit": tpm_limit,
+            "max_usage_count": max_usage_count,
+            "proxy": proxy,
+            "ip_allowlist": ip_allowlist,
+            "expires_at": expires_at,
+            "status": status,
+            "tags": tags if tags is not None else [],
+            "forced_capabilities": (
+                forced_capabilities if forced_capabilities is not None else []
+            ),
+            "exclusive_capability_match": exclusive_capability_match,
+        },
+    )
+
+
+def seed_model_group(
+    fake_web: "FakeWebClient",
+    *,
+    group: str,
+    vendor_key_ids: list[str],
+    strategy: str = "fixed_order",
+    cross_vendor_fallback: bool = False,
+    max_tokens_cap: Optional[int] = None,
+    default_params: Optional[dict] = None,
+    forced_params: Optional[dict] = None,
+) -> None:
+    """Write a single `model_groups` row.
+
+    `vendor_key_ids` is a list because E4-C will register multiple keys
+    under one group and switch `strategy` to `round_robin` / `weighted_rr` /
+    `load_balance` / etc.
+    """
+    fake_web.put_entity(
+        "model_groups",
+        group,
+        {
+            "group": group,
+            "strategy": strategy,
+            "cross_vendor_fallback": cross_vendor_fallback,
+            "max_tokens_cap": max_tokens_cap,
+            "default_params": default_params if default_params is not None else {},
+            "forced_params": forced_params if forced_params is not None else {},
+            "vendor_key_ids": vendor_key_ids,
+        },
+    )
+
+
+def seed_pricing(
+    fake_web: "FakeWebClient",
+    *,
+    model: str,
+    input_micro: int = 30000,
+    output_micro: int = 60000,
+    max_output: int = 4096,
+    model_markup: float = 1.0,
+    connect_timeout_ms: Optional[int] = None,
+    read_timeout_ms: Optional[int] = None,
+    total_timeout_ms: Optional[int] = None,
+    stream_total_timeout_ms: Optional[int] = None,
+) -> None:
+    """Write a single `pricings` row. Defaults match a typical chat model
+    (30k/60k micro-units per token, 4096 max output)."""
+    fake_web.put_entity(
+        "pricings",
+        model,
+        {
+            "model": model,
+            "input_price_micro_per_token": input_micro,
+            "output_price_micro_per_token": output_micro,
+            "max_output": max_output,
+            "model_markup": model_markup,
+            "connect_timeout_ms": connect_timeout_ms,
+            "read_timeout_ms": read_timeout_ms,
+            "total_timeout_ms": total_timeout_ms,
+            "stream_total_timeout_ms": stream_total_timeout_ms,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# seed_passthrough — thin composition over the primitives above for the
+# happy-path one-key same-protocol case. The signature and resulting
+# payloads are IDENTICAL to the pre-refactor inline version, so the E3-B
+# happy-path tests are unaffected. New scenario suites (E4-C / E4-D) that
+# need multiple keys, alternate strategies, or cross-protocol endpoints
+# should call the primitives directly instead of extending this helper.
+# ---------------------------------------------------------------------------
+
+
+def seed_passthrough(
+    fake_web: "FakeWebClient",
+    *,
+    protocol: str,
+    model: str,
+    group: str,
+    vendor_id: str,
+    key_id: str,
+    user_id: str,
+    api_key_id: str,
+    api_key_plaintext: str,
+    upstream_key: str = "sk-up",
+    base_url: str = "http://fake-upstream:9000",
+) -> dict:
+    """Seed users + api_keys + vendor + vendor_key + model_group + pricing
+    so a pair-auth request for `model` over `protocol` routes to `base_url`.
+
+    `protocol` must be the snake_case ProtocolKind variant the gateway
+    expects: `open_ai`, `anthropic`, or `gemini` (NOT `openai` — see
+    serde rename_all="snake_case" on `gw_core::protocol::ProtocolKind`).
+    The string is passed straight through to `accessible_endpoints`.
+
+    Returns a small dict of the ids that were seeded for the caller's
+    convenience.
+    """
+    seed_user_apikey(
+        fake_web,
+        user_id=user_id,
+        api_key_id=api_key_id,
+        api_key_plaintext=api_key_plaintext,
+        allowed_groups=[group],
+    )
+    seed_vendor(fake_web, vendor_id=vendor_id, base_urls=[base_url])
+    seed_vendor_key(
+        fake_web,
+        key_id=key_id,
+        vendor_id=vendor_id,
+        model=model,
+        accessible_endpoints=[protocol],
+        upstream_key=upstream_key,
+        protocol_conversion=False,
+    )
+    seed_model_group(
+        fake_web,
+        group=group,
+        vendor_key_ids=[key_id],
+        strategy="fixed_order",
+    )
+    seed_pricing(fake_web, model=model)
+
+    return {
+        "user_id": user_id,
+        "api_key_id": api_key_id,
+        "api_key_plaintext": api_key_plaintext,
+        "vendor_id": vendor_id,
+        "key_id": key_id,
+        "group": group,
+        "model": model,
+    }
