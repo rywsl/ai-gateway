@@ -21,7 +21,7 @@ use crate::timeouts::Timeouts;
 use bytes::BytesMut;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
-use gw_core::entity::{ModelGroup, StrategyKind};
+use gw_core::entity::{ModelGroup, Pricing, StrategyKind, TimeoutSpec, Vendor};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::Mutations;
 use gw_routing::candidates::get_candidate_keys;
@@ -238,21 +238,23 @@ pub async fn pick_peer(
     let mut peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host);
 
     // -------------------------------------------------------------
-    // Timeouts. Pricing-supplied overrides take precedence over the
-    // generic defaults.
+    // Timeouts (G4). Ladder: hardcoded default < Vendor.timeout_overrides
+    // < Pricing timeouts. `apply_timeout_precedence` composes the effective
+    // TimeoutSpec; absent fields fall through to `default_for_nonstream`.
     // -------------------------------------------------------------
     let mut t = Timeouts::default_for_nonstream();
     if let Some(p) = ctx.pricing.as_ref() {
-        if let Some(ms) = p.value.connect_timeout_ms {
+        let eff = apply_timeout_precedence(&vendor.value, &p.value);
+        if let Some(ms) = eff.connect_ms {
             t.connect = std::time::Duration::from_millis(ms as u64);
         }
-        if let Some(ms) = p.value.read_timeout_ms {
+        if let Some(ms) = eff.read_ms {
             t.read = std::time::Duration::from_millis(ms as u64);
         }
-        if let Some(ms) = p.value.total_timeout_ms {
+        if let Some(ms) = eff.total_ms {
             t.total = std::time::Duration::from_millis(ms as u64);
         }
-        if let Some(ms) = p.value.stream_total_timeout_ms {
+        if let Some(ms) = eff.stream_total_ms {
             t.stream_total = std::time::Duration::from_millis(ms as u64);
         }
     }
@@ -271,6 +273,42 @@ pub async fn pick_peer(
     ctx.inflight_guard = Some(InFlightGuard::new(counter));
 
     Ok(Box::new(peer))
+}
+
+/// G4 — compose effective `TimeoutSpec` from default ← `Vendor.timeout_overrides`
+/// ← `Pricing` timeouts. Pricing wins because it's the most specific (per-model);
+/// Vendor wins over defaults because operators typically tune at the vendor level.
+/// All four fields are independently overlayed; absent fields fall through to the
+/// next-lower rung (and ultimately to `Timeouts::default_for_nonstream`).
+pub fn apply_timeout_precedence(vendor: &Vendor, pricing: &Pricing) -> TimeoutSpec {
+    let mut eff = TimeoutSpec::default();
+    if let Some(v) = vendor.timeout_overrides.as_ref() {
+        if let Some(x) = v.connect_ms {
+            eff.connect_ms = Some(x);
+        }
+        if let Some(x) = v.read_ms {
+            eff.read_ms = Some(x);
+        }
+        if let Some(x) = v.total_ms {
+            eff.total_ms = Some(x);
+        }
+        if let Some(x) = v.stream_total_ms {
+            eff.stream_total_ms = Some(x);
+        }
+    }
+    if let Some(x) = pricing.connect_timeout_ms {
+        eff.connect_ms = Some(x);
+    }
+    if let Some(x) = pricing.read_timeout_ms {
+        eff.read_ms = Some(x);
+    }
+    if let Some(x) = pricing.total_timeout_ms {
+        eff.total_ms = Some(x);
+    }
+    if let Some(x) = pricing.stream_total_timeout_ms {
+        eff.stream_total_ms = Some(x);
+    }
+    eff
 }
 
 fn strategy_for(kind: StrategyKind) -> StrategyAny {
