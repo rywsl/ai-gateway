@@ -137,19 +137,11 @@ impl ProxyHttp for LlmGateway {
         ReqCtx::new(trace, req)
     }
 
-    async fn early_request_filter(
-        &self,
-        session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<()> {
+    async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
         filters::early::run(session, ctx, &self.store, &self.ratelimit, self.trust_xff).await
     }
 
-    async fn request_filter(
-        &self,
-        session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<bool> {
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         filters::request::run(
             session,
             ctx,
@@ -159,6 +151,7 @@ impl ProxyHttp for LlmGateway {
             self.global_rpm,
             self.trust_xff,
             self.jwt_validator.as_ref(),
+            self.capability_resolver.as_ref(),
         )
         .await
     }
@@ -316,8 +309,15 @@ impl ProxyHttp for LlmGateway {
         err: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
-        filters::logging::run(session, err, ctx, &self.health, &self.ledger, &self.counters)
-            .await;
+        filters::logging::run(
+            session,
+            err,
+            ctx,
+            &self.health,
+            &self.ledger,
+            &self.counters,
+        )
+        .await;
     }
 
     /// Silence pingora's own ERROR-level log for the gateway's intentional

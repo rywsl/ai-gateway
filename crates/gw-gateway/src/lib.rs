@@ -192,12 +192,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let kek_cache = kms::init(cfg).await.context("KMS init failed")?;
 
     // 2. Storage clients.
-    let redis = gw_store::redis_client::RedisCtx::connect(
-        cfg.redis.url_str(),
-        cfg.redis.pool_size,
-    )
-    .await
-    .context("redis connect failed")?;
+    let redis = gw_store::redis_client::RedisCtx::connect(cfg.redis.url_str(), cfg.redis.pool_size)
+        .await
+        .context("redis connect failed")?;
 
     let pg = gw_store::pg_client::connect(cfg.pgsql.url_str(), cfg.pgsql.max_connections)
         .await
@@ -272,37 +269,42 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // available. Absent → validator stays None and request_filter falls back
     // to the legacy `verify_jwt` so deployments without AuthConfig keep
     // working with v1 semantics (exp-only, JWKS-by-kid).
-    let jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>> = match store
-        .auth_config_or_load("global")
-        .await
-    {
-        Some(cfg_v) => {
-            let vcfg = gw_auth::jwt::JwtValidatorConfig {
-                static_secret_hs256: cfg_v.value.static_secret_hs256.clone(),
-                static_pem_rs256: cfg_v.value.static_pem_rs256.clone(),
-                expected_iss: cfg_v.value.expected_iss.clone(),
-                expected_aud: cfg_v.value.expected_aud.clone(),
-                leeway_secs: cfg_v.value.leeway_secs,
-                require_nbf: cfg_v.value.require_nbf,
-            };
-            let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
-            v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
-                store: store.clone(),
-            }));
-            tracing::info!(
-                target: "gw_gateway",
-                "JwtValidator wired from AuthConfig.global (G6, T1-E)"
-            );
-            Some(Arc::new(v))
-        }
-        None => {
-            tracing::info!(
-                target: "gw_gateway",
-                "AuthConfig.global absent; client-bearer JWT path stays on legacy verify_jwt"
-            );
-            None
-        }
-    };
+    let jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>> =
+        match store.auth_config_or_load("global").await {
+            Some(cfg_v) => {
+                let vcfg = gw_auth::jwt::JwtValidatorConfig {
+                    static_secret_hs256: cfg_v.value.static_secret_hs256.clone(),
+                    static_pem_rs256: cfg_v.value.static_pem_rs256.clone(),
+                    expected_iss: cfg_v.value.expected_iss.clone(),
+                    expected_aud: cfg_v.value.expected_aud.clone(),
+                    leeway_secs: cfg_v.value.leeway_secs,
+                    require_nbf: cfg_v.value.require_nbf,
+                };
+                let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
+                v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
+                    store: store.clone(),
+                }));
+                tracing::info!(
+                    target: "gw_gateway",
+                    "JwtValidator wired from AuthConfig.global (G6, T1-E)"
+                );
+                Some(Arc::new(v))
+            }
+            None => {
+                tracing::info!(
+                    target: "gw_gateway",
+                    "AuthConfig.global absent; client-bearer JWT path stays on legacy verify_jwt"
+                );
+                None
+            }
+        };
+
+    // G13 (T3-C) — production capability resolver backed by the EntityStore.
+    // `Model.capabilities` / `ApiKeyEntry.force_capabilities` /
+    // `ApiKeyEntry.match_mode_exclusive` drive the resolved requirement set.
+    let capability_resolver = Some(Arc::new(gw_capability::CapabilityResolver::new(Arc::new(
+        gw_capability::EntityStoreResolveBackend::new(store.clone()),
+    ))));
 
     Ok(Wired {
         store,
@@ -315,8 +317,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         trust_xff: cfg.security.trust_xff,
         business_port: cfg.server.business_port,
         jwt_validator,
-        // Wave 1+ placeholder. T3-C wires `capability_resolver`.
         strategies: Arc::new(gw_routing::strategy::set::StrategySet::new_default()),
-        capability_resolver: None,
+        capability_resolver,
     })
 }

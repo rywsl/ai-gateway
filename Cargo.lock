@@ -1696,6 +1696,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "dashmap",
+ "gw-capability",
  "gw-core",
  "gw-health",
  "gw-store",

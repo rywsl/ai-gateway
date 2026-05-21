@@ -93,6 +93,7 @@ async fn empty_blacklist_no_op() {
         &store,
         1024,
         &[],
+        None,
     )
     .await;
     let ids: Vec<&str> = out.iter().map(|k| k.key_id.as_ref()).collect();
@@ -115,6 +116,7 @@ async fn blacklisted_key_filtered() {
         &store,
         1024,
         &blacklist,
+        None,
     )
     .await;
     let ids: Vec<&str> = out.iter().map(|k| k.key_id.as_ref()).collect();
@@ -137,6 +139,7 @@ async fn all_blacklisted_returns_empty() {
         &store,
         1024,
         &blacklist,
+        None,
     )
     .await;
     assert!(out.is_empty());

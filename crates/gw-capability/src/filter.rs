@@ -49,6 +49,51 @@ impl CapabilityFilter {
     }
 }
 
+/// Parse a slice of capability name strings (as stored on `VendorKey` /
+/// `ApiKeyEntry`) into the typed [`Capability`] set. Unknown names collapse to
+/// `Capability::Tagged` via the shared resolver parser.
+pub fn parse_capabilities<S: AsRef<str>>(names: &[S]) -> Vec<Capability> {
+    names
+        .iter()
+        .map(|s| crate::resolver::parse_capability(s.as_ref()))
+        .collect()
+}
+
+/// Pure capability match for a routing candidate (G13, ADR-G13-2). No ReDoS /
+/// ApiKey-disable check (that lives on the ApiKey-keyed [`CapabilityFilter`]);
+/// this operates purely on the candidate channel's advertised capability set.
+///
+/// Semantics:
+/// - A candidate with an **empty** advertised set is non-restrictive: it
+///   matches any requirement set.
+/// - Otherwise every required cap must be present in `candidate_caps`
+///   (Compatible mode).
+/// - In `Exclusive` mode the candidate must additionally advertise **no** cap
+///   outside the required set (exact-match channels).
+pub fn candidate_matches(
+    required: &RequiredCapabilities,
+    candidate_caps: &[Capability],
+    candidate_exclusive: bool,
+) -> bool {
+    if candidate_caps.is_empty() {
+        return true;
+    }
+    for c in &required.set {
+        if !candidate_caps.contains(c) {
+            return false;
+        }
+    }
+    let exclusive = candidate_exclusive || required.mode == MatchMode::Exclusive;
+    if exclusive {
+        for c in candidate_caps {
+            if !required.set.contains(c) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub struct CandidateView<'a> {
     pub api_key_id: &'a str,
     pub vendor_key_id: &'a str,

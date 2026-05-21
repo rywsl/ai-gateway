@@ -24,10 +24,10 @@ use gw_codec::AnyCodec;
 use gw_core::entity::{ModelGroup, Pricing, TimeoutSpec, Vendor};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::Mutations;
-use gw_routing::candidates::get_candidate_keys;
-use gw_routing::strategy::set::StrategySet;
 use gw_health::KeyHealthStore;
+use gw_routing::candidates::get_candidate_keys;
 use gw_routing::in_flight::{InFlightGuard, InFlightStore};
+use gw_routing::strategy::set::StrategySet;
 use gw_routing::{PickCtx, Strategy};
 use gw_store::EntityStore;
 use pingora::http::RequestHeader;
@@ -140,24 +140,18 @@ pub async fn pick_peer(
         }
     };
 
-    let group: Arc<gw_core::versioned::Versioned<ModelGroup>> = match store
-        .model_group_or_load(&group_id)
-        .await
-    {
-        Some(g) => g,
-        None => {
-            return emit_envelope_and_bail(
-                session,
-                ctx,
-                envelope_for(
-                    codes::GW_BACKEND_UNAVAILABLE,
-                    "model_group not found",
-                    503,
-                ),
-            )
-            .await;
-        }
-    };
+    let group: Arc<gw_core::versioned::Versioned<ModelGroup>> =
+        match store.model_group_or_load(&group_id).await {
+            Some(g) => g,
+            None => {
+                return emit_envelope_and_bail(
+                    session,
+                    ctx,
+                    envelope_for(codes::GW_BACKEND_UNAVAILABLE, "model_group not found", 503),
+                )
+                .await;
+            }
+        };
     // G5 (T2-B): Pricing is pre-loaded in `request_filter` (after IR parse
     // exposes the model name) so `merge_permissions` can populate the
     // `model_markup` chain entry. EntityStore is Moka-memoised, so even on a
@@ -176,19 +170,41 @@ pub async fn pick_peer(
         store,
         PER_KEY_INFLIGHT_CAP,
         &ctx.retry_blacklist,
+        ctx.required_caps.as_ref(),
     )
     .await;
     if candidates.is_empty() {
-        return emit_envelope_and_bail(
-            session,
-            ctx,
-            envelope_for(
+        // G13 — distinguish "no channel at all" from "channels exist but none
+        // satisfy the resolved capability requirements". Re-run the filter
+        // without the capability constraint: if that yields candidates, the
+        // capability filter is what emptied the set, so surface the dedicated
+        // 503 `GW_ROUTING_NO_CAPABILITY_MATCH`.
+        let (code, message) = if ctx.required_caps.is_some()
+            && !get_candidate_keys(
+                &group.value,
+                &model,
+                client_codec_kind,
+                &perm,
+                in_flight,
+                store,
+                PER_KEY_INFLIGHT_CAP,
+                &ctx.retry_blacklist,
+                None,
+            )
+            .await
+            .is_empty()
+        {
+            (
+                codes::GW_ROUTING_NO_CAPABILITY_MATCH,
+                "no channel satisfies the required capabilities",
+            )
+        } else {
+            (
                 codes::GW_ROUTING_NO_AVAILABLE_CHANNEL,
                 "no available channel for the requested model",
-                503,
-            ),
-        )
-        .await;
+            )
+        };
+        return emit_envelope_and_bail(session, ctx, envelope_for(code, message, 503)).await;
     }
 
     // -------------------------------------------------------------
@@ -390,12 +406,7 @@ pub async fn rewrite_request(
     let api_key = picked.api_key.expose_secret().to_owned();
     let auth_value = vendor.value.auth_template.replace("{api_key}", &api_key);
     let _ = upstream_request.insert_header("authorization", auth_value);
-    if let Some(host) = vendor
-        .value
-        .base_urls
-        .first()
-        .and_then(|u| u.host_str())
-    {
+    if let Some(host) = vendor.value.base_urls.first().and_then(|u| u.host_str()) {
         let _ = upstream_request.insert_header("host", host.to_string());
     }
     // W3C traceparent: version-traceid-spanid-flags. The span-id is a fresh

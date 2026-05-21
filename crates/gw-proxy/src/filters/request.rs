@@ -10,7 +10,9 @@
 
 use crate::ctx::ReqCtx;
 use crate::error_emit;
-use crate::filters::early::{client_ip_from_session, pick_emit_codec, short_circuit, with_request_id};
+use crate::filters::early::{
+    client_ip_from_session, pick_emit_codec, short_circuit, with_request_id,
+};
 use gw_auth::apikey::verify_apikey;
 use gw_auth::ip_filter::check_blocklist;
 use gw_auth::jwt::{verify_jwt, JwtError, JwtValidator};
@@ -20,7 +22,6 @@ use gw_auth::AuthCtx;
 use gw_core::entity::ApiKeyEntry;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, ModelName, UserId};
-use time::OffsetDateTime;
 use gw_store::counter_store::daily_tokens_key;
 use gw_store::deduction::{UserCircuit, USER_CIRCUIT};
 use gw_store::{CounterStore, EntityStore};
@@ -30,6 +31,7 @@ use std::borrow::Cow;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
+use time::OffsetDateTime;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -41,6 +43,7 @@ pub async fn run(
     global_rpm: u32,
     trust_xff: bool,
     jwt_validator: Option<&Arc<JwtValidator>>,
+    capability_resolver: Option<&Arc<gw_capability::CapabilityResolver>>,
 ) -> Result<bool> {
     ctx.phase_start("request_filter");
     ctx.timing.start = Some(Instant::now());
@@ -98,16 +101,6 @@ pub async fn run(
         unreachable!()
     }
 
-    // TODO(T6-A wave-7 wiring): once LlmGateway holds Arc<CapabilityResolver>,
-    // resolve capabilities from headers + model alias + retry-upgrade hint:
-    //   let header_require: Vec<&str> = session.req_header().headers
-    //       .get_all("x-require-capability").iter()
-    //       .filter_map(|v| v.to_str().ok())
-    //       .flat_map(|s| s.split(',').map(str::trim))
-    //       .collect();
-    //   let req = gw_capability::resolver::ResolveRequest { ... };
-    //   ctx.required_caps = Some(resolver.resolve(&req).await?);
-
     // ---------------------------------------------------------------------
     // 1. Auth — Bearer JWT or `x-api-key` header.
     // ---------------------------------------------------------------------
@@ -146,9 +139,15 @@ pub async fn run(
                 Ok(uid) => Ok((uid, None, None)),
                 Err(jerr) => {
                     let (code, msg) = match jerr {
-                        JwtError::InvalidIss => (codes::GW_AUTH_JWT_INVALID_ISS, "jwt issuer invalid"),
-                        JwtError::InvalidAud => (codes::GW_AUTH_JWT_INVALID_AUD, "jwt audience invalid"),
-                        JwtError::NotYetValid => (codes::GW_AUTH_JWT_NOT_YET_VALID, "jwt not yet valid"),
+                        JwtError::InvalidIss => {
+                            (codes::GW_AUTH_JWT_INVALID_ISS, "jwt issuer invalid")
+                        }
+                        JwtError::InvalidAud => {
+                            (codes::GW_AUTH_JWT_INVALID_AUD, "jwt audience invalid")
+                        }
+                        JwtError::NotYetValid => {
+                            (codes::GW_AUTH_JWT_NOT_YET_VALID, "jwt not yet valid")
+                        }
                         JwtError::Expired => (codes::GW_AUTH_JWT_EXPIRED, "jwt expired"),
                         JwtError::InvalidSignature => (codes::GW_AUTH_INVALID_JWT, "jwt invalid"),
                     };
@@ -388,8 +387,7 @@ pub async fn run(
             timestamp: ctx.signature_timestamp.clone(),
         };
         match crate::body_verify::verify_body(input) {
-            Ok((SignatureCheckResult::Valid, _))
-            | Ok((SignatureCheckResult::NotRequired, _)) => {
+            Ok((SignatureCheckResult::Valid, _)) | Ok((SignatureCheckResult::NotRequired, _)) => {
                 // Pass through. `cached_body` holds the raw on-wire bytes;
                 // `verify_body` decompresses internally for the signature
                 // compare but the plaintext is discarded here. Known gap:
@@ -582,6 +580,53 @@ pub async fn run(
         };
         emit_and_bail(session, ctx, &err, &request_id).await?;
         unreachable!()
+    }
+
+    // ---------------------------------------------------------------------
+    // 6b. G13 (ADR-G13-2) — capability resolve. After permission merge and the
+    //     model-permission check, collapse (ApiKey forced caps + Model caps +
+    //     `x-require-capability` header) into a single `RequiredCapabilities`
+    //     set and stash it on `ctx.required_caps`. `upstream_peer` then passes
+    //     it into `get_candidate_keys`, which capability-filters each candidate
+    //     channel. `None` resolver (deployment without Model entities) leaves
+    //     `ctx.required_caps` empty so routing is unconstrained (v1 behaviour).
+    // ---------------------------------------------------------------------
+    if let Some(resolver) = capability_resolver {
+        let header_require: Vec<String> = session
+            .req_header()
+            .headers
+            .get_all("x-require-capability")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|s| s.split(',').map(str::trim))
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let header_refs: Vec<&str> = header_require.iter().map(String::as_str).collect();
+        let protocol = ctx
+            .client_codec
+            .as_ref()
+            .map(|c| c.kind())
+            .unwrap_or(gw_core::protocol::ProtocolKind::OpenAi);
+        let req = gw_capability::ResolveRequest {
+            api_key_id: api_key_id.as_ref().map(|a| a.as_ref()).unwrap_or(""),
+            model_alias: model_name.as_ref(),
+            header_require: if header_refs.is_empty() {
+                None
+            } else {
+                Some(header_refs.as_slice())
+            },
+            protocol,
+            retry_upgrade: None,
+        };
+        match resolver.resolve(&req).await {
+            Ok(caps) => ctx.required_caps = Some(caps),
+            Err(_e) => {
+                // Resolver failure is non-fatal: leave `required_caps` empty so
+                // routing proceeds unconstrained rather than failing the
+                // request closed on a transient store error.
+            }
+        }
     }
 
     // ---------------------------------------------------------------------

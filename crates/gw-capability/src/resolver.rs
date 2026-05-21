@@ -106,7 +106,7 @@ impl CapabilityResolver {
     }
 }
 
-fn parse_capability(s: &str) -> Capability {
+pub(crate) fn parse_capability(s: &str) -> Capability {
     match s.to_ascii_lowercase().as_str() {
         "vision" => Capability::Vision,
         "audio" => Capability::Audio,

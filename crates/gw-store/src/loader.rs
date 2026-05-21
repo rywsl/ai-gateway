@@ -15,11 +15,11 @@ use gw_core::entity::{
     ApiKeyEntry, AuthConfig, JwksEntry, Model, ModelGroup, Pricing, UserEntry, UserGroup, Vendor,
     VendorKey,
 };
-use gw_core::ids::{ApiKeyId, Group, Kid, KeyId, ModelName, UserGroupId, UserId, VendorId};
+use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
 
-use crate::encrypt::{decrypt, EncryptedKey, KekCache};
 use super::redis_client::RedisCtx;
+use crate::encrypt::{decrypt, EncryptedKey, KekCache};
 
 #[derive(Clone)]
 pub struct LoaderCtx {
@@ -47,9 +47,9 @@ where
     let hash: std::collections::HashMap<String, String> = client.hgetall(&key).await?;
     if !hash.is_empty() {
         let v: u64 = hash.get("v").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let d = hash
-            .get("d")
-            .ok_or_else(|| anyhow::anyhow!("missing payload field 'd' in entity:{namespace}:{id}"))?;
+        let d = hash.get("d").ok_or_else(|| {
+            anyhow::anyhow!("missing payload field 'd' in entity:{namespace}:{id}")
+        })?;
         let parsed: serde_json::Value = serde_json::from_str(d)?;
         let value = decode_fn(&parsed)?;
         return Ok(Versioned {
@@ -129,6 +129,15 @@ struct VendorKeyRow {
     status: gw_core::entity::KeyStatus,
     #[serde(default)]
     tags: Vec<String>,
+    /// G13 — capabilities this channel advertises as required-to-route. Fed to
+    /// the candidate `CapabilityFilter`, not the resolver. Defaults empty
+    /// (non-restrictive).
+    #[serde(default)]
+    forced_capabilities: Vec<String>,
+    /// G13 — if true, the channel only matches requests whose required-caps
+    /// exactly equal `forced_capabilities`. Defaults false.
+    #[serde(default)]
+    exclusive_capability_match: bool,
 }
 
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
@@ -145,8 +154,7 @@ const MODEL_GROUP_SQL: &str =
 const PRICING_SQL: &str =
     "SELECT payload, version FROM pricings WHERE id = $1 AND deleted_at IS NULL";
 const JWKS_SQL: &str = "SELECT payload, version FROM jwks WHERE id = $1 AND deleted_at IS NULL";
-const MODEL_SQL: &str =
-    "SELECT payload, version FROM models WHERE id = $1 AND deleted_at IS NULL";
+const MODEL_SQL: &str = "SELECT payload, version FROM models WHERE id = $1 AND deleted_at IS NULL";
 // TODO(T1-E): the `auth_configs` table does not yet exist in
 // `migrations/0001_initial.sql`. Until it lands, this query errors at the PG
 // layer, `with_cold_load_timeout` swallows the error into `None`, and
@@ -173,10 +181,7 @@ pub async fn load_user_group(
     .await
 }
 
-pub async fn load_apikey(
-    ctx: &LoaderCtx,
-    id: &ApiKeyId,
-) -> anyhow::Result<Versioned<ApiKeyEntry>> {
+pub async fn load_apikey(ctx: &LoaderCtx, id: &ApiKeyId) -> anyhow::Result<Versioned<ApiKeyEntry>> {
     load_entity(ctx, "apikey", id.as_ref(), API_KEY_SQL, |v| {
         serde_json::from_value::<ApiKeyEntry>(v.clone()).map_err(Into::into)
     })
@@ -190,10 +195,7 @@ pub async fn load_vendor(ctx: &LoaderCtx, id: &VendorId) -> anyhow::Result<Versi
     .await
 }
 
-pub async fn load_vendor_key(
-    ctx: &LoaderCtx,
-    id: &KeyId,
-) -> anyhow::Result<Versioned<VendorKey>> {
+pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Versioned<VendorKey>> {
     let kek = ctx.kek.clone();
     load_entity(ctx, "vendor_key", id.as_ref(), VENDOR_KEY_SQL, move |v| {
         let row: VendorKeyRow = serde_json::from_value(v.clone())?;
@@ -216,10 +218,9 @@ pub async fn load_vendor_key(
             expires_at: row.expires_at,
             status: row.status,
             tags: row.tags,
-            // T0-C: new capability fields default to empty/false; T3-C will
-            // extend VendorKeyRow to read them from the JSONB payload.
-            forced_capabilities: Vec::new(),
-            exclusive_capability_match: false,
+            // G13 (T3-C): read the capability fields from the JSONB payload.
+            forced_capabilities: row.forced_capabilities,
+            exclusive_capability_match: row.exclusive_capability_match,
         })
     })
     .await
@@ -235,10 +236,7 @@ pub async fn load_model_group(
     .await
 }
 
-pub async fn load_pricing(
-    ctx: &LoaderCtx,
-    id: &ModelName,
-) -> anyhow::Result<Versioned<Pricing>> {
+pub async fn load_pricing(ctx: &LoaderCtx, id: &ModelName) -> anyhow::Result<Versioned<Pricing>> {
     load_entity(ctx, "pricing", id.as_ref(), PRICING_SQL, |v| {
         serde_json::from_value::<Pricing>(v.clone()).map_err(Into::into)
     })

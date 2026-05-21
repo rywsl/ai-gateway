@@ -11,12 +11,17 @@
 //! 5. the key's in-flight count is under the per-key cap,
 //! 6. the `key_id` is NOT in `retry_blacklist` (G10) — i.e. already attempted
 //!    and failed earlier in this request.
+//! 7. (G13) the channel's advertised `forced_capabilities` satisfy the
+//!    request's `RequiredCapabilities` per `gw_capability::candidate_matches`
+//!    (a channel with no advertised caps is non-restrictive; `caps == None`
+//!    disables the filter entirely).
 //!
 //! Health/circuit checks happen *later* inside `Strategy::pick` via
 //! `KeyHealthStore::is_available` — candidate filtering is the cheap
 //! upstream step.
 
 use crate::in_flight::InFlightStore;
+use gw_capability::{candidate_matches, parse_capabilities, RequiredCapabilities};
 use gw_core::entity::{KeyStatus, ModelGroup, VendorKey};
 use gw_core::ids::{KeyId, ModelName};
 use gw_core::permissions::MergedPermissions;
@@ -35,6 +40,7 @@ pub async fn get_candidate_keys(
     store: &EntityStore,
     in_flight_per_key: u32,
     retry_blacklist: &[KeyId],
+    required_caps: Option<&RequiredCapabilities>,
 ) -> Vec<Arc<VendorKey>> {
     let mut out = Vec::with_capacity(group.vendor_key_ids.len());
     for kid in &group.vendor_key_ids {
@@ -59,6 +65,15 @@ pub async fn get_candidate_keys(
         }
         if retry_blacklist.iter().any(|k| k == &key.key_id) {
             continue;
+        }
+        // G13 — capability match. `None` disables the filter; a channel with no
+        // advertised `forced_capabilities` is non-restrictive (see
+        // `candidate_matches`).
+        if let Some(req) = required_caps {
+            let advertised = parse_capabilities(&key.forced_capabilities);
+            if !candidate_matches(req, &advertised, key.exclusive_capability_match) {
+                continue;
+            }
         }
         out.push(Arc::new(VendorKey {
             key_id: key.key_id.clone(),
