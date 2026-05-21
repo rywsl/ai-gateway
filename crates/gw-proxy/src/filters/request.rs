@@ -21,6 +21,7 @@ use gw_core::entity::ApiKeyEntry;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, ModelName, UserId};
 use time::OffsetDateTime;
+use gw_store::counter_store::daily_tokens_key;
 use gw_store::deduction::{UserCircuit, USER_CIRCUIT};
 use gw_store::{CounterStore, EntityStore};
 use pingora::Result;
@@ -607,6 +608,48 @@ pub async fn run(
     }
 
     // ---------------------------------------------------------------------
+    // 7a. G3 — daily token quota (ADR-G3-1/G3-2). `UserEntry.daily_quota_tokens`
+    //     is the limit; `0` means unlimited. We GET the per-(user, UTC-day)
+    //     counter and pre-reject when `consumed + freeze_estimate` would
+    //     exceed the quota. The freeze estimate is intentionally added so the
+    //     gate is fail-closed against burst traffic that has not yet been
+    //     accounted for by `logging`.
+    //
+    //     Redis failure fails open (consistent with the balance check above —
+    //     daily quota is observational, not billing). Quota = 0 short-circuits
+    //     before the Redis read. The post-increment lives in `logging`.
+    // ---------------------------------------------------------------------
+    let daily_quota = ctx
+        .user
+        .as_ref()
+        .map(|u| u.value.daily_quota_tokens)
+        .unwrap_or(0);
+    if daily_quota > 0 {
+        let day = day_key_utc(OffsetDateTime::now_utc());
+        let key = daily_tokens_key(&merged.effective_user_id, &day);
+        let consumed = counters.get_str_key(&key).await.unwrap_or(0).max(0) as u64;
+        // freeze_estimate is computed at step 9; pre-compute a conservative
+        // upper bound here using the same flat formula so the gate is closed
+        // before USER_CIRCUIT and RPM consume budget.
+        let freeze_est = freeze_estimate(est_input_tokens, merged.markup_chain.product);
+        if check_daily_quota(consumed, freeze_est, daily_quota).is_err() {
+            let err = ErrorIR {
+                category: ErrorCategory::ClientQuota,
+                status: 403,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_QUOTA_DAILY_TOKENS_EXCEEDED),
+                message: Cow::Borrowed("daily token quota exceeded"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            emit_and_bail(session, ctx, &err, &request_id).await?;
+            unreachable!()
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // 7b. USER_CIRCUIT breaker (zero-balance / banned-user short-circuit).
     //     Acts as an in-process cache: once a request observes a negative
     //     balance and the ledger flusher trips this circuit, subsequent
@@ -719,6 +762,34 @@ pub fn check_api_key_ip_allowlist(
         Some(list) if gw_auth::ip_filter::match_any_cidr(client_ip, list) => Ok(()),
         _ => Err(()),
     }
+}
+
+/// G3 (ADR-G3-2) — pure daily-token quota gate. `quota == 0` is treated as
+/// "no quota" (unlimited). Otherwise reject when `consumed_today + freeze_est`
+/// would exceed the configured quota. Saturating add so a pathological
+/// estimate cannot wrap around silently.
+#[allow(clippy::result_unit_err)]
+pub fn check_daily_quota(
+    consumed_today: u64,
+    freeze_estimate: u64,
+    quota: u64,
+) -> std::result::Result<(), ()> {
+    if quota == 0 {
+        return Ok(());
+    }
+    if consumed_today.saturating_add(freeze_estimate) > quota {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// G3 — format an `OffsetDateTime` as a UTC calendar day key (`YYYY-MM-DD`).
+/// Centralised so the request-filter pre-check and the logging post-increment
+/// cannot disagree on day boundaries. UTC by construction; per-tenant timezone
+/// support is a v2 follow-up.
+pub fn day_key_utc(now: OffsetDateTime) -> String {
+    let d = now.date();
+    format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
 }
 
 /// Estimate a conservative freeze (in micro-units) before pricing is loaded.

@@ -197,7 +197,8 @@ impl ProxyHttp for LlmGateway {
         err: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
-        filters::logging::run(session, err, ctx, &self.health, &self.ledger).await;
+        filters::logging::run(session, err, ctx, &self.health, &self.ledger, &self.counters)
+            .await;
     }
 
     /// Silence pingora's own ERROR-level log for the gateway's intentional

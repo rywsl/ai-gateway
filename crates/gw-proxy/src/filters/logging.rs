@@ -9,10 +9,13 @@ use gw_core::usage::UsageSnapshot;
 use gw_health::{KeyHealthStore, OutcomeKind};
 use gw_ledger::usage::{UsageRecord, UsageSource, UsageStatus};
 use gw_ledger::{FreezeGuard, Ledger};
+use gw_store::counter_store::daily_tokens_key;
+use gw_store::CounterStore;
 use pingora::ErrorType;
 use pingora_proxy::Session;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use time::OffsetDateTime;
 
 /// Classify a completed request into one of 8 stable buckets:
 /// `1xx`/`2xx`/`3xx`/`4xx`/`5xx`/`other`/`err`/`early`.
@@ -64,6 +67,7 @@ pub async fn run(
     ctx: &mut ReqCtx,
     health: &Arc<KeyHealthStore>,
     ledger: &Arc<Ledger>,
+    counters: &Arc<CounterStore>,
 ) {
     let now = std::time::Instant::now();
     ctx.timing.end = Some(now);
@@ -236,6 +240,38 @@ pub async fn run(
                 .unwrap_or_else(MarkupChainSnapshot::placeholder),
         };
         let _ = ledger.try_send(rec);
+
+        // -----------------------------------------------------------------
+        // G3 (ADR-G3-2) — daily-quota post-increment. Bump
+        // `counter:user:{effective_user_id}:daily_tokens:{YYYY-MM-DD}` by
+        // the observed input+output tokens and pin a 48 h TTL so old days
+        // age out without an explicit sweeper. Best-effort: Redis errors
+        // are logged but never propagate (daily quota is observational,
+        // not billing).
+        //
+        // TODO(metrics): wire `gw_daily_quota_increment_error_total` once
+        // the metrics catalog opens a slot for it (out of scope for T2-A —
+        // see the T2-A plan note about metrics_catalog gating).
+        // -----------------------------------------------------------------
+        let total_tokens =
+            (ctx.usage.input_tokens as u64).saturating_add(ctx.usage.output_tokens as u64);
+        if total_tokens > 0 {
+            let d = OffsetDateTime::now_utc().date();
+            let day = format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day());
+            let key = daily_tokens_key(&effective, &day);
+            let counters_for_spawn = counters.clone();
+            // Best-effort fire-and-forget; the request lifecycle does not
+            // wait for this to complete. 48 h TTL = 172800 s.
+            tokio::spawn(async move {
+                if let Err(e) = counters_for_spawn
+                    .incrby_with_expire(&key, total_tokens as i64, 172_800)
+                    .await
+                {
+                    tracing::warn!(target: "gw_daily_quota", error = %e, "daily quota increment failed");
+                }
+            });
+        }
+
 
         // -----------------------------------------------------------------
         // DetailedLogRecord — emitted via tracing for v1. A dedicated sink
