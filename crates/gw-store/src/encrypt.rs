@@ -2,25 +2,146 @@
 //!
 //! Vendor api_key plaintext is encrypted at rest in PostgreSQL with a KEK keyed
 //! by `kek_kid`. The cache holds the KEK material in process memory.
+//!
+//! KEK rotation (G-α.6 / SE3) follows a dual-read state machine:
+//!
+//! ```text
+//! Healthy { active: K_old }
+//!   --enter_dual_read(K_new)-->
+//! DualRead { active: K_new, reencrypting: false }
+//!   --mark_reencrypting()-->
+//! DualRead { active: K_new, reencrypting: true }
+//!   --drop_old_kek(K_old)-->
+//! Healthy { active: K_new }
+//! ```
+//!
+//! Constraints: at most 2 KEKs concurrent, never drop the only remaining KEK,
+//! `active_kid` must always be in the resident set.
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
+use arc_swap::ArcSwap;
 use secrecy::SecretString;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Clone, Default)]
-pub struct KekCache(Arc<HashMap<String, [u8; 32]>>);
+#[derive(Clone)]
+pub struct KekCache {
+    inner: Arc<KekCacheInner>,
+}
+
+impl Default for KekCache {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+struct KekCacheInner {
+    keks: HashMap<String, [u8; 32]>,
+    active_kid: ArcSwap<String>,
+    state: ArcSwap<KekState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KekState {
+    Healthy,
+    DualRead { reencrypting: bool },
+}
 
 impl KekCache {
+    /// Construct a cache from a KEK map. The active kid is the first key
+    /// returned by the map's iterator (HashMap iteration order is unspecified
+    /// but stable for a single map). Use [`KekCache::with_active`] to pin a
+    /// specific active kid.
     pub fn new(map: HashMap<String, [u8; 32]>) -> Self {
-        Self(Arc::new(map))
+        Self::with_active(map, None)
     }
+
+    /// Construct a cache and pin the active kid. If `active` is `None`, the
+    /// first key in the map (iteration order) becomes active; if the map is
+    /// empty the active kid is the empty string.
+    pub fn with_active(map: HashMap<String, [u8; 32]>, active: Option<&str>) -> Self {
+        let active = active
+            .map(String::from)
+            .or_else(|| map.keys().next().cloned())
+            .unwrap_or_default();
+        Self {
+            inner: Arc::new(KekCacheInner {
+                keks: map,
+                active_kid: ArcSwap::from_pointee(active),
+                state: ArcSwap::from_pointee(KekState::Healthy),
+            }),
+        }
+    }
+
     pub fn empty() -> Self {
-        Self(Arc::new(HashMap::new()))
+        Self::new(HashMap::new())
     }
+
     pub(crate) fn get(&self, kid: &str) -> Option<&[u8; 32]> {
-        self.0.get(kid)
+        self.inner.keks.get(kid)
+    }
+
+    pub fn active_kid(&self) -> String {
+        self.inner.active_kid.load_full().as_ref().clone()
+    }
+
+    pub fn state(&self) -> KekState {
+        self.inner.state.load_full().as_ref().clone()
+    }
+
+    /// Enter dual-read: add new KEK to the resident set, switch active to new.
+    /// Refuses if already in DualRead (max 2 KEKs concurrent).
+    pub fn enter_dual_read(&mut self, new_kid: String, new_kek: [u8; 32]) -> anyhow::Result<()> {
+        if matches!(self.state(), KekState::DualRead { .. }) {
+            anyhow::bail!("already in dual-read");
+        }
+        if self.inner.keks.contains_key(&new_kid) {
+            anyhow::bail!("kid {} already resident", new_kid);
+        }
+        let mut new_map = self.inner.keks.clone();
+        new_map.insert(new_kid.clone(), new_kek);
+        self.inner = Arc::new(KekCacheInner {
+            keks: new_map,
+            active_kid: ArcSwap::from_pointee(new_kid),
+            state: ArcSwap::from_pointee(KekState::DualRead { reencrypting: false }),
+        });
+        Ok(())
+    }
+
+    /// Mark the dual-read state as actively re-encrypting (informational flag
+    /// for observers; does not gate any internal decisions).
+    pub fn mark_reencrypting(&self) {
+        self.inner
+            .state
+            .store(Arc::new(KekState::DualRead { reencrypting: true }));
+    }
+
+    /// Drop an old KEK and return to Healthy. Refuses unless we're in
+    /// DualRead, refuses to drop the only remaining KEK, and refuses to drop
+    /// the currently-active KEK.
+    pub fn drop_old_kek(&mut self, old_kid: &str) -> anyhow::Result<()> {
+        if !matches!(self.state(), KekState::DualRead { .. }) {
+            anyhow::bail!("not in dual-read");
+        }
+        let active = self.active_kid();
+        if old_kid == active {
+            anyhow::bail!("refusing to drop active kid {}", old_kid);
+        }
+        let mut new_map = self.inner.keks.clone();
+        new_map.remove(old_kid);
+        if new_map.is_empty() {
+            anyhow::bail!("cannot drop the only kek");
+        }
+        if !new_map.contains_key(&active) {
+            anyhow::bail!("active_kid not in remaining set");
+        }
+        self.inner = Arc::new(KekCacheInner {
+            keks: new_map,
+            active_kid: ArcSwap::from_pointee(active),
+            state: ArcSwap::from_pointee(KekState::Healthy),
+        });
+        Ok(())
     }
 }
 
