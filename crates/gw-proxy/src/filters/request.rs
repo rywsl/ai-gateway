@@ -128,12 +128,13 @@ pub async fn run(
         .map(str::to_owned);
 
     let request_id = ctx.request_id.0.clone();
-    let user_id_res: Result<(UserId, Option<ApiKeyId>)> = if let Some(bearer) = auth_header
-        .as_deref()
-        .and_then(|h| h.strip_prefix("Bearer "))
+    let user_id_res: Result<(UserId, Option<ApiKeyId>, Option<Vec<String>>)> = if let Some(bearer) =
+        auth_header
+            .as_deref()
+            .and_then(|h| h.strip_prefix("Bearer "))
     {
         match verify_jwt(bearer, store).await {
-            Ok(uid) => Ok((uid, None)),
+            Ok(uid) => Ok((uid, None, None)),
             Err(err) => {
                 emit_and_bail(session, ctx, &err, &request_id).await?;
                 unreachable!()
@@ -183,7 +184,15 @@ pub async fn run(
                                 .and_then(|v| v.to_str().ok())
                                 .map(String::from);
                         }
-                        Ok((entry.value.user_id.clone(), Some(akid)))
+                        // G2 — capture the per-key IP allowlist so the
+                        // post-blocklist gate (below) can consult it after
+                        // `entry` itself goes out of scope.
+                        let ip_allowlist_for_request = entry.value.ip_allowlist.clone();
+                        Ok((
+                            entry.value.user_id.clone(),
+                            Some(akid),
+                            ip_allowlist_for_request,
+                        ))
                     }
                     None => {
                         let err = ErrorIR {
@@ -222,7 +231,7 @@ pub async fn run(
         emit_and_bail(session, ctx, &err, &request_id).await?;
         unreachable!()
     };
-    let (user_id, api_key_id) = user_id_res?;
+    let (user_id, api_key_id, ip_allowlist_for_request) = user_id_res?;
 
     // Load the user entry (used by ReqCtx for downstream consumers).
     let user_entry = match store.user_or_load(&user_id).await {
@@ -262,6 +271,30 @@ pub async fn run(
     let client_ip_v = client_ip_from_session(session, trust_xff);
     if let Some(ip) = client_ip_v {
         if let Err(err) = check_blocklist(ip, Some(&user_id), api_key_id.as_ref(), store).await {
+            emit_and_bail(session, ctx, &err, &request_id).await?;
+            unreachable!()
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 2b. G2 — per-key IP allowlist (after the User/ApiKey-scoped blocklist).
+    //     `None` and empty list mean unrestricted; otherwise the client IP
+    //     must match at least one CIDR. Malformed entries fail closed: they
+    //     are skipped + a warn is logged inside `match_any_cidr`.
+    // ---------------------------------------------------------------------
+    if let Some(ip) = client_ip_v {
+        if check_api_key_ip_allowlist(ip_allowlist_for_request.as_deref(), ip).is_err() {
+            let err = ErrorIR {
+                category: ErrorCategory::ClientAuth,
+                status: 403,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_AUTH_KEY_IP_NOT_ALLOWED),
+                message: Cow::Borrowed("client ip not in api key allowlist"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
             emit_and_bail(session, ctx, &err, &request_id).await?;
             unreachable!()
         }
@@ -527,6 +560,23 @@ pub fn check_api_key_expiry(
     match entry.expires_at {
         None => Ok(()),
         Some(exp) if now < exp => Ok(()),
+        _ => Err(()),
+    }
+}
+
+/// G2 — per-key IP allowlist gate. Pure (no async, no I/O) so a test can pin
+/// both inputs. `None` and an empty allowlist mean unrestricted; otherwise
+/// `client_ip` must match at least one CIDR in the list. Malformed entries
+/// fail closed (skipped, never auto-match) inside `match_any_cidr`.
+#[allow(clippy::result_unit_err)]
+pub fn check_api_key_ip_allowlist(
+    allowlist: Option<&[String]>,
+    client_ip: IpAddr,
+) -> std::result::Result<(), ()> {
+    match allowlist {
+        None => Ok(()),
+        Some([]) => Ok(()),
+        Some(list) if gw_auth::ip_filter::match_any_cidr(client_ip, list) => Ok(()),
         _ => Err(()),
     }
 }

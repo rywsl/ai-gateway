@@ -58,6 +58,29 @@ pub async fn check_blocklist(
     Ok(())
 }
 
+/// G2 — return `true` iff `ip` is contained in any CIDR in `allowlist`.
+/// Malformed CIDR entries are logged at `warn` and skipped (fail closed:
+/// they never auto-match). Reuses the file-local `parse_cidr` helper used
+/// by `check_blocklist`.
+pub fn match_any_cidr(ip: IpAddr, allowlist: &[String]) -> bool {
+    for cidr in allowlist {
+        match parse_cidr(cidr) {
+            Some(net) => {
+                if net.contains(&ip) {
+                    return true;
+                }
+            }
+            None => {
+                tracing::warn!(
+                    cidr = %cidr,
+                    "ip_allowlist entry has malformed CIDR; skipping"
+                );
+            }
+        }
+    }
+    false
+}
+
 /// Parse `cidr` as an IPv4/IPv6 [`IpNet`]. Returns `None` on malformed input
 /// so the caller can log and skip that entry.
 fn parse_cidr(cidr: &str) -> Option<IpNet> {
