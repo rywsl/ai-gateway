@@ -224,4 +224,9 @@ Pending lints (uncomment when target phase lands):
 
 ## 9. Known gaps (deferred)
 
-`expires_at` enforcement, `ip_allowlist` per-key, `daily_quota_tokens`, `Vendor.timeout_overrides`, `Pricing.model_markup`, JWT `iss`/`aud`/`nbf` validation on the API-key path, mandatory HMAC, cross-protocol *response* body re-render, multi-event SSE buffering, retry executor on the proxy hot path, DLQ for billing flush failures, Sticky TTL sweep, and `CapabilityResolver` injection into `LlmGateway` (T6-A wave-7) are deferred. The `e2e_full_flow.rs` Pingora+wiremock+reqwest harness is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`.
+Closure of the deferred gaps is tracked in [`docs/superpowers/specs/2026-05-21-known-gaps-design.md`](superpowers/specs/2026-05-21-known-gaps-design.md) and [`docs/superpowers/plans/2026-05-21-known-gaps.md`](superpowers/plans/2026-05-21-known-gaps.md). Status (in-flight on `feature/known-gaps-closure`):
+
+- **Landed**: `ApiKeyEntry.expires_at` enforcement (G1, T1-A).
+- **Deferred**: `ip_allowlist` per-key, `daily_quota_tokens`, `Vendor.timeout_overrides`, `Pricing.model_markup`, JWT `iss`/`aud`/`nbf` validation on the API-key path, mandatory HMAC, cross-protocol *response* body re-render, multi-event SSE buffering, retry executor on the proxy hot path, DLQ for billing flush failures, Sticky TTL sweep, and `CapabilityResolver` injection into `LlmGateway`.
+
+The `e2e_full_flow.rs` Pingora+wiremock+reqwest harness is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`. The docker-based black-box harness lands on `feature/e2e-blackbox` (see [`docs/superpowers/specs/2026-05-21-e2e-blackbox-design.md`](superpowers/specs/2026-05-21-e2e-blackbox-design.md)).
