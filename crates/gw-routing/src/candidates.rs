@@ -8,7 +8,9 @@
 //!    `protocol_conversion = true`,
 //! 4. the caller's `MergedPermissions.allowed_channels` is either empty (no
 //!    channel allowlist) or contains this key,
-//! 5. the key's in-flight count is under the per-key cap.
+//! 5. the key's in-flight count is under the per-key cap,
+//! 6. the `key_id` is NOT in `retry_blacklist` (G10) — i.e. already attempted
+//!    and failed earlier in this request.
 //!
 //! Health/circuit checks happen *later* inside `Strategy::pick` via
 //! `KeyHealthStore::is_available` — candidate filtering is the cheap
@@ -16,13 +18,14 @@
 
 use crate::in_flight::InFlightStore;
 use gw_core::entity::{KeyStatus, ModelGroup, VendorKey};
-use gw_core::ids::ModelName;
+use gw_core::ids::{KeyId, ModelName};
 use gw_core::permissions::MergedPermissions;
 use gw_core::protocol::ProtocolKind;
 use gw_store::entity_store::EntityStore;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn get_candidate_keys(
     group: &ModelGroup,
     model: &ModelName,
@@ -31,6 +34,7 @@ pub async fn get_candidate_keys(
     in_flight: &InFlightStore,
     store: &EntityStore,
     in_flight_per_key: u32,
+    retry_blacklist: &[KeyId],
 ) -> Vec<Arc<VendorKey>> {
     let mut out = Vec::with_capacity(group.vendor_key_ids.len());
     for kid in &group.vendor_key_ids {
@@ -51,6 +55,9 @@ pub async fn get_candidate_keys(
             continue;
         }
         if in_flight.count(&key.key_id) >= in_flight_per_key {
+            continue;
+        }
+        if retry_blacklist.iter().any(|k| k == &key.key_id) {
             continue;
         }
         out.push(Arc::new(VendorKey {

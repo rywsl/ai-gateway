@@ -141,6 +141,11 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Gauge,
         help: "approximate live sticky bindings in the moka cache",
     },
+    MetricSpec {
+        name: "gw_retry_attempt_total",
+        kind: MetricKind::Counter,
+        help: "fail_to_connect retry decisions (G10); label=outcome (recovered/exhausted/tls_blocked)",
+    },
 ];
 
 pub fn describe_all() {

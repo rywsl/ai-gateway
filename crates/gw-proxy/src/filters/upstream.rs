@@ -175,6 +175,7 @@ pub async fn pick_peer(
         in_flight,
         store,
         PER_KEY_INFLIGHT_CAP,
+        &ctx.retry_blacklist,
     )
     .await;
     if candidates.is_empty() {

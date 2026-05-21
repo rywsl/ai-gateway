@@ -89,6 +89,12 @@ pub struct ReqCtx {
     /// candidate selection on cross-key retry (G10). Empty on the first
     /// attempt.
     pub retry_blacklist: Vec<KeyId>,
+    /// G10 — gateway error code stamped by `fail_to_connect` when an upstream
+    /// connect attempt is *not* going to be retried (either because TLS errors
+    /// short-circuit, or because `retry_count` reached `MAX_CONNECT_RETRIES`).
+    /// Read by `logging` to surface the right `GW_*` code in metrics / detailed
+    /// logs. `None` on the happy path.
+    pub upstream_error_code: Option<&'static str>,
 
     // --- Cross-protocol response re-render accumulator (G8 + G9) ---
     /// Accumulator across events in one chunk; taken+frozen by
@@ -173,6 +179,7 @@ impl ReqCtx {
             upstream_status: None,
             retry_count: 0,
             retry_blacklist: Vec::new(),
+            upstream_error_code: None,
             pending_client_body: None,
             error_outcome: None,
             signature_required: false,

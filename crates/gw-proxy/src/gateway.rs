@@ -11,18 +11,64 @@ use crate::filters;
 use async_trait::async_trait;
 use bytes::Bytes;
 use gw_auth::ratelimit::RateLimitGuard;
+use gw_core::error::codes;
 use gw_core::ids::{RequestId, TraceId};
-use gw_ledger::Ledger;
 use gw_health::KeyHealthStore;
+use gw_ledger::Ledger;
 use gw_routing::in_flight::InFlightStore;
 use gw_store::{CounterStore, EntityStore};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
-use pingora::Result;
+use pingora::{Error, ErrorType, Result};
 use pingora_proxy::{ProxyHttp, Session};
 use rand::RngCore;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Maximum cross-key connect retries per request (G10). At
+/// `MAX_CONNECT_RETRIES = 2` a request can try at most three keys before
+/// giving up: the initial pick plus two retries. Kept conservative because
+/// the body is buffered in memory and each retry walks the strategy stack
+/// again.
+const MAX_CONNECT_RETRIES: u32 = 2;
+
+/// Classification of a connect-time error for the G10 retry hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectErrorKind {
+    /// TLS handshake / cert failure. Almost always a config issue (wrong
+    /// SNI, bad CA, expired cert). Retrying a different key won't fix it,
+    /// so we short-circuit immediately.
+    Tls,
+    /// Any other connect-time error (timeout, refused, no-route, proxy
+    /// failure, generic handshake or connect). Retryable on another key.
+    Connect,
+}
+
+/// Inspect the Pingora `Error` chain for known TLS error variants. The
+/// `ErrorType` enum lives in `pingora-error`; the TLS group covers stages
+/// from the X509 lookup through the post-handshake "other handshake" bucket.
+///
+/// Both the outer `etype` and the root (`root_etype`) are checked because
+/// pingora sometimes wraps a low-level TLS failure inside a higher-level
+/// `ConnectError`.
+fn classify_connect_error(e: &Error) -> ConnectErrorKind {
+    use ErrorType::*;
+    let is_tls = |t: &ErrorType| {
+        matches!(
+            t,
+            TLSWantX509Lookup
+                | TLSHandshakeFailure
+                | TLSHandshakeTimedout
+                | InvalidCert
+                | HandshakeError
+        )
+    };
+    if is_tls(&e.etype) || is_tls(e.root_etype()) {
+        ConnectErrorKind::Tls
+    } else {
+        ConnectErrorKind::Connect
+    }
+}
 
 pub struct LlmGateway {
     pub store: Arc<EntityStore>,
@@ -199,6 +245,71 @@ impl ProxyHttp for LlmGateway {
         filters::response::run(session, body, end_of_stream, ctx)
     }
 
+    /// G10 — cross-key retry on upstream connect failure.
+    ///
+    /// On any non-TLS connect error (timeout / refused / no-route / proxy
+    /// failure / generic handshake) we push the failing `KeyId` onto
+    /// `ctx.retry_blacklist`, bump `ctx.retry_count`, and call `e.set_retry(true)`.
+    /// Pingora then calls `upstream_peer` again; `pick_peer` passes the blacklist
+    /// into `get_candidate_keys`, so the next strategy pick is guaranteed to land
+    /// on a different key (or `GW_ROUTING_NO_AVAILABLE_CHANNEL` if exhausted).
+    ///
+    /// TLS handshake / cert errors short-circuit immediately: a different vendor
+    /// key against the same host won't fix a bad CA or expired cert, so we stamp
+    /// `GW_UPSTREAM_TLS_ERROR` and let the error propagate to `fail_to_proxy`.
+    ///
+    /// When `retry_count` reaches `MAX_CONNECT_RETRIES` we stamp
+    /// `GW_UPSTREAM_CONNECT_FAILED` and propagate. Metric:
+    /// `gw_retry_attempt_total{outcome=recovered|exhausted|tls_blocked}`.
+    ///
+    /// v1.5 scope: this hook handles **connect-only** retry. Response-side
+    /// (5xx / 429) retry remains deferred to the routing-r-e `FailoverExecutor v2`.
+    fn fail_to_connect(
+        &self,
+        _session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut Self::CTX,
+        mut e: Box<Error>,
+    ) -> Box<Error> {
+        match classify_connect_error(&e) {
+            ConnectErrorKind::Tls => {
+                metrics::counter!(
+                    "gw_retry_attempt_total",
+                    "outcome" => "tls_blocked",
+                )
+                .increment(1);
+                ctx.upstream_error_code = Some(codes::GW_UPSTREAM_TLS_ERROR);
+                e
+            }
+            ConnectErrorKind::Connect => {
+                if ctx.retry_count < MAX_CONNECT_RETRIES {
+                    if let Some(k) = ctx.picked_vendor_key.as_ref().map(|p| p.key_id.clone()) {
+                        ctx.retry_blacklist.push(k);
+                    }
+                    ctx.retry_count += 1;
+                    // Drop the in-flight guard for the failed key so the next
+                    // pick is not counted against the previous key's quota.
+                    ctx.inflight_guard = None;
+                    metrics::counter!(
+                        "gw_retry_attempt_total",
+                        "outcome" => "recovered",
+                    )
+                    .increment(1);
+                    e.set_retry(true);
+                    e
+                } else {
+                    metrics::counter!(
+                        "gw_retry_attempt_total",
+                        "outcome" => "exhausted",
+                    )
+                    .increment(1);
+                    ctx.upstream_error_code = Some(codes::GW_UPSTREAM_CONNECT_FAILED);
+                    e
+                }
+            }
+        }
+    }
+
     async fn logging(
         &self,
         session: &mut Session,
@@ -246,7 +357,6 @@ impl ProxyHttp for LlmGateway {
 /// upstream timeout, sanity-check 500s without the marker cause) still
 /// surface at ERROR.
 fn is_gw_short_circuit(error: &pingora::Error) -> bool {
-    use pingora::ErrorType;
     matches!(error.etype, ErrorType::HTTPStatus(_))
         && matches!(
             error.root_etype(),
@@ -263,8 +373,35 @@ fn trace_id_hex() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_gw_short_circuit;
+    use super::{classify_connect_error, is_gw_short_circuit, ConnectErrorKind};
     use pingora::{Error, ErrorType};
+
+    #[test]
+    fn classify_connect_error_tls_outer() {
+        let e = Error::new(ErrorType::TLSHandshakeFailure);
+        assert_eq!(classify_connect_error(&e), ConnectErrorKind::Tls);
+    }
+
+    #[test]
+    fn classify_connect_error_tls_in_root_cause() {
+        // ConnectError wrapping a TLS failure → still classified TLS.
+        let e = Error::because(
+            ErrorType::ConnectError,
+            "wrapped",
+            Error::new(ErrorType::InvalidCert),
+        );
+        assert_eq!(classify_connect_error(&e), ConnectErrorKind::Tls);
+    }
+
+    #[test]
+    fn classify_connect_error_plain_connect() {
+        let e = Error::new(ErrorType::ConnectTimedout);
+        assert_eq!(classify_connect_error(&e), ConnectErrorKind::Connect);
+        let e = Error::new(ErrorType::ConnectRefused);
+        assert_eq!(classify_connect_error(&e), ConnectErrorKind::Connect);
+        let e = Error::new(ErrorType::ConnectNoRoute);
+        assert_eq!(classify_connect_error(&e), ConnectErrorKind::Connect);
+    }
 
     #[test]
     fn suppresses_gateway_short_circuit() {
