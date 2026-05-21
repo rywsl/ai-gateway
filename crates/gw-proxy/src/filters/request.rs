@@ -41,6 +41,69 @@ pub async fn run(
     ctx.timing.start = Some(Instant::now());
 
     // ---------------------------------------------------------------------
+    // 0. Management-plane path branch (G-α.9 / G-β wire).
+    //    `/admin/*` requests are destined for the management plane, not the
+    //    LLM business path. We tag `ctx.mgmt = true` and reject any request
+    //    that lacks a `Mgmt <token>` Authorization header. The full
+    //    mgmt-token validation against `entity:management_token` is a future
+    //    spec — v1 just rejects unauthorized mgmt requests cleanly rather
+    //    than mixing them with the business ApiKey/JWT code paths below.
+    // ---------------------------------------------------------------------
+    let req_path = session.req_header().uri.path().to_string();
+    if gw_auth::mgmt::is_management_path(&req_path) {
+        ctx.mgmt = true;
+        let req_id_for_mgmt = ctx.request_id.0.clone();
+        let mgmt_auth_hdr = session
+            .req_header()
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if gw_auth::mgmt::parse_mgmt_authorization(mgmt_auth_hdr).is_none() {
+            let err = ErrorIR {
+                category: ErrorCategory::ClientAuth,
+                status: 401,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_AUTH_INVALID_JWT),
+                message: Cow::Borrowed("mgmt token required"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            emit_and_bail(session, ctx, &err, &req_id_for_mgmt).await?;
+            unreachable!()
+        }
+        // Mgmt header present and well-formed. The actual mgmt routing /
+        // token validation is a follow-up task; for v1 we short-circuit
+        // here so the request does not flow into business-path auth.
+        // TODO(G-α.9 follow-up): dispatch into mgmt handler instead of 501.
+        let err = ErrorIR {
+            category: ErrorCategory::GatewayInternal,
+            status: 501,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
+            message: Cow::Borrowed("mgmt path not yet implemented"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        };
+        emit_and_bail(session, ctx, &err, &req_id_for_mgmt).await?;
+        unreachable!()
+    }
+
+    // TODO(T6-A wave-7 wiring): once LlmGateway holds Arc<CapabilityResolver>,
+    // resolve capabilities from headers + model alias + retry-upgrade hint:
+    //   let header_require: Vec<&str> = session.req_header().headers
+    //       .get_all("x-require-capability").iter()
+    //       .filter_map(|v| v.to_str().ok())
+    //       .flat_map(|s| s.split(',').map(str::trim))
+    //       .collect();
+    //   let req = gw_capability::resolver::ResolveRequest { ... };
+    //   ctx.required_caps = Some(resolver.resolve(&req).await?);
+
+    // ---------------------------------------------------------------------
     // 1. Auth — Bearer JWT or `x-api-key` header.
     // ---------------------------------------------------------------------
     let auth_header = session

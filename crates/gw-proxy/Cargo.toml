@@ -13,6 +13,7 @@ gw-store = { path = "../gw-store" }
 gw-auth = { path = "../gw-auth" }
 gw-routing = { path = "../gw-routing" }
 gw-ledger = { path = "../gw-ledger" }
+gw-capability = { path = "../gw-capability" }
 async-trait.workspace = true
 bytes.workspace = true
 pingora.workspace = true

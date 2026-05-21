@@ -86,6 +86,16 @@ pub struct ReqCtx {
     pub upstream_status: Option<u16>,
     pub retry_count: u32,
 
+    // --- Management path / capability (G-α.9 / G-β wire) ---
+    /// `true` if the request path matched `/admin/*` and is destined for the
+    /// management plane rather than the LLM business path.
+    pub mgmt: bool,
+    /// Capability set resolved for this request (header / model-alias /
+    /// retry-upgrade inputs collapsed into a single requirement). Filled by
+    /// the request filter once `CapabilityResolver` is wired into
+    /// `LlmGateway`; `None` in v1 (see TODO in `filters::request`).
+    pub required_caps: Option<gw_capability::types::RequiredCapabilities>,
+
     // --- Debug ---
     pub trace: TraceBuffer,
     pub debug: DebugMode,
@@ -121,6 +131,8 @@ impl ReqCtx {
             sse_leftover: Vec::new(),
             upstream_status: None,
             retry_count: 0,
+            mgmt: false,
+            required_caps: None,
             trace: TraceBuffer::new(),
             debug: DebugMode::DISABLED,
         }
