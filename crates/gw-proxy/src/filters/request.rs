@@ -17,8 +17,10 @@ use gw_auth::jwt::verify_jwt;
 use gw_auth::merge_permissions;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_auth::AuthCtx;
+use gw_core::entity::ApiKeyEntry;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, ModelName, UserId};
+use time::OffsetDateTime;
 use gw_store::deduction::{UserCircuit, USER_CIRCUIT};
 use gw_store::{CounterStore, EntityStore};
 use pingora::Result;
@@ -144,6 +146,24 @@ pub async fn run(
                 // Resolve the user_id via the api-key entry.
                 match store.apikey_or_load(&akid).await {
                     Some(entry) => {
+                        // G1 — reject expired keys before any IR parse or
+                        // permission merge. Closed interval: a request issued
+                        // exactly at `expires_at` rejects (spec ADR-G1-1).
+                        if check_api_key_expiry(&entry.value, OffsetDateTime::now_utc()).is_err() {
+                            let err = ErrorIR {
+                                category: ErrorCategory::ClientAuth,
+                                status: 401,
+                                upstream_status: None,
+                                code: Cow::Borrowed(codes::GW_AUTH_KEY_EXPIRED),
+                                message: Cow::Borrowed("api key expired"),
+                                retryable: false,
+                                upstream_raw: None,
+                                request_id: "",
+                                retry_after_secs: None,
+                            };
+                            emit_and_bail(session, ctx, &err, &request_id).await?;
+                            unreachable!()
+                        }
                         // T6-C: stash signature requirement state so the
                         // request_body_filter (or `body_verify::verify_body`)
                         // can run body-after HMAC verification.
@@ -493,6 +513,22 @@ pub async fn run(
     ctx.merged_perm = Some(merged);
     ctx.phase_end();
     Ok(false)
+}
+
+/// G1 — closed-interval expiry check for an API key. `now` is injected so the
+/// helper is testable without mocking the clock. `None` means never expires;
+/// otherwise the key is valid only while `now < expires_at` (a request issued
+/// exactly at the expiry instant rejects).
+#[allow(clippy::result_unit_err)]
+pub fn check_api_key_expiry(
+    entry: &ApiKeyEntry,
+    now: OffsetDateTime,
+) -> std::result::Result<(), ()> {
+    match entry.expires_at {
+        None => Ok(()),
+        Some(exp) if now < exp => Ok(()),
+        _ => Err(()),
+    }
 }
 
 /// Estimate a conservative freeze (in micro-units) before pricing is loaded.
