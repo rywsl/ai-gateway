@@ -37,6 +37,16 @@ pub static METRICS: &[MetricSpec] = &[
         help: "raw bytes passed through codec; label=direction",
     },
     MetricSpec {
+        name: "gw_codec_cross_render_total",
+        kind: MetricKind::Counter,
+        help: "cross-protocol stream events re-rendered via IR round-trip (G8); labels=from,to",
+    },
+    MetricSpec {
+        name: "gw_codec_passthrough_total",
+        kind: MetricKind::Counter,
+        help: "same-protocol stream events forwarded verbatim (zero-copy); label=kind",
+    },
+    MetricSpec {
         name: "gw_freeze_acquire_total",
         kind: MetricKind::Counter,
         help: "freeze acquire outcomes; label=outcome",

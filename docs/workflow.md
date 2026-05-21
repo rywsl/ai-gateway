@@ -125,7 +125,7 @@ Pingora streams the request body. We discard every chunk **until** `end_of_strea
   - `Usage` events accumulate `input_tokens`, `output_tokens`, `cache_read_input_tokens` on `ctx.usage_accum`.
   - `Start` / `Delta` events record `ctx.timing.ttft` (one-shot, first delta wins).
 
-The same loop forwards bytes to the client (same-protocol passthrough is the v1 path; cross-protocol *response* re-render is deferred — see [`architecture.md`](architecture.md) §9). Per-chunk SSE conversion for the OpenAI Responses shape lives in `crates/gw-codec/src/openai/responses/{wire_stream_chunk,conversion}.rs`.
+After parsing, the loop decides how to forward the chunk to the client. If `ctx.client_codec.kind() == ctx.upstream_codec.kind()` (or the client codec is unknown) the upstream bytes are forwarded verbatim — same-protocol streaming stays zero-copy. When the kinds differ (G8, T4-A) each `StreamEventIR` is re-rendered through the *client* codec into the `ctx.pending_client_body: Option<BytesMut>` accumulator: the buffer is taken out at the start of the framed event, every IR event appends into it (so Gemini's combined `[Delta, End]` fan-out renders both, not just the last), and at the end of the chunk `response_body_filter` `take()`s the accumulator, `freeze()`s it, and substitutes it for the outbound body. The `.take()` is per-chunk — each Pingora callback gets a fresh accumulator so old rendered bytes never leak forward. Counters: `gw_codec_cross_render_total{from,to}` per re-rendered event, `gw_codec_passthrough_total{kind}` per same-protocol event. Per-chunk SSE conversion for the OpenAI Responses shape lives in `crates/gw-codec/src/openai/responses/{wire_stream_chunk,conversion}.rs`.
 
 ### 2.7 Streaming policy
 
