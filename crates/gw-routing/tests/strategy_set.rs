@@ -3,6 +3,23 @@
 
 use gw_core::entity::StrategyKind;
 use gw_routing::strategy::set::StrategySet;
+use gw_routing::strategy::Strategy;
+
+/// Expected `Strategy::name()` for each `StrategyKind`. A mis-wired arm in
+/// `StrategySet::pick_for` (e.g. `Sticky => &self.round_robin`) would fail
+/// this — the previous `!name().is_empty()` assertion would not.
+fn expected_name(kind: StrategyKind) -> &'static str {
+    match kind {
+        StrategyKind::FixedOrder => "fixed_order",
+        StrategyKind::RoundRobin => "round_robin",
+        StrategyKind::LoadBalance => "load_balance",
+        StrategyKind::WeightedRr => "weighted_rr",
+        StrategyKind::CostFirst => "cost_first",
+        StrategyKind::LatencyFirst => "latency_first",
+        StrategyKind::CacheAffinity => "cache_affinity",
+        StrategyKind::Sticky => "sticky",
+    }
+}
 
 #[test]
 fn strategy_set_dispatches_each_kind() {
@@ -18,7 +35,13 @@ fn strategy_set_dispatches_each_kind() {
         StrategyKind::Sticky,
     ] {
         let s = set.pick_for(kind);
-        assert!(!s.name().is_empty(), "strategy {:?} returns name", kind);
+        assert_eq!(
+            s.name(),
+            expected_name(kind),
+            "strategy {:?} dispatched to wrong variant: got {}",
+            kind,
+            s.name(),
+        );
     }
 }
 

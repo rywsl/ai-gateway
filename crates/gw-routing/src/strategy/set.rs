@@ -8,6 +8,23 @@
 //! `gw-proxy/src/filters/upstream.rs`, which constructed a fresh
 //! `Sticky::default()` every call and therefore leaked all session affinity.
 //!
+//! ## Dispatch shape
+//!
+//! [`Self::pick_for`] returns `&StrategyAny` (not `&dyn Strategy`) so the hot
+//! path stays on the codebase's enum-dispatch contract (see
+//! `crates/gw-routing/src/strategy/mod.rs` doc on `StrategyAny`: "Avoids
+//! heap-allocated trait objects on the hot path"). The set stores one
+//! pre-built `StrategyAny` per kind, so dispatch is a borrow + enum match,
+//! never a vtable call.
+//!
+//! ## T2-C migration note
+//!
+//! When `Sticky` grows a `moka::sync::Cache` and becomes expensive to clone,
+//! `StrategyAny::Sticky` will likely change to hold `Arc<Sticky>`. Because we
+//! return `&StrategyAny` (a borrow), no by-value moves are baked into this
+//! API — that future change stays local to `strategy/mod.rs` + this file's
+//! constructors and does not ripple into call sites.
+//!
 //! Spec ADR refs: G12.
 
 use crate::strategy::cache_affinity::CacheAffinity;
@@ -18,35 +35,39 @@ use crate::strategy::load_balance::LoadBalance;
 use crate::strategy::round_robin::RoundRobin;
 use crate::strategy::sticky::Sticky;
 use crate::strategy::weighted_rr::WeightedRr;
-use crate::strategy::Strategy;
+use crate::strategy::StrategyAny;
 use gw_core::entity::StrategyKind;
 
 /// One instance of each of the 8 strategy variants, owned for the lifetime of
 /// the process and shared across all requests via `Arc<StrategySet>`.
+///
+/// Fields are private; access is via [`Self::pick_for`] which enforces the
+/// `StrategyKind` → variant mapping and returns `&StrategyAny` so callers
+/// stay on enum dispatch.
 pub struct StrategySet {
-    pub fixed_order: FixedOrder,
-    pub round_robin: RoundRobin,
-    pub load_balance: LoadBalance,
-    pub weighted_rr: WeightedRr,
-    pub cost_first: CostFirst,
-    pub latency_first: LatencyFirst,
-    pub cache_affinity: CacheAffinity,
+    fixed_order: StrategyAny,
+    round_robin: StrategyAny,
+    load_balance: StrategyAny,
+    weighted_rr: StrategyAny,
+    cost_first: StrategyAny,
+    latency_first: StrategyAny,
+    cache_affinity: StrategyAny,
     /// T2-C migrates this to moka-backed shared state.
-    pub sticky: Sticky,
+    sticky: StrategyAny,
 }
 
 impl StrategySet {
     /// Construct with the production defaults for each strategy.
     pub fn new_default() -> Self {
         Self {
-            fixed_order: FixedOrder,
-            round_robin: RoundRobin::default(),
-            load_balance: LoadBalance,
-            weighted_rr: WeightedRr::default(),
-            cost_first: CostFirst,
-            latency_first: LatencyFirst,
-            cache_affinity: CacheAffinity,
-            sticky: Sticky::default(),
+            fixed_order: StrategyAny::FixedOrder(FixedOrder),
+            round_robin: StrategyAny::RoundRobin(RoundRobin::default()),
+            load_balance: StrategyAny::LoadBalance(LoadBalance),
+            weighted_rr: StrategyAny::WeightedRr(WeightedRr::default()),
+            cost_first: StrategyAny::CostFirst(CostFirst),
+            latency_first: StrategyAny::LatencyFirst(LatencyFirst),
+            cache_affinity: StrategyAny::CacheAffinity(CacheAffinity),
+            sticky: StrategyAny::Sticky(Sticky::default()),
         }
     }
 
@@ -57,8 +78,12 @@ impl StrategySet {
         Self::new_default()
     }
 
-    /// Dispatch by [`StrategyKind`] to the owned instance.
-    pub fn pick_for(&self, kind: StrategyKind) -> &dyn Strategy {
+    /// Dispatch by [`StrategyKind`] to the owned [`StrategyAny`] instance.
+    ///
+    /// Returns `&StrategyAny` (not `&dyn Strategy`) to stay on enum dispatch
+    /// — same shape that the legacy `strategy_for(kind) -> StrategyAny`
+    /// factory in `gw-proxy/src/filters/upstream.rs` produces.
+    pub fn pick_for(&self, kind: StrategyKind) -> &StrategyAny {
         match kind {
             StrategyKind::FixedOrder => &self.fixed_order,
             StrategyKind::RoundRobin => &self.round_robin,
