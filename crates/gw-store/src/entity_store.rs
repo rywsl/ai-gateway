@@ -82,6 +82,10 @@ pub struct EntityStore {
     pub pricing: Cache<ModelName, Arc<Versioned<Pricing>>>,
     pub jwks: Cache<Kid, Arc<Versioned<JwksEntry>>>,
     pub ipblock: Cache<String, Arc<Versioned<IpBlockEntry>>>,
+    pub model_mapping: moka::future::Cache<
+        (String, gw_core::protocol::ProtocolKind),
+        std::sync::Arc<gw_core::versioned::Versioned<gw_core::entity::ModelMapping>>,
+    >,
     /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
     /// `None` for unit tests that pre-populate caches by hand.
     loader: Option<Arc<LoaderCtx>>,
@@ -147,6 +151,10 @@ impl EntityStore {
             ipblock: Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(300))
+                .build(),
+            model_mapping: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(1800))
                 .build(),
             loader,
             cold_load_timeout,

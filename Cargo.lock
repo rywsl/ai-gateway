@@ -1530,9 +1530,12 @@ dependencies = [
 name = "gw-capability"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "gw-core",
  "gw-store",
+ "metrics",
+ "parking_lot",
  "serde",
  "smallvec",
  "thiserror 1.0.69",

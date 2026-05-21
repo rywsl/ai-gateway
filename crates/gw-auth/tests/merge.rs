@@ -79,6 +79,8 @@ fn apikey(
             expires_at: None,
             signature_required: false,
             signature_algo: SignatureAlgo::default(),
+            force_capabilities: smallvec::SmallVec::new(),
+            match_mode_exclusive: false,
         },
     ))
 }
