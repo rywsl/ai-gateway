@@ -5,6 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
+gw-auth  = { path = "../gw-auth" }
 gw-core  = { path = "../gw-core" }
 gw-store = { path = "../gw-store" }
 serde = { workspace = true }
