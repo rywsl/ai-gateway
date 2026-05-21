@@ -13,6 +13,7 @@ pub mod error_emit;
 pub mod filters;
 pub mod gateway;
 pub mod mem;
+pub mod resilience;
 pub mod timeouts;
 
 pub use gateway::LlmGateway;
