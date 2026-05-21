@@ -168,6 +168,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# no_global_hmac_force (G7) — HMAC signing is per-api-key (ApiKeyEntry.
+# signature_required). A workspace-global force flag is an explicit v2
+# follow-up (ADR-G7-2) and must not leak into v1.5 source.
+# ---------------------------------------------------------------------------
+echo "[no_global_hmac_force] workspace-global HMAC force flag must not appear"
+if grep -rnE '\bsignature_required_workspace_wide\b|\b(global|workspace)_signature_required\b|\bforce_signature_(global|workspace)\b' crates/ config/ 2>/dev/null; then
+  bad "workspace-global HMAC force flag remains"
+else
+  ok "no workspace-global HMAC force flag"
+fi
+
+# ---------------------------------------------------------------------------
 # no_freezeguard_settle (§5.2) — FreezeGuard::release replaces settle.
 # ---------------------------------------------------------------------------
 echo "[no_freezeguard_settle] FreezeGuard::settle must be absent"
