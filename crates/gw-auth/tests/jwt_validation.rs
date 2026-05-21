@@ -1,4 +1,8 @@
-use gw_auth::jwt::{JwtValidator, JwtValidatorConfig};
+//! Sibling to `jwt_validator_hybrid.rs` — exercises the synchronous-feel
+//! `JwtValidator::validate` path with HS256 static secrets. Updated for the
+//! T1-E enum-shaped `JwtError`.
+
+use gw_auth::jwt::{JwtError, JwtValidator, JwtValidatorConfig};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
@@ -35,77 +39,59 @@ fn make_token(secret: &[u8], iss: &str, aud: &str, exp_offset: i64, nbf_offset: 
     .unwrap()
 }
 
-#[test]
-fn rejects_iss_mismatch() {
+fn cfg(secret: &[u8], iss: &str, aud: &str, leeway: u32, require_nbf: bool) -> JwtValidatorConfig {
+    JwtValidatorConfig {
+        static_secret_hs256: Some(secret.to_vec()),
+        static_pem_rs256: None,
+        expected_iss: smallvec![iss.into()],
+        expected_aud: smallvec![aud.into()],
+        leeway_secs: leeway,
+        require_nbf,
+    }
+}
+
+#[tokio::test]
+async fn rejects_iss_mismatch() {
     let secret = b"secret";
     let token = make_token(secret, "evil", "gw", 60, -1);
-    let v = JwtValidator::new(JwtValidatorConfig {
-        secret: secret.to_vec(),
-        expected_iss: smallvec!["good".into()],
-        expected_aud: smallvec!["gw".into()],
-        leeway_secs: 30,
-        require_nbf: true,
-    });
-    let err = v.verify::<Claims>(&token).unwrap_err();
+    let v = JwtValidator::new(cfg(secret, "good", "gw", 30, true));
+    let err = v.validate::<Claims>(&token).await.unwrap_err();
+    assert_eq!(err, JwtError::InvalidIss);
     assert_eq!(err.reason(), "iss");
 }
 
-#[test]
-fn rejects_aud_mismatch() {
+#[tokio::test]
+async fn rejects_aud_mismatch() {
     let secret = b"secret";
     let token = make_token(secret, "good", "evil", 60, -1);
-    let v = JwtValidator::new(JwtValidatorConfig {
-        secret: secret.to_vec(),
-        expected_iss: smallvec!["good".into()],
-        expected_aud: smallvec!["gw".into()],
-        leeway_secs: 30,
-        require_nbf: true,
-    });
-    let err = v.verify::<Claims>(&token).unwrap_err();
-    assert_eq!(err.reason(), "aud");
+    let v = JwtValidator::new(cfg(secret, "good", "gw", 30, true));
+    let err = v.validate::<Claims>(&token).await.unwrap_err();
+    assert_eq!(err, JwtError::InvalidAud);
 }
 
-#[test]
-fn rejects_nbf_in_future() {
+#[tokio::test]
+async fn rejects_nbf_in_future() {
     let secret = b"secret";
     let token = make_token(secret, "good", "gw", 600, 120);
-    let v = JwtValidator::new(JwtValidatorConfig {
-        secret: secret.to_vec(),
-        expected_iss: smallvec!["good".into()],
-        expected_aud: smallvec!["gw".into()],
-        leeway_secs: 0,
-        require_nbf: true,
-    });
-    let err = v.verify::<Claims>(&token).unwrap_err();
-    assert_eq!(err.reason(), "nbf");
+    let v = JwtValidator::new(cfg(secret, "good", "gw", 0, true));
+    let err = v.validate::<Claims>(&token).await.unwrap_err();
+    assert_eq!(err, JwtError::NotYetValid);
 }
 
-#[test]
-fn accepts_valid_with_leeway() {
+#[tokio::test]
+async fn accepts_valid_with_leeway() {
     let secret = b"secret";
     let token = make_token(secret, "good", "gw", -10, -100);
-    let v = JwtValidator::new(JwtValidatorConfig {
-        secret: secret.to_vec(),
-        expected_iss: smallvec!["good".into()],
-        expected_aud: smallvec!["gw".into()],
-        leeway_secs: 30,
-        require_nbf: true,
-    });
-    let claims = v.verify::<Claims>(&token).unwrap();
+    let v = JwtValidator::new(cfg(secret, "good", "gw", 30, true));
+    let claims = v.validate::<Claims>(&token).await.unwrap();
     assert_eq!(claims.sub, "u1");
 }
 
-#[test]
-fn reason_does_not_contain_token() {
-    let v = JwtValidator::new(JwtValidatorConfig {
-        secret: b"secret".to_vec(),
-        expected_iss: smallvec!["a".into()],
-        expected_aud: smallvec!["b".into()],
-        leeway_secs: 0,
-        require_nbf: false,
-    });
+#[tokio::test]
+async fn reason_does_not_contain_token() {
+    let v = JwtValidator::new(cfg(b"secret", "a", "b", 0, false));
     let secret_token = "not.a.real.jwt";
-    let err = v.verify::<serde_json::Value>(secret_token).unwrap_err();
+    let err = v.validate::<serde_json::Value>(secret_token).await.unwrap_err();
     let dbg = format!("{err:?}");
     let disp = format!("{err}");
     assert!(

@@ -112,6 +112,7 @@ impl ProxyHttp for LlmGateway {
             &self.counters,
             self.global_rpm,
             self.trust_xff,
+            self.jwt_validator.as_ref(),
         )
         .await
     }

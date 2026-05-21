@@ -13,7 +13,7 @@ use crate::error_emit;
 use crate::filters::early::{client_ip_from_session, pick_emit_codec, short_circuit, with_request_id};
 use gw_auth::apikey::verify_apikey;
 use gw_auth::ip_filter::check_blocklist;
-use gw_auth::jwt::verify_jwt;
+use gw_auth::jwt::{verify_jwt, JwtError, JwtValidator};
 use gw_auth::merge_permissions;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_auth::AuthCtx;
@@ -30,6 +30,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     session: &mut Session,
     ctx: &mut ReqCtx,
@@ -38,6 +39,7 @@ pub async fn run(
     counters: &Arc<CounterStore>,
     global_rpm: u32,
     trust_xff: bool,
+    jwt_validator: Option<&Arc<JwtValidator>>,
 ) -> Result<bool> {
     ctx.phase_start("request_filter");
     ctx.timing.start = Some(Instant::now());
@@ -133,12 +135,44 @@ pub async fn run(
             .as_deref()
             .and_then(|h| h.strip_prefix("Bearer "))
     {
-        match verify_jwt(bearer, store).await {
-            Ok(uid) => Ok((uid, None, None)),
-            Err(err) => {
-                emit_and_bail(session, ctx, &err, &request_id).await?;
-                unreachable!()
-            }
+        // G6 (T1-E): if AuthConfig.global is wired into the gateway, use the
+        // hybrid validator (JWKS resolver + iss/aud/nbf/leeway enforcement
+        // with HS256 / static_pem_rs256 fallbacks). Otherwise fall through to
+        // the legacy `verify_jwt` so deployments without AuthConfig keep
+        // working with v1 semantics (exp-only, JWKS-by-kid).
+        match jwt_validator {
+            Some(v) => match v.validate_sub(bearer).await {
+                Ok(uid) => Ok((uid, None, None)),
+                Err(jerr) => {
+                    let (code, msg) = match jerr {
+                        JwtError::InvalidIss => (codes::GW_AUTH_JWT_INVALID_ISS, "jwt issuer invalid"),
+                        JwtError::InvalidAud => (codes::GW_AUTH_JWT_INVALID_AUD, "jwt audience invalid"),
+                        JwtError::NotYetValid => (codes::GW_AUTH_JWT_NOT_YET_VALID, "jwt not yet valid"),
+                        JwtError::Expired => (codes::GW_AUTH_INVALID_JWT, "jwt expired"),
+                        JwtError::InvalidSignature => (codes::GW_AUTH_INVALID_JWT, "jwt invalid"),
+                    };
+                    let err = ErrorIR {
+                        category: ErrorCategory::ClientAuth,
+                        status: 401,
+                        upstream_status: None,
+                        code: Cow::Borrowed(code),
+                        message: Cow::Borrowed(msg),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    emit_and_bail(session, ctx, &err, &request_id).await?;
+                    unreachable!()
+                }
+            },
+            None => match verify_jwt(bearer, store).await {
+                Ok(uid) => Ok((uid, None, None)),
+                Err(err) => {
+                    emit_and_bail(session, ctx, &err, &request_id).await?;
+                    unreachable!()
+                }
+            },
         }
     } else if let (Some(akid_str), Some(akey)) = (api_key_id_hdr.as_ref(), api_key_hdr.as_ref()) {
         let akid = ApiKeyId::from(akid_str.as_str());

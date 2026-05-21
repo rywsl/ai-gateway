@@ -268,6 +268,42 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         }
     });
 
+    // T1-E (G6) — build the hybrid JwtValidator if AuthConfig.global is
+    // available. Absent → validator stays None and request_filter falls back
+    // to the legacy `verify_jwt` so deployments without AuthConfig keep
+    // working with v1 semantics (exp-only, JWKS-by-kid).
+    let jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>> = match store
+        .auth_config_or_load("global")
+        .await
+    {
+        Some(cfg_v) => {
+            let vcfg = gw_auth::jwt::JwtValidatorConfig {
+                static_secret_hs256: cfg_v.value.static_secret_hs256.clone(),
+                static_pem_rs256: cfg_v.value.static_pem_rs256.clone(),
+                expected_iss: cfg_v.value.expected_iss.clone(),
+                expected_aud: cfg_v.value.expected_aud.clone(),
+                leeway_secs: cfg_v.value.leeway_secs,
+                require_nbf: cfg_v.value.require_nbf,
+            };
+            let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
+            v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
+                store: store.clone(),
+            }));
+            tracing::info!(
+                target: "gw_gateway",
+                "JwtValidator wired from AuthConfig.global (G6, T1-E)"
+            );
+            Some(Arc::new(v))
+        }
+        None => {
+            tracing::info!(
+                target: "gw_gateway",
+                "AuthConfig.global absent; client-bearer JWT path stays on legacy verify_jwt"
+            );
+            None
+        }
+    };
+
     Ok(Wired {
         store,
         health,
@@ -278,9 +314,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         global_rpm: cfg.ratelimit.global_rpm,
         trust_xff: cfg.security.trust_xff,
         business_port: cfg.server.business_port,
-        // Wave 1+ placeholders. T1-E flips `jwt_validator` on once it builds
-        // a validator from `AuthConfig.global`; T3-C wires `capability_resolver`.
-        jwt_validator: None,
+        jwt_validator,
+        // Wave 1+ placeholder. T3-C wires `capability_resolver`.
         strategies: Arc::new(gw_routing::strategy::set::StrategySet::new_default()),
         capability_resolver: None,
     })

@@ -293,6 +293,15 @@ pub struct AuthConfig {
     pub leeway_secs: u32,
     pub require_nbf: bool,
     pub blacklist_fail_mode: BlacklistFailMode,
+    /// HS256 shared-secret bytes for the client-bearer JWT path (G6, T1-E).
+    /// Absent means the HS256 path is disabled.
+    #[serde(default)]
+    pub static_secret_hs256: Option<Vec<u8>>,
+    /// Static RS256 public-key PEM for the client-bearer JWT path (G6, T1-E).
+    /// Acts as fallback when the JWKS resolver returns `None` or the token has
+    /// no `kid` header. Absent means the RS256 static path is disabled.
+    #[serde(default)]
+    pub static_pem_rs256: Option<Vec<u8>>,
 }
 
 /// JWT-blacklist behavior when Redis is unreachable.
