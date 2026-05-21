@@ -9,7 +9,7 @@
 use crate::types::{Capability, CapabilityOrigin, MatchMode, RequiredCapabilities};
 use async_trait::async_trait;
 use gw_core::error::ErrorClass;
-use gw_core::protocol::ProtocolKind;
+use gw_core::protocol::{ApiShape, ProtocolKind};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -70,6 +70,38 @@ impl CapabilityResolver {
         };
         let label = if r.set.is_empty() { "miss" } else { "hit" };
         metrics::counter!("gw_capability_resolve_total", "match" => label).increment(1);
+        Ok(r)
+    }
+
+    /// Resolve capabilities and auto-attach shape-derived caps.
+    ///
+    /// `shape == ApiShape::OpenAiResponses` adds `Capability::OpenAiResponsesShape`
+    /// with `CapabilityOrigin::HeaderRequire` (treating the shape detection as
+    /// equivalent to a client-supplied requirement, so origin tracking shows
+    /// where the cap came from).
+    pub async fn resolve_with_shape(
+        &self,
+        api_key_id: &str,
+        model_alias: &str,
+        header_require: Option<&[&str]>,
+        protocol: ProtocolKind,
+        shape: ApiShape,
+        retry_upgrade: Option<&RetryUpgradeHint>,
+    ) -> anyhow::Result<RequiredCapabilities> {
+        let req = ResolveRequest {
+            api_key_id,
+            model_alias,
+            header_require,
+            protocol,
+            retry_upgrade,
+        };
+        let mut r = self.resolve(&req).await?;
+        if shape == ApiShape::OpenAiResponses {
+            r.add(
+                Capability::OpenAiResponsesShape,
+                CapabilityOrigin::HeaderRequire,
+            );
+        }
         Ok(r)
     }
 }
