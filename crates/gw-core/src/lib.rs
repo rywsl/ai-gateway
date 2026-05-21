@@ -10,3 +10,16 @@ pub mod protocol;
 pub mod traits;
 pub mod usage;
 pub mod versioned;
+
+pub mod ratelimit {
+    #[non_exhaustive]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum RateLimitKind {
+        Rpm,
+        Tpm,
+        Daily,
+        Monthly,
+        Concurrent,
+        Unknown,
+    }
+}
