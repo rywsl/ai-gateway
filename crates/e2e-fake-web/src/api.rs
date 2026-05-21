@@ -13,7 +13,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Map any anyhow error from a Store call into a `400` with the message.
 ///
@@ -110,4 +110,32 @@ pub async fn set_balance(
         Ok(()) => (StatusCode::OK, "ok").into_response(),
         Err(e) => err_to_400(e).into_response(),
     }
+}
+
+#[derive(Serialize)]
+pub struct ResetResponse {
+    pub ok: bool,
+}
+
+/// `POST /admin/reset` — wipe Redis (FLUSHALL) and TRUNCATE every entity
+/// table, then reset the shared drain cursor back to `"0-0"`.
+///
+/// CRITICAL: the drain cursor MUST be reset together with the FLUSHALL.
+/// FLUSHALL removes `usage:records` entirely; if the cursor still pointed
+/// at the old high id, the next drain would only deliver entries with
+/// `id > cursor` and silently skip freshly-XADDed records in the new
+/// stream.
+///
+/// On any error from Store we surface `500` (this is an admin-only test
+/// endpoint; a non-200 just means the test harness should abort the run).
+pub async fn admin_reset(State(state): State<AppState>) -> impl IntoResponse {
+    if let Err(e) = state.store.reset().await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    // Reset the cursor after the store wipe — order matters only insofar
+    // as both must complete before the next test starts. Holding the lock
+    // here is fine; the drain loop is paused while it waits on this mutex.
+    let mut guard = state.drain_cursor.lock().await;
+    *guard = String::from("0-0");
+    Json(ResetResponse { ok: true }).into_response()
 }

@@ -5,3 +5,8 @@ target/
 .env
 .env.local
 .sqlx/
+
+# E2E python harness — venv + caches are per-developer.
+tests/e2e/client/.venv/
+**/__pycache__/
+**/.pytest_cache/

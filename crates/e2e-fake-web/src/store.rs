@@ -8,7 +8,7 @@
 
 use crate::events;
 use fred::clients::RedisPool;
-use fred::interfaces::{KeysInterface, StreamsInterface};
+use fred::interfaces::{ClientLike, KeysInterface, StreamsInterface};
 use std::sync::Arc;
 
 /// Allowlist of entity tables the fake web is permitted to upsert/delete.
@@ -173,5 +173,38 @@ impl Store {
     pub async fn xlen(&self, stream: &str) -> anyhow::Result<i64> {
         let v: i64 = self.redis.next().xlen(stream).await?;
         Ok(v)
+    }
+
+    /// Full-state reset for per-test isolation:
+    ///
+    /// 1. `FLUSHALL` on Redis (NOT `FLUSHDB`) — the e2e Redis is
+    ///    single-purpose, so wiping every key across every database
+    ///    (counters, streams, consumer groups) is the simplest way to
+    ///    guarantee a clean slate between tests.
+    /// 2. `TRUNCATE` every entity table with `RESTART IDENTITY CASCADE` so
+    ///    autoincrement sequences and any FK fanout reset too. `CASCADE`
+    ///    is safe today because v1 entity tables have no inter-table FKs;
+    ///    the clause is kept defensively for future migrations.
+    ///
+    /// Note: this deliberately SKIPS `events::emit_invalidate`. The Redis
+    /// stream that carries those events is wiped in step 1, so there are
+    /// no consumers left to notify — the gateway's in-memory caches are
+    /// expected to be re-seeded by whatever the next test puts back via
+    /// `put_entity` (which emits invalidations the normal way).
+    ///
+    /// Cursor reset for the drain loop is handled by the HTTP handler
+    /// (it owns the `Mutex<String>` in `AppState`).
+    pub async fn reset(&self) -> anyhow::Result<()> {
+        // FLUSHALL is gated on fred's `i-server` feature, which is pulled
+        // in by the default `i-std` set, so this just works.
+        let _: () = self.redis.next().flushall(false).await?;
+
+        // One statement so it's atomic and we can't half-truncate. The
+        // table list is the same allowlist `ENTITY_TABLES` — keep them
+        // in sync.
+        let tables = ENTITY_TABLES.join(", ");
+        let sql = format!("TRUNCATE {tables} RESTART IDENTITY CASCADE");
+        sqlx::query(&sql).execute(&self.pg).await?;
+        Ok(())
     }
 }

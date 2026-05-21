@@ -48,6 +48,7 @@ impl AppState {
 /// - `POST /balance/{user_id}`
 /// - `POST /jwks/rotate`
 /// - `POST /usage/drain`, `GET /usage/stats`
+/// - `POST /admin/reset`
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -61,5 +62,6 @@ pub fn router(state: AppState) -> Router {
         .route("/jwks/rotate", post(jwks::rotate))
         .route("/usage/drain", post(usage_drain::force_drain))
         .route("/usage/stats", get(usage_drain::stats))
+        .route("/admin/reset", post(api::admin_reset))
         .with_state(state)
 }
