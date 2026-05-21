@@ -473,9 +473,9 @@ pub async fn run(
         emit_and_bail(session, ctx, &err, &request_id).await?;
         unreachable!()
     }
-    // freeze-estimate is computed once we have pricing; for now we freeze a
-    // conservative placeholder so the user is gated against runaway parallel
-    // requests. The real per-token cost is settled in `logging`.
+    // freeze-estimate uses a flat 1 micro per estimated token times the
+    // markup product. The freeze is released in `logging`; Go computes the
+    // real cost from the UsageRecord.
     let freeze_estimate_micro = freeze_estimate(est_input_tokens, merged.markup_chain.product);
     if let Err(err) = check_cost(freeze_estimate_micro, &hc_cfg) {
         emit_and_bail(session, ctx, &err, &request_id).await?;
