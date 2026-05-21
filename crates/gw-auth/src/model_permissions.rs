@@ -64,3 +64,98 @@ pub fn check_model_against_permissions(model: &str, perms: &[ModelPermission]) -
     }
     allow
 }
+
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::time::Instant;
+
+/// Per-call regex match budget. Matches over `BUDGET_MS` are recorded as
+/// timeouts via [`RedosTracker::record_timeout`]; once an ApiKey accumulates
+/// `TIMEOUT_THRESHOLD` timeouts, [`RedosTracker::is_disabled`] returns true
+/// and [`check_with_budget`] short-circuits to `None`.
+pub const BUDGET_MS: u128 = 100;
+
+/// Number of regex-match timeouts per ApiKey before that key is auto-disabled.
+const TIMEOUT_THRESHOLD: u32 = 10;
+
+/// Per-ApiKey timeout counter + disable flag. Cheap interior mutability
+/// (parking_lot::Mutex over a small HashMap) so production code can hold a
+/// shared `&'static RedosTracker` (or an Arc) on the hot path.
+#[derive(Default)]
+pub struct RedosTracker {
+    inner: Mutex<HashMap<String, TrackerEntry>>,
+}
+
+#[derive(Default)]
+struct TrackerEntry {
+    timeout_count: u32,
+    disabled: bool,
+}
+
+impl RedosTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn timeout_count(&self, ak: &str) -> u32 {
+        self.inner
+            .lock()
+            .get(ak)
+            .map(|e| e.timeout_count)
+            .unwrap_or(0)
+    }
+
+    pub fn is_disabled(&self, ak: &str) -> bool {
+        self.inner
+            .lock()
+            .get(ak)
+            .map(|e| e.disabled)
+            .unwrap_or(false)
+    }
+
+    pub fn record_timeout(&self, ak: &str) {
+        let mut m = self.inner.lock();
+        let e = m.entry(ak.to_string()).or_default();
+        e.timeout_count += 1;
+        if e.timeout_count >= TIMEOUT_THRESHOLD {
+            e.disabled = true;
+        }
+        metrics::counter!("gw_redos_timeout_total",
+            "api_key_id" => ak.to_string())
+        .increment(1);
+    }
+}
+
+/// Run a permission check with a per-ApiKey ReDoS budget guard.
+///
+/// - Returns `None` when the ApiKey has been auto-disabled (caller should reject the request).
+/// - Returns `Some(matched)` otherwise. If the elapsed time exceeded `BUDGET_MS`,
+///   the timeout is recorded but this call still returns the (presumably correct)
+///   regex result — the next call from the same ApiKey will be the one short-circuited
+///   if the threshold is crossed.
+///
+/// `regex` crate has no native incremental-step API; the post-check timestamp
+/// is therefore observational, not preemptive. This is acceptable because:
+///   1. `RegexBuilder::dfa_size_limit` already bounds DFA construction;
+///   2. RE2-style matching is linear-time on input (no catastrophic backtracking
+///      possible regardless of pattern shape);
+///   3. The budget guard is a defense-in-depth — even with a pathological
+///      input, threshold-disable bounds total damage to ~ `TIMEOUT_THRESHOLD`
+///      slow calls per ApiKey.
+pub fn check_with_budget(
+    model: &str,
+    perms: &[ModelPermission],
+    api_key_id: &str,
+    tracker: &RedosTracker,
+) -> Option<bool> {
+    if tracker.is_disabled(api_key_id) {
+        return None;
+    }
+    let start = Instant::now();
+    let result = check_model_against_permissions(model, perms);
+    let elapsed = start.elapsed();
+    if elapsed.as_millis() > BUDGET_MS {
+        tracker.record_timeout(api_key_id);
+    }
+    Some(result)
+}
