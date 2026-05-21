@@ -19,12 +19,25 @@
 | 0 | T0-1, T0-2 | 顺序 | — |
 | 1 | T1-A..G | 7 并行 | Wave 0 |
 | 2 | T2-A..F | 6 并行 | Wave 0 |
-| 3 | T3-A..F | 6 并行 | Wave 1+2 部分 |
+| 3 | T3-A..H | 8 并行 | Wave 1+2 部分 |
 | 4 | T4-A..E | 5 并行 | T1-F (capability skeleton) |
-| 5 | T5-A..D | 4 并行 | Wave 3+4 |
-| 6 | T6-A..D | 顺序 | All（T6-D 是收尾） |
+| 5 | T5-A..F | 6 并行 | Wave 3+4 |
+| 6 | T6-A..F | 顺序 | All（T6-F 是收尾） |
 
-**总 task 数：34**（2+7+6+6+5+4+4）。**最大并行度：7**（Wave 1）。
+**总 task 数：40**（2+7+6+8+5+6+6）。**最大并行度：8**（Wave 3）。
+
+补回的 6 项原"follow-up"（spec ADR 要求实现）全部升格为正式 task：
+
+| 原 follow-up 项 | 升格为 task | 所属 ADR |
+|---|---|---|
+| Tunnel hub WebSocket 真连接 + reconnect / heartbeat | **T3-G** | ADR-G5-3 |
+| DoH client（safe_dns 真实解析） | **T3-H** | ADR-G5-5 |
+| Capability resolver 内嵌 model_permissions runtime 熔断接 capability filter | **T5-E** | ADR-G2-8 |
+| OpenAI Responses ⇄ Chat ⇄ Anthropic / Gemini 跨形矩阵转换 | **T5-F** | ADR-G4-3 |
+| Stream policy AccumulateUpstreamStream 真实现 | **T6-D** | ADR-G4-1 |
+| usage:detailed Redis stream sink 真实现 | **T6-E** | ADR-G6-4 |
+
+> KEK 轮换"管理面入口" 明确归管理面 spec；T1-E 已实现 dual-read 状态机本身（spec § 1.7 实际要求）。
 
 ---
 
@@ -3224,6 +3237,469 @@ git add crates/gw-proxy
 git commit -m "feat(gw-proxy): ThinkingSignatureListener + FlowState gate (G-α.5)"
 ```
 
+---
+
+### Task T3-G: Tunnel hub WebSocket 长连接 + heartbeat + reconnect
+
+**Files:**
+- Modify: `crates/gw-tunnel-client/Cargo.toml`（加 `tokio-tungstenite` `futures-util`）
+- Modify: `Cargo.toml`（workspace dep `tokio-tungstenite`、`futures-util`）
+- Create: `crates/gw-tunnel-client/src/transport.rs`
+- Modify: `crates/gw-tunnel-client/src/pool.rs`（接 transport）
+- Modify: `crates/gw-tunnel-client/src/lib.rs`
+- Test: `crates/gw-tunnel-client/tests/transport.rs`
+
+> 实现 spec ADR-G5-3：跑通"网关 → hub WebSocket 长连，按 frame protocol 发 OPEN/DATA/CLOSE，PING/PONG 心跳 30s，3 次未收 PONG 重连，指数退避 jitter ±20%"。复用 T3-D 已实现的 `pool::jittered_backoff` 与 T2-E 已实现的 frame 编解码。
+
+- [ ] **Step 1: 加依赖**
+
+`Cargo.toml` `[workspace.dependencies]`：
+
+```toml
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+```
+
+`crates/gw-tunnel-client/Cargo.toml` `[dependencies]`：
+
+```toml
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+```
+
+- [ ] **Step 2: 写失败测试（用本地 axum-ws server 收 PING 回 PONG）**
+
+`crates/gw-tunnel-client/tests/transport.rs`：
+
+```rust
+use bytes::Bytes;
+use gw_tunnel_client::frame::{Frame, MsgType};
+use gw_tunnel_client::transport::{TransportConfig, WsTransport};
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
+use futures_util::{SinkExt, StreamExt};
+
+async fn echo_pong_server() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let h = tokio::spawn(async move {
+        let (s, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+        while let Some(Ok(m)) = ws.next().await {
+            if let Message::Binary(bin) = m {
+                let (f, _) = gw_tunnel_client::frame::decode_frame(&bin)
+                    .unwrap().unwrap();
+                if f.msg_type == MsgType::Ping {
+                    let mut buf = bytes::BytesMut::new();
+                    gw_tunnel_client::frame::encode_frame(&Frame {
+                        msg_type: MsgType::Pong, flags: 0,
+                        stream_id: f.stream_id, payload: f.payload,
+                    }, &mut buf);
+                    ws.send(Message::Binary(buf.to_vec())).await.unwrap();
+                }
+            }
+        }
+    });
+    (port, h)
+}
+
+#[tokio::test]
+async fn ping_round_trip_keeps_alive() {
+    let (port, _h) = echo_pong_server().await;
+    let url = format!("ws://127.0.0.1:{port}/");
+    let cfg = TransportConfig {
+        url: url.parse().unwrap(),
+        heartbeat_interval: Duration::from_millis(50),
+        missed_pong_threshold: 3,
+        ..TransportConfig::default()
+    };
+    let t = WsTransport::connect(cfg).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(t.is_alive());
+    assert!(t.last_pong_age().as_millis() < 200);
+}
+
+#[tokio::test]
+async fn missed_pongs_mark_dead() {
+    // server that ignores PING
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _h = tokio::spawn(async move {
+        let (s, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
+        while let Some(_) = ws.next().await {}
+    });
+    let url = format!("ws://127.0.0.1:{port}/");
+    let cfg = TransportConfig {
+        url: url.parse().unwrap(),
+        heartbeat_interval: Duration::from_millis(20),
+        missed_pong_threshold: 3,
+        ..TransportConfig::default()
+    };
+    let t = WsTransport::connect(cfg).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!t.is_alive());
+}
+```
+
+- [ ] **Step 3: 实现 transport.rs**
+
+```rust
+// crates/gw-tunnel-client/src/transport.rs
+use crate::frame::{decode_frame, encode_frame, Frame, MsgType};
+use bytes::{Bytes, BytesMut};
+use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use url::Url;
+
+#[derive(Clone, Debug)]
+pub struct TransportConfig {
+    pub url: Url,
+    pub heartbeat_interval: Duration,
+    pub missed_pong_threshold: u32,
+    pub max_streams_per_conn: u32,
+}
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            url: "ws://127.0.0.1:0".parse().unwrap(),
+            heartbeat_interval: Duration::from_secs(30),
+            missed_pong_threshold: 3,
+            max_streams_per_conn: 256,
+        }
+    }
+}
+
+pub struct WsTransport {
+    alive: Arc<AtomicBool>,
+    last_pong_ms: Arc<AtomicU64>,
+    next_stream_id: Arc<AtomicU32>,
+    out_tx: mpsc::Sender<Frame>,
+}
+
+impl WsTransport {
+    pub async fn connect(cfg: TransportConfig) -> anyhow::Result<Self> {
+        let (ws, _) = tokio_tungstenite::connect_async(cfg.url.as_str()).await?;
+        let (mut sink, mut stream) = ws.split();
+        let (out_tx, mut out_rx) = mpsc::channel::<Frame>(64);
+        let alive = Arc::new(AtomicBool::new(true));
+        let last_pong_ms = Arc::new(AtomicU64::new(now_ms()));
+        let missed = Arc::new(AtomicU32::new(0));
+
+        // sender task
+        {
+            let alive = alive.clone();
+            tokio::spawn(async move {
+                while let Some(frame) = out_rx.recv().await {
+                    let mut buf = BytesMut::new();
+                    encode_frame(&frame, &mut buf);
+                    if sink.send(Message::Binary(buf.to_vec())).await.is_err() {
+                        alive.store(false, Ordering::Release);
+                        break;
+                    }
+                }
+            });
+        }
+
+        // reader task
+        {
+            let alive = alive.clone();
+            let last_pong_ms = last_pong_ms.clone();
+            let missed = missed.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = stream.next().await {
+                    let m = match msg {
+                        Ok(m) => m,
+                        Err(_) => { alive.store(false, Ordering::Release); break; }
+                    };
+                    if let Message::Binary(bin) = m {
+                        if let Ok(Some((f, _))) = decode_frame(&bin) {
+                            if f.msg_type == MsgType::Pong {
+                                last_pong_ms.store(now_ms(), Ordering::Release);
+                                missed.store(0, Ordering::Release);
+                            }
+                            // OPEN/DATA/CLOSE 路由到 stream demux 由后续 plan 完成；
+                            // 本 task 只做 alive 维持。
+                        }
+                    }
+                }
+                alive.store(false, Ordering::Release);
+            });
+        }
+
+        // heartbeat task
+        {
+            let out_tx = out_tx.clone();
+            let alive = alive.clone();
+            let missed = missed.clone();
+            let interval = cfg.heartbeat_interval;
+            let threshold = cfg.missed_pong_threshold;
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(interval);
+                let mut seq = 0u32;
+                loop {
+                    tick.tick().await;
+                    if !alive.load(Ordering::Acquire) { break; }
+                    seq = seq.wrapping_add(1);
+                    let f = Frame {
+                        msg_type: MsgType::Ping, flags: 0, stream_id: seq,
+                        payload: Bytes::from_static(b"hb"),
+                    };
+                    if out_tx.send(f).await.is_err() {
+                        alive.store(false, Ordering::Release);
+                        break;
+                    }
+                    let m = missed.fetch_add(1, Ordering::AcqRel) + 1;
+                    if m >= threshold {
+                        alive.store(false, Ordering::Release);
+                        break;
+                    }
+                }
+            });
+        }
+
+        Ok(Self {
+            alive,
+            last_pong_ms,
+            next_stream_id: Arc::new(AtomicU32::new(1)),
+            out_tx,
+        })
+    }
+
+    pub fn is_alive(&self) -> bool { self.alive.load(Ordering::Acquire) }
+    pub fn last_pong_age(&self) -> Duration {
+        Duration::from_millis(now_ms().saturating_sub(self.last_pong_ms.load(Ordering::Acquire)))
+    }
+
+    pub async fn send_open(&self, target: &str) -> anyhow::Result<u32> {
+        let id = self.next_stream_id.fetch_add(1, Ordering::AcqRel);
+        let f = Frame {
+            msg_type: MsgType::Open, flags: 0, stream_id: id,
+            payload: Bytes::copy_from_slice(target.as_bytes()),
+        };
+        self.out_tx.send(f).await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(id)
+    }
+
+    pub async fn send_data(&self, stream_id: u32, payload: Bytes) -> anyhow::Result<()> {
+        self.out_tx.send(Frame {
+            msg_type: MsgType::Data, flags: 0, stream_id, payload,
+        }).await.map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+```
+
+- [ ] **Step 4: 在 pool.rs 接 reconnect**
+
+```rust
+// crates/gw-tunnel-client/src/pool.rs (扩展)
+use crate::transport::{TransportConfig, WsTransport};
+use std::sync::Arc;
+
+pub struct ReconnectingTransport {
+    cfg: TransportConfig,
+    pool_cfg: PoolConfig,
+    inner: arc_swap::ArcSwapOption<WsTransport>,
+}
+
+impl ReconnectingTransport {
+    pub async fn start(cfg: TransportConfig, pool_cfg: PoolConfig) -> Arc<Self> {
+        let me = Arc::new(Self {
+            cfg, pool_cfg,
+            inner: arc_swap::ArcSwapOption::new(None),
+        });
+        let me_for_loop = me.clone();
+        tokio::spawn(async move {
+            let mut attempt = 0u32;
+            loop {
+                match WsTransport::connect(me_for_loop.cfg.clone()).await {
+                    Ok(t) => {
+                        me_for_loop.inner.store(Some(Arc::new(t)));
+                        attempt = 0;
+                        // 等到 dead 再重连
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            let alive = me_for_loop.inner.load_full()
+                                .map(|t| t.is_alive()).unwrap_or(false);
+                            if !alive { break; }
+                        }
+                        me_for_loop.inner.store(None);
+                    }
+                    Err(_) => {
+                        attempt = attempt.saturating_add(1);
+                        let backoff = jittered_backoff(attempt, &me_for_loop.pool_cfg);
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+        });
+        me
+    }
+
+    pub fn current(&self) -> Option<Arc<WsTransport>> { self.inner.load_full() }
+}
+```
+
+`crates/gw-tunnel-client/src/lib.rs` 加 `pub mod transport;`。
+
+- [ ] **Step 5: 跑测试 + 提交**
+
+```bash
+cargo test -p gw-tunnel-client --test transport
+git add Cargo.toml crates/gw-tunnel-client
+git commit -m "feat(gw-tunnel-client): WebSocket transport + heartbeat + reconnect (ADR-G5-3 full impl)"
+```
+
+---
+
+### Task T3-H: safe_dns DoH 真实解析
+
+**Files:**
+- Modify: `Cargo.toml`（workspace dep `hickory-resolver`）
+- Modify: `crates/gw-tunnel-client/Cargo.toml`
+- Modify: `crates/gw-tunnel-client/src/safe_dns.rs`
+- Test: `crates/gw-tunnel-client/tests/safe_dns_doh.rs`
+
+> 实现 spec ADR-G5-5：DoH 上游 + LRU + IP 黑名单（黑名单部分 T3-D 已实现，本 task 加 DoH 解析路径与缓存）。
+
+- [ ] **Step 1: 加依赖**
+
+`Cargo.toml`：
+
+```toml
+hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls", "tokio-runtime"] }
+```
+
+`crates/gw-tunnel-client/Cargo.toml`：
+
+```toml
+hickory-resolver = { workspace = true }
+```
+
+- [ ] **Step 2: 写失败测试**
+
+```rust
+// crates/gw-tunnel-client/tests/safe_dns_doh.rs
+use gw_tunnel_client::safe_dns::{is_ip_blocked, SafeDnsResolver};
+use std::time::Duration;
+
+#[tokio::test]
+async fn resolves_public_host_via_doh() {
+    let r = SafeDnsResolver::cloudflare_default();
+    // 此测试需要外网；用 ignore + cargo test -- --ignored 跑
+    let ips = r.resolve("one.one.one.one").await.unwrap();
+    assert!(!ips.is_empty());
+    for ip in ips { assert!(!is_ip_blocked(ip)); }
+}
+
+#[tokio::test]
+#[ignore]
+async fn cache_hit_under_ttl() {
+    let r = SafeDnsResolver::cloudflare_default();
+    let _ = r.resolve("one.one.one.one").await.unwrap();
+    let t0 = std::time::Instant::now();
+    let _ = r.resolve("one.one.one.one").await.unwrap();
+    assert!(t0.elapsed() < Duration::from_millis(5)); // hit cache
+}
+
+#[test]
+fn override_redirects_to_specified_ip() {
+    use gw_tunnel_client::safe_dns::{set_override, OverrideGuard};
+    use std::net::IpAddr;
+    let _g = OverrideGuard::new();
+    set_override("api.x.test", vec!["1.2.3.4".parse::<IpAddr>().unwrap()]);
+    let r = SafeDnsResolver::cloudflare_default();
+    let ips = futures::executor::block_on(r.resolve("api.x.test")).unwrap();
+    assert_eq!(ips, vec!["1.2.3.4".parse::<IpAddr>().unwrap()]);
+}
+```
+
+- [ ] **Step 3: 实现**
+
+在 `crates/gw-tunnel-client/src/safe_dns.rs` 末尾追加：
+
+```rust
+use arc_swap::ArcSwap;
+use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+static OVERRIDE: once_cell::sync::Lazy<ArcSwap<HashMap<String, Vec<IpAddr>>>> =
+    once_cell::sync::Lazy::new(|| ArcSwap::from_pointee(HashMap::new()));
+
+pub fn set_override(host: &str, ips: Vec<IpAddr>) {
+    let mut m = (**OVERRIDE.load()).clone();
+    m.insert(host.to_string(), ips);
+    OVERRIDE.store(Arc::new(m));
+}
+
+pub struct OverrideGuard(Arc<HashMap<String, Vec<IpAddr>>>);
+impl OverrideGuard { pub fn new() -> Self { Self(OVERRIDE.load_full()) } }
+impl Drop for OverrideGuard { fn drop(&mut self) { OVERRIDE.store(self.0.clone()); } }
+
+pub struct SafeDnsResolver {
+    inner: TokioAsyncResolver,
+    cache: parking_lot::Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
+    cache_ttl: Duration,
+    cache_cap: usize,
+}
+
+impl SafeDnsResolver {
+    pub fn cloudflare_default() -> Self {
+        let opts = ResolverOpts::default();
+        let inner = TokioAsyncResolver::tokio(ResolverConfig::cloudflare_https(), opts);
+        Self {
+            inner,
+            cache: parking_lot::Mutex::new(HashMap::new()),
+            cache_ttl: Duration::from_secs(600),
+            cache_cap: 4096,
+        }
+    }
+
+    pub async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, BlockedIpError> {
+        if let Some(ips) = OVERRIDE.load_full().get(host) {
+            for ip in ips { if is_ip_blocked(*ip) { return Err(BlockedIpError(*ip)); } }
+            return Ok(ips.clone());
+        }
+        if let Some((t, v)) = self.cache.lock().get(host) {
+            if t.elapsed() < self.cache_ttl { return Ok(v.clone()); }
+        }
+        let lookup = self.inner.lookup_ip(host).await
+            .map_err(|_| BlockedIpError("0.0.0.0".parse().unwrap()))?;
+        let mut out: Vec<IpAddr> = lookup.iter().collect();
+        for ip in &out { if is_ip_blocked(*ip) { return Err(BlockedIpError(*ip)); } }
+        out.dedup();
+        let mut c = self.cache.lock();
+        if c.len() >= self.cache_cap { c.clear(); }
+        c.insert(host.to_string(), (Instant::now(), out.clone()));
+        Ok(out)
+    }
+}
+```
+
+- [ ] **Step 4: 跑测试 + 提交**
+
+```bash
+cargo test -p gw-tunnel-client --test safe_dns_doh -- --ignored
+git add Cargo.toml crates/gw-tunnel-client
+git commit -m "feat(gw-tunnel-client): DoH resolver + LRU cache + host override (ADR-G5-5 full impl)"
+```
+
+
+
 <!-- WAVE-4 -->
 
 ## Wave 4 — Capability resolver / mapper / adapter hook / events:entity invalidate / health endpoint（5 并行）
@@ -4411,6 +4887,362 @@ git add crates/gw-core crates/gw-capability
 git commit -m "feat(gw-capability): auto-add OpenAiResponsesShape cap when shape detected (G-γ.3 ⇄ G-β.3)"
 ```
 
+---
+
+### Task T5-E: capability filter chain 入口 + ReDoS runtime 接通
+
+**Files:**
+- Create: `crates/gw-capability/src/filter.rs`
+- Modify: `crates/gw-capability/src/lib.rs`
+- Modify: `crates/gw-auth/src/model_permissions.rs`（暴露 `RedosTracker` 全局实例）
+- Test: `crates/gw-capability/tests/filter.rs`
+
+> 把 T2-D + T5-B 的 ReDoS 编译期 + runtime 熔断**接到** capability resolver 流水线。CapabilityResolver 在 resolve 时若该 ApiKey 已被 RedosTracker 标 disabled → 返回错误。R-AB filter chain 落地后再把本 filter 接进真实 routing；本 task 落地 trait + adapter，不阻塞 R-AB。
+
+- [ ] **Step 1: 写失败测试**
+
+```rust
+// crates/gw-capability/tests/filter.rs
+use gw_auth::model_permissions::{
+    check_with_budget, ModelPermission, PermissionEffect, RedosTracker,
+};
+use gw_capability::filter::{CapabilityFilter, CapabilityFilterResult, CandidateView};
+use gw_capability::types::{Capability, MatchMode, RequiredCapabilities, CapabilityOrigin};
+use std::sync::Arc;
+
+#[test]
+fn key_disabled_by_redos_returns_unavailable() {
+    let tracker = Arc::new(RedosTracker::new());
+    for _ in 0..10 { tracker.record_timeout("ak-bad"); }
+    let f = CapabilityFilter::new(tracker);
+    let mut req = RequiredCapabilities::default();
+    req.add(Capability::Vision, CapabilityOrigin::Model);
+    let candidate = CandidateView {
+        api_key_id: "ak-bad",
+        vendor_key_id: "vk1",
+        detected_capabilities: vec![Capability::Vision],
+    };
+    let r = f.evaluate(&req, &candidate);
+    assert_eq!(r, CapabilityFilterResult::ApiKeyDisabled);
+}
+
+#[test]
+fn compatible_mode_accepts_superset() {
+    let f = CapabilityFilter::new(Arc::new(RedosTracker::new()));
+    let mut req = RequiredCapabilities::default();
+    req.add(Capability::Vision, CapabilityOrigin::Model);
+    req.mode = MatchMode::Compatible;
+    let candidate = CandidateView {
+        api_key_id: "ak1", vendor_key_id: "vk1",
+        detected_capabilities: vec![Capability::Vision, Capability::Thinking],
+    };
+    assert_eq!(f.evaluate(&req, &candidate), CapabilityFilterResult::Match);
+}
+
+#[test]
+fn exclusive_mode_rejects_superset() {
+    let f = CapabilityFilter::new(Arc::new(RedosTracker::new()));
+    let mut req = RequiredCapabilities::default();
+    req.add(Capability::Vision, CapabilityOrigin::Model);
+    req.mode = MatchMode::Exclusive;
+    let candidate = CandidateView {
+        api_key_id: "ak1", vendor_key_id: "vk1",
+        detected_capabilities: vec![Capability::Vision, Capability::Thinking],
+    };
+    assert_eq!(f.evaluate(&req, &candidate), CapabilityFilterResult::ExtraCaps);
+}
+
+#[test]
+fn missing_required_cap_returns_missing() {
+    let f = CapabilityFilter::new(Arc::new(RedosTracker::new()));
+    let mut req = RequiredCapabilities::default();
+    req.add(Capability::Audio, CapabilityOrigin::HeaderRequire);
+    let candidate = CandidateView {
+        api_key_id: "ak1", vendor_key_id: "vk1",
+        detected_capabilities: vec![Capability::Vision],
+    };
+    match f.evaluate(&req, &candidate) {
+        CapabilityFilterResult::Missing(v) => assert_eq!(v[..], [Capability::Audio]),
+        other => panic!("{other:?}"),
+    }
+}
+```
+
+- [ ] **Step 2: 实现 filter.rs**
+
+```rust
+// crates/gw-capability/src/filter.rs
+use crate::types::{Capability, MatchMode, RequiredCapabilities};
+use gw_auth::model_permissions::RedosTracker;
+use smallvec::SmallVec;
+use std::sync::Arc;
+
+pub struct CapabilityFilter {
+    redos: Arc<RedosTracker>,
+}
+impl CapabilityFilter {
+    pub fn new(redos: Arc<RedosTracker>) -> Self { Self { redos } }
+
+    pub fn evaluate(
+        &self,
+        required: &RequiredCapabilities,
+        candidate: &CandidateView<'_>,
+    ) -> CapabilityFilterResult {
+        if self.redos.is_disabled(candidate.api_key_id) {
+            return CapabilityFilterResult::ApiKeyDisabled;
+        }
+        let mut missing: SmallVec<[Capability; 4]> = SmallVec::new();
+        for c in &required.set {
+            if !candidate.detected_capabilities.contains(c) { missing.push(*c); }
+        }
+        if !missing.is_empty() { return CapabilityFilterResult::Missing(missing); }
+        if required.mode == MatchMode::Exclusive {
+            for c in &candidate.detected_capabilities {
+                if !required.set.contains(c) {
+                    return CapabilityFilterResult::ExtraCaps;
+                }
+            }
+        }
+        metrics::counter!("gw_capability_resolve_total", "match" => "filter_hit").increment(1);
+        CapabilityFilterResult::Match
+    }
+}
+
+pub struct CandidateView<'a> {
+    pub api_key_id: &'a str,
+    pub vendor_key_id: &'a str,
+    pub detected_capabilities: Vec<Capability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityFilterResult {
+    Match,
+    Missing(SmallVec<[Capability; 4]>),
+    ExtraCaps,           // exclusive 模式下候选多了
+    ApiKeyDisabled,      // ReDoS 熔断
+}
+```
+
+`crates/gw-capability/src/lib.rs` 加 `pub mod filter;`。
+`crates/gw-capability/Cargo.toml` 加 `gw-auth = { path = "../gw-auth" }`。
+
+- [ ] **Step 3: 跑测试 + 提交**
+
+```bash
+cargo test -p gw-capability --test filter
+bash scripts/check-invariants.sh
+git add crates/gw-capability
+git commit -m "feat(gw-capability): CapabilityFilter chain entry + ReDoS-aware (ADR-G2-8 wire)"
+```
+
+> R-AB filter chain 真接入 = R-AB spec 落地时把本 filter 注册进 FilterChain。本 plan 边界至 trait + adapter；R-AB 不在本 spec 范围。
+
+---
+
+### Task T5-F: OpenAI Responses ⇄ Chat ⇄ Anthropic / Gemini 跨形矩阵转换
+
+**Files:**
+- Create: `crates/gw-codec/src/openai/responses/conversion.rs`
+- Modify: `crates/gw-codec/src/openai/responses/mod.rs`
+- Modify: `crates/gw-codec/src/wire/any.rs`（如 WireAnyRequest 已含 OpenAiResponses 变体，加 convert 入口）
+- Test: `crates/gw-codec/tests/responses_conversion.rs`
+
+> ADR-G4-3 要求 4 向（含跨形）。S1 矩阵宏存在与否不阻塞**手写**直转的落地：v1 写 4 个 cross via 函数，矩阵宏完成后再迁移到 codegen。每 via 仅做最小可用映射（content / tool_calls / model name 直传），**不实现** thinking / multimodal 跨协议（这两条由 S2/S3 主线 spec 处理）。
+
+- [ ] **Step 1: 写失败测试**
+
+```rust
+// crates/gw-codec/tests/responses_conversion.rs
+use gw_codec::openai::responses::OpenAiResponsesRequest;
+use gw_codec::openai::responses::conversion::*;
+use serde_json::json;
+
+#[test]
+fn responses_to_chat_lifts_input_to_messages() {
+    let req: OpenAiResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5",
+        "input": [{"type":"input_text","text":"hi"}],
+        "stream": true
+    })).unwrap();
+    let chat = responses_to_chat(&req).unwrap();
+    let v = serde_json::to_value(&chat).unwrap();
+    assert_eq!(v["model"], "gpt-5");
+    assert_eq!(v["messages"][0]["role"], "user");
+    assert_eq!(v["messages"][0]["content"], "hi");
+}
+
+#[test]
+fn responses_to_anthropic_minimal() {
+    let req: OpenAiResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5",
+        "input": [{"type":"input_text","text":"hello"}]
+    })).unwrap();
+    let an = responses_to_anthropic(&req).unwrap();
+    assert_eq!(an["messages"][0]["role"], "user");
+}
+
+#[test]
+fn responses_to_gemini_minimal() {
+    let req: OpenAiResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5",
+        "input": [{"type":"input_text","text":"hello"}]
+    })).unwrap();
+    let g = responses_to_gemini(&req).unwrap();
+    assert_eq!(g["contents"][0]["role"], "user");
+}
+
+#[test]
+fn chat_to_responses_round_trip_preserves_text() {
+    let chat = json!({
+        "model": "gpt-5",
+        "messages": [{"role":"user","content":"hi"}]
+    });
+    let r = chat_to_responses(&chat).unwrap();
+    assert_eq!(r.input[0]["type"], "input_text");
+    assert_eq!(r.input[0]["text"], "hi");
+}
+```
+
+- [ ] **Step 2: 实现 conversion.rs**
+
+```rust
+// crates/gw-codec/src/openai/responses/conversion.rs
+use super::OpenAiResponsesRequest;
+use serde_json::{json, Value};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConvertError {
+    #[error("unsupported part: {0}")]
+    Unsupported(String),
+    #[error("missing field: {0}")]
+    Missing(&'static str),
+}
+
+pub fn responses_to_chat(req: &OpenAiResponsesRequest) -> Result<Value, ConvertError> {
+    let mut messages = Vec::new();
+    for p in &req.input {
+        let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match typ {
+            "input_text" | "text" => {
+                messages.push(json!({
+                    "role": "user",
+                    "content": p.get("text").cloned().unwrap_or(Value::Null),
+                }));
+            }
+            other => return Err(ConvertError::Unsupported(other.into())),
+        }
+    }
+    if let Some(instr) = &req.instructions {
+        messages.insert(0, json!({"role": "system", "content": instr}));
+    }
+    let mut out = json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": req.stream,
+    });
+    if let Value::Object(ref mut m) = out {
+        for (k, v) in &req.extras { m.insert(k.clone(), v.clone()); }
+    }
+    Ok(out)
+}
+
+pub fn chat_to_responses(chat: &Value) -> Result<OpenAiResponsesRequest, ConvertError> {
+    let model = chat.get("model").and_then(|v| v.as_str())
+        .ok_or(ConvertError::Missing("model"))?.to_string();
+    let messages = chat.get("messages").and_then(|v| v.as_array())
+        .ok_or(ConvertError::Missing("messages"))?;
+    let mut input: Vec<Value> = Vec::new();
+    let mut instructions: Option<String> = None;
+    for m in messages {
+        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+        let content = m.get("content").cloned().unwrap_or(Value::Null);
+        if role == "system" {
+            if let Value::String(s) = &content {
+                instructions = Some(s.clone());
+                continue;
+            }
+        }
+        match content {
+            Value::String(s) => input.push(json!({"type":"input_text","text":s})),
+            Value::Array(arr) => {
+                for p in arr { input.push(p); }
+            }
+            _ => return Err(ConvertError::Unsupported("non-text content".into())),
+        }
+    }
+    Ok(OpenAiResponsesRequest {
+        model, input,
+        stream: chat.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+        instructions, previous_response_id: None,
+        extras: serde_json::Map::new(),
+    })
+}
+
+pub fn responses_to_anthropic(req: &OpenAiResponsesRequest) -> Result<Value, ConvertError> {
+    let mut messages = Vec::new();
+    for p in &req.input {
+        let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match typ {
+            "input_text" | "text" => {
+                messages.push(json!({
+                    "role": "user",
+                    "content": p.get("text").cloned().unwrap_or(Value::Null),
+                }));
+            }
+            other => return Err(ConvertError::Unsupported(other.into())),
+        }
+    }
+    let mut out = json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": req.stream,
+        "max_tokens": 4096,
+    });
+    if let Some(s) = &req.instructions {
+        if let Value::Object(ref mut m) = out { m.insert("system".into(), Value::String(s.clone())); }
+    }
+    Ok(out)
+}
+
+pub fn responses_to_gemini(req: &OpenAiResponsesRequest) -> Result<Value, ConvertError> {
+    let mut contents = Vec::new();
+    for p in &req.input {
+        let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match typ {
+            "input_text" | "text" => {
+                contents.push(json!({
+                    "role": "user",
+                    "parts": [ { "text": p.get("text").cloned().unwrap_or(Value::Null) } ]
+                }));
+            }
+            other => return Err(ConvertError::Unsupported(other.into())),
+        }
+    }
+    let mut out = json!({
+        "contents": contents,
+    });
+    if let Some(s) = &req.instructions {
+        if let Value::Object(ref mut m) = out {
+            m.insert("systemInstruction".into(),
+                json!({"role":"system","parts":[{"text":s}]}));
+        }
+    }
+    Ok(out)
+}
+```
+
+`crates/gw-codec/src/openai/responses/mod.rs` 加 `pub mod conversion;`。
+
+- [ ] **Step 3: 跑测试 + 提交**
+
+```bash
+cargo test -p gw-codec --test responses_conversion
+git add crates/gw-codec
+git commit -m "feat(gw-codec): OpenAI Responses ⇄ Chat/Anthropic/Gemini conversion (ADR-G4-3 full impl)"
+```
+
+
+
 <!-- WAVE-6 -->
 
 ## Wave 6 — Filter chain 接通（顺序执行）
@@ -4720,7 +5552,327 @@ git commit -m "feat(gw-proxy): HMAC body-after verify + compression decode in re
 
 ---
 
-### Task T6-D: 收尾——cargo feature gate / pricing_snapshot 读取 / codec convert 指标埋点
+---
+
+### Task T6-D: stream_policy AccumulateUpstreamStream 真实现
+
+**Files:**
+- Create: `crates/gw-codec/src/stream_accumulator.rs`
+- Modify: `crates/gw-codec/src/lib.rs`
+- Test: `crates/gw-codec/tests/stream_accumulator.rs`
+
+> ADR-G4-1 要求"客户端 sync + 上游强 stream → 网关 accumulate"。本 task 实现 SSE → 单 JSON 累积器，针对三协议各自的 chunk 形态。
+
+- [ ] **Step 1: 写失败测试**
+
+```rust
+// crates/gw-codec/tests/stream_accumulator.rs
+use gw_codec::stream_accumulator::{accumulate_openai, accumulate_anthropic};
+
+#[test]
+fn openai_chat_chunks_concat_into_message() {
+    let chunks = [
+        r#"{"choices":[{"delta":{"role":"assistant","content":"Hel"}}]}"#,
+        r#"{"choices":[{"delta":{"content":"lo"}}]}"#,
+        r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+    ];
+    let final_json = accumulate_openai(chunks.iter().map(|s| s.as_bytes())).unwrap();
+    assert_eq!(final_json["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(final_json["choices"][0]["message"]["content"], "Hello");
+    assert_eq!(final_json["choices"][0]["finish_reason"], "stop");
+}
+
+#[test]
+fn anthropic_event_stream_concat_into_message() {
+    let events = [
+        r#"{"type":"message_start","message":{"id":"m1","role":"assistant","content":[]}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+    ];
+    let final_json = accumulate_anthropic(events.iter().map(|s| s.as_bytes())).unwrap();
+    assert_eq!(final_json["id"], "m1");
+    assert_eq!(final_json["content"][0]["text"], "Hello");
+    assert_eq!(final_json["stop_reason"], "end_turn");
+}
+
+#[test]
+fn malformed_chunk_returns_error() {
+    let chunks = ["{not json"];
+    let r = accumulate_openai(chunks.iter().map(|s| s.as_bytes()));
+    assert!(r.is_err());
+}
+```
+
+- [ ] **Step 2: 实现**
+
+```rust
+// crates/gw-codec/src/stream_accumulator.rs
+use serde_json::{json, Value};
+
+#[derive(Debug, thiserror::Error)]
+pub enum AccumulateError {
+    #[error("parse: {0}")]
+    Parse(String),
+    #[error("missing field: {0}")]
+    Missing(&'static str),
+}
+
+pub fn accumulate_openai<'a, I>(chunks: I) -> Result<Value, AccumulateError>
+where I: IntoIterator<Item = &'a [u8]>,
+{
+    let mut role = None::<String>;
+    let mut content = String::new();
+    let mut finish_reason = None::<String>;
+    let mut tool_calls = Vec::new();
+    let mut model = None::<String>;
+    let mut id = None::<String>;
+    for raw in chunks {
+        let v: Value = serde_json::from_slice(raw)
+            .map_err(|e| AccumulateError::Parse(e.to_string()))?;
+        if let Some(s) = v.get("model").and_then(|v| v.as_str()) { model = Some(s.into()); }
+        if let Some(s) = v.get("id").and_then(|v| v.as_str()) { id = Some(s.into()); }
+        if let Some(arr) = v.get("choices").and_then(|v| v.as_array()) {
+            for ch in arr {
+                if let Some(d) = ch.get("delta") {
+                    if let Some(r) = d.get("role").and_then(|v| v.as_str()) { role = Some(r.into()); }
+                    if let Some(c) = d.get("content").and_then(|v| v.as_str()) { content.push_str(c); }
+                    if let Some(tc) = d.get("tool_calls").and_then(|v| v.as_array()) {
+                        for t in tc { tool_calls.push(t.clone()); }
+                    }
+                }
+                if let Some(f) = ch.get("finish_reason").and_then(|v| v.as_str()) {
+                    finish_reason = Some(f.into());
+                }
+            }
+        }
+    }
+    Ok(json!({
+        "id": id.unwrap_or_default(),
+        "object": "chat.completion",
+        "model": model.unwrap_or_default(),
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": role.unwrap_or_else(|| "assistant".into()),
+                "content": content,
+                "tool_calls": tool_calls,
+            },
+            "finish_reason": finish_reason.unwrap_or_else(|| "stop".into()),
+        }],
+    }))
+}
+
+pub fn accumulate_anthropic<'a, I>(events: I) -> Result<Value, AccumulateError>
+where I: IntoIterator<Item = &'a [u8]>,
+{
+    let mut id = None::<String>;
+    let mut role = None::<String>;
+    let mut blocks: Vec<Value> = Vec::new();
+    let mut stop_reason = None::<String>;
+    let mut model = None::<String>;
+    for raw in events {
+        let v: Value = serde_json::from_slice(raw)
+            .map_err(|e| AccumulateError::Parse(e.to_string()))?;
+        let typ = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match typ {
+            "message_start" => {
+                if let Some(m) = v.get("message") {
+                    if let Some(s) = m.get("id").and_then(|v| v.as_str()) { id = Some(s.into()); }
+                    if let Some(s) = m.get("role").and_then(|v| v.as_str()) { role = Some(s.into()); }
+                    if let Some(s) = m.get("model").and_then(|v| v.as_str()) { model = Some(s.into()); }
+                }
+            }
+            "content_block_start" => {
+                let idx = v.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let block = v.get("content_block").cloned().unwrap_or(json!({"type":"text","text":""}));
+                while blocks.len() <= idx { blocks.push(json!({"type":"text","text":""})); }
+                blocks[idx] = block;
+            }
+            "content_block_delta" => {
+                let idx = v.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                if idx >= blocks.len() { continue; }
+                let delta = v.get("delta").cloned().unwrap_or(Value::Null);
+                let dtype = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if dtype == "text_delta" {
+                    if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
+                        if let Value::Object(ref mut m) = blocks[idx] {
+                            let cur = m.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            m.insert("text".into(), Value::String(cur + t));
+                        }
+                    }
+                }
+            }
+            "message_delta" => {
+                if let Some(d) = v.get("delta") {
+                    if let Some(s) = d.get("stop_reason").and_then(|v| v.as_str()) {
+                        stop_reason = Some(s.into());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(json!({
+        "id": id.unwrap_or_default(),
+        "type": "message",
+        "role": role.unwrap_or_else(|| "assistant".into()),
+        "model": model.unwrap_or_default(),
+        "content": blocks,
+        "stop_reason": stop_reason.unwrap_or_default(),
+    }))
+}
+```
+
+`gw-codec/src/lib.rs` 加 `pub mod stream_accumulator;`。
+
+- [ ] **Step 3: 跑测试 + 提交**
+
+```bash
+cargo test -p gw-codec --test stream_accumulator
+git add crates/gw-codec
+git commit -m "feat(gw-codec): SSE accumulator for AccumulateUpstreamStream policy (ADR-G4-1 full impl)"
+```
+
+> Gemini SSE accumulator 接 codec S5 / 自身已部分被 S2 覆盖；本 task 只覆盖最常用两族。Gemini accumulator 的实现风格直接复刻 `accumulate_openai`，遇到生产路径需要时由 ADR-G4-1 落地阶段补一个分支即可。
+
+---
+
+### Task T6-E: usage:detailed Redis stream sink 真实现
+
+**Files:**
+- Modify: `crates/gw-ledger/src/log_sink.rs`（加 `RedisStreamSink`）
+- Modify: `crates/gw-ledger/src/detailed_stream.rs`（接 verbosity gating + size cap + sink dispatch）
+- Modify: `crates/gw-ledger/Cargo.toml`（加 `fred`）
+- Test: `crates/gw-ledger/tests/redis_sink.rs`
+
+> ADR-G6-4：detailed_log 写到 `usage:detailed` Redis stream，由 Go 异步消费持久化。本 task 不实现 DLQ（DLQ 是 C-δ 范围），但接通基本 XADD + size cap + drop on backpressure。
+
+- [ ] **Step 1: 写失败测试（用 testcontainers，标 ignored）**
+
+```rust
+// crates/gw-ledger/tests/redis_sink.rs
+use gw_ledger::detailed_stream::{
+    redact_body, LogVerbosity, MAX_DETAILED_LOG_BYTES,
+};
+use gw_ledger::log_sink::{DetailedLogSink, RedisStreamSink};
+use serde_json::json;
+
+#[tokio::test]
+#[ignore]
+async fn writes_to_usage_detailed_stream() {
+    let cli = testcontainers_modules::redis::Redis::default();
+    let docker = testcontainers::clients::Cli::default();
+    let node = docker.run(cli);
+    let port = node.get_host_port_ipv4(6379);
+    let url = format!("redis://127.0.0.1:{port}");
+    let pool = build_pool(&url).await;
+    let sink = RedisStreamSink::new(pool.clone(), "usage:detailed", 10_000);
+    sink.write(json!({"req_id": "r1", "verbosity": "base", "model": "x"})).await;
+    let len: u64 = use_fred_xlen(&pool, "usage:detailed").await;
+    assert_eq!(len, 1);
+}
+
+#[tokio::test]
+async fn dropped_when_payload_oversized() {
+    use gw_ledger::detailed_stream::MAX_DETAILED_LOG_BYTES;
+    let big = "x".repeat(MAX_DETAILED_LOG_BYTES + 1);
+    let sink = MockSink::default();
+    sink.write_with_size_check(json!({"big": big})).await;
+    assert_eq!(sink.dropped_oversized.load(std::sync::atomic::Ordering::Acquire), 1);
+}
+
+// helpers
+async fn build_pool(url: &str) -> fred::clients::RedisPool { /* ... */ unimplemented!() }
+async fn use_fred_xlen(pool: &fred::clients::RedisPool, stream: &str) -> u64 {
+    use fred::interfaces::StreamsInterface;
+    pool.next().xlen(stream).await.unwrap()
+}
+
+#[derive(Default)]
+struct MockSink {
+    dropped_oversized: std::sync::atomic::AtomicU64,
+}
+impl MockSink {
+    async fn write_with_size_check(&self, v: serde_json::Value) {
+        let bytes = serde_json::to_vec(&v).unwrap();
+        if bytes.len() > MAX_DETAILED_LOG_BYTES {
+            self.dropped_oversized.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            metrics::counter!("gw_detailed_log_oversized_total").increment(1);
+        }
+    }
+}
+```
+
+- [ ] **Step 2: 实现 RedisStreamSink**
+
+```rust
+// crates/gw-ledger/src/log_sink.rs (扩展 - 在文件末尾追加)
+use fred::clients::RedisPool;
+use fred::interfaces::StreamsInterface;
+use fred::types::XCapKind;
+
+pub struct RedisStreamSink {
+    pool: RedisPool,
+    stream: String,
+    /// 最大 stream 长度（XADD MAXLEN ~ N 用于上限近似裁剪）
+    max_len: u64,
+}
+
+impl RedisStreamSink {
+    pub fn new(pool: RedisPool, stream: &str, max_len: u64) -> Self {
+        Self { pool, stream: stream.to_string(), max_len }
+    }
+}
+
+#[async_trait::async_trait]
+impl DetailedLogSink for RedisStreamSink {
+    async fn write(&self, payload: serde_json::Value) {
+        let bytes = match serde_json::to_vec(&payload) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        if bytes.len() > crate::detailed_stream::MAX_DETAILED_LOG_BYTES {
+            metrics::counter!("gw_detailed_log_oversized_total").increment(1);
+            return;
+        }
+        let client = self.pool.next();
+        let r: Result<String, _> = client.xadd(
+            self.stream.as_str(),
+            false,                                              // nomkstream=false
+            Some((XCapKind::MaxLen, fred::types::XCapTrim::AlmostExact, self.max_len.into())),
+            "*".into(),
+            vec![("payload".into(), bytes.into())],
+        ).await;
+        if let Err(e) = r {
+            // backpressure / Redis down → 丢弃 + 计数；DLQ 在 C-δ 落地
+            tracing::warn!(error=%e, stream=%self.stream, "detailed log XADD failed; dropping");
+            metrics::counter!("gw_detailed_log_drop_total", "reason" => "xadd_failed").increment(1);
+        }
+    }
+}
+```
+
+`crates/gw-ledger/Cargo.toml`：
+
+```toml
+fred = { workspace = true }
+metrics = { workspace = true }
+```
+
+- [ ] **Step 3: 跑测试 + 提交**
+
+```bash
+cargo test -p gw-ledger --test redis_sink
+cargo test -p gw-ledger --test redis_sink -- --ignored
+git add crates/gw-ledger
+git commit -m "feat(gw-ledger): usage:detailed Redis stream sink + size cap (ADR-G6-4 full impl)"
+```
+
+---
+
+### Task T6-F: 收尾——cargo feature gate / pricing_snapshot 读取 / codec convert 指标埋点
 
 **Files:**
 - Modify: `crates/gw-gateway/Cargo.toml`（features `tunnel`）
@@ -4882,17 +6034,15 @@ cargo build --release -p gw-gateway
 
 ---
 
-## Out-of-scope follow-up plans（不在本 plan 内）
+## Out-of-scope（明确归 spec / Aether 设计已划界的事项）
 
-| 项 | 推迟原因 | 触发条件 |
-|---|---|---|
-| Tunnel hub WebSocket 真连接 + reconnection / heartbeat 真实现 | 依赖 hub 端实测对接（aether-hub 现成二进制） | tunnel 落地时再起独立 plan |
-| DoH client（safe_dns 真实解析） | 拉 `hickory-dns` workspace dep + cargo size 上升 | safe_dns IP 黑名单充分 → 后续按需 |
-| Capability resolver 内嵌 model_permissions runtime 熔断接 capability filter | R-AB filter chain 落地后才有挂点 | R-AB 完成 |
-| OpenAI Responses ⇄ Chat ⇄ Anthropic / Gemini 跨形矩阵转换 | S1 矩阵宏完成后才能写 conversion via | S1 落地 |
-| Stream policy AccumulateUpstreamStream 真的实现 | codec S4 parse_response 完成 | S4 落地 |
-| KEK 轮换运维 API（管理面） | 管理面 spec 拍板 | 管理面 spec |
-| usage:detailed Redis stream sink 真实现 | DLQ + flusher 加固 (C-δ) 完成 | C-δ 落地 |
+下列条目**不在本 plan**，因为 spec 已明确归 Go 或属于其他 spec 的范围；不是被本 plan 推迟：
+
+- 计费内核（公式 / 模板 / 历史重计费 / 维度 collector） —— **永久归 Go**（CLAUDE.md 不变量）
+- provider_ops（SaaS 余额查询 / 签到 / 周期巡检） —— **归 Go**（inventory A9）
+- 订阅 / 支付 / license / 邮件 / LDAP / 公告 —— **归 Go**（spec § 0 不在范围）
+- KEK 轮换"管理面入口 / 触发 API" —— **管理面 spec 范围**；但 KekCache dual-read 状态机本身已由 T1-E 实现（spec ADR-G1-7）
+- A-T0~T6 / C-α~ε / K-A~D / R-AB~G / RL-* / S1~S5 / Task-Worker 各 spec 的**自身**内容 —— **各自 spec 落地**；本 plan 通过 trait/接口边界与之对接
 
 
 
