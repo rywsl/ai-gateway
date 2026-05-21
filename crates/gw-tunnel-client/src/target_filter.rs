@@ -31,23 +31,33 @@ pub fn assert_target_allowed(url: &Url) -> Result<(), TargetDenied> {
     }
 }
 
-/// RAII guard for tests: snapshots the whitelist on construction, restores on drop.
-pub struct ResetGuard(Arc<Vec<(String, u16)>>);
+/// RAII guard for tests: serializes parallel test sections AND snapshots /
+/// restores the whitelist. Hold one for the duration of any test that calls
+/// `set_whitelist`.
+pub struct ResetGuard {
+    snapshot: Arc<Vec<(String, u16)>>,
+    _lock: parking_lot::MutexGuard<'static, ()>,
+}
 
 impl ResetGuard {
     pub fn new() -> Self {
-        Self(WHITELIST.load_full())
+        let lock = WHITELIST_TEST_LOCK.lock();
+        Self {
+            snapshot: WHITELIST.load_full(),
+            _lock: lock,
+        }
     }
 }
 
 impl Default for ResetGuard {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl Drop for ResetGuard {
     fn drop(&mut self) {
-        WHITELIST.store(self.0.clone());
+        WHITELIST.store(self.snapshot.clone());
     }
 }
+
+static WHITELIST_TEST_LOCK: once_cell::sync::Lazy<parking_lot::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(()));

@@ -2700,6 +2700,8 @@ git add crates/gw-codec crates/gw-store/migrations
 git commit -m "feat(gw-codec): GeminiFilesGateway trait + dedup logic (G-γ.4)"
 ```
 
+> **Wave 3 deferral note**: the entity-store loader for `gemini_file_mapping` is intentionally NOT added in T3-C. Production wiring of upload-and-cache lands in T6-E alongside the detailed-log stream sink, when adapter A-T2 (gemini_cli) is the natural injection point. Migration `0003_model_mapping.sql` and `0002_gemini_file_mapping.sql` ship pre-staged for the operator.
+
 ---
 
 ### Task T3-D: gw-tunnel-client pool + resolver + safe_dns + target_filter
