@@ -123,7 +123,15 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         ctx.phase_start("upstream_peer");
-        let peer = filters::upstream::pick_peer(session, ctx, &self.store, &self.health, &self.in_flight).await?;
+        let peer = filters::upstream::pick_peer(
+            session,
+            ctx,
+            &self.store,
+            &self.health,
+            &self.in_flight,
+            &self.strategies,
+        )
+        .await?;
         ctx.phase_end();
         Ok(peer)
     }

@@ -45,7 +45,7 @@ syn = { version = "2", features = ["full"] }
 quote = "1"
 
 # 缓存 / 并发
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 dashmap = "6"
 parking_lot = "0.12"
 arc-swap = "1"

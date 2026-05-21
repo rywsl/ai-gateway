@@ -1700,6 +1700,7 @@ dependencies = [
  "gw-health",
  "gw-store",
  "metrics",
+ "moka",
  "rand 0.8.6",
  "secrecy",
  "serde",

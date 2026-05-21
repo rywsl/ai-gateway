@@ -121,6 +121,26 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "usage records routed to usage:records:dlq on primary XADD failure; label=outcome (success/error)",
     },
+    MetricSpec {
+        name: "gw_sticky_bind_total",
+        kind: MetricKind::Counter,
+        help: "sticky strategy bound a new (conversation_id -> key_id) entry",
+    },
+    MetricSpec {
+        name: "gw_sticky_hit_total",
+        kind: MetricKind::Counter,
+        help: "sticky strategy reused an existing binding",
+    },
+    MetricSpec {
+        name: "gw_sticky_evict_total",
+        kind: MetricKind::Counter,
+        help: "sticky bindings evicted by moka TTL or LRU overflow",
+    },
+    MetricSpec {
+        name: "gw_sticky_bindings_active",
+        kind: MetricKind::Gauge,
+        help: "approximate live sticky bindings in the moka cache",
+    },
 ];
 
 pub fn describe_all() {

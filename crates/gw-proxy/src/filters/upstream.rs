@@ -21,18 +21,14 @@ use crate::timeouts::Timeouts;
 use bytes::BytesMut;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
-use gw_core::entity::{ModelGroup, Pricing, StrategyKind, TimeoutSpec, Vendor};
+use gw_core::entity::{ModelGroup, Pricing, TimeoutSpec, Vendor};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::Mutations;
 use gw_routing::candidates::get_candidate_keys;
-use gw_routing::strategy::{
-    cache_affinity::CacheAffinity, cost_first::CostFirst, fixed_order::FixedOrder,
-    latency_first::LatencyFirst, load_balance::LoadBalance, round_robin::RoundRobin,
-    sticky::Sticky, weighted_rr::WeightedRr,
-};
+use gw_routing::strategy::set::StrategySet;
 use gw_health::KeyHealthStore;
 use gw_routing::in_flight::{InFlightGuard, InFlightStore};
-use gw_routing::{PickCtx, Strategy, StrategyAny};
+use gw_routing::{PickCtx, Strategy};
 use gw_store::EntityStore;
 use pingora::http::RequestHeader;
 use pingora::upstreams::peer::HttpPeer;
@@ -94,6 +90,7 @@ pub async fn pick_peer(
     store: &Arc<EntityStore>,
     health: &Arc<KeyHealthStore>,
     in_flight: &Arc<InFlightStore>,
+    strategies: &Arc<StrategySet>,
 ) -> Result<Box<HttpPeer>> {
     // The remaining `ErrorType::Custom(...)` short-circuits in this function
     // stay as bare-500 errors (no JSON envelope) on purpose. They signal
@@ -196,7 +193,10 @@ pub async fn pick_peer(
     // -------------------------------------------------------------
     // Strategy dispatch.
     // -------------------------------------------------------------
-    let strategy = strategy_for(group.value.strategy);
+    // G12: dispatch into the per-process StrategySet so Sticky's moka cache
+    // (and any future stateful strategy) is shared across requests rather
+    // than allocated per call.
+    let strategy = strategies.pick_for(group.value.strategy);
     let pick_ctx = PickCtx {
         user_id: &perm.effective_user_id,
         model: &model,
@@ -309,19 +309,6 @@ pub fn apply_timeout_precedence(vendor: &Vendor, pricing: &Pricing) -> TimeoutSp
         eff.stream_total_ms = Some(x);
     }
     eff
-}
-
-fn strategy_for(kind: StrategyKind) -> StrategyAny {
-    match kind {
-        StrategyKind::FixedOrder => StrategyAny::FixedOrder(FixedOrder),
-        StrategyKind::RoundRobin => StrategyAny::RoundRobin(RoundRobin::default()),
-        StrategyKind::LoadBalance => StrategyAny::LoadBalance(LoadBalance),
-        StrategyKind::WeightedRr => StrategyAny::WeightedRr(WeightedRr::default()),
-        StrategyKind::CostFirst => StrategyAny::CostFirst(CostFirst),
-        StrategyKind::LatencyFirst => StrategyAny::LatencyFirst(LatencyFirst),
-        StrategyKind::CacheAffinity => StrategyAny::CacheAffinity(CacheAffinity),
-        StrategyKind::Sticky => StrategyAny::Sticky(Sticky::default()),
-    }
 }
 
 pub async fn rewrite_request(
