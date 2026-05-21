@@ -84,6 +84,8 @@ fn make_apikey(id: &str) -> Arc<Versioned<ApiKeyEntry>> {
             markup: 1.0,
             ip_allowlist: None,
             expires_at: None,
+            signature_required: false,
+            signature_algo: SignatureAlgo::default(),
         },
     ))
 }

@@ -25,6 +25,7 @@ tracing.workspace = true
 metrics.workspace = true
 ipnet.workspace = true
 hex.workspace = true
+fred.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

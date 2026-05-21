@@ -77,6 +77,8 @@ fn apikey(
             markup,
             ip_allowlist: None,
             expires_at: None,
+            signature_required: false,
+            signature_algo: SignatureAlgo::default(),
         },
     ))
 }

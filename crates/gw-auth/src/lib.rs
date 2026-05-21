@@ -5,7 +5,9 @@ pub mod apikey;
 pub mod hard_cap;
 pub mod ip_filter;
 pub mod jwt;
+pub mod jwt_blacklist;
 pub mod merge;
+pub mod mgmt;
 pub mod ratelimit;
 pub mod signature;
 
