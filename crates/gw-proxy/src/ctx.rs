@@ -86,6 +86,13 @@ pub struct ReqCtx {
     pub upstream_status: Option<u16>,
     pub retry_count: u32,
 
+    // --- Error classification (T6-B) ---
+    /// Set by the classifier (filters that detect upstream/short-circuit errors)
+    /// so the `logging` filter can fan the outcome out to the registered
+    /// ErrorListener stack. `None` on the happy path; existing tests are
+    /// unaffected.
+    pub error_outcome: Option<gw_core::error::ClassifierOutcome>,
+
     // --- Management path / capability (G-α.9 / G-β wire) ---
     /// `true` if the request path matched `/admin/*` and is destined for the
     /// management plane rather than the LLM business path.
@@ -131,6 +138,7 @@ impl ReqCtx {
             sse_leftover: Vec::new(),
             upstream_status: None,
             retry_count: 0,
+            error_outcome: None,
             mgmt: false,
             required_caps: None,
             trace: TraceBuffer::new(),
