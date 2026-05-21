@@ -123,7 +123,7 @@ async fn three_way_model_intersection() {
         api_key_id: Some(ApiKeyId::from("ak1")),
         client_ip: ip(),
     };
-    let perm = merge_permissions(&ctx, &store, 0).await.unwrap();
+    let perm = merge_permissions(&ctx, &store, 0, None).await.unwrap();
 
     assert_eq!(perm.allowed_models.len(), 1);
     assert!(perm.allowed_models.contains(&ModelName::from("gpt-4")));
@@ -157,7 +157,7 @@ async fn rpm_takes_min_across_tiers() {
         api_key_id: Some(ApiKeyId::from("ak1")),
         client_ip: ip(),
     };
-    let perm = merge_permissions(&ctx, &store, 300).await.unwrap();
+    let perm = merge_permissions(&ctx, &store, 300, None).await.unwrap();
     assert_eq!(perm.rpm_limit, 50);
 }
 
@@ -181,7 +181,7 @@ async fn sub_account_effective_user_id_is_parent() {
         api_key_id: None,
         client_ip: ip(),
     };
-    let perm = merge_permissions(&ctx, &store, 0).await.unwrap();
+    let perm = merge_permissions(&ctx, &store, 0, None).await.unwrap();
     assert_eq!(perm.user_id, UserId::from("child"));
     assert_eq!(perm.effective_user_id, UserId::from("parent"));
 }
@@ -210,7 +210,7 @@ async fn markup_is_product_of_tiers() {
         api_key_id: Some(ApiKeyId::from("ak1")),
         client_ip: ip(),
     };
-    let perm = merge_permissions(&ctx, &store, 0).await.unwrap();
+    let perm = merge_permissions(&ctx, &store, 0, None).await.unwrap();
     // user * main(==user) * group * apikey = 1.5 * 1.5 * 2.0 * 3.0 = 13.5
     assert!((perm.markup_chain.product - 13.5).abs() < 1e-4);
 }

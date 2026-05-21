@@ -11,12 +11,15 @@
 //! - `effective_user_id` is the parent main-account id for a sub-account,
 //!   otherwise the user's own id.
 
+use gw_core::entity::Pricing;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::*;
 use gw_core::permissions::MergedPermissions;
+use gw_core::versioned::Versioned;
 use gw_store::EntityStore;
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 pub use gw_core::permissions::MarkupChainSnapshot;
 
@@ -26,6 +29,7 @@ pub async fn merge_permissions(
     ctx: &AuthCtx,
     store: &EntityStore,
     global_rpm: u32,
+    pricing: Option<Arc<Versioned<Pricing>>>,
 ) -> Result<MergedPermissions, ErrorIR<'static>> {
     let user = store
         .user_or_load(&ctx.user_id)
@@ -148,12 +152,14 @@ pub async fn merge_permissions(
         tpm_limit: tpm,
         max_concurrent_streams: main.value.max_concurrent_streams,
         markup_chain: MarkupChainSnapshot {
-            // Phase 1b: per-tier values left as 1.0 placeholders.
-            // Phase 5 (Bm1) populates these from the actual entity reads above.
+            // Phase 1b: tier values for user-group / api-key / vendor remain 1.0
+            // placeholders. G5 (T2-B) populates `model_markup` from the loaded
+            // Pricing entry so the Go billing service receives the per-model
+            // multiplier; the remaining per-tier fields land in Phase 5 (Bm1).
             user_group_markup: 1.0,
             api_key_markup: 1.0,
             vendor_markup: 1.0,
-            model_markup: 1.0,
+            model_markup: pricing.as_ref().map(|p| p.value.model_markup).unwrap_or(1.0),
             product: markup,
         },
     })

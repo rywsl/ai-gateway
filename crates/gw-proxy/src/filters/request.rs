@@ -538,6 +538,18 @@ pub async fn run(
     }
 
     // ---------------------------------------------------------------------
+    // 4c. G5 (T2-B) — pre-load Pricing for the resolved model now that
+    //     `model_name` is known. The EntityStore is Moka-memoised so a later
+    //     fetch in `upstream_peer` is a hit; pulling the load forward lets
+    //     `merge_permissions` populate `MarkupChainSnapshot.model_markup`
+    //     instead of leaving the 1.0 placeholder. A missing Pricing entry
+    //     (e.g. unconfigured model) falls through with `None` so the chain
+    //     entry stays at the multiplicative-identity 1.0.
+    // ---------------------------------------------------------------------
+    let pricing = store.pricing_or_load(&model_name).await;
+    ctx.pricing = pricing.clone();
+
+    // ---------------------------------------------------------------------
     // 5. Merge permissions across the five-tier hierarchy.
     // ---------------------------------------------------------------------
     let auth_ctx = AuthCtx {
@@ -545,7 +557,7 @@ pub async fn run(
         api_key_id: api_key_id.clone(),
         client_ip: client_ip_v.unwrap_or(IpAddr::from([0, 0, 0, 0])),
     };
-    let merged = match merge_permissions(&auth_ctx, store, global_rpm).await {
+    let merged = match merge_permissions(&auth_ctx, store, global_rpm, pricing.clone()).await {
         Ok(p) => p,
         Err(err) => {
             emit_and_bail(session, ctx, &err, &request_id).await?;

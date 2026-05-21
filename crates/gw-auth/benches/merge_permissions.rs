@@ -140,7 +140,7 @@ fn bench_merge(c: &mut Criterion) {
     c.bench_function("merge_permissions_10_groups_with_apikey", |b| {
         b.iter(|| {
             let perm = rt.block_on(async {
-                merge_permissions(black_box(&ctx), black_box(&store), 100_000)
+                merge_permissions(black_box(&ctx), black_box(&store), 100_000, None)
                     .await
                     .expect("merge")
             });

@@ -161,11 +161,11 @@ pub async fn pick_peer(
             .await;
         }
     };
-    // Lazy load pricing too (Phase-4 v1: not yet used in routing decisions but
-    // cached on ctx for the logging filter).
-    if let Some(p) = store.pricing_or_load(&model).await {
-        ctx.pricing = Some(p);
-    }
+    // G5 (T2-B): Pricing is pre-loaded in `request_filter` (after IR parse
+    // exposes the model name) so `merge_permissions` can populate the
+    // `model_markup` chain entry. EntityStore is Moka-memoised, so even on a
+    // miss here the original load is the source of truth. `ctx.pricing` is
+    // already set; nothing to do.
 
     // -------------------------------------------------------------
     // Candidate filter.

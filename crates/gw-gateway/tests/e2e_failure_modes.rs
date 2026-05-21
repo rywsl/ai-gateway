@@ -49,7 +49,7 @@ async fn merge_permissions_returns_401_when_user_missing() {
         api_key_id: None,
         client_ip: client_ip(),
     };
-    let err = merge_permissions(&ctx, &store, 100_000)
+    let err = merge_permissions(&ctx, &store, 100_000, None)
         .await
         .expect_err("expected error for missing user");
     assert_eq!(err.status, 401);
