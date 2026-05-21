@@ -1,0 +1,150 @@
+//! `Store` — the thin Postgres + Redis facade the fake control-plane uses
+//! to mutate the same state shape the gateway's hot path reads.
+//!
+//! Hard invariant: this crate must not depend on any gw-* crate that
+//! carries the gateway's domain types (gw-store, gw-auth, gw-ledger,
+//! gw-codec, gw-proxy, gw-gateway). We only use sqlx + fred directly
+//! and serialize whatever JSON payload the test harness hands us.
+
+use crate::events;
+use fred::clients::RedisPool;
+use fred::interfaces::{KeysInterface, StreamsInterface};
+use std::sync::Arc;
+
+/// Allowlist of entity tables the fake web is permitted to upsert/delete.
+///
+/// `table` is interpolated directly into SQL (Postgres does not allow a
+/// table name as a bind parameter), so we must reject anything not in
+/// this fixed set. The mapping to invalidation `ns` lives in
+/// [`ns_for_table`].
+const ENTITY_TABLES: &[&str] = &[
+    "users",
+    "user_groups",
+    "api_keys",
+    "vendors",
+    "vendor_keys",
+    "model_groups",
+    "pricings",
+    "jwks",
+    "ip_blocks",
+    "models",
+];
+
+/// Map an entity table name to the `ns` field emitted on `events:entity`.
+///
+/// The gateway's consumer switches on a fixed vocabulary that is NOT the
+/// table name (e.g. `users` → `user`, `api_keys` → `apikey`). `models`
+/// has no consumer namespace; the gateway ignores unknown ns values, so
+/// we simply skip emitting for it.
+pub(crate) fn ns_for_table(table: &str) -> Option<&'static str> {
+    match table {
+        "users" => Some("user"),
+        "user_groups" => Some("user_group"),
+        "api_keys" => Some("apikey"),
+        "vendors" => Some("vendor"),
+        "vendor_keys" => Some("vendor_key"),
+        "model_groups" => Some("model_group"),
+        "pricings" => Some("pricing"),
+        "jwks" => Some("jwks"),
+        "ip_blocks" => Some("ipblock"),
+        // `models` has no consumer ns — skip emit.
+        "models" => None,
+        _ => None,
+    }
+}
+
+fn validate_table(table: &str) -> anyhow::Result<()> {
+    if ENTITY_TABLES.contains(&table) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("table '{}' not in entity allowlist", table))
+    }
+}
+
+pub struct Store {
+    pub pg: sqlx::PgPool,
+    pub redis: Arc<RedisPool>,
+}
+
+impl Store {
+    pub fn new(pg: sqlx::PgPool, redis: Arc<RedisPool>) -> Self {
+        Self { pg, redis }
+    }
+
+    /// Upsert an entity row by id, bump version, then publish an
+    /// invalidation event on `events:entity` (unless the table has no
+    /// consumer ns).
+    pub async fn put_entity(
+        &self,
+        table: &str,
+        id: &str,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        validate_table(table)?;
+        // Table name is allowlist-validated above and cannot be a bind
+        // parameter in PostgreSQL DDL/DML. id + payload are bind params.
+        let sql = format!(
+            "INSERT INTO {table} (id, payload, version) VALUES ($1, $2, 0) \
+             ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, \
+             version = {table}.version + 1, updated_at = now(), deleted_at = NULL"
+        );
+        sqlx::query(&sql)
+            .bind(id)
+            .bind(&payload)
+            .execute(&self.pg)
+            .await?;
+        if let Some(ns) = ns_for_table(table) {
+            events::emit_invalidate(&self.redis, ns, id).await?;
+        }
+        Ok(())
+    }
+
+    /// Soft-delete an entity row and publish an invalidation event.
+    pub async fn delete_entity(&self, table: &str, id: &str) -> anyhow::Result<()> {
+        validate_table(table)?;
+        let sql =
+            format!("UPDATE {table} SET deleted_at = now(), version = version + 1 WHERE id = $1");
+        sqlx::query(&sql).bind(id).execute(&self.pg).await?;
+        if let Some(ns) = ns_for_table(table) {
+            events::emit_invalidate(&self.redis, ns, id).await?;
+        }
+        Ok(())
+    }
+
+    /// SET `counter:{scope}:{id}:{field}` to the given i64.
+    pub async fn set_counter(
+        &self,
+        scope: &str,
+        id: &str,
+        field: &str,
+        value: i64,
+    ) -> anyhow::Result<()> {
+        let key = format!("counter:{scope}:{id}:{field}");
+        let _: () = self
+            .redis
+            .next()
+            .set(&key, value, None, None, false)
+            .await?;
+        Ok(())
+    }
+
+    /// Convenience: SET `counter:user:{user_id}:balance_micro`.
+    pub async fn set_balance(&self, user_id: &str, micros: i64) -> anyhow::Result<()> {
+        self.set_counter("user", user_id, "balance_micro", micros)
+            .await
+    }
+
+    /// SET an arbitrary fully-qualified counter key (used for the
+    /// `daily_tokens:{day}` family whose suffix is a date, not a plain
+    /// field segment).
+    pub async fn set_raw_counter(&self, key: &str, value: i64) -> anyhow::Result<()> {
+        let _: () = self.redis.next().set(key, value, None, None, false).await?;
+        Ok(())
+    }
+
+    /// XLEN over an arbitrary stream. Returns 0 for an empty/missing stream.
+    pub async fn xlen(&self, stream: &str) -> anyhow::Result<i64> {
+        let v: i64 = self.redis.next().xlen(stream).await?;
+        Ok(v)
+    }
+}
