@@ -6,17 +6,38 @@
 //! analyzers (claude_code 401, gemini_cli quota header, codex retry-after,
 //! …) and the rate-limit info extraction.
 
+use bytes::Bytes;
+use gw_core::error::{CooldownDirective, OAuthSignal};
+
 /// Outcome of analyzing an upstream HTTP response.
 ///
 /// Phase 1d places this in `gw-adapter` so the trait can compile; Phase 3
 /// K-B may move it to `gw-health` if it grows fields shared with the
 /// health store. Either crate is allowed per integration spec §3 C-7.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+///
+/// `Eq`/`PartialEq` is intentionally not derived: `Bytes` byte-equality
+/// would force every comparison through full payload memcmp, and
+/// `CooldownDirective`/`OAuthSignal` carry future fields we don't want
+/// to commit to value-equality semantics for. Tests rely on `is_none()`
+/// per field instead of struct equality.
+#[derive(Clone, Debug, Default)]
 pub struct ErrorOutcome {
     /// `None` = uncategorized. Phase 3 introduces the full enum.
     pub kind: Option<ErrorKind>,
     /// Retry-After hint from the upstream (seconds).
     pub retry_after_secs: Option<u32>,
+
+    /// K-A 的冷却命令；adapter 看了 status + body 后决定。
+    /// 由 § 1 ClassifierOutcome 透传 K-A apply_cooldown。
+    pub cooldown: Option<CooldownDirective>,
+
+    /// vendor 错误体 → 客户端协议错误体的 "vendor 端增强" 产物。
+    /// kiro 等 vendor 在此处把帧头剥掉 / type 字段改写。
+    /// 不做 vendor 改写时为 None（passthrough）。
+    pub enhanced_body: Option<Bytes>,
+
+    /// OAuth 标记：401 是 token 失效还是账号挂起？vendor 决定。
+    pub oauth_signal: Option<OAuthSignal>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,6 +82,7 @@ impl UpstreamErrorAnalyzer for DefaultErrorAnalyzer {
         ErrorOutcome {
             kind,
             retry_after_secs,
+            ..Default::default()
         }
     }
 }

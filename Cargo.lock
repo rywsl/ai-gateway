@@ -1441,6 +1441,7 @@ name = "gw-adapter"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "dashmap",
  "gw-codec",
  "gw-core",

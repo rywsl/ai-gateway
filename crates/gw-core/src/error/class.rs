@@ -65,12 +65,12 @@ pub struct RateLimitHint {
     pub retry_after_secs: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthSignal {
     pub kind: OAuthSignalKind,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum OAuthSignalKind {
     RefreshFailed,
     AccountBlocked,
