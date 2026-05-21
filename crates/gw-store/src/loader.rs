@@ -12,7 +12,7 @@ use secrecy::SecretString;
 use sqlx::PgPool;
 
 use gw_core::entity::{
-    ApiKeyEntry, AuthConfig, JwksEntry, ModelGroup, Pricing, UserEntry, UserGroup, Vendor,
+    ApiKeyEntry, AuthConfig, JwksEntry, Model, ModelGroup, Pricing, UserEntry, UserGroup, Vendor,
     VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, Kid, KeyId, ModelName, UserGroupId, UserId, VendorId};
@@ -88,7 +88,7 @@ where
 fn ttl_for(ns: &str) -> u64 {
     match ns {
         "user" | "user_group" | "apikey" | "ipblock" => 300,
-        "vendor" | "vendor_key" | "model_group" | "pricing" => 1800,
+        "vendor" | "vendor_key" | "model_group" | "pricing" | "model" => 1800,
         "jwks" | "auth_config" => 3600,
         _ => 300,
     }
@@ -145,6 +145,8 @@ const MODEL_GROUP_SQL: &str =
 const PRICING_SQL: &str =
     "SELECT payload, version FROM pricings WHERE id = $1 AND deleted_at IS NULL";
 const JWKS_SQL: &str = "SELECT payload, version FROM jwks WHERE id = $1 AND deleted_at IS NULL";
+const MODEL_SQL: &str =
+    "SELECT payload, version FROM models WHERE id = $1 AND deleted_at IS NULL";
 // TODO(T1-E): the `auth_configs` table does not yet exist in
 // `migrations/0001_initial.sql`. Until it lands, this query errors at the PG
 // layer, `with_cold_load_timeout` swallows the error into `None`, and
@@ -261,6 +263,16 @@ pub async fn load_jwks(ctx: &LoaderCtx, id: &Kid) -> anyhow::Result<Versioned<Jw
 pub async fn load_auth_config(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versioned<AuthConfig>> {
     load_entity(ctx, "auth_config", id, AUTH_CONFIG_SQL, |v| {
         serde_json::from_value::<AuthConfig>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+/// Cold-load a [`Model`] (G13 — capability metadata) by name. Mirrors
+/// [`load_vendor_key`]: Redis L1 → PgSQL `models` L2 → Redis write-back.
+/// T3-C's `CapabilityResolver` consumes the returned `capabilities` list.
+pub async fn load_model(ctx: &LoaderCtx, name: &ModelName) -> anyhow::Result<Versioned<Model>> {
+    load_entity(ctx, "model", name.as_ref(), MODEL_SQL, |v| {
+        serde_json::from_value::<Model>(v.clone()).map_err(Into::into)
     })
     .await
 }

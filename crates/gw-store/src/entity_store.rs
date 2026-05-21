@@ -10,8 +10,8 @@
 //! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
 use crate::loader::{
-    load_apikey, load_auth_config, load_jwks, load_model_group, load_pricing, load_user,
-    load_user_group, load_vendor, load_vendor_key, LoaderCtx,
+    load_apikey, load_auth_config, load_jwks, load_model, load_model_group, load_pricing,
+    load_user, load_user_group, load_vendor, load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -85,6 +85,9 @@ pub struct EntityStore {
     /// `"global"`). 3600s TTL, same as `jwks`. Populated by T1-E via
     /// [`EntityStore::auth_config_or_load`].
     pub auth_config: Cache<String, Arc<Versioned<AuthConfig>>>,
+    /// Per-model entity (G13). 1800s TTL matching `vendor_key`. Consumed by
+    /// T3-C's `CapabilityResolver` via [`EntityStore::model_or_load`].
+    pub model: Cache<ModelName, Arc<Versioned<Model>>>,
     pub ipblock: Cache<String, Arc<Versioned<IpBlockEntry>>>,
     pub model_mapping: moka::future::Cache<
         (String, gw_core::protocol::ProtocolKind),
@@ -155,6 +158,10 @@ impl EntityStore {
             auth_config: Cache::builder()
                 .max_capacity(100)
                 .time_to_live(Duration::from_secs(3600))
+                .build(),
+            model: Cache::builder()
+                .max_capacity(1_000)
+                .time_to_live(Duration::from_secs(1800))
                 .build(),
             ipblock: Cache::builder()
                 .max_capacity(10_000)
@@ -345,6 +352,30 @@ impl EntityStore {
             .try_get_with_by_ref(id, async move {
                 with_cold_load_timeout("jwks", deadline, async move {
                     load_jwks(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    /// Resolve a [`Model`] (G13 — capability metadata) by name. L1 Moka →
+    /// cold load via `load_model`. T3-C's `CapabilityResolver` reads
+    /// `Model.capabilities`. Returns `None` on miss/timeout (empty
+    /// capabilities then mean "no specific requirements" per ADR-G13-1).
+    pub async fn model_or_load(&self, name: &ModelName) -> Option<Arc<Versioned<Model>>> {
+        if let Some(hit) = self.model.get(name).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let name2 = name.clone();
+        let deadline = self.cold_load_timeout;
+        self.model
+            .try_get_with_by_ref(name, async move {
+                with_cold_load_timeout("model", deadline, async move {
+                    load_model(&loader, &name2).await
                 })
                 .await
                 .map(Arc::new)
