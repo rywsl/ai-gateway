@@ -116,6 +116,11 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "detailed log dropped due to size",
     },
+    MetricSpec {
+        name: "gw_usage_dlq_enqueued_total",
+        kind: MetricKind::Counter,
+        help: "usage records routed to usage:records:dlq on primary XADD failure; label=outcome (success/error)",
+    },
 ];
 
 pub fn describe_all() {

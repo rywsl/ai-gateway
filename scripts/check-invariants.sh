@@ -145,12 +145,26 @@ fi
 
 # ---------------------------------------------------------------------------
 # no_billing_records_stream (§5.2) — stream renamed to usage:records.
+# The `usage:records:dlq` fallback (G11) is a *separate* stream name and is
+# unaffected by the literal `"billing:records"` grep below.
 # ---------------------------------------------------------------------------
 echo "[no_billing_records_stream] billing:records stream name must not appear"
 if grep -rn '"billing:records"' crates/ 2>/dev/null; then
   bad "billing:records stream name remains"
 else
   ok "no billing:records reference"
+fi
+
+# ---------------------------------------------------------------------------
+# no_cost_in_dlq (G11) — the DLQ wrapper must not introduce cost fields.
+# Rust never computes cost; the DLQ payload is the original UsageRecord
+# wrapped with `dlq_meta`. `cost_micro` must not appear in flusher source.
+# ---------------------------------------------------------------------------
+echo "[no_cost_in_dlq] cost_micro must not appear in gw-ledger flusher source"
+if grep -nE '\bcost_micro\b' crates/gw-ledger/src/flusher.rs 2>/dev/null; then
+  bad "cost_micro field appears in flusher.rs"
+else
+  ok "no cost_micro in flusher.rs"
 fi
 
 # ---------------------------------------------------------------------------
