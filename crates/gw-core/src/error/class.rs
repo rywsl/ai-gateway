@@ -33,12 +33,17 @@ pub enum AccountBlockReason {
     AdminForce,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Retryability {
+    /// 不重试
     #[default]
     No,
+    /// 同 key 可重试（瞬时）
     SameKey,
+    /// 跨 key 可重试（账号问题 / RPM 满）
     CrossKey,
+    /// 跨 vendor 可重试
     CrossVendor,
 }
 
@@ -54,6 +59,7 @@ pub struct ClassifierOutcome {
 
 #[derive(Debug, Clone)]
 pub struct CooldownDirective {
+    /// 与 K-A CooldownReason u16 编码同步。
     pub reason_code: u16,
     pub ttl_secs: u32,
     pub reset_consecutive: bool,
@@ -70,6 +76,7 @@ pub struct OAuthSignal {
     pub kind: OAuthSignalKind,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum OAuthSignalKind {
     RefreshFailed,
@@ -86,7 +93,9 @@ pub struct PassthroughBody {
 pub struct ClassifyCtx<'a> {
     pub key_id: &'a str,
     pub vendor_id: &'a str,
+    /// 客户端实际呈递的 API 形态（按 path/header 探测）
     pub api_format: crate::protocol::ProtocolKind,
+    /// 上游路由 / 选 key 时使用的协议（可与 api_format 不同，如 stream-policy 桥接情形）
     pub protocol: crate::protocol::ProtocolKind,
 }
 

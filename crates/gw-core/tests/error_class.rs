@@ -6,6 +6,9 @@ fn error_class_default_is_internal() {
     assert_eq!(oc.class, ErrorClass::Internal);
     assert_eq!(oc.retryable, Retryability::No);
     assert!(oc.cooldown.is_none());
+    assert!(oc.rate_limit_hint.is_none());
+    assert!(oc.oauth_signal.is_none());
+    assert!(oc.passthrough_body.is_none());
 }
 
 #[test]
