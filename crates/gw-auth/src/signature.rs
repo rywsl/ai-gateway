@@ -46,11 +46,21 @@ use gw_core::entity::SignatureAlgo;
 
 const REPLAY_WINDOW_SECS: i64 = 300;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SignatureCheckResult {
-    Valid,
-    Invalid,
+    /// Signature requirement is off — caller should pass through.
     NotRequired,
+    /// `x-signature` or `x-timestamp` header absent when required. The client
+    /// failed to satisfy a precondition (distinct from `Invalid`, which means
+    /// the client sent headers but they were wrong).
+    Missing,
+    /// Timestamp outside the ±300 s replay window (in either direction).
+    TimestampDrift,
+    /// HMAC mismatch, or malformed timestamp string (header present but not
+    /// parseable as an `i64`).
+    Invalid,
+    /// HMAC matches and timestamp is within the replay window.
+    Valid,
 }
 
 /// High-level HMAC verification gating on `required` flag, replay window, and algo.
@@ -61,6 +71,14 @@ pub enum SignatureCheckResult {
 ///
 /// Replay window is ±300s relative to local clock; future timestamps beyond the
 /// window are rejected as well (uses `(now - ts).abs()`).
+///
+/// Outcome mapping (G7 — T1-D):
+/// - `!required` → `NotRequired`
+/// - signature header absent **or** timestamp header absent → `Missing`
+/// - timestamp header present but not parseable as `i64` → `Invalid`
+/// - timestamp parsed but outside ±300 s → `TimestampDrift`
+/// - HMAC compare fails → `Invalid`
+/// - HMAC compare passes → `Valid`
 pub fn verify_required(
     required: bool,
     algo: SignatureAlgo,
@@ -72,20 +90,28 @@ pub fn verify_required(
     if !required {
         return SignatureCheckResult::NotRequired;
     }
+    // Header(s) absent — Missing rather than Invalid so the request_filter
+    // call site can emit GW_AUTH_SIGNATURE_MISSING.
     let received = match received {
         Some(s) if !s.is_empty() => s,
-        _ => return SignatureCheckResult::Invalid,
+        _ => return SignatureCheckResult::Missing,
     };
-    let ts = match timestamp_str.and_then(|s| s.parse::<i64>().ok()) {
-        Some(t) => t,
-        None => return SignatureCheckResult::Invalid,
+    let raw_ts = match timestamp_str {
+        Some(s) if !s.is_empty() => s,
+        _ => return SignatureCheckResult::Missing,
+    };
+    // Header present but malformed → Invalid (the client's input was wrong,
+    // not absent).
+    let ts = match raw_ts.parse::<i64>() {
+        Ok(t) => t,
+        Err(_) => return SignatureCheckResult::Invalid,
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     if (now - ts).abs() > REPLAY_WINDOW_SECS {
-        return SignatureCheckResult::Invalid;
+        return SignatureCheckResult::TimestampDrift;
     }
     let ok = match algo {
         SignatureAlgo::HmacSha256 => verify(secret, received, input),

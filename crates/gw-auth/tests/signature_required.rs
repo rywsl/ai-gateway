@@ -41,7 +41,8 @@ fn required_true_missing_header_fails() {
             body: b"{}",
         },
     );
-    assert_eq!(r, SignatureCheckResult::Invalid);
+    // T1-D: absent headers now resolve to `Missing` (distinct from `Invalid`).
+    assert_eq!(r, SignatureCheckResult::Missing);
 }
 
 #[test]
@@ -78,7 +79,9 @@ fn required_true_stale_timestamp_fails() {
             body: b"{}",
         },
     );
-    assert_eq!(r, SignatureCheckResult::Invalid);
+    // T1-D: out-of-window timestamps now resolve to `TimestampDrift`
+    // (distinct from `Invalid`). Note "1" is unix-epoch+1s — far outside ±300s.
+    assert_eq!(r, SignatureCheckResult::TimestampDrift);
 }
 
 #[test]

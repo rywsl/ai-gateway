@@ -1,16 +1,15 @@
 //! Body-after HMAC verification + Content-Encoding decode.
 //!
-//! Called by `gateway.rs::request_body_filter` once the full request body
-//! has been buffered. Decodes any compressed body first (so the signature
-//! always matches the plaintext payload), then runs `verify_required`.
+//! Called by `filters::request::run` once the full request body has been
+//! buffered (the existing 16 MiB body-read loop, before codec parse).
+//! Decodes any compressed body first (so the signature always matches the
+//! plaintext payload), then runs [`gw_auth::signature::verify_required`].
 //!
-//! Returns the decoded body alongside the verification result so the codec
-//! parse path can operate on the plaintext.
-//
-// TODO(T6-C follow-up): wire `verify_body` into
-// `gateway.rs::request_body_filter` at EOS. Current state: ctx fields set,
-// helper ready. Filter integration deferred to a future task once the
-// request_body_filter hot path stabilises.
+//! Returns the decoded body alongside the verification result. The caller
+//! maps the [`SignatureCheckResult`] variants to distinct 401 error codes
+//! per ADR-G7-1 (`GW_AUTH_SIGNATURE_MISSING` / `_INVALID` /
+//! `_TIMESTAMP_DRIFT`). Decompression errors are surfaced as
+//! [`BodyVerifyError::Decompression`].
 
 use bytes::Bytes;
 use gw_auth::signature::{verify_required, SignatureCheckResult, SignatureInput};

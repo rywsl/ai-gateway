@@ -110,6 +110,13 @@ pub struct ReqCtx {
     pub signature_received: Option<Vec<u8>>,
     pub signature_timestamp: Option<String>,
     pub req_content_encoding: gw_codec::compression::Encoding,
+    /// G7 — HMAC secret bytes hoisted out of the resolved `ApiKeyEntry` so the
+    /// body-verify call site (after the body-read loop in `request_filter`)
+    /// can run without keeping the `ApiKey` `Arc` alive. v1.5 reuses the
+    /// api-key hash as the HMAC secret; v2 will add a dedicated
+    /// `signature_secret: Vec<u8>` field to `ApiKeyEntry` (tracked as a Wave 5
+    /// or later follow-up). Empty when `signature_required = false`.
+    pub signature_secret: Vec<u8>,
 
     // --- Management path / capability (G-α.9 / G-β wire) ---
     /// `true` if the request path matched `/admin/*` and is destined for the
@@ -173,6 +180,7 @@ impl ReqCtx {
             signature_received: None,
             signature_timestamp: None,
             req_content_encoding: gw_codec::compression::Encoding::Identity,
+            signature_secret: Vec::new(),
             mgmt: false,
             required_caps: None,
             trace: TraceBuffer::new(),

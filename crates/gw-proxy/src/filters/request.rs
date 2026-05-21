@@ -183,6 +183,10 @@ pub async fn run(
                                 .get("x-timestamp")
                                 .and_then(|v| v.to_str().ok())
                                 .map(String::from);
+                            // G7 v1.5 — reuse the api-key hash as the HMAC
+                            // secret. A dedicated `signature_secret` field
+                            // on `ApiKeyEntry` is a future follow-up.
+                            ctx.signature_secret = entry.value.hash.clone();
                         }
                         // G2 — capture the per-key IP allowlist so the
                         // post-blocklist gate (below) can consult it after
@@ -325,6 +329,104 @@ pub async fn run(
     }
     let body_bytes = bytes::Bytes::from(body_buf);
     ctx.cached_body = Some(body_bytes.clone());
+
+    // ---------------------------------------------------------------------
+    // 3b. G7 / T1-D — HMAC body-after verification. If the resolved api-key
+    //     requires a signature, verify `x-signature` + `x-timestamp` against
+    //     the (decompressed) body now that the full body is buffered. This
+    //     runs BEFORE codec parse so tampered bodies never enter the IR
+    //     pipeline. Three distinct 401 codes are emitted per ADR-G7-1.
+    // ---------------------------------------------------------------------
+    if ctx.signature_required {
+        use gw_auth::signature::SignatureCheckResult;
+        let method = session.req_header().method.as_str().to_owned();
+        let path = session.req_header().uri.path().to_owned();
+        let input = crate::body_verify::BodyVerifyInput {
+            method: &method,
+            path: &path,
+            body: body_bytes.clone(),
+            content_encoding: ctx.req_content_encoding,
+            signature_required: ctx.signature_required,
+            signature_algo: ctx.signature_algo,
+            secret: ctx.signature_secret.clone(),
+            signature: ctx.signature_received.clone(),
+            timestamp: ctx.signature_timestamp.clone(),
+        };
+        match crate::body_verify::verify_body(input) {
+            Ok((SignatureCheckResult::Valid, _))
+            | Ok((SignatureCheckResult::NotRequired, _)) => {
+                // Pass through. `cached_body` already holds the on-wire form
+                // the codec parse step expects; decompression for verification
+                // is internal to `verify_body` and intentionally not folded
+                // back into `cached_body` (the codec handles Content-Encoding
+                // on its own path).
+            }
+            Ok((SignatureCheckResult::Missing, _)) => {
+                let err = ErrorIR {
+                    category: ErrorCategory::ClientAuth,
+                    status: 401,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_AUTH_SIGNATURE_MISSING),
+                    message: Cow::Borrowed("signature or timestamp header missing"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                emit_and_bail(session, ctx, &err, &request_id).await?;
+                unreachable!()
+            }
+            Ok((SignatureCheckResult::TimestampDrift, _)) => {
+                let err = ErrorIR {
+                    category: ErrorCategory::ClientAuth,
+                    status: 401,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_AUTH_SIGNATURE_TIMESTAMP_DRIFT),
+                    message: Cow::Borrowed("signature timestamp drifted"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                emit_and_bail(session, ctx, &err, &request_id).await?;
+                unreachable!()
+            }
+            Ok((SignatureCheckResult::Invalid, _)) => {
+                let err = ErrorIR {
+                    category: ErrorCategory::ClientAuth,
+                    status: 401,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_AUTH_SIGNATURE_INVALID),
+                    message: Cow::Borrowed("signature invalid"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                emit_and_bail(session, ctx, &err, &request_id).await?;
+                unreachable!()
+            }
+            Err(_decompress_err) => {
+                // Body decompression failed: signature is computed over
+                // plaintext, so we cannot verify. No dedicated body-decode
+                // error code exists in v1; surface as signature-invalid to
+                // keep the rejection in a single ClientAuth code family.
+                let err = ErrorIR {
+                    category: ErrorCategory::ClientAuth,
+                    status: 401,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_AUTH_SIGNATURE_INVALID),
+                    message: Cow::Borrowed("signature invalid (body decompression failed)"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                emit_and_bail(session, ctx, &err, &request_id).await?;
+                unreachable!()
+            }
+        }
+    }
 
     // ---------------------------------------------------------------------
     // 4. Parse the request through the client codec into IR. The IR is
