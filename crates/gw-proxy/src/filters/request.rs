@@ -148,7 +148,7 @@ pub async fn run(
                         JwtError::InvalidIss => (codes::GW_AUTH_JWT_INVALID_ISS, "jwt issuer invalid"),
                         JwtError::InvalidAud => (codes::GW_AUTH_JWT_INVALID_AUD, "jwt audience invalid"),
                         JwtError::NotYetValid => (codes::GW_AUTH_JWT_NOT_YET_VALID, "jwt not yet valid"),
-                        JwtError::Expired => (codes::GW_AUTH_INVALID_JWT, "jwt expired"),
+                        JwtError::Expired => (codes::GW_AUTH_JWT_EXPIRED, "jwt expired"),
                         JwtError::InvalidSignature => (codes::GW_AUTH_INVALID_JWT, "jwt invalid"),
                     };
                     let err = ErrorIR {

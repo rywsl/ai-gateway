@@ -38,6 +38,7 @@ pub const GW_AUTH_KEY_IP_NOT_ALLOWED: &str = "GW_AUTH_KEY_IP_NOT_ALLOWED";
 pub const GW_AUTH_JWT_INVALID_ISS: &str = "GW_AUTH_JWT_INVALID_ISS";
 pub const GW_AUTH_JWT_INVALID_AUD: &str = "GW_AUTH_JWT_INVALID_AUD";
 pub const GW_AUTH_JWT_NOT_YET_VALID: &str = "GW_AUTH_JWT_NOT_YET_VALID";
+pub const GW_AUTH_JWT_EXPIRED: &str = "GW_AUTH_JWT_EXPIRED";
 // Auth: HMAC request signing (G7). `GW_AUTH_SIGNATURE_INVALID` already exists
 // above; the missing-header and clock-drift variants are new.
 pub const GW_AUTH_SIGNATURE_MISSING: &str = "GW_AUTH_SIGNATURE_MISSING";
