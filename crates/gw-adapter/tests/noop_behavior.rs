@@ -62,6 +62,8 @@ fn dummy_vendor_key() -> Arc<VendorKey> {
         expires_at: None,
         status: KeyStatus::Active,
         tags: vec![],
+        forced_capabilities: vec![],
+        exclusive_capability_match: false,
     })
 }
 

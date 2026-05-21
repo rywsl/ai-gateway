@@ -39,6 +39,8 @@ fn fake_key(id: &str, priority: i32, weight: u32) -> Arc<VendorKey> {
         expires_at: None,
         status: KeyStatus::Active,
         tags: vec![],
+        forced_capabilities: vec![],
+        exclusive_capability_match: false,
     })
 }
 

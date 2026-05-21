@@ -71,6 +71,8 @@ pub async fn get_candidate_keys(
             expires_at: key.expires_at,
             status: key.status,
             tags: key.tags.clone(),
+            forced_capabilities: key.forced_capabilities.clone(),
+            exclusive_capability_match: key.exclusive_capability_match,
         }));
     }
     out

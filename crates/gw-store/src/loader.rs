@@ -214,6 +214,10 @@ pub async fn load_vendor_key(
             expires_at: row.expires_at,
             status: row.status,
             tags: row.tags,
+            // T0-C: new capability fields default to empty/false; T3-C will
+            // extend VendorKeyRow to read them from the JSONB payload.
+            forced_capabilities: Vec::new(),
+            exclusive_capability_match: false,
         })
     })
     .await

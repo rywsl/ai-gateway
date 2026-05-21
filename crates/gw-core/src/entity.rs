@@ -180,6 +180,15 @@ pub struct VendorKey {
     pub expires_at: Option<OffsetDateTime>,
     pub status: KeyStatus,
     pub tags: Vec<String>,
+    /// Capabilities this vendor key advertises regardless of model defaults
+    /// (consumed by `CapabilityResolver` — T3-C, ADR-G13-1). Stored as
+    /// `Vec<String>` (parsed against `gw_capability::types::Capability` at
+    /// resolve time) to avoid a supporting → business layer back-edge.
+    pub forced_capabilities: Vec<String>,
+    /// When true, the key only matches if every required capability is
+    /// present (strict match). When false, the resolver may use a looser
+    /// containment check (T3-C / ADR-G13-1).
+    pub exclusive_capability_match: bool,
 }
 
 impl std::fmt::Debug for VendorKey {
@@ -313,6 +322,20 @@ pub struct ManagementToken {
     pub secret_hash: Vec<u8>,
     pub scopes: smallvec::SmallVec<[String; 4]>,
     pub expires_at_unix_s: Option<u64>,
+}
+
+/// Per-model entity (T3-C, ADR-G13-1).
+///
+/// Carries the capability advertisement consumed by `CapabilityResolver`.
+/// Capability strings are parsed against `gw_capability::types::Capability`
+/// at resolve time — keeping the field as `Vec<String>` avoids a
+/// supporting → business layer back-edge (`gw-core` cannot depend on
+/// `gw-capability`; see `scripts/check-invariants.sh` §crate_layering).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Model {
+    pub name: ModelName,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// Model alias → upstream model mapping (T4-A).
