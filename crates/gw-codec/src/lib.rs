@@ -17,6 +17,7 @@ pub mod error_passthrough;
 pub mod gemini;
 pub mod openai;
 pub mod passthrough;
+pub mod stream_accumulator;
 pub mod stream_policy;
 pub mod trait_def;
 pub mod wire;
