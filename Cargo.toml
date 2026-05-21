@@ -13,6 +13,7 @@ members = [
     "crates/gw-capability",
     "crates/gw-proxy",
     "crates/gw-gateway",
+    "crates/gw-tunnel-client",
 ]
 
 [workspace.package]
@@ -67,6 +68,9 @@ jsonwebtoken = "9"
 governor = "0.7"
 ipnet = "2.10"
 hex = "0.4"
+brotli = "7"
+flate2 = "1"
+regex = "1"
 
 # 可观测
 tracing = "0.1"

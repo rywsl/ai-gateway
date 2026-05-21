@@ -37,6 +37,7 @@
 pub mod config;
 pub mod health;
 pub mod kms;
+pub mod metrics_catalog;
 pub mod observability;
 
 use anyhow::Context;

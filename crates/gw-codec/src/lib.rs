@@ -12,9 +12,11 @@
 pub mod anthropic;
 pub mod any;
 pub(crate) mod common;
+pub mod compression;
 pub mod gemini;
 pub mod openai;
 pub mod passthrough;
+pub mod stream_policy;
 pub mod trait_def;
 pub mod wire;
 

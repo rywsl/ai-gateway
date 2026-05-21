@@ -27,6 +27,7 @@ ipnet.workspace = true
 hex.workspace = true
 fred.workspace = true
 smallvec.workspace = true
+regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

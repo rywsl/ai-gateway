@@ -8,6 +8,7 @@ pub mod jwt;
 pub mod jwt_blacklist;
 pub mod merge;
 pub mod mgmt;
+pub mod model_permissions;
 pub mod ratelimit;
 pub mod signature;
 
