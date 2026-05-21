@@ -102,13 +102,18 @@ pub struct FakeMapperBackend {
 
 impl FakeMapperBackend {
     pub fn insert(&self, m: ModelMapping) {
-        self.map.lock().insert((m.user_alias.clone(), m.protocol), m);
+        self.map
+            .lock()
+            .insert((m.user_alias.clone(), m.protocol), m);
     }
 }
 
 #[async_trait]
 impl MapperBackend for FakeMapperBackend {
     async fn get(&self, user_alias: &str, protocol: ProtocolKind) -> Option<ModelMapping> {
-        self.map.lock().get(&(user_alias.to_string(), protocol)).cloned()
+        self.map
+            .lock()
+            .get(&(user_alias.to_string(), protocol))
+            .cloned()
     }
 }

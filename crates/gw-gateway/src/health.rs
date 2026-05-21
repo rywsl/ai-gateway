@@ -90,13 +90,8 @@ async fn handle_connection(mut stream: TcpStream) {
             if READY.load(Ordering::Acquire) {
                 let _ = write_response(&mut stream, 200, "OK", OK_BODY).await;
             } else {
-                let _ = write_response(
-                    &mut stream,
-                    503,
-                    "Service Unavailable",
-                    NOT_READY_BODY,
-                )
-                .await;
+                let _ =
+                    write_response(&mut stream, 503, "Service Unavailable", NOT_READY_BODY).await;
             }
         }
         path if path.starts_with("/healthz/circuits")
@@ -107,13 +102,7 @@ async fn handle_connection(mut stream: TcpStream) {
             // gw-auth::mgmt). The real mgmt token validation lands in T6-A
             // wiring; for now we always reject so production deployments that
             // expose 8080 do not leak circuit / health internals.
-            let _ = write_response(
-                &mut stream,
-                401,
-                "Unauthorized",
-                b"mgmt token required",
-            )
-            .await;
+            let _ = write_response(&mut stream, 401, "Unauthorized", b"mgmt token required").await;
         }
         _ => {
             let _ = write_response(&mut stream, 404, "Not Found", b"").await;

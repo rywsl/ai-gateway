@@ -13,19 +13,14 @@ use secrecy::ExposeSecret;
 use std::collections::HashMap;
 
 pub async fn init(cfg: &Config) -> anyhow::Result<KekCache> {
-    let kek_hex = cfg
-        .kms
-        .kek_hex
-        .as_ref()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no KEK configured: set GW_KMS__KEK_HEX to a 64-char hex string \
+    let kek_hex = cfg.kms.kek_hex.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no KEK configured: set GW_KMS__KEK_HEX to a 64-char hex string \
                  (dev mode) or wire a production KMS provider"
-            )
-        })?;
+        )
+    })?;
 
-    let raw = hex::decode(kek_hex.expose_secret())
-        .context("GW_KMS__KEK_HEX is not valid hex")?;
+    let raw = hex::decode(kek_hex.expose_secret()).context("GW_KMS__KEK_HEX is not valid hex")?;
 
     let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
         anyhow::anyhow!(

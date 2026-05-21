@@ -11,7 +11,7 @@ use crate::config::Config;
 use anyhow::Context;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 pub fn init(cfg: &Config) -> anyhow::Result<()> {
     init_tracing()?;
@@ -20,8 +20,8 @@ pub fn init(cfg: &Config) -> anyhow::Result<()> {
 }
 
 fn init_tracing() -> anyhow::Result<()> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,gw=debug"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,gw=debug"));
 
     let fmt_layer = fmt::layer().json().with_current_span(false);
 

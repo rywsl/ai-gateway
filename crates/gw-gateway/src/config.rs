@@ -11,8 +11,8 @@
 //! accidental `Debug` output redacts.
 
 use figment::{
-    Figment,
     providers::{Env, Format, Toml},
+    Figment,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
