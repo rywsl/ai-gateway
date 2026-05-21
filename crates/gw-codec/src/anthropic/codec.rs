@@ -5,6 +5,7 @@
 use bytes::BytesMut;
 use gw_core::error::ErrorIR;
 use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR};
+use smallvec::{smallvec, SmallVec};
 use std::borrow::Cow;
 
 use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
@@ -46,7 +47,7 @@ impl ProtocolCodec for Anthropic {
     fn parse_stream_chunk<'a>(
         &self,
         chunk: &'a [u8],
-    ) -> Result<Option<StreamEventIR<'a>>, ErrorIR<'static>> {
+    ) -> Result<SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
         let s = std::str::from_utf8(chunk).map_err(|_| internal_err("invalid utf8 in chunk"))?;
         let mut event_name: Option<&str> = None;
         let mut data_line: Option<&str> = None;
@@ -59,18 +60,18 @@ impl ProtocolCodec for Anthropic {
             }
         }
         match (event_name, data_line) {
-            (Some("message_stop"), _) => Ok(Some(StreamEventIR::End {
+            (Some("message_stop"), _) => Ok(smallvec![StreamEventIR::End {
                 finish_reason: FinishReasonIR::Stop,
-            })),
+            }]),
             (Some("content_block_delta"), Some(payload)) if !payload.is_empty() => {
                 let val: serde_json::Value = match serde_json::from_str(payload) {
                     Ok(v) => v,
                     Err(_) => {
                         // CONTRACT: malformed payloads must not short-circuit
-                        // the stream — surface a warn and return Ok(None) so
-                        // the framer continues to the next chunk.
+                        // the stream — surface a warn and return an empty
+                        // SmallVec so the framer continues to the next chunk.
                         tracing::warn!("malformed SSE data on anthropic");
-                        return Ok(None);
+                        return Ok(SmallVec::new());
                     }
                 };
                 let txt = val
@@ -78,13 +79,13 @@ impl ProtocolCodec for Anthropic {
                     .and_then(|d| d.get("text"))
                     .and_then(|t| t.as_str())
                     .map(|s| Cow::Owned(s.to_owned()));
-                Ok(Some(StreamEventIR::Delta {
+                Ok(smallvec![StreamEventIR::Delta {
                     text: txt,
                     tool_call: None,
                     thinking: None,
-                }))
+                }])
             }
-            _ => Ok(None),
+            _ => Ok(SmallVec::new()),
         }
     }
 

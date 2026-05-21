@@ -5,6 +5,7 @@
 use bytes::BytesMut;
 use gw_core::error::ErrorIR;
 use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR};
+use smallvec::{smallvec, SmallVec};
 use std::borrow::Cow;
 
 use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
@@ -51,7 +52,7 @@ impl ProtocolCodec for Gemini {
     fn parse_stream_chunk<'a>(
         &self,
         chunk: &'a [u8],
-    ) -> Result<Option<StreamEventIR<'a>>, ErrorIR<'static>> {
+    ) -> Result<SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
         let s = std::str::from_utf8(chunk).map_err(|_| internal_err("invalid utf8 in chunk"))?;
         for line in s.split('\n') {
             let line = line.trim_end_matches('\r');
@@ -81,39 +82,44 @@ impl ProtocolCodec for Gemini {
                 .map(|s| Cow::Owned(s.to_owned()));
             let finish = candidate
                 .and_then(|c| c.get("finishReason"))
-                .and_then(|r| r.as_str());
-
-            // CONTRACT: under v1's one-event-per-call rule, when a final
-            // Gemini chunk carries BOTH text and finishReason we must pick
-            // one. We prefer the Delta (text) to avoid silent text loss; the
-            // finishReason is logged and dropped. Cross-protocol callers
-            // that need an explicit End for the rare text+finish co-occurrence
-            // can synthesize one on the framer side.
-            // TODO(v2): widen `parse_stream_chunk` return type so we can emit
-            // Delta + End from a single chunk.
-            if txt.is_some() {
-                if let Some(reason) = finish {
-                    tracing::warn!(
-                        "gemini: finishReason {reason} dropped to preserve trailing text; framer should synthesize End"
-                    );
-                }
-                return Ok(Some(StreamEventIR::Delta {
-                    text: txt,
-                    tool_call: None,
-                    thinking: None,
-                }));
-            }
-            if let Some(reason) = finish {
-                let finish_reason = match reason {
+                .and_then(|r| r.as_str())
+                .map(|reason| match reason {
                     "STOP" => FinishReasonIR::Stop,
                     "MAX_TOKENS" => FinishReasonIR::Length,
                     "SAFETY" => FinishReasonIR::ContentFilter,
                     _ => FinishReasonIR::Other,
-                };
-                return Ok(Some(StreamEventIR::End { finish_reason }));
+                });
+
+            // ADR-G9-1: a single Gemini SSE frame may carry BOTH `text` and
+            // `finishReason` (the "combined final event"). Decompose into
+            // `[Delta, End]` so downstream consumers (cross-protocol render,
+            // usage accounting) see each IR event distinctly. The common
+            // single-event cases still fit in the inline `[_; 1]` storage.
+            match (txt, finish) {
+                (Some(t), Some(fr)) => {
+                    let mut out: SmallVec<[StreamEventIR<'a>; 1]> = SmallVec::new();
+                    out.push(StreamEventIR::Delta {
+                        text: Some(t),
+                        tool_call: None,
+                        thinking: None,
+                    });
+                    out.push(StreamEventIR::End { finish_reason: fr });
+                    return Ok(out);
+                }
+                (Some(t), None) => {
+                    return Ok(smallvec![StreamEventIR::Delta {
+                        text: Some(t),
+                        tool_call: None,
+                        thinking: None,
+                    }]);
+                }
+                (None, Some(fr)) => {
+                    return Ok(smallvec![StreamEventIR::End { finish_reason: fr }]);
+                }
+                (None, None) => continue,
             }
         }
-        Ok(None)
+        Ok(SmallVec::new())
     }
 
     fn render_stream_chunk(

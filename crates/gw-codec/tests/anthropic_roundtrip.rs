@@ -40,9 +40,10 @@ fn render_roundtrip_preserves_fields() {
 fn parse_stream_chunk_delta() {
     let codec = Anthropic;
     let chunk = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
-    let e = codec.parse_stream_chunk(chunk).unwrap().unwrap();
-    match e {
-        StreamEventIR::Delta { text, .. } => assert_eq!(text.unwrap(), "Hi"),
+    let evs = codec.parse_stream_chunk(chunk).unwrap();
+    assert_eq!(evs.len(), 1);
+    match &evs[0] {
+        StreamEventIR::Delta { text, .. } => assert_eq!(text.as_deref().unwrap(), "Hi"),
         _ => panic!("expected Delta"),
     }
 }
@@ -51,8 +52,9 @@ fn parse_stream_chunk_delta() {
 fn parse_stream_message_stop() {
     let codec = Anthropic;
     let chunk = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
-    let e = codec.parse_stream_chunk(chunk).unwrap().unwrap();
-    assert!(matches!(e, StreamEventIR::End { .. }));
+    let evs = codec.parse_stream_chunk(chunk).unwrap();
+    assert_eq!(evs.len(), 1);
+    assert!(matches!(evs[0], StreamEventIR::End { .. }));
 }
 
 #[test]

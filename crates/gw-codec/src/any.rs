@@ -66,7 +66,7 @@ impl AnyCodec {
     pub fn parse_stream_chunk<'a>(
         &self,
         chunk: &'a [u8],
-    ) -> Result<Option<StreamEventIR<'a>>, ErrorIR<'static>> {
+    ) -> Result<smallvec::SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
         match self {
             AnyCodec::OpenAi(c) => c.parse_stream_chunk(chunk),
             AnyCodec::Anthropic(c) => c.parse_stream_chunk(chunk),

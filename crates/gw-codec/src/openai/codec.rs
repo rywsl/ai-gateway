@@ -4,6 +4,7 @@
 use bytes::BytesMut;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR};
+use smallvec::{smallvec, SmallVec};
 use std::borrow::Cow;
 
 use crate::common::{
@@ -47,7 +48,7 @@ impl ProtocolCodec for OpenAi {
     fn parse_stream_chunk<'a>(
         &self,
         chunk: &'a [u8],
-    ) -> Result<Option<StreamEventIR<'a>>, ErrorIR<'static>> {
+    ) -> Result<SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
         let s = std::str::from_utf8(chunk).map_err(|_| internal_err("invalid utf8 in chunk"))?;
         for line in s.split('\n') {
             let line = line.trim_start();
@@ -56,9 +57,9 @@ impl ProtocolCodec for OpenAi {
             };
             let payload = payload.trim_start();
             if payload.trim() == "[DONE]" {
-                return Ok(Some(StreamEventIR::End {
+                return Ok(smallvec![StreamEventIR::End {
                     finish_reason: FinishReasonIR::Stop,
-                }));
+                }]);
             }
             if payload.is_empty() {
                 continue;
@@ -72,23 +73,23 @@ impl ProtocolCodec for OpenAi {
                         .and_then(|d| d.get("content"))
                         .and_then(|c| c.as_str())
                         .map(|s| Cow::Owned(s.to_owned()));
-                    return Ok(Some(StreamEventIR::Delta {
+                    return Ok(smallvec![StreamEventIR::Delta {
                         text: txt,
                         tool_call: None,
                         thinking: None,
-                    }));
+                    }]);
                 }
                 Err(_) => {
                     // CONTRACT: a malformed `data:` payload should NOT
                     // short-circuit the entire stream — surface a warn and
-                    // return Ok(None) so the framer can continue with the
-                    // next chunk.
+                    // return an empty SmallVec so the framer can continue
+                    // with the next chunk.
                     tracing::warn!("malformed SSE data on openai");
-                    return Ok(None);
+                    return Ok(SmallVec::new());
                 }
             }
         }
-        Ok(None)
+        Ok(SmallVec::new())
     }
 
     fn render_stream_chunk(

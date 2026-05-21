@@ -28,23 +28,24 @@ pub trait ProtocolCodec: Send + Sync + 'static {
     ///
     /// CONTRACT: The caller pre-frames the upstream byte stream on `\n\n`
     /// boundaries and passes exactly one complete event to this method. The
-    /// codec implementation does NOT split or accumulate; it interprets
-    /// exactly one event and returns `Ok(None)` if the chunk contains no
-    /// usable IR payload (e.g. an SSE comment line, keep-alive, or unknown
-    /// event).
+    /// codec implementation does NOT split or accumulate across calls; it
+    /// interprets exactly one event and returns an empty `SmallVec` if the
+    /// chunk contains no usable IR payload (e.g. an SSE comment line,
+    /// keep-alive, or unknown event).
+    ///
+    /// A single framed event may decompose into more than one IR event —
+    /// notably Gemini's combined final chunk carrying both `text` and
+    /// `finishReason` decomposes into `[Delta, Finish]`. The common case
+    /// is one IR event per framed chunk and stays inline (no heap) thanks
+    /// to the `SmallVec<[_; 1]>` storage.
     ///
     /// Codecs are expected to be tolerant of malformed `data:` payloads:
-    /// they return `Ok(None)` (with a `tracing::warn!`) rather than `Err`,
-    /// so that streaming is not short-circuited mid-response.
-    ///
-    /// TODO(v2): widen the return type to `Vec<StreamEventIR>` or an
-    /// iterator so a single upstream chunk can emit multiple IR events
-    /// (e.g. Gemini's combined `text + finishReason` final chunk). v1
-    /// enforces one-event-per-call.
+    /// they return an empty `SmallVec` (with a `tracing::warn!`) rather
+    /// than `Err`, so that streaming is not short-circuited mid-response.
     fn parse_stream_chunk<'a>(
         &self,
         chunk: &'a [u8],
-    ) -> Result<Option<StreamEventIR<'a>>, ErrorIR<'static>>;
+    ) -> Result<smallvec::SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>>;
     fn render_stream_chunk(
         &self,
         ir: &StreamEventIR<'_>,

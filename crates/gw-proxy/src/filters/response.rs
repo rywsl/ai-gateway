@@ -91,26 +91,30 @@ fn find_event_boundary(buf: &[u8]) -> Option<usize> {
 }
 
 fn handle_event(codec: &AnyCodec, event_bytes: &[u8], ctx: &mut ReqCtx) {
-    match codec.parse_stream_chunk(event_bytes) {
-        Ok(Some(StreamEventIR::Usage(u))) => {
-            ctx.usage.input_tokens = u.input_tokens;
-            ctx.usage.output_tokens = u.output_tokens;
-            ctx.usage.cached_tokens = u.cached_tokens;
-        }
-        Ok(Some(StreamEventIR::Start { .. })) => {
-            if ctx.timing.ttft.is_none() {
-                ctx.timing.ttft = Some(std::time::Instant::now());
-            }
-        }
-        Ok(Some(StreamEventIR::Delta { .. })) => {
-            if ctx.timing.ttft.is_none() {
-                ctx.timing.ttft = Some(std::time::Instant::now());
-            }
-        }
-        Ok(Some(StreamEventIR::End { .. })) | Ok(Some(StreamEventIR::Error(_))) => {}
-        Ok(None) => {}
+    let events = match codec.parse_stream_chunk(event_bytes) {
+        Ok(evs) => evs,
         Err(e) => {
             tracing::warn!(error = ?e.code, "stream parse error");
+            return;
+        }
+    };
+    // A single framed event may fan out into multiple IR events (Gemini's
+    // combined `text + finishReason` final chunk decomposes into
+    // `[Delta, End]`). Per-event accumulation (TTFT, usage) runs once per
+    // IR event so cross-protocol render (T4-A) sees them in order.
+    for ev in events {
+        match ev {
+            StreamEventIR::Usage(u) => {
+                ctx.usage.input_tokens = u.input_tokens;
+                ctx.usage.output_tokens = u.output_tokens;
+                ctx.usage.cached_tokens = u.cached_tokens;
+            }
+            StreamEventIR::Start { .. } | StreamEventIR::Delta { .. } => {
+                if ctx.timing.ttft.is_none() {
+                    ctx.timing.ttft = Some(std::time::Instant::now());
+                }
+            }
+            StreamEventIR::End { .. } | StreamEventIR::Error(_) => {}
         }
     }
 }
