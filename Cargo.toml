@@ -10,6 +10,7 @@ members = [
     "crates/gw-routing",
     "crates/gw-ledger",
     "crates/gw-health",
+    "crates/gw-capability",
     "crates/gw-proxy",
     "crates/gw-gateway",
 ]

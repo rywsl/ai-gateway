@@ -59,6 +59,17 @@ else
   note "skipped: cargo + jq required"
 fi
 
+echo "[crate_layering] gw-capability is business; must not depend on routing/proxy/adapter/tunnel-client/gateway"
+if command -v cargo >/dev/null && command -v jq >/dev/null; then
+  cap_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-capability") | .dependencies[] | select(.kind == null) | .name')"
+  for forb in gw-routing gw-proxy gw-adapter gw-tunnel-client gw-gateway; do
+    if echo "$cap_deps" | grep -qx "$forb"; then
+      bad "gw-capability depends on $forb (business-layer rule)"
+    fi
+  done
+  [ "$fail" -eq 0 ] && ok "gw-capability layering ok"
+fi
+
 # ---------------------------------------------------------------------------
 # no_billing_crate (§5.2) — gw-billing must never exist as a crate.
 # ---------------------------------------------------------------------------

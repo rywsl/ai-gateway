@@ -1470,12 +1470,27 @@ dependencies = [
  "metrics",
  "parking_lot",
  "serde",
+ "serde_json",
  "sha2",
+ "smallvec",
  "subtle",
  "thiserror 1.0.69",
  "time",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "gw-capability"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gw-core",
+ "gw-store",
+ "serde",
+ "smallvec",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -1632,6 +1647,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "arc-swap",
  "async-trait",
  "bytes",
  "dashmap",
