@@ -51,5 +51,7 @@ fn init_metrics(cfg: &Config) -> anyhow::Result<()> {
     // broken exporter during ops triage.
     metrics::counter!("gateway_started_total").increment(1);
 
+    crate::metrics_catalog::describe_all();
+
     Ok(())
 }
