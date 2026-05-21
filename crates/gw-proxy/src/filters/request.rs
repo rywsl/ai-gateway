@@ -143,7 +143,28 @@ pub async fn run(
             Ok(()) => {
                 // Resolve the user_id via the api-key entry.
                 match store.apikey_or_load(&akid).await {
-                    Some(entry) => Ok((entry.value.user_id.clone(), Some(akid))),
+                    Some(entry) => {
+                        // T6-C: stash signature requirement state so the
+                        // request_body_filter (or `body_verify::verify_body`)
+                        // can run body-after HMAC verification.
+                        if entry.value.signature_required {
+                            ctx.signature_required = true;
+                            ctx.signature_algo = entry.value.signature_algo;
+                            ctx.signature_received = session
+                                .req_header()
+                                .headers
+                                .get("x-signature")
+                                .and_then(|v| v.to_str().ok())
+                                .map(|s| s.as_bytes().to_vec());
+                            ctx.signature_timestamp = session
+                                .req_header()
+                                .headers
+                                .get("x-timestamp")
+                                .and_then(|v| v.to_str().ok())
+                                .map(String::from);
+                        }
+                        Ok((entry.value.user_id.clone(), Some(akid)))
+                    }
                     None => {
                         let err = ErrorIR {
                             category: ErrorCategory::ClientAuth,
@@ -204,6 +225,16 @@ pub async fn run(
     };
     ctx.user = Some(user_entry);
     ctx.api_key_id = api_key_id.clone();
+
+    // T6-C: parse Content-Encoding for the request body so the
+    // request_body_filter (or `body_verify::verify_body`) knows whether to
+    // decode before signature verification + codec parse.
+    let enc_header = session
+        .req_header()
+        .headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok());
+    ctx.req_content_encoding = gw_codec::compression::parse_content_encoding(enc_header);
 
     // ---------------------------------------------------------------------
     // 2. Re-run IP blocklist with the resolved scope IDs.

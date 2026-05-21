@@ -29,7 +29,11 @@ tikv-jemalloc-ctl.workspace = true
 rand.workspace = true
 hex.workspace = true
 url.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 parking_lot = { workspace = true }
+flate2 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }

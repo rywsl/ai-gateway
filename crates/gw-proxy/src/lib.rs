@@ -7,6 +7,7 @@
 //! sampling and timeout helpers. Task 4.2 fills in the filter chain modules
 //! and wires them into the `ProxyHttp` impl.
 
+pub mod body_verify;
 pub mod ctx;
 pub mod detailed_log;
 pub mod error;

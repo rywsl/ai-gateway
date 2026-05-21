@@ -93,6 +93,13 @@ pub struct ReqCtx {
     /// unaffected.
     pub error_outcome: Option<gw_core::error::ClassifierOutcome>,
 
+    // --- HMAC signature (T6-C body-after) ---
+    pub signature_required: bool,
+    pub signature_algo: gw_core::entity::SignatureAlgo,
+    pub signature_received: Option<Vec<u8>>,
+    pub signature_timestamp: Option<String>,
+    pub req_content_encoding: gw_codec::compression::Encoding,
+
     // --- Management path / capability (G-α.9 / G-β wire) ---
     /// `true` if the request path matched `/admin/*` and is destined for the
     /// management plane rather than the LLM business path.
@@ -139,6 +146,11 @@ impl ReqCtx {
             upstream_status: None,
             retry_count: 0,
             error_outcome: None,
+            signature_required: false,
+            signature_algo: gw_core::entity::SignatureAlgo::default(),
+            signature_received: None,
+            signature_timestamp: None,
+            req_content_encoding: gw_codec::compression::Encoding::Identity,
             mgmt: false,
             required_caps: None,
             trace: TraceBuffer::new(),
