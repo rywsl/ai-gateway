@@ -41,6 +41,14 @@ pub fn responses_to_chat(req: &OpenAiResponsesRequest) -> Result<Value, ConvertE
             m.insert(k.clone(), v.clone());
         }
     }
+    metrics::counter!(
+        "gw_codec_convert_total",
+        "direction" => "request",
+        "source" => "openai_responses",
+        "target" => "openai_chat",
+        "status" => "ok",
+    )
+    .increment(1);
     Ok(out)
 }
 
@@ -75,6 +83,14 @@ pub fn chat_to_responses(chat: &Value) -> Result<OpenAiResponsesRequest, Convert
             _ => return Err(ConvertError::Unsupported("non-text content".into())),
         }
     }
+    metrics::counter!(
+        "gw_codec_convert_total",
+        "direction" => "request",
+        "source" => "openai_chat",
+        "target" => "openai_responses",
+        "status" => "ok",
+    )
+    .increment(1);
     Ok(OpenAiResponsesRequest {
         model,
         input,
@@ -108,6 +124,14 @@ pub fn responses_to_anthropic(req: &OpenAiResponsesRequest) -> Result<Value, Con
             m.insert("system".into(), Value::String(s.clone()));
         }
     }
+    metrics::counter!(
+        "gw_codec_convert_total",
+        "direction" => "request",
+        "source" => "openai_responses",
+        "target" => "anthropic_messages",
+        "status" => "ok",
+    )
+    .increment(1);
     Ok(out)
 }
 
@@ -137,5 +161,13 @@ pub fn responses_to_gemini(req: &OpenAiResponsesRequest) -> Result<Value, Conver
             );
         }
     }
+    metrics::counter!(
+        "gw_codec_convert_total",
+        "direction" => "request",
+        "source" => "openai_responses",
+        "target" => "gemini_generate",
+        "status" => "ok",
+    )
+    .increment(1);
     Ok(out)
 }
