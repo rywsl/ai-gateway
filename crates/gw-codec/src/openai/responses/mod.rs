@@ -2,6 +2,7 @@
 //!
 //! Conversion to/from chat / anthropic / gemini lives in T5-F.
 
+pub mod conversion;
 pub mod wire_request;
 pub mod wire_response;
 pub mod wire_stream_chunk;
