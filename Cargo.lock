@@ -1078,11 +1078,13 @@ dependencies = [
  "bytes",
  "futures-util",
  "http-body-util",
+ "httparse",
  "hyper",
  "hyper-util",
  "regex",
  "serde",
  "serde_json",
+ "socket2 0.5.10",
  "tokio",
 ]
 
