@@ -41,3 +41,79 @@ pub fn verify(secret: &[u8], received: &[u8], input: &SignatureInput<'_>) -> boo
     let expected = mac.finalize().into_bytes();
     expected.ct_eq(received).into()
 }
+
+use gw_core::entity::SignatureAlgo;
+
+const REPLAY_WINDOW_SECS: i64 = 300;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SignatureCheckResult {
+    Valid,
+    Invalid,
+    NotRequired,
+}
+
+/// High-level HMAC verification gating on `required` flag, replay window, and algo.
+///
+/// `received` is the raw signature bytes (the existing [`verify`] takes raw bytes,
+/// not base64) — semantically these are the bytes the client sent in the
+/// `x-signature` header value. Caller is responsible for any wire-format decoding.
+///
+/// Replay window is ±300s relative to local clock; future timestamps beyond the
+/// window are rejected as well (uses `(now - ts).abs()`).
+pub fn verify_required(
+    required: bool,
+    algo: SignatureAlgo,
+    secret: &[u8],
+    received: Option<&[u8]>,
+    timestamp_str: Option<&str>,
+    input: &SignatureInput<'_>,
+) -> SignatureCheckResult {
+    if !required {
+        return SignatureCheckResult::NotRequired;
+    }
+    let received = match received {
+        Some(s) if !s.is_empty() => s,
+        _ => return SignatureCheckResult::Invalid,
+    };
+    let ts = match timestamp_str.and_then(|s| s.parse::<i64>().ok()) {
+        Some(t) => t,
+        None => return SignatureCheckResult::Invalid,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if (now - ts).abs() > REPLAY_WINDOW_SECS {
+        return SignatureCheckResult::Invalid;
+    }
+    let ok = match algo {
+        SignatureAlgo::HmacSha256 => verify(secret, received, input),
+        SignatureAlgo::HmacSha512 => verify_sha512(secret, received, input),
+    };
+    if ok {
+        SignatureCheckResult::Valid
+    } else {
+        SignatureCheckResult::Invalid
+    }
+}
+
+fn verify_sha512(secret: &[u8], received: &[u8], input: &SignatureInput<'_>) -> bool {
+    use sha2::{Digest, Sha512};
+    let body_hash = {
+        let mut h = Sha512::new();
+        h.update(input.body);
+        hex::encode(h.finalize())
+    };
+    let signing = format!(
+        "{}\n{}\n{}\n{}",
+        input.method, input.path, input.timestamp, body_hash
+    );
+    let mut mac = match Hmac::<Sha512>::new_from_slice(secret) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(signing.as_bytes());
+    let expected = mac.finalize().into_bytes();
+    expected.ct_eq(received).into()
+}
