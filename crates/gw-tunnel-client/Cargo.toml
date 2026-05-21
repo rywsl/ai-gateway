@@ -13,6 +13,7 @@ gw-store  = { path = "../gw-store" }
 bytes     = { workspace = true }
 tokio     = { workspace = true, features = ["sync", "net", "macros", "rt", "time"] }
 thiserror = { workspace = true }
+anyhow    = { workspace = true }
 serde     = { workspace = true }
 url       = { workspace = true }
 secrecy   = { workspace = true }
