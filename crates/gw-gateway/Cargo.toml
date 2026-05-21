@@ -24,6 +24,7 @@ gw-proxy = { path = "../gw-proxy" }
 gw-store = { path = "../gw-store" }
 gw-auth = { path = "../gw-auth" }
 gw-routing = { path = "../gw-routing" }
+gw-capability = { path = "../gw-capability" }
 gw-ledger = { path = "../gw-ledger" }
 gw-codec = { path = "../gw-codec" }
 gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }

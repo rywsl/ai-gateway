@@ -38,6 +38,15 @@ pub struct LlmGateway {
     /// peer address only. Default is `false` so a misconfigured deployment
     /// does not silently bypass IP blocklisting via a forged header.
     pub trust_xff: bool,
+    /// JWT claim validator (iss/aud/nbf, T1-E). `None` until T1-E builds it
+    /// from `AuthConfig.global`; auth falls back to signature-only checks.
+    pub jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
+    /// Shared selection-strategy instances (T0-B). One `StrategyAny` per kind,
+    /// dispatched via `StrategySet::pick_for`.
+    pub strategies: Arc<gw_routing::strategy::set::StrategySet>,
+    /// Capability resolver (T3-C). `None` until wired; `filters::request`
+    /// then leaves `ctx.required_caps` empty (v1 behaviour).
+    pub capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
 }
 
 impl LlmGateway {
@@ -51,6 +60,9 @@ impl LlmGateway {
         counters: Arc<CounterStore>,
         global_rpm: u32,
         trust_xff: bool,
+        jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
+        strategies: Arc<gw_routing::strategy::set::StrategySet>,
+        capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
     ) -> Self {
         Self {
             store,
@@ -61,6 +73,9 @@ impl LlmGateway {
             counters,
             global_rpm,
             trust_xff,
+            jwt_validator,
+            strategies,
+            capability_resolver,
         }
     }
 }

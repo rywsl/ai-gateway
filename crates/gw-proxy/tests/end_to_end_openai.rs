@@ -70,9 +70,22 @@ fn llm_gateway_constructor_signature_smoke() {
         counters: Arc<CounterStore>,
         global_rpm: u32,
         trust_xff: bool,
+        jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
+        strategies: Arc<gw_routing::strategy::set::StrategySet>,
+        capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
     ) -> LlmGateway {
         LlmGateway::new(
-            store, health, in_flight, ratelimit, ledger, counters, global_rpm, trust_xff,
+            store,
+            health,
+            in_flight,
+            ratelimit,
+            ledger,
+            counters,
+            global_rpm,
+            trust_xff,
+            jwt_validator,
+            strategies,
+            capability_resolver,
         )
     }
     // Do not call it — `Ledger::start` would need a live Redis. We only need

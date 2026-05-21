@@ -10,8 +10,8 @@
 //! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
 use crate::loader::{
-    load_apikey, load_jwks, load_model_group, load_pricing, load_user, load_user_group,
-    load_vendor, load_vendor_key, LoaderCtx,
+    load_apikey, load_auth_config, load_jwks, load_model_group, load_pricing, load_user,
+    load_user_group, load_vendor, load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -81,6 +81,10 @@ pub struct EntityStore {
     pub model_group: Cache<Group, Arc<Versioned<ModelGroup>>>,
     pub pricing: Cache<ModelName, Arc<Versioned<Pricing>>>,
     pub jwks: Cache<Kid, Arc<Versioned<JwksEntry>>>,
+    /// JWT/blacklist policy (G1/G2/G3). Keyed by config id (well-known id
+    /// `"global"`). 3600s TTL, same as `jwks`. Populated by T1-E via
+    /// [`EntityStore::auth_config_or_load`].
+    pub auth_config: Cache<String, Arc<Versioned<AuthConfig>>>,
     pub ipblock: Cache<String, Arc<Versioned<IpBlockEntry>>>,
     pub model_mapping: moka::future::Cache<
         (String, gw_core::protocol::ProtocolKind),
@@ -145,6 +149,10 @@ impl EntityStore {
                 .time_to_live(Duration::from_secs(1800))
                 .build(),
             jwks: Cache::builder()
+                .max_capacity(100)
+                .time_to_live(Duration::from_secs(3600))
+                .build(),
+            auth_config: Cache::builder()
                 .max_capacity(100)
                 .time_to_live(Duration::from_secs(3600))
                 .build(),
@@ -337,6 +345,32 @@ impl EntityStore {
             .try_get_with_by_ref(id, async move {
                 with_cold_load_timeout("jwks", deadline, async move {
                     load_jwks(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    /// Resolve an [`AuthConfig`] (G1/G2/G3 — JWT/blacklist policy) by id.
+    /// L1 Moka → cold load via `load_auth_config`. T1-E reads the well-known
+    /// id `"global"`; the loader is id-generic so per-tenant configs can be
+    /// added later. Returns `None` on miss/timeout (the `auth_configs` table
+    /// is not yet in the v1 migrations, see `load_auth_config` for the
+    /// follow-up note); callers fall back to permissive defaults.
+    pub async fn auth_config_or_load(&self, id: &str) -> Option<Arc<Versioned<AuthConfig>>> {
+        if let Some(hit) = self.auth_config.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.to_owned();
+        let deadline = self.cold_load_timeout;
+        self.auth_config
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("auth_config", deadline, async move {
+                    load_auth_config(&loader, &id2).await
                 })
                 .await
                 .map(Arc::new)

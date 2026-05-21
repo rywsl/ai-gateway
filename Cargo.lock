@@ -1599,6 +1599,7 @@ dependencies = [
  "bytes",
  "figment",
  "gw-auth",
+ "gw-capability",
  "gw-codec",
  "gw-core",
  "gw-health",

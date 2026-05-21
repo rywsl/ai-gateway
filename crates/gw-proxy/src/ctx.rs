@@ -10,12 +10,12 @@
 //! ADR-004 freeze-rollback and ADR-024 stream-slot-release contracts even on
 //! cancellation paths.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use gw_auth::ratelimit::StreamSlot;
 use gw_codec::AnyCodec;
 use gw_core::debug::{DebugMode, TraceBuffer};
 use gw_core::entity::{Pricing, UserEntry, Vendor, VendorKey};
-use gw_core::ids::{ApiKeyId, ModelName, RequestId, TraceId, UserId};
+use gw_core::ids::{ApiKeyId, KeyId, ModelName, RequestId, TraceId, UserId};
 use gw_core::permissions::MergedPermissions;
 use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
@@ -85,6 +85,17 @@ pub struct ReqCtx {
     // --- HTTP status seen on response ---
     pub upstream_status: Option<u16>,
     pub retry_count: u32,
+    /// Keys already tried (and failed) for this request, excluded from
+    /// candidate selection on cross-key retry (G10). Empty on the first
+    /// attempt.
+    pub retry_blacklist: Vec<KeyId>,
+
+    // --- Cross-protocol response re-render accumulator (G8 + G9) ---
+    /// Accumulator across events in one chunk; taken+frozen by
+    /// `response_body_filter`. MUST stay `BytesMut`: `T4-A` appends multiple
+    /// stream-event renders into this per chunk, so a `Bytes` would silently
+    /// drop earlier events.
+    pub pending_client_body: Option<BytesMut>,
 
     // --- Error classification (T6-B) ---
     /// Set by the classifier (filters that detect upstream/short-circuit errors)
@@ -113,6 +124,15 @@ pub struct ReqCtx {
     // --- Debug ---
     pub trace: TraceBuffer,
     pub debug: DebugMode,
+}
+
+impl Default for ReqCtx {
+    /// Builds a `ReqCtx` with empty IDs. Only intended for tests and
+    /// scaffolding assertions; the proxy hot path always uses
+    /// [`ReqCtx::new`] with a freshly generated trace/request id.
+    fn default() -> Self {
+        Self::new(TraceId::from(String::new()), RequestId::from(String::new()))
+    }
 }
 
 impl ReqCtx {
@@ -145,6 +165,8 @@ impl ReqCtx {
             sse_leftover: Vec::new(),
             upstream_status: None,
             retry_count: 0,
+            retry_blacklist: Vec::new(),
+            pending_client_body: None,
             error_outcome: None,
             signature_required: false,
             signature_algo: gw_core::entity::SignatureAlgo::default(),

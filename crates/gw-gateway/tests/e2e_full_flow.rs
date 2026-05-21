@@ -130,6 +130,9 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         counters.clone(),
         100_000,
         false,
+        None,
+        Arc::new(gw_routing::strategy::set::StrategySet::new_default()),
+        None,
     );
 
     // -----------------------------------------------------------------

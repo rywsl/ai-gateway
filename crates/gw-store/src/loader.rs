@@ -12,7 +12,8 @@ use secrecy::SecretString;
 use sqlx::PgPool;
 
 use gw_core::entity::{
-    ApiKeyEntry, JwksEntry, ModelGroup, Pricing, UserEntry, UserGroup, Vendor, VendorKey,
+    ApiKeyEntry, AuthConfig, JwksEntry, ModelGroup, Pricing, UserEntry, UserGroup, Vendor,
+    VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, Kid, KeyId, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -88,7 +89,7 @@ fn ttl_for(ns: &str) -> u64 {
     match ns {
         "user" | "user_group" | "apikey" | "ipblock" => 300,
         "vendor" | "vendor_key" | "model_group" | "pricing" => 1800,
-        "jwks" => 3600,
+        "jwks" | "auth_config" => 3600,
         _ => 300,
     }
 }
@@ -144,6 +145,14 @@ const MODEL_GROUP_SQL: &str =
 const PRICING_SQL: &str =
     "SELECT payload, version FROM pricings WHERE id = $1 AND deleted_at IS NULL";
 const JWKS_SQL: &str = "SELECT payload, version FROM jwks WHERE id = $1 AND deleted_at IS NULL";
+// TODO(T1-E): the `auth_configs` table does not yet exist in
+// `migrations/0001_initial.sql`. Until it lands, this query errors at the PG
+// layer, `with_cold_load_timeout` swallows the error into `None`, and
+// `auth_config_or_load` returns `None` — which T1-E treats as "no AuthConfig"
+// and falls back to permissive JWT defaults. Once the table is added, this
+// constant needs no change.
+const AUTH_CONFIG_SQL: &str =
+    "SELECT payload, version FROM auth_configs WHERE id = $1 AND deleted_at IS NULL";
 
 pub async fn load_user(ctx: &LoaderCtx, id: &UserId) -> anyhow::Result<Versioned<UserEntry>> {
     load_entity(ctx, "user", id.as_ref(), USER_SQL, |v| {
@@ -233,6 +242,21 @@ pub async fn load_pricing(
 pub async fn load_jwks(ctx: &LoaderCtx, id: &Kid) -> anyhow::Result<Versioned<JwksEntry>> {
     load_entity(ctx, "jwks", id.as_ref(), JWKS_SQL, |v| {
         serde_json::from_value::<JwksEntry>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+/// Cold-load an [`AuthConfig`] (JWT/blacklist policy, G1/G2/G3). Mirrors
+/// [`load_jwks`]: Redis L1 → PgSQL `auth_configs` L2 → Redis write-back.
+///
+/// The well-known id is `"global"` (T1-E reads `AuthConfig.global`), but the
+/// loader is id-generic so per-tenant configs can be added later. See the
+/// TODO on [`AUTH_CONFIG_SQL`]: the table is not in the v1 schema yet, so until
+/// it lands this returns `Err` (swallowed to `None` by the store wrapper) and
+/// T1-E falls back to permissive defaults.
+pub async fn load_auth_config(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versioned<AuthConfig>> {
+    load_entity(ctx, "auth_config", id, AUTH_CONFIG_SQL, |v| {
+        serde_json::from_value::<AuthConfig>(v.clone()).map_err(Into::into)
     })
     .await
 }

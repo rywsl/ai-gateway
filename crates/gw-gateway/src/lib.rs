@@ -65,6 +65,14 @@ struct Wired {
     global_rpm: u32,
     trust_xff: bool,
     business_port: u16,
+    // --- Wave 1+ placeholders (known-gaps closure) ---
+    /// JWT claim validator (T1-E). `None` until T1-E builds it from
+    /// `AuthConfig.global`.
+    jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
+    /// Shared selection-strategy instances (T0-B).
+    strategies: Arc<gw_routing::strategy::set::StrategySet>,
+    /// Capability resolver (T3-C). `None` until wired.
+    capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -148,6 +156,9 @@ pub fn run() -> anyhow::Result<()> {
         wired.counters,
         wired.global_rpm,
         wired.trust_xff,
+        wired.jwt_validator,
+        wired.strategies,
+        wired.capability_resolver,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -267,5 +278,10 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         global_rpm: cfg.ratelimit.global_rpm,
         trust_xff: cfg.security.trust_xff,
         business_port: cfg.server.business_port,
+        // Wave 1+ placeholders. T1-E flips `jwt_validator` on once it builds
+        // a validator from `AuthConfig.global`; T3-C wires `capability_resolver`.
+        jwt_validator: None,
+        strategies: Arc::new(gw_routing::strategy::set::StrategySet::new_default()),
+        capability_resolver: None,
     })
 }

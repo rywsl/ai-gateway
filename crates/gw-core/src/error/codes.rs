@@ -28,3 +28,24 @@ pub const GW_UPSTREAM_CANCELLED: &str = "GW_UPSTREAM_CANCELLED";
 pub const GW_BACKEND_UNAVAILABLE: &str = "GW_BACKEND_UNAVAILABLE";
 pub const GW_COLD_LOAD_TIMEOUT: &str = "GW_COLD_LOAD_TIMEOUT";
 pub const GW_GATEWAY_INTERNAL: &str = "GW_GATEWAY_INTERNAL";
+
+// --- Wave 1+ codes (known-gaps closure) ---
+// Auth: ApiKeyEntry.expires_at lifecycle (G1).
+pub const GW_AUTH_KEY_EXPIRED: &str = "GW_AUTH_KEY_EXPIRED";
+// Auth: ApiKeyEntry.ip_allowlist (G2).
+pub const GW_AUTH_KEY_IP_NOT_ALLOWED: &str = "GW_AUTH_KEY_IP_NOT_ALLOWED";
+// Auth: JWT claim validation — iss / aud / nbf, hybrid JWKS (G6).
+pub const GW_AUTH_JWT_INVALID_ISS: &str = "GW_AUTH_JWT_INVALID_ISS";
+pub const GW_AUTH_JWT_INVALID_AUD: &str = "GW_AUTH_JWT_INVALID_AUD";
+pub const GW_AUTH_JWT_NOT_YET_VALID: &str = "GW_AUTH_JWT_NOT_YET_VALID";
+// Auth: HMAC request signing (G7). `GW_AUTH_SIGNATURE_INVALID` already exists
+// above; the missing-header and clock-drift variants are new.
+pub const GW_AUTH_SIGNATURE_MISSING: &str = "GW_AUTH_SIGNATURE_MISSING";
+pub const GW_AUTH_SIGNATURE_TIMESTAMP_DRIFT: &str = "GW_AUTH_SIGNATURE_TIMESTAMP_DRIFT";
+// Quota: daily token cap (G3).
+pub const GW_QUOTA_DAILY_TOKENS_EXCEEDED: &str = "GW_QUOTA_DAILY_TOKENS_EXCEEDED";
+// Routing: capability match via CapabilityResolver (G13).
+pub const GW_ROUTING_NO_CAPABILITY_MATCH: &str = "GW_ROUTING_NO_CAPABILITY_MATCH";
+// Upstream: connect / TLS failures surfaced via fail_to_connect retry (G10).
+pub const GW_UPSTREAM_CONNECT_FAILED: &str = "GW_UPSTREAM_CONNECT_FAILED";
+pub const GW_UPSTREAM_TLS_ERROR: &str = "GW_UPSTREAM_TLS_ERROR";
