@@ -9,6 +9,16 @@
 //! [`READY`] which the main thread flips to `true` after all critical
 //! collaborators (KMS, Redis, PgSQL, Ledger) finish initialising AND the
 //! pingora business service has been registered.
+//!
+//! Endpoint summary:
+//!
+//! - `/livez` — unconditional liveness ping.
+//! - `/readyz` — gated on [`READY`] (init complete).
+//! - `/healthz/circuits`, `/healthz/key/<id>`, `/healthz/resilience` —
+//!   admin-only; require `Authorization: Mgmt <token>` (validated in T6-A
+//!   wiring). v1 returns 401 unconditionally so production deployments that
+//!   expose 8080 do not leak circuit / health internals before the mgmt
+//!   token plumbing lands.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -88,6 +98,22 @@ async fn handle_connection(mut stream: TcpStream) {
                 )
                 .await;
             }
+        }
+        path if path.starts_with("/healthz/circuits")
+            || path.starts_with("/healthz/key/")
+            || path == "/healthz/resilience" =>
+        {
+            // v1: gated behind management-token authorization (parsed by
+            // gw-auth::mgmt). The real mgmt token validation lands in T6-A
+            // wiring; for now we always reject so production deployments that
+            // expose 8080 do not leak circuit / health internals.
+            let _ = write_response(
+                &mut stream,
+                401,
+                "Unauthorized",
+                b"mgmt token required",
+            )
+            .await;
         }
         _ => {
             let _ = write_response(&mut stream, 404, "Not Found", b"").await;

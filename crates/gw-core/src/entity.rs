@@ -108,6 +108,18 @@ pub struct ApiKeyEntry {
     pub ip_allowlist: Option<Vec<String>>,
     #[serde(default)]
     pub expires_at: Option<OffsetDateTime>,
+    /// HMAC signature requirement (T1-C).
+    #[serde(default)]
+    pub signature_required: bool,
+    /// HMAC algorithm choice (T1-C).
+    #[serde(default)]
+    pub signature_algo: SignatureAlgo,
+    /// Capabilities the ApiKey is forced to require regardless of header (T4-B).
+    #[serde(default)]
+    pub force_capabilities: smallvec::SmallVec<[String; 4]>,
+    /// If true, the matching mode for capability resolution is Exclusive.
+    #[serde(default)]
+    pub match_mode_exclusive: bool,
 }
 
 impl std::fmt::Debug for ApiKeyEntry {
@@ -261,4 +273,65 @@ pub enum IpBlockReason {
     Manual,
     AbnormalTraffic,
     Compliance,
+}
+
+/// AuthConfig — JWT/blacklist policy. Loaded from `entity:auth_config`.
+/// Used by gw-auth::jwt JwtValidator and JwtBlacklist (T1-A / T1-B).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct AuthConfig {
+    pub expected_iss: smallvec::SmallVec<[String; 2]>,
+    pub expected_aud: smallvec::SmallVec<[String; 2]>,
+    pub leeway_secs: u32,
+    pub require_nbf: bool,
+    pub blacklist_fail_mode: BlacklistFailMode,
+}
+
+/// JWT-blacklist behavior when Redis is unreachable.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BlacklistFailMode {
+    /// Treat as revoked when backend down (most strict; default).
+    #[default]
+    FailClosed,
+    /// Treat as not revoked when backend down (availability-first).
+    FailOpen,
+}
+
+/// Signature algorithm identifier for HMAC request-signing (T1-C).
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureAlgo {
+    #[default]
+    HmacSha256,
+    HmacSha512,
+}
+
+/// Management token for /admin/* paths (T1-D / T6-A).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ManagementToken {
+    pub token_id: String,
+    pub secret_hash: Vec<u8>,
+    pub scopes: smallvec::SmallVec<[String; 4]>,
+    pub expires_at_unix_s: Option<u64>,
+}
+
+/// Model alias → upstream model mapping (T4-A).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ModelMapping {
+    pub user_alias: String,
+    pub protocol: crate::protocol::ProtocolKind,
+    pub default_upstream_model: String,
+    pub vendor_key_overrides: std::collections::BTreeMap<String, String>,
+    pub availability: ModelAvailability,
+    pub pricing_strategy_ref: Option<String>,
+}
+
+/// Per-model availability gate (T4-A / G-β.4).
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAvailability {
+    #[default]
+    Enabled,
+    Disabled,
+    ShadowOnly,
 }

@@ -151,34 +151,76 @@ impl StreamConsumer {
                 return;
             }
         };
-        tracing::debug!(
-            target: "gw_store::stream_consumer",
-            ns = %ns,
-            id = %id,
-            "invalidating entity"
-        );
-        match ns {
-            "user" => self.store.user.invalidate(&UserId::from(id)).await,
-            "user_group" => {
-                self.store
-                    .user_group
-                    .invalidate(&UserGroupId::from(id))
-                    .await
-            }
-            "apikey" => self.store.apikey.invalidate(&ApiKeyId::from(id)).await,
-            "vendor" => self.store.vendor.invalidate(&VendorId::from(id)).await,
-            "vendor_key" => self.store.vendor_key.invalidate(&KeyId::from(id)).await,
-            "model_group" => self.store.model_group.invalidate(&Group::from(id)).await,
-            "pricing" => self.store.pricing.invalidate(&ModelName::from(id)).await,
-            "jwks" => self.store.jwks.invalidate(&Kid::from(id)).await,
-            "ipblock" => self.store.ipblock.invalidate(&id.to_string()).await,
-            other => {
+        apply_entity_event(&self.store, ns, id).await;
+    }
+}
+
+/// Dispatch a single `events:entity` invalidation against an [`EntityStore`].
+///
+/// Extracted from [`StreamConsumer::apply`] so the in-process tests
+/// (and any future direct caller) can exercise the per-namespace match
+/// without a live Redis connection or consumer struct.
+pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &str) {
+    tracing::debug!(
+        target: "gw_store::stream_consumer",
+        ns = %ns,
+        id = %id,
+        "invalidating entity"
+    );
+    match ns {
+        "user" => store.user.invalidate(&UserId::from(id)).await,
+        "user_group" => store.user_group.invalidate(&UserGroupId::from(id)).await,
+        "apikey" => store.apikey.invalidate(&ApiKeyId::from(id)).await,
+        "vendor" => store.vendor.invalidate(&VendorId::from(id)).await,
+        "vendor_key" => store.vendor_key.invalidate(&KeyId::from(id)).await,
+        "model_group" => store.model_group.invalidate(&Group::from(id)).await,
+        "pricing" => store.pricing.invalidate(&ModelName::from(id)).await,
+        "jwks" => store.jwks.invalidate(&Kid::from(id)).await,
+        "ipblock" => store.ipblock.invalidate(&id.to_string()).await,
+        "model_mapping" => {
+            // id format: "alias|protocol", with protocol matching ProtocolKind's
+            // snake_case serde tag ("openai" | "anthropic" | "gemini").
+            if let Some((alias, proto)) = id.split_once('|') {
+                let p = match proto {
+                    "openai" => Some(gw_core::protocol::ProtocolKind::OpenAi),
+                    "anthropic" => Some(gw_core::protocol::ProtocolKind::Anthropic),
+                    "gemini" => Some(gw_core::protocol::ProtocolKind::Gemini),
+                    _ => None,
+                };
+                if let Some(p) = p {
+                    store
+                        .model_mapping
+                        .invalidate(&(alias.to_string(), p))
+                        .await;
+                } else {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        id = %id,
+                        proto = %proto,
+                        "model_mapping event with unknown protocol; skipping"
+                    );
+                }
+            } else {
                 tracing::warn!(
                     target: "gw_store::stream_consumer",
-                    ns = %other,
-                    "unknown entity namespace; skipping"
+                    id = %id,
+                    "model_mapping event id missing 'alias|protocol' separator; skipping"
                 );
             }
         }
+        other => {
+            tracing::warn!(
+                target: "gw_store::stream_consumer",
+                ns = %other,
+                "unknown entity namespace; skipping"
+            );
+        }
     }
+}
+
+/// Test-only helper: drive [`apply_entity_event`] against an [`EntityStore`]
+/// without needing a live [`StreamConsumer`] or Redis connection.
+#[doc(hidden)]
+pub async fn apply_inline_for_test_helper(store: &Arc<EntityStore>, ns: &str, id: &str) {
+    apply_entity_event(store, ns, id).await;
 }

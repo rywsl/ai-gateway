@@ -1,0 +1,20 @@
+[package]
+name = "gw-capability"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+gw-auth  = { path = "../gw-auth" }
+gw-core  = { path = "../gw-core" }
+gw-store = { path = "../gw-store" }
+serde = { workspace = true }
+smallvec = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+metrics = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

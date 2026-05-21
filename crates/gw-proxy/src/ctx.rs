@@ -86,6 +86,30 @@ pub struct ReqCtx {
     pub upstream_status: Option<u16>,
     pub retry_count: u32,
 
+    // --- Error classification (T6-B) ---
+    /// Set by the classifier (filters that detect upstream/short-circuit errors)
+    /// so the `logging` filter can fan the outcome out to the registered
+    /// ErrorListener stack. `None` on the happy path; existing tests are
+    /// unaffected.
+    pub error_outcome: Option<gw_core::error::ClassifierOutcome>,
+
+    // --- HMAC signature (T6-C body-after) ---
+    pub signature_required: bool,
+    pub signature_algo: gw_core::entity::SignatureAlgo,
+    pub signature_received: Option<Vec<u8>>,
+    pub signature_timestamp: Option<String>,
+    pub req_content_encoding: gw_codec::compression::Encoding,
+
+    // --- Management path / capability (G-α.9 / G-β wire) ---
+    /// `true` if the request path matched `/admin/*` and is destined for the
+    /// management plane rather than the LLM business path.
+    pub mgmt: bool,
+    /// Capability set resolved for this request (header / model-alias /
+    /// retry-upgrade inputs collapsed into a single requirement). Filled by
+    /// the request filter once `CapabilityResolver` is wired into
+    /// `LlmGateway`; `None` in v1 (see TODO in `filters::request`).
+    pub required_caps: Option<gw_capability::types::RequiredCapabilities>,
+
     // --- Debug ---
     pub trace: TraceBuffer,
     pub debug: DebugMode,
@@ -121,6 +145,14 @@ impl ReqCtx {
             sse_leftover: Vec::new(),
             upstream_status: None,
             retry_count: 0,
+            error_outcome: None,
+            signature_required: false,
+            signature_algo: gw_core::entity::SignatureAlgo::default(),
+            signature_received: None,
+            signature_timestamp: None,
+            req_content_encoding: gw_codec::compression::Encoding::Identity,
+            mgmt: false,
+            required_caps: None,
             trace: TraceBuffer::new(),
             debug: DebugMode::DISABLED,
         }

@@ -41,6 +41,69 @@ pub async fn run(
     ctx.timing.start = Some(Instant::now());
 
     // ---------------------------------------------------------------------
+    // 0. Management-plane path branch (G-α.9 / G-β wire).
+    //    `/admin/*` requests are destined for the management plane, not the
+    //    LLM business path. We tag `ctx.mgmt = true` and reject any request
+    //    that lacks a `Mgmt <token>` Authorization header. The full
+    //    mgmt-token validation against `entity:management_token` is a future
+    //    spec — v1 just rejects unauthorized mgmt requests cleanly rather
+    //    than mixing them with the business ApiKey/JWT code paths below.
+    // ---------------------------------------------------------------------
+    let req_path = session.req_header().uri.path().to_string();
+    if gw_auth::mgmt::is_management_path(&req_path) {
+        ctx.mgmt = true;
+        let req_id_for_mgmt = ctx.request_id.0.clone();
+        let mgmt_auth_hdr = session
+            .req_header()
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if gw_auth::mgmt::parse_mgmt_authorization(mgmt_auth_hdr).is_none() {
+            let err = ErrorIR {
+                category: ErrorCategory::ClientAuth,
+                status: 401,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_AUTH_INVALID_JWT),
+                message: Cow::Borrowed("mgmt token required"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            emit_and_bail(session, ctx, &err, &req_id_for_mgmt).await?;
+            unreachable!()
+        }
+        // Mgmt header present and well-formed. The actual mgmt routing /
+        // token validation is a follow-up task; for v1 we short-circuit
+        // here so the request does not flow into business-path auth.
+        // TODO(G-α.9 follow-up): dispatch into mgmt handler instead of 501.
+        let err = ErrorIR {
+            category: ErrorCategory::GatewayInternal,
+            status: 501,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
+            message: Cow::Borrowed("mgmt path not yet implemented"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        };
+        emit_and_bail(session, ctx, &err, &req_id_for_mgmt).await?;
+        unreachable!()
+    }
+
+    // TODO(T6-A wave-7 wiring): once LlmGateway holds Arc<CapabilityResolver>,
+    // resolve capabilities from headers + model alias + retry-upgrade hint:
+    //   let header_require: Vec<&str> = session.req_header().headers
+    //       .get_all("x-require-capability").iter()
+    //       .filter_map(|v| v.to_str().ok())
+    //       .flat_map(|s| s.split(',').map(str::trim))
+    //       .collect();
+    //   let req = gw_capability::resolver::ResolveRequest { ... };
+    //   ctx.required_caps = Some(resolver.resolve(&req).await?);
+
+    // ---------------------------------------------------------------------
     // 1. Auth — Bearer JWT or `x-api-key` header.
     // ---------------------------------------------------------------------
     let auth_header = session
@@ -80,7 +143,28 @@ pub async fn run(
             Ok(()) => {
                 // Resolve the user_id via the api-key entry.
                 match store.apikey_or_load(&akid).await {
-                    Some(entry) => Ok((entry.value.user_id.clone(), Some(akid))),
+                    Some(entry) => {
+                        // T6-C: stash signature requirement state so the
+                        // request_body_filter (or `body_verify::verify_body`)
+                        // can run body-after HMAC verification.
+                        if entry.value.signature_required {
+                            ctx.signature_required = true;
+                            ctx.signature_algo = entry.value.signature_algo;
+                            ctx.signature_received = session
+                                .req_header()
+                                .headers
+                                .get("x-signature")
+                                .and_then(|v| v.to_str().ok())
+                                .map(|s| s.as_bytes().to_vec());
+                            ctx.signature_timestamp = session
+                                .req_header()
+                                .headers
+                                .get("x-timestamp")
+                                .and_then(|v| v.to_str().ok())
+                                .map(String::from);
+                        }
+                        Ok((entry.value.user_id.clone(), Some(akid)))
+                    }
                     None => {
                         let err = ErrorIR {
                             category: ErrorCategory::ClientAuth,
@@ -141,6 +225,16 @@ pub async fn run(
     };
     ctx.user = Some(user_entry);
     ctx.api_key_id = api_key_id.clone();
+
+    // T6-C: parse Content-Encoding for the request body so the
+    // request_body_filter (or `body_verify::verify_body`) knows whether to
+    // decode before signature verification + codec parse.
+    let enc_header = session
+        .req_header()
+        .headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok());
+    ctx.req_content_encoding = gw_codec::compression::parse_content_encoding(enc_header);
 
     // ---------------------------------------------------------------------
     // 2. Re-run IP blocklist with the resolved scope IDs.

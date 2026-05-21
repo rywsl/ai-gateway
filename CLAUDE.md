@@ -1,12 +1,51 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the entry point for any agent working in this repo. It describes **what** the project does, where to find detailed reference docs, and the operational rules that must hold. Architecture and request-lifecycle detail live in [`docs/`](docs/) and must be kept in sync with the code (see §Sync rule below).
 
-## Project
+## Sync rule
 
-`ailinkmax-gateway` is a Rust LLM gateway built on Pingora 0.8. It terminates OpenAI/Anthropic/Gemini-shaped client traffic, normalises through an in-memory IR, authenticates + merges permissions + enforces rate-limit/quota/hard-caps, picks an upstream vendor key via one of 8 strategies, streams the response back through the matching codec, and emits a billing record per request to a Redis stream.
+When you make a change that crosses any of these boundaries, update the matching doc **in the same commit**:
 
-The design spec is `docs/superpowers/specs/2026-05-18-llm-gateway-design.md`; the implementation plan + current status are tracked in `docs/superpowers/plans/`. Significant operational gotchas captured in `docs/issues/`.
+| If you change… | Update |
+|----------------|--------|
+| Crate layout, layering invariants, traits, configuration tables, persistence namespaces, background-task graph | [`docs/architecture.md`](docs/architecture.md) |
+| Pingora filters (order, behaviour, `ReqCtx` fields), ledger / detailed-log emission, error-handler fanout | [`docs/workflow.md`](docs/workflow.md) |
+| `scripts/check-invariants.sh` lints (activated, retired, or renamed) | [`docs/architecture.md`](docs/architecture.md) §Invariants |
+| A behaviour that looks like a bug but is deliberate (fail-closed, generic error message, pair-header requirement, etc.) | [`docs/architecture.md`](docs/architecture.md) §Deliberate behaviours |
+| Deferred gap → implemented | Remove from [`docs/architecture.md`](docs/architecture.md) §Known gaps; if it was tracked in a spec or plan under `docs/superpowers/`, mark it landed there too |
+
+PRs that touch code in these areas without updating the index are incomplete.
+
+## What this gateway does
+
+A Rust LLM gateway on **Pingora 0.8**. It accepts OpenAI- / Anthropic- / Gemini-shaped client traffic, normalises to an in-memory IR, authenticates, merges 5-tier permissions, enforces RPM / quota / hard caps, picks an upstream vendor key via one of 8 strategies, streams the response back through the matching client codec, and records usage to a Redis stream. **Cost computation is not performed in Rust** — the Go billing service consumes `usage:records`. The `no_cost_micro` and `no_billing_crate` lints enforce this.
+
+Capability surface highlights:
+
+- **Wire formats**: OpenAI Chat + Responses, Anthropic Messages, Gemini Generate. Same-protocol passthrough is zero-copy; cross-protocol *request* re-render is wired (response re-render deferred — see [`docs/architecture.md`](docs/architecture.md) §Known gaps).
+- **Auth**: `(x-api-key, x-api-key-id)` pair, `Authorization: Bearer <JWT>` (HS256/RS256, `iss`/`aud`/`nbf`/leeway on the management-token surface), optional HMAC signing with ±300 s replay window.
+- **Permissions**: 5-tier merge (global → user-group → user → sub-account → api-key); model-permission regex with a 100 ms per-call ReDoS budget + auto-disable.
+- **Routing**: 8 strategies (`FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky`). Multi-dim per-(key, format) health, sliding-window cooldown, per-key in-flight cap.
+- **Capability**: model → required capabilities → matching keys via `gw-capability::CapabilityResolver` (resolver injection into `LlmGateway` is the wave-7 follow-up T6-A).
+- **Tunnel**: optional WebSocket transport to remote nodes (`--features tunnel`), DoH resolver + target-filter whitelist.
+- **Observability**: `usage:records` (billing), `usage:detailed` (verbose, three-level redaction, XADD MAXLEN), Prometheus `/metrics`, `/livez` + `/readyz`, admin `/healthz/*` (token-gated).
+
+For the dependency DAG, traits, persistence namespaces, KEK rotation, and the full list of invariants & deliberate behaviours, read [`docs/architecture.md`](docs/architecture.md). For the request lifecycle (bootstrap, every filter phase, error fanout, streaming, cache invalidation), read [`docs/workflow.md`](docs/workflow.md).
+
+## Source layout
+
+```
+crates/                  Rust workspace (13 crates; see docs/architecture.md §Workspace layout)
+config/default.toml      figment base layer; per-machine override at config/local.toml (gitignored)
+docs/
+  architecture.md        Layered architecture, crates, traits, persistence, invariants
+  workflow.md            Bootstrap + Pingora filter chain + error fanout
+  dev-setup.md           Per-machine dev setup (Docker, Postgres, Redis)
+  superpowers/specs/     Authoritative design specs
+  superpowers/plans/     Implementation plans + status
+  issues/                Operational gotchas (e.g. fred + redis:7 XREADGROUP parse warn)
+scripts/check-invariants.sh   Layering / namespace / retired-symbol lints
+```
 
 ## Common commands
 
@@ -27,6 +66,9 @@ cargo test -p gw-auth --test merge
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 
+# Architectural invariants.
+bash scripts/check-invariants.sh
+
 # Benches (criterion). --no-run catches signature drift fast.
 cargo bench --workspace --no-run
 cargo bench -p gw-codec --bench passthrough -- --warm-up-time 1 --measurement-time 2 --sample-size 10
@@ -41,86 +83,28 @@ GW_PGSQL__URL=postgres://postgres:postgres@localhost:5432/gateway \
   ./target/release/gw-gateway
 ```
 
-Ports: 8000 business proxy, 9090 Prometheus `/metrics`, 8080 health (`/livez`, `/readyz`).
+Ports: `8000` business proxy, `9090` Prometheus `/metrics`, `8080` health (`/livez`, `/readyz`, `/healthz/*`).
 
 ## Toolchain & build pitfalls
 
 - **Rust 1.86.0** is pinned in `rust-toolchain.toml`. Do not bump without coordinating: Pingora 0.8 pulls `getrandom 0.4` (via `cf-rustracing`) whose `wasip3` target manifest needs `edition2024` (min rustc 1.85). 1.86 matches CI.
 - **`GW_KMS__KEK_HEX` must contain at least one a–f character.** Figment's env deserializer tries integer coercion first, so an all-digit 64-char hex string round-trips as `i64` and fails the hex parser. `python3 secrets.token_hex(32)` is fine; hand-rolled values must include a letter.
 - **No sqlx offline cache.** v1 uses runtime-checked `sqlx::query` / `sqlx::raw_sql` exclusively — there is no `.sqlx/` directory and no `cargo sqlx prepare` step. When the codebase migrates to `query!` macros the workflow will be added in `docs/dev-setup.md`.
-- Migrations live at `crates/gw-store/migrations/0001_initial.sql` and are not auto-applied; for a host Postgres run them with `psql -f`.
+- Migrations live at `crates/gw-store/migrations/0001_initial.sql`, `0002_gemini_file_mapping.sql`, `0003_model_mapping.sql` and are **not auto-applied**; for a host Postgres run them with `psql -f`.
 
 ## Configuration
 
-Figment layers, low → high precedence: `config/default.toml` → `config/local.toml` (gitignored) → env vars `GW_*` with `__` as nesting separator (e.g. `GW_REDIS__URL`, `GW_PGSQL__URL`, `GW_KMS__KEK_HEX`, `GW_SERVER__BUSINESS_PORT`). Secrets must come from env, never the TOML.
+Figment layers, low → high precedence: `config/default.toml` → `config/local.toml` (gitignored) → env vars `GW_*` with `__` as nesting separator (e.g. `GW_REDIS__URL`, `GW_PGSQL__URL`, `GW_KMS__KEK_HEX`, `GW_SERVER__BUSINESS_PORT`). Secrets must come from env, never the TOML. Table-by-table reference lives in [`docs/architecture.md`](docs/architecture.md) §Configuration.
 
-## Architecture: bootstrap shape
+## Where to look first when…
 
-Pingora's `Server::run_forever` is `-> !` and manages its own per-service tokio runtimes, but we need long-lived background tasks (Ledger flusher, health server, StreamConsumer) on a runtime that outlives Pingora. The pattern in `gw-gateway/src/lib.rs`:
+- **Tracing a request** — start at [`docs/workflow.md`](docs/workflow.md) §Pingora filter chain.
+- **Adding a vendor / codec / strategy** — [`docs/architecture.md`](docs/architecture.md) §Public traits.
+- **Debugging a 401 / 402 / 429** — `crates/gw-core/src/error/codes.rs` for the code, [`docs/workflow.md`](docs/workflow.md) §request_filter for where it's emitted.
+- **A "this looks like a bug" moment** — check [`docs/architecture.md`](docs/architecture.md) §Deliberate behaviours first. Many fail-closed behaviours are intentional.
+- **CI invariant failure** — `scripts/check-invariants.sh` output names the rule; the meaning is in [`docs/architecture.md`](docs/architecture.md) §Invariants.
+- **Operational incident** — look under `docs/issues/`. The `fred` 9.4 + Redis 7 XREADGROUP parse warning is captured there and is benign.
 
-1. A detached `gw-bootstrap` OS thread builds a multi-thread tokio runtime, does all async init (KMS → Redis → Postgres → `EntityStore` → `Ledger::start` → `StreamConsumer::start` → health HTTP server), and hands a `Wired` bundle back to `main` via `sync_channel`.
-2. The bootstrap thread then parks its runtime on `pending::<()>()` so the spawned tasks keep running.
-3. `main` constructs the Pingora `Server`, adds the `LlmGateway` service, flips `health::READY` to true, and calls `run_forever()` on the main thread.
+## What this file is not
 
-`Ledger::try_send` is sync (`tokio mpsc::Sender::try_send`) so it is callable from Pingora's worker threads even though the receiver lives on the bootstrap runtime. Don't move ledger emission to an `async fn` that requires a handle to the right runtime — that's the whole point of the split.
-
-## Architecture: filter chain
-
-`gw-proxy::LlmGateway` is the `ProxyHttp` impl. Each phase delegates to one `filters::*` module:
-
-| Phase                       | Module                  | Role |
-|-----------------------------|-------------------------|------|
-| `early_request_filter`      | `filters::early`        | IP blocklist, global stream cap, protocol detection, debug trigger |
-| `request_filter`            | `filters::request`      | auth (`x-api-key` + `x-api-key-id` pair), IR parse, ADR-023 5-tier permission merge, governor RPM, ADR-024 hard caps, balance check, freeze-estimate, circuit check |
-| `upstream_peer`             | `filters::upstream`     | candidate filtering → one of 8 strategies → `HttpPeer` |
-| `upstream_request_filter`   | `filters::upstream`     | codec rewrite of outbound body into `ctx.cached_body`; auth header injection |
-| `request_body_filter`       | `gateway.rs`            | swaps the cached body in at EOS (otherwise cross-protocol rewrites never reach the wire) |
-| `response_filter`           | `gateway.rs`            | captures upstream status |
-| `response_body_filter`      | `filters::response`     | incremental SSE parsing, usage accumulation |
-| `logging`                   | `filters::logging`      | release freeze (C-γ §ADR-Cγ-2), record key-health outcome, emit `UsageRecord` + `DetailedLog` |
-| `suppress_error_log`        | `gateway.rs`            | mutes Pingora's own ERROR line for intentional short-circuits (matches `HTTPStatus` outer + `Custom("gw_short_circuit")` root cause) |
-
-Short-circuits go through `error_emit::send_error`, which sends a vendor-flavoured JSON envelope before returning the marker `Error`.
-
-## Workspace dependency direction
-
-```
-gw-core ◄── everything (IR, IDs, error codes)
-gw-codec-macros ◄── gw-codec
-gw-codec        ◄── gw-proxy, gw-adapter
-gw-store        ◄── gw-auth, gw-routing, gw-ledger, gw-proxy, gw-gateway
-gw-health       ◄── gw-routing, gw-proxy, gw-gateway, gw-adapter
-gw-adapter      ◄── (Phase 3 wires it through gw-proxy)
-gw-auth         ◄── gw-proxy
-gw-routing      ◄── gw-proxy
-gw-ledger       ◄── gw-proxy
-gw-proxy        ◄── gw-gateway (binary)
-```
-
-Treat `gw-core` as the type-only ground floor. Anything that pulls a runtime or I/O goes in `gw-store` or higher.
-
-## Things that are intentional, not bugs
-
-- **Non-stream completion requests are rejected with `GW_REQUEST_NONSTREAM_NOT_SUPPORTED` 400.** Codec `parse_response` is `unimplemented!()` for every codec in v1, so non-stream would silently bill `cost_micro = 0`. v1.1 lifts this; until then, do not "fix" it by stubbing the parser.
-- **Anthropic SDK incompatibility.** The gateway requires `(x-api-key, x-api-key-id)` together. Anthropic's public protocol uses `x-api-key` alone — porting clients must supply both. Missing either yields `GW_AUTH_INVALID_APIKEY` (deliberately generic).
-- **`trust_xff` defaults to `false`.** With it off, the IP blocklist matches the L4 socket peer (which behind an L7 LB is the LB's IP, not the client). Only enable it behind a trusted L7 LB that strips client-supplied XFF headers, otherwise the blocklist is trivially bypassable.
-- **Distinct 429 codes.** `GW_QUOTA_RPM_EXCEEDED` = gateway tripped per-user RPM; `GW_UPSTREAM_OVERLOADED` = upstream returned 429. Don't collapse them.
-- **`gw-core::ir` not renamed to `gw-core::schema` yet.** Integration spec §2.1 A10 prescribes the rename + `#[non_exhaustive]` strip. Phase 1d landed the *scaffolding* parts of S1 v2 (WireAny enums, wire_convert_matrix! proc-macro skeleton, Mutations upgrade) without breaking the runtime IR path. The strict A10 form — module rename, removal of public constructors / Default impl / Serialize-Deserialize — lands atomically in Phase 2 alongside the wire→wire matrix migration. The `no_ir_runtime_struct` lint stays PENDING in `scripts/check-invariants.sh` until then.
-
-## v1 gaps to be aware of when extending
-
-`expires_at`, `ip_allowlist`, `daily_quota_tokens`, `Vendor.timeout_overrides`, `Pricing.model_markup`, JWT `iss`/`aud`/`nbf` validation, mandatory HMAC, cross-protocol *response* body re-render, multi-event SSE buffering, retry executor on the proxy hot path, and DLQ for billing flush failures are all explicitly deferred — see the "Known gaps" list in `README.md`. The `Sticky` strategy leaks assignment-map entries (no TTL sweep) and `crates/gw-gateway/tests/e2e_full_flow.rs` is the full Pingora + wiremock + reqwest harness but is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`.
-
-## Crate layering rules (v2 integration)
-
-Authoritative source: `docs/superpowers/specs/2026-05-20-v2-integration-design.md` §3 C-1. Enforced by `scripts/check-invariants.sh`.
-
-Three layers, strict one-way dependency:
-
-- **Supporting layer** (`gw-core`, `gw-codec`, `gw-codec-macros`, `gw-store`, `gw-auth`, `gw-ledger`): provide generic mechanism only (IR/schema, Redis client, JWT, FreezeGuard trait, routing primitives). MUST NOT depend on any business or execution crate. MUST NOT introduce business namespaces (`mod task`, `mod billing`, vendor-specific `mod claude_code`, etc.). `gw-store` carries only the generic Entity / Counter / Append-log / Lock / Counter-Event protocols — no `task::*` / `billing::*` namespaces.
-- **Business layer** (`gw-adapter`, `gw-health`, `gw-routing`, `gw-task`): one crate per business concern. May depend on any supporting crate. Business-to-business dependencies must be registered explicitly in a spec. `gw-routing` was reclassified from supporting to business in Phase 1c: its `Strategy::pick` signature takes `&KeyHealthStore` from `gw-health`; the crate carries `InFlightStore` + strategy impls only — the multi-dim health / circuit / cooldown state machine lives in `gw-health`.
-- **Execution layer** (`gw-proxy`, `gw-task-runtime`): runtime / server / binary entry points. May depend on supporting + business crates. **Execution crates MUST NOT depend on each other** — `gw-proxy ↔ gw-task-runtime` is forbidden in both directions.
-
-**Billing boundary:** the Rust gateway only *records* usage (`UsageRecord` → `usage:records` stream). The usage→cost formula and markup-chain application live entirely in Go. No Rust code path may compute cost. The `gw-billing` crate is permanently retired and must not reappear.
-
-**Hard deployment guarantee** (worker spec ADR-T16): gateway config/args/code carry no worker host/port; worker config/args/code carry no gateway host/port. The only coupling surface is a shared Redis namespace (+ KMS KEK, optional shared PgSQL). Any N-gateway × M-worker topology must work with zero peer-awareness.
+Not the design spec — those live under `docs/superpowers/specs/`. Not the implementation status — `docs/superpowers/plans/` tracks that. Not deep architecture — [`docs/architecture.md`](docs/architecture.md) and [`docs/workflow.md`](docs/workflow.md) are. Keep this file small; if you find yourself adding more than a paragraph here, the right home is probably `docs/`.

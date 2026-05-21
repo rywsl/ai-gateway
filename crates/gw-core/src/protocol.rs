@@ -23,3 +23,18 @@ impl ProtocolKind {
 /// (e.g. `openai_chat`, `openai_responses`, `openai_cli`) may shadow this
 /// alias with a distinct enum.
 pub type ApiFormat = ProtocolKind;
+
+/// Finer-grained shape detection: which API surface within a protocol the
+/// client used. Used by capability resolution (T5-D) to gate `OpenAiResponses`
+/// vs `OpenAiChat` and similar shape-specific capabilities.
+///
+/// Distinct from [`ProtocolKind`]: ProtocolKind is the vendor family;
+/// ApiShape is the concrete request/response wire shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiShape {
+    OpenAiChat,
+    OpenAiResponses,
+    AnthropicMessages,
+    GeminiGenerate,
+}

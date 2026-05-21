@@ -21,3 +21,5 @@ metrics.workspace = true
 tokio = { workspace = true, features = ["macros", "test-util"] }
 testcontainers.workspace = true
 testcontainers-modules.workspace = true
+serde_json.workspace = true
+metrics.workspace = true

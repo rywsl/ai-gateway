@@ -318,6 +318,35 @@ pub async fn run(
             "debug trace buffer emitted"
         );
     }
+
+    // ---------------------------------------------------------------------
+    // T6-B: invoke ErrorHandler fanout if a ClassifierOutcome was produced
+    // earlier in the filter chain. Listeners are stateless stubs in v1 so
+    // ad-hoc construction is acceptable; the follow-up moves construction to
+    // `LlmGateway::new` so shared Arc handles (KeyHealthStore, EntityStore,
+    // ResilienceState) can be threaded through `HandlerCtx`.
+    // ---------------------------------------------------------------------
+    if let Some(oc) = ctx.error_outcome.as_ref() {
+        use crate::error::handler::{ErrorHandler, HandlerCtx};
+        use crate::error::listeners::{
+            cache_invalidate::CacheInvalidateListener, key_health::KeyHealthListener,
+            ledger::LedgerListener, metrics::MetricsListener, oauth::OAuthListener,
+            rate_limit::RateLimitFeedbackListener,
+        };
+        #[allow(clippy::default_constructed_unit_structs)]
+        let handler = ErrorHandler::new(vec![
+            Arc::new(KeyHealthListener::default()) as _,
+            Arc::new(RateLimitFeedbackListener::default()) as _,
+            Arc::new(OAuthListener::default()) as _,
+            Arc::new(CacheInvalidateListener::default()) as _,
+            Arc::new(MetricsListener::default()) as _,
+            Arc::new(LedgerListener::default()) as _,
+        ]);
+        // TODO(T6-B follow-up): populate real fields (request_id, api_key_id,
+        // vendor_key_id, api_format, key_health, entity_store, resilience).
+        let hctx = HandlerCtx::stub();
+        handler.fanout(&hctx, oc);
+    }
 }
 
 /// Truncate `s` to at most `max_chars` characters, respecting UTF-8 boundaries.

@@ -37,7 +37,11 @@
 pub mod config;
 pub mod health;
 pub mod kms;
+pub mod metrics_catalog;
 pub mod observability;
+
+#[cfg(feature = "tunnel")]
+pub use gw_tunnel_client;
 
 use anyhow::Context;
 use gw_auth::ratelimit::RateLimitGuard;

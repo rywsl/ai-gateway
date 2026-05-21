@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "gw_gateway"
 path = "src/lib.rs"
 
+[features]
+default = []
+tunnel = ["dep:gw-tunnel-client"]
+
 [dependencies]
 gw-core = { path = "../gw-core" }
 gw-health = { path = "../gw-health" }
@@ -22,6 +26,7 @@ gw-auth = { path = "../gw-auth" }
 gw-routing = { path = "../gw-routing" }
 gw-ledger = { path = "../gw-ledger" }
 gw-codec = { path = "../gw-codec" }
+gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -25,10 +25,14 @@ tracing.workspace = true
 metrics.workspace = true
 ipnet.workspace = true
 hex.workspace = true
+fred.workspace = true
+smallvec.workspace = true
+regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "merge_permissions"
