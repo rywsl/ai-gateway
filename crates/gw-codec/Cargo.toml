@@ -16,12 +16,18 @@ smallvec.workspace = true
 tracing.workspace = true
 flate2 = { workspace = true }
 brotli = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 proptest.workspace = true
 bytes.workspace = true
 serde_json.workspace = true
 criterion.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [[bench]]
 name = "passthrough"
