@@ -70,6 +70,17 @@ if command -v cargo >/dev/null && command -v jq >/dev/null; then
   [ "$fail" -eq 0 ] && ok "gw-capability layering ok"
 fi
 
+echo "[crate_layering] gw-tunnel-client business; must not depend on execution layer"
+if command -v cargo >/dev/null && command -v jq >/dev/null; then
+  tc_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-tunnel-client") | .dependencies[] | select(.kind == null) | .name')"
+  for forb in gw-proxy gw-gateway gw-task-runtime gw-routing; do
+    if echo "$tc_deps" | grep -qx "$forb"; then
+      bad "gw-tunnel-client depends on $forb (business → execution forbidden)"
+    fi
+  done
+  [ "$fail" -eq 0 ] && ok "gw-tunnel-client layering ok"
+fi
+
 # ---------------------------------------------------------------------------
 # no_billing_crate (§5.2) — gw-billing must never exist as a crate.
 # ---------------------------------------------------------------------------

@@ -1700,6 +1700,19 @@ dependencies = [
 [[package]]
 name = "gw-tunnel-client"
 version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "gw-core",
+ "gw-store",
+ "parking_lot",
+ "rand 0.8.6",
+ "secrecy",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+]
 
 [[package]]
 name = "h2"

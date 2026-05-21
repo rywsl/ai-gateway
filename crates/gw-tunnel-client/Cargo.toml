@@ -4,4 +4,18 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+default = []
+
 [dependencies]
+gw-core   = { path = "../gw-core" }
+gw-store  = { path = "../gw-store" }
+bytes     = { workspace = true }
+tokio     = { workspace = true, features = ["sync", "net", "macros", "rt", "time"] }
+thiserror = { workspace = true }
+serde     = { workspace = true }
+url       = { workspace = true }
+secrecy   = { workspace = true }
+arc-swap  = { workspace = true }
+parking_lot = { workspace = true }
+rand      = { workspace = true }
