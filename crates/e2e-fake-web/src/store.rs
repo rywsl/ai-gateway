@@ -28,6 +28,10 @@ const ENTITY_TABLES: &[&str] = &[
     "jwks",
     "ip_blocks",
     "models",
+    // `auth_configs` is owned by the fake control-plane (gateway TODO
+    // table not yet in migrations). No consumer ns — same treatment as
+    // `models` — so we skip emitting invalidation for it.
+    "auth_configs",
 ];
 
 /// Map an entity table name to the `ns` field emitted on `events:entity`.
@@ -49,6 +53,9 @@ pub(crate) fn ns_for_table(table: &str) -> Option<&'static str> {
         "ip_blocks" => Some("ipblock"),
         // `models` has no consumer ns — skip emit.
         "models" => None,
+        // The gateway reads `auth_configs` row "global" once at boot;
+        // there is no stream consumer, so no invalidation event.
+        "auth_configs" => None,
         _ => None,
     }
 }
@@ -69,6 +76,26 @@ pub struct Store {
 impl Store {
     pub fn new(pg: sqlx::PgPool, redis: Arc<RedisPool>) -> Self {
         Self { pg, redis }
+    }
+
+    /// Provision tables that the gateway expects to read but does not
+    /// create itself. Currently just `auth_configs` (gateway TODO — not
+    /// in migrations 0001-0004; the control-plane owns this table).
+    ///
+    /// Idempotent: uses `CREATE TABLE IF NOT EXISTS`.
+    pub async fn ensure_schema(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS auth_configs (
+                id TEXT PRIMARY KEY,
+                payload JSONB NOT NULL,
+                version BIGINT NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                deleted_at TIMESTAMPTZ NULL
+            )",
+        )
+        .execute(&self.pg)
+        .await?;
+        Ok(())
     }
 
     /// Upsert an entity row by id, bump version, then publish an

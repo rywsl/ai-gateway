@@ -6,7 +6,7 @@
 //! single `GET /healthz` route so docker-compose can mark the
 //! container healthy.
 
-use e2e_fake_web::{drain, router, store::Store};
+use e2e_fake_web::{drain, router, store::Store, AppState};
 use fred::clients::RedisPool;
 use fred::interfaces::ClientLike;
 use fred::types::{ConnectionConfig, PerformanceConfig, ReconnectPolicy, RedisConfig};
@@ -51,20 +51,29 @@ async fn main() -> anyhow::Result<()> {
     let redis = Arc::new(pool);
 
     let store = Arc::new(Store::new(pg, redis));
+    // Provision the `auth_configs` table the gateway expects to read
+    // but does not create itself. Idempotent.
+    store.ensure_schema().await?;
+
+    let state = AppState::new(store);
 
     // Background drain loop. We tolerate transient drain errors (logged)
     // and never propagate them, because a corrupt `usage:records` entry
-    // must not crash the control-plane stand-in.
-    let drain_store = store.clone();
+    // must not crash the control-plane stand-in. Cursor is shared with
+    // the `POST /usage/drain` force-drain handler via the AppState
+    // mutex, so the two can't double-process the same entry.
+    let drain_state = state.clone();
     tokio::spawn(async move {
-        let mut cursor = String::from("0-0");
         loop {
-            match drain::drain_once(&drain_store, &mut cursor).await {
+            let result = {
+                let mut guard = drain_state.drain_cursor.lock().await;
+                drain::drain_once(&drain_state.store, &mut guard).await
+            };
+            match result {
                 Ok(n) => {
                     tracing::debug!(
                         target: "e2e_fake_web::drain",
                         processed = n,
-                        cursor = %cursor,
                         "drain cycle"
                     );
                 }
@@ -80,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let app = router(store);
+    let app = router(state);
     let listener = tokio::net::TcpListener::bind(BIND_ADDR).await?;
     tracing::info!(target: "e2e_fake_web", addr = %BIND_ADDR, "listening");
     axum::serve(listener, app).await?;

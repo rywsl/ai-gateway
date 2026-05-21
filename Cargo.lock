@@ -1150,6 +1150,8 @@ dependencies = [
  "anyhow",
  "axum",
  "fred",
+ "rand 0.8.6",
+ "rsa",
  "serde",
  "serde_json",
  "sqlx",
