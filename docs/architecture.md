@@ -220,13 +220,14 @@ Pending lints (uncomment when target phase lands):
 | `trust_xff = false` by default | With it off, the IP blocklist matches the L4 socket peer. Enabling it behind an untrusted L7 hop lets clients forge XFF and bypass the blocklist. Fail-closed. | `config/default.toml [security]`, `crates/gw-proxy/src/filters/early.rs` |
 | Distinct 429 codes | `GW_QUOTA_RPM_EXCEEDED` (gateway tripped per-user RPM) vs `GW_UPSTREAM_OVERLOADED` (upstream returned 429) — clients need to distinguish local vs upstream throttling. | `crates/gw-core/src/error/codes.rs` |
 | Body filter swaps at EOS only | Cross-protocol rewrites happen in `upstream_request_filter` and must reach the wire in one shot. Pre-EOS chunks are dropped. | `crates/gw-proxy/src/gateway.rs::request_body_filter` |
+| HMAC verify decompresses but the codec re-reads raw bytes | T1-D's `verify_body` decompresses internally for the HMAC compare; the plaintext is discarded and `ctx.cached_body` still holds the on-wire (possibly gzipped) bytes. The codecs `serde_json::from_slice(&body_bytes)` directly without a decode step, so a signed + compressed request verifies OK then fails codec parse. Tracked as a follow-up: stash the decompressed body so step 8 reuses it. | `crates/gw-proxy/src/filters/request.rs` step 7b → step 8; `crates/gw-codec/src/{openai,anthropic,gemini}/codec.rs::parse_request` |
 | `gw-core::ir` not renamed to `::schema` yet | Phase 1d landed the *scaffolding* parts of S1 v2 without breaking the runtime IR path. The strict A10 form lands atomically in Phase 2 alongside the wire→wire matrix migration. | `crates/gw-core/src/ir.rs`, `no_ir_runtime_struct` lint stays PENDING. |
 
 ## 9. Known gaps (deferred)
 
 Closure of the deferred gaps is tracked in [`docs/superpowers/specs/2026-05-21-known-gaps-design.md`](superpowers/specs/2026-05-21-known-gaps-design.md) and [`docs/superpowers/plans/2026-05-21-known-gaps.md`](superpowers/plans/2026-05-21-known-gaps.md). Status (in-flight on `feature/known-gaps-closure`):
 
-- **Landed**: `ApiKeyEntry.expires_at` enforcement (G1, T1-A); `ApiKeyEntry.ip_allowlist` per-key enforcement (G2, T1-B).
-- **Deferred**: `daily_quota_tokens`, `Vendor.timeout_overrides`, `Pricing.model_markup`, JWT `iss`/`aud`/`nbf` validation on the API-key path, mandatory HMAC, cross-protocol *response* body re-render, multi-event SSE buffering, retry executor on the proxy hot path, DLQ for billing flush failures, Sticky TTL sweep, and `CapabilityResolver` injection into `LlmGateway`.
+- **Landed**: `ApiKeyEntry.expires_at` enforcement (G1, T1-A); `ApiKeyEntry.ip_allowlist` per-key enforcement (G2, T1-B); HMAC body-verify wired at request_filter EOS (G7, T1-D).
+- **Deferred**: `daily_quota_tokens`, `Vendor.timeout_overrides`, `Pricing.model_markup`, JWT `iss`/`aud`/`nbf` validation on the API-key path, cross-protocol *response* body re-render, multi-event SSE buffering, retry executor on the proxy hot path, DLQ for billing flush failures, Sticky TTL sweep, and `CapabilityResolver` injection into `LlmGateway`.
 
 The `e2e_full_flow.rs` Pingora+wiremock+reqwest harness is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`. The docker-based black-box harness lands on `feature/e2e-blackbox` (see [`docs/superpowers/specs/2026-05-21-e2e-blackbox-design.md`](superpowers/specs/2026-05-21-e2e-blackbox-design.md)).

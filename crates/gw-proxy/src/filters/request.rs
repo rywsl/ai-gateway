@@ -355,11 +355,15 @@ pub async fn run(
         match crate::body_verify::verify_body(input) {
             Ok((SignatureCheckResult::Valid, _))
             | Ok((SignatureCheckResult::NotRequired, _)) => {
-                // Pass through. `cached_body` already holds the on-wire form
-                // the codec parse step expects; decompression for verification
-                // is internal to `verify_body` and intentionally not folded
-                // back into `cached_body` (the codec handles Content-Encoding
-                // on its own path).
+                // Pass through. `cached_body` holds the raw on-wire bytes;
+                // `verify_body` decompresses internally for the signature
+                // compare but the plaintext is discarded here. Known gap:
+                // the codecs `serde_json::from_slice(&body_bytes)` directly
+                // (no decode step), so a signed + compressed request will
+                // currently verify OK then fail codec parse. The fix is to
+                // stash the decompressed body and feed it to step 8 — see
+                // docs/architecture.md §Deliberate behaviours (compressed-
+                // body parse gap), tracked as a follow-up.
             }
             Ok((SignatureCheckResult::Missing, _)) => {
                 let err = ErrorIR {

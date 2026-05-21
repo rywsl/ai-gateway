@@ -72,11 +72,18 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
    - JWT: `Authorization: Bearer <token>` → `verify_jwt(bearer, store)` (RS256 via JWKS, `exp` checked; `iss`/`aud`/`nbf` validation is on the management-token surface, not yet wired on the API-key surface).
    - API-key: `x-api-key` + `x-api-key-id` (both required, paired). `verify_apikey` SHA-256s the secret and constant-time compares against `ApiKeyEntry.hash`. `apikey_or_load` resolves the entry to extract `user_id`.
    - Missing both → `GW_AUTH_INVALID_APIKEY` 401 (intentionally generic).
-3. **Optional HMAC** — if the resolved entry sets `signature_required`, extract `x-signature` + `x-timestamp`. Verified later in `signature::verify_required` with ±300s replay window.
+3. **Optional HMAC capture** — if the resolved entry sets `signature_required`, extract `x-signature` + `x-timestamp` into `ctx.signature_received` / `ctx.signature_timestamp`, stash the algo on `ctx.signature_algo`, and clone `ApiKeyEntry.hash` onto `ctx.signature_secret` (v1.5 reuses the api-key hash as the HMAC secret; a dedicated `signature_secret` entity field is a v2 follow-up). The actual verification fires in step 7b after the body is buffered.
 4. **User entry** — `store.user_or_load(&user_id)` stashed on `ctx.user`.
 5. **Content-Encoding parse** — detect gzip / br so a later signature-verify or audit step sees the right payload.
 6. **IP blocklist re-check (User/ApiKey scope)** — `check_blocklist(ip, Some(&user_id), api_key_id, store)` now that scope IDs are resolved.
 7. **Body read** — chunked `session.read_request_body()` with 16 MiB cap, frozen onto `ctx.cached_body`.
+7b. **HMAC body-verify (G7, T1-D)** — if `ctx.signature_required`, build `BodyVerifyInput` (using `ctx.req_content_encoding` for the Content-Encoding parse, `ctx.signature_secret` for the secret, `ctx.signature_received`/`ctx.signature_timestamp` for the headers) and call `gw_proxy::body_verify::verify_body`. Outcomes from the 5-variant `gw_auth::signature::SignatureCheckResult`:
+   - `NotRequired` / `Valid` → continue.
+   - `Missing` → 401 `GW_AUTH_SIGNATURE_MISSING`.
+   - `TimestampDrift` → 401 `GW_AUTH_SIGNATURE_TIMESTAMP_DRIFT`.
+   - `Invalid` (HMAC mismatch OR body decompression failure) → 401 `GW_AUTH_SIGNATURE_INVALID`.
+
+   Fail-closed: an unverifiable body cannot reach codec parse. `ctx.cached_body` is *not* replaced by the decompressed plaintext (codec parse paths are still expected to consume the on-wire body — see [`docs/architecture.md`](architecture.md) §Deliberate behaviours for the known compressed-body parse gap, deferred to a follow-up).
 8. **Parse to IR** — `codec.parse_request(&body_bytes)` produces `RequestIR` carrying model name, stream flag, estimated input tokens. Stash `ctx.model`, `ctx.is_stream`, `ctx.idempotent = !is_stream`.
 9. **Non-stream guard** — `is_stream == false` → `GW_REQUEST_NONSTREAM_NOT_SUPPORTED` 400. v1 codec `parse_response` is `unimplemented!()`; without it Rust would emit `cost_micro = 0`. Fail-closed until v1.1.
 10. **5-tier permission merge** — `merge_permissions(AuthCtx, store, global_rpm)` produces a `MarkupChainSnapshot`. Tier order: global → user-group → user → sub-account → api-key; intersection on lists, min-positive on `rpm`/`tpm`, product on markup. Sets `forced_model_group` + `effective_user_id` (parent on sub-accounts).
