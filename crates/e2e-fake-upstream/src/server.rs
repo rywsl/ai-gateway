@@ -1,13 +1,41 @@
+//! Server entry points.
+//!
+//! Two listeners:
+//!   - **business** (`serve_business`) — fully manual on raw `TcpStream`.
+//!     We parse the request head with `httparse`, match the scenario route,
+//!     and dispatch either to the injection primitives in `crate::inject`
+//!     (for the 6 failure variants) or to manual Static/Sse writers (also
+//!     in `crate::inject`). Going full-manual lets us reuse one code path
+//!     for both well-formed and broken responses; no hyper-stream rewinding
+//!     is required.
+//!   - **admin** (`serve_admin`) — stays on hyper. The admin endpoints are
+//!     always well-formed HTTP, so hyper is fine.
+//!
+//! `ConnectionRefusedFirstN` is enforced in the business accept loop BEFORE
+//! we read any bytes from the new socket, because connection refusal must
+//! apply at TCP-handshake time (the client's `connect()` itself sees the
+//! peer drop). The refuse counter is re-primed whenever the scenario is
+//! swapped via `/admin/scenario`.
+
 use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures_util::stream;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full, StreamBody};
-use hyper::body::Frame;
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::header::{HeaderMap, HeaderName, HeaderValue};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use tokio::sync::RwLock;
+use hyper_util::rt::TokioIo;
+use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::RwLock;
+use tokio::time::timeout;
+
+use crate::inject::{self, RefuseCounter};
 use crate::routes::{make_counters, match_route, HitCounters};
 use crate::scenario::{ResponseSpec, Scenario};
 
@@ -16,14 +44,264 @@ use crate::scenario::{ResponseSpec, Scenario};
 pub type SharedScenario = Arc<RwLock<Scenario>>;
 pub type SharedCounters = Arc<RwLock<HitCounters>>;
 
-// ── helper constructors ───────────────────────────────────────────────────────
+// ── Business server (manual, raw TcpStream) ──────────────────────────────────
+
+/// Run the business listener on `listener` until the task is cancelled.
+///
+/// `refuse` is a shared counter consulted at accept time before any bytes
+/// are read from a freshly-accepted socket. Callers (typically `main` and
+/// the admin handler on scenario swap) are responsible for priming it from
+/// the scenario via [`prime_refuse_counter`].
+pub async fn serve_business(
+    listener: TcpListener,
+    scenario: SharedScenario,
+    counters: SharedCounters,
+    refuse: RefuseCounter,
+) {
+    loop {
+        let (stream, _peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[fake-upstream] business accept error: {e}");
+                continue;
+            }
+        };
+
+        // ── ConnectionRefusedFirstN gate ─────────────────────────────────────
+        // Drop the socket BEFORE any HTTP handshake so the client sees a
+        // post-accept reset (most clients surface this as a connection
+        // error). We can't differentiate per-route here because we haven't
+        // read the request yet — refusal applies to whichever connection
+        // arrives first while the counter is non-zero.
+        if refuse.take_one() {
+            // Force RST so the client gets a hard error rather than a
+            // clean EOF on an empty response.
+            inject::rst_close(stream);
+            continue;
+        }
+
+        let sc = Arc::clone(&scenario);
+        let ctr = Arc::clone(&counters);
+        tokio::spawn(async move {
+            if let Err(e) = handle_business_conn(stream, sc, ctr).await {
+                eprintln!("[fake-upstream] business conn error: {e}");
+            }
+        });
+    }
+}
+
+/// Handle a single business connection: parse the head, match the route,
+/// dispatch to the appropriate writer.
+async fn handle_business_conn(
+    mut stream: TcpStream,
+    scenario: SharedScenario,
+    counters: SharedCounters,
+) -> std::io::Result<()> {
+    // 1) Read until end-of-headers (\r\n\r\n) or a sanity cap.
+    let (method, path, headers) = match read_head(&mut stream).await? {
+        Some(parsed) => parsed,
+        None => {
+            // Could not parse a request line within the cap → just close.
+            return Ok(());
+        }
+    };
+
+    // 2) Route match + auth, holding read locks only for sync work.
+    let outcome: Outcome = {
+        let sc = scenario.read().await;
+        let ctr = counters.read().await;
+
+        let matched = match_route(&sc, &method, &path, &headers, &ctr);
+        match matched {
+            None => Outcome::NotFound,
+            Some((_idx, route)) => {
+                if let Some(ref ac) = route.auth_check {
+                    let header_name = ac.header.to_lowercase();
+                    let value = headers
+                        .iter()
+                        .find(|(k, _)| k.as_str().eq_ignore_ascii_case(&header_name))
+                        .and_then(|(_, v)| v.to_str().ok())
+                        .unwrap_or("");
+                    if !value.starts_with(ac.must_start_with.as_str()) {
+                        Outcome::Unauthorized
+                    } else {
+                        Outcome::Spec(route.response.clone())
+                    }
+                } else {
+                    Outcome::Spec(route.response.clone())
+                }
+            }
+        }
+    };
+
+    // 3) Dispatch on the raw stream, locks released.
+    match outcome {
+        Outcome::NotFound => {
+            inject::write_static(
+                stream,
+                404,
+                std::collections::HashMap::from([(
+                    "content-type".into(),
+                    "application/json".into(),
+                )]),
+                r#"{"error":"no matching route in scenario"}"#.to_owned(),
+                0,
+            )
+            .await?;
+        }
+        Outcome::Unauthorized => {
+            inject::write_static(
+                stream,
+                401,
+                std::collections::HashMap::from([(
+                    "content-type".into(),
+                    "application/json".into(),
+                )]),
+                r#"{"error":"upstream auth check failed"}"#.to_owned(),
+                0,
+            )
+            .await?;
+        }
+        Outcome::Spec(spec) => dispatch_spec(stream, spec).await?,
+    }
+    Ok(())
+}
+
+enum Outcome {
+    NotFound,
+    Unauthorized,
+    Spec(ResponseSpec),
+}
+
+async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result<()> {
+    match spec {
+        ResponseSpec::Static {
+            status,
+            headers,
+            body,
+            delay_ms,
+        } => inject::write_static(stream, status, headers, body, delay_ms).await,
+        ResponseSpec::Sse { delay_ms, events } => inject::write_sse(stream, delay_ms, events).await,
+        ResponseSpec::TcpResetAfterHeaders => inject::tcp_reset_after_headers(stream).await,
+        ResponseSpec::TcpResetMidBody { after_bytes } => {
+            inject::tcp_reset_mid_body(stream, after_bytes).await
+        }
+        ResponseSpec::ConnectionRefusedFirstN { .. } => {
+            // Refusal is enforced in the accept loop. If a connection got
+            // this far the counter was already exhausted — fall through
+            // with a normal 200 acknowledgement so the path isn't a hole.
+            inject::write_static(
+                stream,
+                200,
+                std::collections::HashMap::from([(
+                    "content-type".into(),
+                    "application/json".into(),
+                )]),
+                r#"{"ok":true,"note":"refuse counter exhausted"}"#.to_owned(),
+                0,
+            )
+            .await
+        }
+        ResponseSpec::SlowBodyBytePerSecond { body, bps } => {
+            inject::slow_body_byte_per_second(stream, body, bps).await
+        }
+        ResponseSpec::PartialSseEvent { half_body } => {
+            inject::partial_sse_event(stream, half_body).await
+        }
+        ResponseSpec::StatusWithRetryAfter {
+            status,
+            retry_after_secs,
+            body,
+        } => inject::status_with_retry_after(stream, status, retry_after_secs, body).await,
+    }
+}
+
+/// Read the request head (request line + headers) from `stream`, returning
+/// `(method, path, headers)`. Reads at most ~16 KiB and waits at most 5 s
+/// in total before giving up (a slow / stuck client must not park the task
+/// indefinitely, leaking the fd + Arcs across a test run).
+async fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<(String, String, HeaderMap)>> {
+    const MAX_HEAD: usize = 16 * 1024;
+    const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let read_fut = async {
+        let mut buf = Vec::with_capacity(2048);
+        let mut tmp = [0u8; 1024];
+        // `search_from` tracks where the next CRLFCRLF scan should begin.
+        // Each iteration only scans new bytes plus a 3-byte overlap to
+        // catch a CRLFCRLF that straddles a read boundary.
+        let mut search_from: usize = 0;
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok::<_, std::io::Error>(None); // Peer closed.
+            }
+            let prev_len = buf.len();
+            buf.extend_from_slice(&tmp[..n]);
+            let scan_start = prev_len.saturating_sub(3).max(search_from);
+            if buf[scan_start..].windows(4).any(|w| w == b"\r\n\r\n") {
+                break Ok(Some(buf));
+            }
+            search_from = buf.len();
+            if buf.len() > MAX_HEAD {
+                return Ok(None);
+            }
+        }
+    };
+
+    let buf = match timeout(HEAD_READ_TIMEOUT, read_fut).await {
+        Ok(Ok(Some(b))) => b,
+        Ok(Ok(None)) => return Ok(None),
+        Ok(Err(e)) => return Err(e),
+        Err(_elapsed) => {
+            // Slow / stuck client. Drop the connection silently.
+            return Ok(None);
+        }
+    };
+
+    let mut header_storage = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut header_storage);
+    let status = match req.parse(&buf) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    if !status.is_complete() {
+        return Ok(None);
+    }
+    let method = req.method.unwrap_or("").to_owned();
+    let path = req.path.unwrap_or("/").to_owned();
+    let mut headers = HeaderMap::new();
+    for h in req.headers.iter() {
+        if let (Ok(name), Ok(val)) = (
+            HeaderName::from_bytes(h.name.as_bytes()),
+            HeaderValue::from_bytes(h.value),
+        ) {
+            headers.append(name, val);
+        }
+    }
+    Ok(Some((method, path, headers)))
+}
+
+// ── Refuse-counter priming ───────────────────────────────────────────────────
+
+/// Inspect the active scenario and prime `refuse` to the largest declared
+/// `ConnectionRefusedFirstN { n }` value (or 0 if none present).
+pub fn prime_refuse_counter(scenario: &Scenario, refuse: &RefuseCounter) {
+    let mut max_n: u32 = 0;
+    for route in &scenario.routes {
+        if let ResponseSpec::ConnectionRefusedFirstN { n } = route.response {
+            if n > max_n {
+                max_n = n;
+            }
+        }
+    }
+    refuse.set(max_n);
+}
+
+// ── Admin server (hyper) ─────────────────────────────────────────────────────
 
 fn full_body(b: impl Into<Bytes>) -> BoxBody<Bytes, Infallible> {
     Full::new(b.into()).boxed()
-}
-
-fn empty_body() -> BoxBody<Bytes, Infallible> {
-    Empty::new().boxed()
 }
 
 fn json_response(status: StatusCode, body: &str) -> Response<BoxBody<Bytes, Infallible>> {
@@ -34,180 +312,57 @@ fn json_response(status: StatusCode, body: &str) -> Response<BoxBody<Bytes, Infa
         .expect("valid response")
 }
 
-// ── main business handler ─────────────────────────────────────────────────────
-
-/// Handle a single request on the business port (:9000).
-pub async fn handle_business(
-    req: Request<hyper::body::Incoming>,
+/// Run the admin listener on `listener` until cancelled.
+pub async fn serve_admin(
+    listener: TcpListener,
     scenario: SharedScenario,
     counters: SharedCounters,
-) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
-    let method = req.method().as_str().to_owned();
-    let path = req.uri().path().to_owned();
-    let headers = req.headers().clone();
-
-    // Drain the body (needed by some future auth checks; harmless otherwise).
-    let _body_bytes = req
-        .into_body()
-        .collect()
-        .await
-        .map(|c| c.to_bytes())
-        .unwrap_or_default();
-
-    // Acquire read locks, do all synchronous work (route matching, auth check,
-    // hit-counter increment), clone out the owned ResponseSpec, then DROP both
-    // guards BEFORE any await.  This ensures that a delayed Static/Sse response
-    // never blocks POST /admin/scenario from acquiring the write lock.
-    let spec = {
-        let sc = scenario.read().await;
-        let ctr = counters.read().await;
-
-        // match_route increments the hit counter for the matched route while we
-        // still hold `ctr`.
-        let matched = match_route(&sc, &method, &path, &headers, &ctr);
-
-        let Some((_idx, route)) = matched else {
-            return Ok(json_response(
-                StatusCode::NOT_FOUND,
-                r#"{"error":"no matching route in scenario"}"#,
-            ));
-        };
-
-        // Auth check (before dispatching to the response handler).
-        if let Some(ref ac) = route.auth_check {
-            let header_name = ac.header.to_lowercase();
-            let value = headers
-                .iter()
-                .find(|(k, _)| k.as_str().eq_ignore_ascii_case(&header_name))
-                .and_then(|(_, v)| v.to_str().ok())
-                .unwrap_or("");
-
-            if !value.starts_with(ac.must_start_with.as_str()) {
-                return Ok(json_response(
-                    StatusCode::UNAUTHORIZED,
-                    r#"{"error":"upstream auth check failed"}"#,
-                ));
+    refuse: RefuseCounter,
+) {
+    loop {
+        let (stream, _peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[fake-upstream] admin accept error: {e}");
+                continue;
             }
-        }
-
-        // Clone the spec; `sc` and `ctr` are dropped when this block exits.
-        route.response.clone()
-    };
-    // Both read locks are released here — dispatch_response may sleep/await freely.
-
-    let response = dispatch_response(spec).await;
-    Ok(response)
-}
-
-/// Dispatch to the appropriate handler based on the response spec.
-async fn dispatch_response(spec: ResponseSpec) -> Response<BoxBody<Bytes, Infallible>> {
-    match spec {
-        ResponseSpec::Static {
-            status,
-            headers,
-            body,
-            delay_ms,
-        } => handle_static(status, headers, body, delay_ms).await,
-
-        ResponseSpec::Sse { delay_ms, events } => handle_sse(delay_ms, events).await,
-
-        // ── E1-B variants ────────────────────────────────────────────────────
-        // Not implemented until E1-B.  Return a clean 501 so the server never
-        // panics.  Do NOT use todo!() / unimplemented!().
-        ResponseSpec::TcpResetAfterHeaders // E1-B
-        | ResponseSpec::TcpResetMidBody { .. } // E1-B
-        | ResponseSpec::ConnectionRefusedFirstN { .. } // E1-B
-        | ResponseSpec::SlowBodyBytePerSecond { .. } // E1-B
-        | ResponseSpec::PartialSseEvent { .. } // E1-B
-        | ResponseSpec::StatusWithRetryAfter { .. } => {
-            // E1-B
-            json_response(
-                StatusCode::NOT_IMPLEMENTED,
-                r#"{"error":"injection variant not implemented until E1-B"}"#,
-            )
-        }
+        };
+        let io = TokioIo::new(stream);
+        let sc = Arc::clone(&scenario);
+        let ctr = Arc::clone(&counters);
+        let refuse = refuse.clone();
+        tokio::spawn(async move {
+            if let Err(e) = http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(move |req| {
+                        handle_admin(req, Arc::clone(&sc), Arc::clone(&ctr), refuse.clone())
+                    }),
+                )
+                .await
+            {
+                eprintln!("[fake-upstream] admin connection error: {e}");
+            }
+        });
     }
 }
 
-// ── Static handler ────────────────────────────────────────────────────────────
-
-async fn handle_static(
-    status: u16,
-    headers: std::collections::HashMap<String, String>,
-    body: String,
-    delay_ms: u64,
-) -> Response<BoxBody<Bytes, Infallible>> {
-    if delay_ms > 0 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-    }
-
-    let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-
-    let mut builder = Response::builder().status(status_code);
-    for (k, v) in &headers {
-        builder = builder.header(k.as_str(), v.as_str());
-    }
-
-    builder
-        .body(full_body(body))
-        .unwrap_or_else(|_| Response::new(empty_body()))
-}
-
-// ── SSE handler ───────────────────────────────────────────────────────────────
-
-async fn handle_sse(
-    delay_ms: u64,
-    events: Vec<crate::scenario::SseEvent>,
-) -> Response<BoxBody<Bytes, Infallible>> {
-    // Pre-response delay (applied before the first byte is sent).
-    if delay_ms > 0 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-    }
-
-    // Build a lazy async stream: each item is a hyper Frame.
-    // We collect the events into an owned vec and iterate asynchronously using
-    // `stream::unfold` so no extra crate is needed beyond futures-util.
-    let sse_stream = stream::unfold((events, 0usize), |(events, idx)| async move {
-        let event = events.get(idx)?;
-        if event.after_ms > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(event.after_ms)).await;
-        }
-        let frame_bytes = format!("data: {}\n\n", event.data);
-        let frame: Result<Frame<Bytes>, Infallible> = Ok(Frame::data(Bytes::from(frame_bytes)));
-        Some((frame, (events, idx + 1)))
-    });
-
-    let body = StreamBody::new(sse_stream).boxed();
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .header("transfer-encoding", "chunked")
-        .body(body)
-        .expect("valid SSE response")
-}
-
-// ── Admin handler ─────────────────────────────────────────────────────────────
-
-/// Handle a single request on the admin port (:9001).
-pub async fn handle_admin(
-    req: Request<hyper::body::Incoming>,
+async fn handle_admin(
+    req: Request<Incoming>,
     scenario: SharedScenario,
     counters: SharedCounters,
+    refuse: RefuseCounter,
 ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
 
     match (method.as_str(), path.as_str()) {
-        // ── GET /healthz ──────────────────────────────────────────────────────
         ("GET", "/healthz") => Ok(Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/plain")
             .body(full_body("ok"))
             .expect("valid healthz response")),
 
-        // ── POST /admin/scenario ──────────────────────────────────────────────
         ("POST", "/admin/scenario") => {
             let body_bytes = req
                 .into_body()
@@ -216,11 +371,14 @@ pub async fn handle_admin(
                 .map(|c| c.to_bytes())
                 .unwrap_or_default();
 
-            match serde_json::from_slice::<crate::scenario::Scenario>(&body_bytes) {
+            match serde_json::from_slice::<Scenario>(&body_bytes) {
                 Ok(new_scenario) => {
-                    // Build fresh counters sized to the new scenario before
-                    // acquiring the write lock so the lock is held briefly.
                     let new_counters = make_counters(&new_scenario);
+
+                    // Prime the refuse counter from the NEW scenario before
+                    // we publish it, so the next accepted connection sees a
+                    // consistent (scenario, refuse_n) pair.
+                    prime_refuse_counter(&new_scenario, &refuse);
 
                     {
                         let mut sc = scenario.write().await;

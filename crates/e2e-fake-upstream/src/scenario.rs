@@ -55,36 +55,25 @@ pub enum ResponseSpec {
         events: Vec<SseEvent>,
     },
 
-    // ── E1-B variants ───────────────────────────────────────────────────────
-    // These are declared here so the DSL is complete, but are NOT implemented
-    // until E1-B.  Selecting one in a scenario returns HTTP 501.
-    // Fields are unused until E1-B; suppress dead_code lint for now.
-    #[allow(dead_code)]
+    // ── E1-B failure-injection variants ─────────────────────────────────────
+    // Dispatched by `server::dispatch_spec` to the handlers in `crate::inject`.
     TcpResetAfterHeaders,
     TcpResetMidBody {
-        #[allow(dead_code)]
         after_bytes: usize,
     },
     ConnectionRefusedFirstN {
-        #[allow(dead_code)]
         n: u32,
     },
     SlowBodyBytePerSecond {
-        #[allow(dead_code)]
         body: String,
-        #[allow(dead_code)]
         bps: u32,
     },
     PartialSseEvent {
-        #[allow(dead_code)]
         half_body: String,
     },
     StatusWithRetryAfter {
-        #[allow(dead_code)]
         status: u16,
-        #[allow(dead_code)]
         retry_after_secs: u32,
-        #[allow(dead_code)]
         body: String,
     },
 }
