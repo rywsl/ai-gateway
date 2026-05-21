@@ -1,0 +1,226 @@
+# Architecture — ailinkmax-gateway
+
+> **Sync rule**: if you change the crate layout, layering invariants, traits, configuration tables, persistence namespaces, or background-task graph, update this file in the same commit. Code is the source of truth; this document is the index.
+>
+> Companion: [`workflow.md`](workflow.md) — what each filter does, per phase.
+
+## 1. What this gateway is
+
+A Rust LLM gateway built on **Pingora 0.8**. It terminates OpenAI / Anthropic / Gemini-shaped client traffic, normalises through an in-memory IR, authenticates, merges 5-tier permissions, enforces rate-limit / quota / hard-caps, picks an upstream vendor key via one of 8 strategies, streams the response back through the matching client codec, and emits a usage record per request to a Redis stream. Cost computation is **not** performed in Rust — the Go billing service consumes `usage:records`.
+
+## 2. Workspace layout
+
+Three layers with strict one-way dependency (enforced by `scripts/check-invariants.sh`):
+
+```
+┌────────── Execution ──────────┐  gw-gateway (bin), gw-proxy
+│   may depend on ↓ ↓ ↓         │
+├────────── Business ───────────┤  gw-adapter, gw-health, gw-routing,
+│   may depend on ↓             │  gw-capability, gw-tunnel-client
+├────────── Supporting ─────────┤  gw-core, gw-codec, gw-codec-macros,
+│   type / mechanism only        │  gw-store, gw-auth, gw-ledger
+└───────────────────────────────┘
+```
+
+**Forbidden edges**: Supporting → Business/Execution. Execution → Execution.
+
+### 2.1 Crate responsibilities
+
+| Crate | Layer | Responsibility |
+|-------|-------|----------------|
+| `gw-core` | Supporting | ID newtypes, entity structs, `RequestIR` / `ResponseIR` / `StreamEventIR`, `ErrorIR`, `ErrorClass`, `DefaultClassifier`, stable error-code dictionary. No I/O. |
+| `gw-codec-macros` | Supporting | Proc-macros driving codec boilerplate (Phase 2 `wire_convert_matrix!` scaffolding). |
+| `gw-codec` | Supporting | `ProtocolCodec` trait + OpenAI / Anthropic / Gemini codecs, same-protocol passthrough fast path, cross-protocol IR re-render, SSE accumulator, gzip/brotli compression, stream-policy truth table. |
+| `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (9 Moka caches with cold-load chain), `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
+| `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor RPM, ADR-024 hard caps, HMAC signature verify, IP allow/blocklist, model-permission regex w/ ReDoS budget, management-path detect. |
+| `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process `frozen_micro`), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction. |
+| `gw-adapter` | Business | `UpstreamAdapter` trait (vendor-specific outbound rewrite hooks), `UpstreamErrorAnalyzer` trait, `ErrorOutcome`. |
+| `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
+| `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
+| `gw-capability` | Business | Model-capability resolution: `Capability` enum, `RequiredCapabilities`, `ModelMapper`, `CapabilityResolver`, `AdapterCapabilityHook`, `CapabilityFilter`, `PricingReader`. |
+| `gw-tunnel-client` | Business | Tunnel transport to remote nodes: frame codec (magic `0xAE21`, 8 msg types), WebSocket transport w/ heartbeat / reconnect, DoH resolver, target-filter whitelist. Opt-in via `gw-gateway` feature `tunnel`. |
+| `gw-proxy` | Execution | Pingora `ProxyHttp` impl. Filter chain, `ReqCtx`, error fanout, timeouts, body-verify hook, jemalloc sampling. |
+| `gw-gateway` | Execution | Binary entry. Figment config, observability, KMS init, bootstrap OS thread + tokio runtime, health HTTP server. |
+
+### 2.2 Dependency DAG (path deps only)
+
+```
+gw-core ◄── everything
+
+Supporting:
+  gw-codec-macros  ◄── gw-codec
+  gw-codec         ◄── gw-proxy, gw-adapter
+  gw-store         ◄── gw-auth, gw-routing, gw-ledger, gw-capability,
+                       gw-tunnel-client, gw-proxy, gw-gateway
+  gw-auth          ◄── gw-capability, gw-proxy, gw-gateway
+  gw-ledger        ◄── gw-proxy, gw-gateway
+
+Business:
+  gw-health        ◄── gw-adapter, gw-routing, gw-proxy, gw-gateway
+  gw-adapter       ◄── (wired into gw-proxy in Phase 3)
+  gw-routing       ◄── gw-proxy, gw-gateway
+  gw-capability    ◄── (resolver injection pending — wave-7 T6-A)
+  gw-tunnel-client ◄── gw-gateway (feature="tunnel")
+
+Execution:
+  gw-proxy ◄── gw-gateway (binary)
+```
+
+## 3. Public traits — extension surface
+
+| Trait | Crate | Purpose | Impls |
+|-------|-------|---------|-------|
+| `ProtocolCodec` | gw-codec | Wire ⇄ IR per protocol | `OpenAiCodec`, `AnthropicCodec`, `GeminiCodec`, `PassthroughCodec`, `ErrorPassthroughCodec`, `AnyCodec` (dispatcher) |
+| `ErrorClassifier` | gw-core | HTTP status + body → `ClassifierOutcome` | `DefaultClassifier` |
+| `UpstreamErrorAnalyzer` | gw-adapter | Vendor-specific error shape → `ErrorOutcome` | `DefaultErrorAnalyzer` (Phase 3 adds vendor analyzers) |
+| `UpstreamAdapter` | gw-adapter | 4 outbound rewrite hooks + transport profile | `NoopAdapter` |
+| `Strategy` | gw-routing | Pick one `VendorKey` from candidates | `FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky` (8 total, `StrategyAny` enum) |
+| `FreezeGuard` | gw-ledger | RAII freeze on `frozen_micro` | `RequestFreeze`, `TaskFreeze` |
+| `DetailedLogSink` | gw-ledger | Verbose log output | `RedisStreamSink` (XADD MAXLEN) |
+| `ResolveBackend` | gw-capability | Model / key capability lookup | (injected at boot) |
+| `JwtBlacklist` | gw-auth | Token revocation check | `RedisJwtBlacklist` (with `FailMode`) |
+| `HeaderView` | gw-adapter | Borrow-friendly header access | (per-adapter) |
+| `ContentFilter` / `TokenEstimator` / `Redactor` | gw-core | Pluggable scrubbing / sizing | `Noop*` |
+
+## 4. Configuration
+
+Figment layering (low → high): `config/default.toml` → `config/local.toml` (gitignored) → `GW_*` env vars (`__` is nesting separator).
+
+### 4.1 TOML tables
+
+| Table | Purpose |
+|-------|---------|
+| `[server]` | `business_port` (8000), `metrics_port` (9090), `health_port` (8080) |
+| `[redis]` | URL, pool size |
+| `[pgsql]` | URL, max connections |
+| `[ratelimit]` | Workspace `global_rpm` ceiling (per-user lives in DB) |
+| `[ledger]` | `channel_capacity`, `batch_size`, `flush_interval_ms` for the billing flusher |
+| `[kms]` | KEK identifier; secret is env-only |
+| `[debug]` | Sampling rate + body-capture toggles for detailed logs |
+| `[security]` | `trust_xff` (default `false`) |
+
+Secrets must come from env, never the TOML.
+
+### 4.2 Env-var caveat
+
+`GW_KMS__KEK_HEX` **must contain at least one a-f character**. Figment tries integer coercion first; an all-digit 64-char hex round-trips as `i64` and fails the hex parser downstream. Use `python3 -c 'import secrets; print(secrets.token_hex(32))'`.
+
+### 4.3 KEK rotation state machine
+
+`crates/gw-store/src/encrypt.rs::KekCache`:
+
+```
+Healthy(K_old)
+    ↓ enter_dual_read(K_new)        // K_old + K_new both resident, K_new active
+DualRead { reencrypting: false }
+    ↓ mark_reencrypting()
+DualRead { reencrypting: true }     // re-encryption job running
+    ↓ drop_old_kek(K_old)
+Healthy(K_new)
+```
+
+Invariants: max 2 KEKs concurrent; never drop only KEK; cannot drop active KEK; cannot enter dual-read twice.
+
+## 5. Persistence
+
+### 5.1 PostgreSQL
+
+Migrations live at `crates/gw-store/migrations/`. **Not auto-applied** — run `psql -f` on a host Postgres for dev.
+
+| File | Tables |
+|------|--------|
+| `0001_initial.sql` | `users`, `user_groups`, `api_keys`, `vendors`, `vendor_keys`, `model_groups`, `pricings`, `jwks`, `ip_blocks`. All share `(id TEXT PK, payload JSONB, version BIGINT, updated_at TIMESTAMPTZ, deleted_at TIMESTAMPTZ NULL)`. |
+| `0002_gemini_file_mapping.sql` | `gemini_file_mapping(sha256_hex, user_id) PK → file_uri, mime, size, expire_unix_s`. |
+| `0003_model_mapping.sql` | `model_mapping(user_alias, protocol) PK → default_upstream_model, vendor_key_overrides JSONB, availability, pricing_strategy_ref`. |
+
+### 5.2 Redis namespaces
+
+| Namespace | Purpose | Writer | Reader |
+|-----------|---------|--------|--------|
+| `cache:{ns}:{id}` | Entity cache L1 | `gw-store::loader` (write-back), control plane | `EntityStore::*_or_load` |
+| `counter:{scope}:{id}:{field}` | Runtime counters (`balance_micro`, RPM, TPM) | Go billing service, `CounterStore::incrby` | `request_filter` balance check, RPM guard |
+| `events:entity` | Cache-invalidation stream | Control plane | `StreamConsumer` → `EntityStore::invalidate` |
+| `events:counter` | Counter event echo (Phase 5) | (deferred) | `StreamConsumer` (observability only in v1) |
+| `usage:records` | Billing records | `Ledger` flusher (XADD batched) | Go billing service |
+| `usage:detailed` | Verbose request/response log | `RedisStreamSink` (XADD MAXLEN) | Optional Go consumer |
+| `sticky:{key_id}:{user_id}` | Sticky assignment | `Sticky` strategy | `Sticky` strategy. **Leaks entries — no TTL sweep in v1.** |
+| `jwt:blacklist:*` | JWT revocation (T1-C) | Control plane | `RedisJwtBlacklist` (with `FailMode::ClosedOnError` / `OpenOnError`) |
+| `lock:*`, `key_health:*`, `circuit:*`, `dedup:*` | Reserved for Phase 5+ | — | — |
+
+## 6. Lifecycle — bootstrap shape
+
+Pingora's `Server::run_forever` is `-> !` and manages its own per-service runtimes, but we need long-lived background tasks (Ledger flusher, StreamConsumer, health server) on a runtime that outlives Pingora. The pattern in `crates/gw-gateway/src/lib.rs`:
+
+```
+main thread                              bootstrap thread (detached)
+─────────────                            ─────────────────────────
+load config                              build multi-thread tokio rt
+spawn bootstrap thread  ────────────►    KMS init
+                                         Redis connect
+                                         Postgres connect
+                                         EntityStore + Loader
+                                         KeyHealthStore, InFlightStore,
+                                          RateLimitGuard, CounterStore
+                                         Ledger::start         (spawned task)
+                                         StreamConsumer::start (spawned task)
+                                         health::run_server   (spawned task)
+                                         Prometheus exporter   (spawned task)
+                  ◄─── Wired bundle ───  pending::<()>().await    // park, keep tasks alive
+build pingora::Server
+add LlmGateway service
+health::READY ← true
+server.run_forever()    // never returns
+```
+
+`Ledger::try_send` is synchronous (`tokio mpsc::Sender::try_send`) so Pingora worker threads enqueue records without owning the bootstrap runtime handle.
+
+### 6.1 Listeners
+
+| Port | Server | Module |
+|------|--------|--------|
+| 8000 | Pingora business proxy | `gw-proxy::LlmGateway` |
+| 9090 | Prometheus `/metrics` | `gw-gateway::metrics_catalog` |
+| 8080 | Health HTTP — `/livez`, `/readyz`, `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience` | `gw-gateway::health` |
+
+The `/healthz/*` admin routes return `401` until management-token validation lands (T6-A).
+
+## 7. Invariants (`scripts/check-invariants.sh`)
+
+Active lints (all green at HEAD):
+
+| Lint | Meaning |
+|------|---------|
+| `crate_layering` | Supporting must not depend on Business/Execution; gw-routing / gw-capability / gw-tunnel-client (Business) must not depend on Execution; gw-proxy ↮ gw-task-runtime. |
+| `no_billing_crate` | `gw-billing` is permanently retired — must not reappear. |
+| `no_proxy_worker_dep` | gw-proxy must not depend on gw-task-runtime. |
+| `no_worker_addr_config` | Gateway config/code must not embed worker host/port (ADR-T16). |
+| `no_cost_micro` | Rust must not carry `cost_micro` (cost computation lives in Go). |
+| `no_billing_records_stream` | Use `usage:records`, not `billing:records`. |
+| `no_freezeguard_settle` | `FreezeGuard::release` only — `settle()` must not appear. |
+| `no_markup_product_scalar` | Carry `markup_chain` (array), not `markup_product` scalar. |
+| `no_legacy_breaker` | `BreakerState` / `BreakerStore` retired (replaced by gw-health). |
+| `no_legacy_retry` | `gw-routing/src/retry.rs` deleted in Phase 1c. |
+| `no_patch_body` | Adapter trait v2 has no `patch_body` / `BodyPatch`. |
+
+Pending lints (uncomment when target phase lands):
+
+| Lint | Lands at |
+|------|----------|
+| `no_ir_runtime_struct` | Phase 2 — atomic with `gw-core::ir` → `gw-core::schema` rename and removal of public constructors / `Default` / `Serialize`+`Deserialize`. |
+| `no_gateway_addr_config` | Phase 6 — symmetric to `no_worker_addr_config`. |
+| `deploy_e2e_matrix` | Phase 6/7 — N-gateway × M-worker topology acceptance. |
+
+## 8. Deliberate behaviours (not bugs)
+
+| Behaviour | Reason | Source |
+|-----------|--------|--------|
+| Non-stream completions rejected with `GW_REQUEST_NONSTREAM_NOT_SUPPORTED` 400 | `parse_response` is `unimplemented!()` in every v1 codec; without it Rust would silently bill `cost_micro = 0`. Lifts in v1.1. | `crates/gw-proxy/src/filters/request.rs` non-stream guard |
+| `(x-api-key, x-api-key-id)` pair required | A BYOK gateway can't route by key prefix; the pair makes tenant routing explicit. Anthropic SDK clients must supply both. Missing either yields `GW_AUTH_INVALID_APIKEY` (deliberately generic). | `crates/gw-proxy/src/filters/request.rs` auth extraction |
+| `trust_xff = false` by default | With it off, the IP blocklist matches the L4 socket peer. Enabling it behind an untrusted L7 hop lets clients forge XFF and bypass the blocklist. Fail-closed. | `config/default.toml [security]`, `crates/gw-proxy/src/filters/early.rs` |
+| Distinct 429 codes | `GW_QUOTA_RPM_EXCEEDED` (gateway tripped per-user RPM) vs `GW_UPSTREAM_OVERLOADED` (upstream returned 429) — clients need to distinguish local vs upstream throttling. | `crates/gw-core/src/error/codes.rs` |
+| Body filter swaps at EOS only | Cross-protocol rewrites happen in `upstream_request_filter` and must reach the wire in one shot. Pre-EOS chunks are dropped. | `crates/gw-proxy/src/gateway.rs::request_body_filter` |
+| `gw-core::ir` not renamed to `::schema` yet | Phase 1d landed the *scaffolding* parts of S1 v2 without breaking the runtime IR path. The strict A10 form lands atomically in Phase 2 alongside the wire→wire matrix migration. | `crates/gw-core/src/ir.rs`, `no_ir_runtime_struct` lint stays PENDING. |
+
+## 9. Known gaps (deferred)
+
+`expires_at` enforcement, `ip_allowlist` per-key, `daily_quota_tokens`, `Vendor.timeout_overrides`, `Pricing.model_markup`, JWT `iss`/`aud`/`nbf` validation on the API-key path, mandatory HMAC, cross-protocol *response* body re-render, multi-event SSE buffering, retry executor on the proxy hot path, DLQ for billing flush failures, Sticky TTL sweep, and `CapabilityResolver` injection into `LlmGateway` (T6-A wave-7) are deferred. The `e2e_full_flow.rs` Pingora+wiremock+reqwest harness is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`.
