@@ -45,6 +45,18 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 KEK_HEX = os.environ.get("GW_KEK_HEX", "deadbeef" * 8)
 
 
+# ---------------------------------------------------------------------------
+# Boot-time AuthConfig constants (E4-A). These MUST match the values seeded
+# into postgres by `tests/e2e/seed_auth_config.sql`, which is applied during
+# initdb (before the gateway boots and builds its JwtValidator). Scenario code
+# signs JWTs against these so iss/aud line up with what the validator enforces.
+# ---------------------------------------------------------------------------
+
+HS256_SECRET = "e2e-hs256-secret-key"
+JWT_ISS = "e2e-issuer"
+JWT_AUD = "e2e-aud"
+
+
 def sha256_bytes(plaintext: str) -> list[int]:
     """Return the 32 raw bytes of sha256(plaintext) as a list of ints.
 

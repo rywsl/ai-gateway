@@ -1150,6 +1150,7 @@ dependencies = [
  "anyhow",
  "axum",
  "fred",
+ "futures",
  "rand 0.8.6",
  "rsa",
  "serde",
