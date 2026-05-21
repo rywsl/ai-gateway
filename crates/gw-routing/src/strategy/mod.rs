@@ -14,6 +14,7 @@ pub mod fixed_order;
 pub mod latency_first;
 pub mod load_balance;
 pub mod round_robin;
+pub mod set;
 pub mod sticky;
 pub mod weighted_rr;
 
