@@ -1,0 +1,35 @@
+# ----- Builder stage -----
+FROM rust:1.86-bookworm AS builder
+WORKDIR /build
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        cmake \
+        make \
+        pkg-config \
+        perl \
+        libssl-dev \
+        ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY config ./config
+
+RUN cargo build --release --locked -p e2e-fake-web \
+ && strip /build/target/release/fake_web
+
+# ----- Runtime stage -----
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /build/target/release/fake_web /usr/local/bin/fake_web
+
+EXPOSE 7000
+
+ENV RUST_LOG=info
+
+ENTRYPOINT ["/usr/local/bin/fake_web"]

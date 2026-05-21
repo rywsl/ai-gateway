@@ -1,0 +1,9 @@
+[package]
+name = "e2e-fake-upstream"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+
+[[bin]]
+name = "fake_upstream"
+path = "src/main.rs"

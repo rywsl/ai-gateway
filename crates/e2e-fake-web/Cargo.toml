@@ -1,0 +1,9 @@
+[package]
+name = "e2e-fake-web"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+
+[[bin]]
+name = "fake_web"
+path = "src/main.rs"

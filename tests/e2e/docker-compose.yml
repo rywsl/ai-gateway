@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: gateway
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gateway"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+
+  fake-upstream:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.e2e-fake-upstream
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  fake-web:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.e2e-fake-web
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      FAKE_WEB_PG_URL: postgres://postgres:postgres@postgres:5432/gateway
+      FAKE_WEB_REDIS_URL: redis://redis:6379
+    ports:
+      - "7000:7000"
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      fake-web:
+        condition: service_started
+    environment:
+      GW_REDIS__URL: redis://redis:6379
+      GW_PGSQL__URL: postgres://postgres:postgres@postgres:5432/gateway
+      GW_KMS__KEK_HEX: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+      GW_SERVER__BUSINESS_PORT: "8000"
+      GW_SERVER__METRICS_PORT: "9090"
+      GW_SERVER__HEALTH_PORT: "8080"
+    ports:
+      - "8000:8000"
+      - "9090:9090"
+      - "8080:8080"
