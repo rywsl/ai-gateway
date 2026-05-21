@@ -1732,6 +1732,7 @@ dependencies = [
 name = "gw-tunnel-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arc-swap",
  "bytes",
  "futures-util",
