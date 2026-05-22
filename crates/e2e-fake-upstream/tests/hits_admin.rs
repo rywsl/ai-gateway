@@ -108,3 +108,48 @@ async fn chaos_stats_counts_variants() {
     let sum: u64 = variants.iter().map(|v| v["hits"].as_u64().unwrap()).sum();
     assert_eq!(sum, 50, "every request must increment exactly one variant");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn hits_total_sums_routes_and_refused() {
+    let scenario = Scenario {
+        routes: vec![Route {
+            r#match: MatchSpec {
+                method: Some("POST".into()),
+                path_regex: Some("^/x$".into()),
+                header_eq: None,
+            },
+            auth_check: None,
+            response: ResponseSpec::ConnectionRefusedFirstN { n: 3 },
+        }],
+    };
+    let counters = make_counters(&scenario);
+    let weighted = e2e_fake_upstream::routes::make_weighted_counters(&scenario);
+    let business = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let admin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let baddr = business.local_addr().unwrap();
+    let aaddr = admin.local_addr().unwrap();
+    let s = Arc::new(RwLock::new(scenario));
+    let c = Arc::new(RwLock::new(counters));
+    let wh = Arc::new(RwLock::new(weighted));
+    let refuse = RefuseCounter::new();
+    e2e_fake_upstream::server::prime_refuse_counter(&*s.read().await, &refuse);
+    tokio::spawn(serve_business(
+        business,
+        Arc::clone(&s),
+        Arc::clone(&c),
+        Arc::clone(&wh),
+        refuse.clone(),
+    ));
+    tokio::spawn(serve_admin(admin, s, c, wh, refuse));
+
+    // 3 refused (counter primed to 3), then 2 served (route hit).
+    for _ in 0..5 {
+        drive_once(baddr, "/x").await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let v = fetch_json(aaddr, "/admin/hits-total").await;
+    assert_eq!(v["refused_hit_sum"], serde_json::json!(3));
+    assert_eq!(v["routes_hit_sum"], serde_json::json!(2));
+    assert_eq!(v["total"], serde_json::json!(5));
+}

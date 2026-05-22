@@ -490,6 +490,22 @@ async fn handle_admin(
             Ok(json_response(StatusCode::OK, &body))
         }
 
+        ("GET", "/admin/hits-total") => {
+            let ctr = counters.read().await;
+            let routes_hit_sum: u64 = ctr
+                .iter()
+                .map(|a| a.load(std::sync::atomic::Ordering::Relaxed) as u64)
+                .sum();
+            let refused = refuse.refused_total();
+            let body = serde_json::json!({
+                "routes_hit_sum": routes_hit_sum,
+                "refused_hit_sum": refused,
+                "total": routes_hit_sum + refused,
+            })
+            .to_string();
+            Ok(json_response(StatusCode::OK, &body))
+        }
+
         _ => Ok(json_response(
             StatusCode::NOT_FOUND,
             r#"{"error":"unknown admin endpoint"}"#,
