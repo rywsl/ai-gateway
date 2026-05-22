@@ -148,6 +148,15 @@ pub async fn run(
         ctx.debug.upgrade_to_enabled(DebugTrigger::Header);
     }
 
+    // -----------------------------------------------------------------
+    // 6. ADR-S3: sticky-strategy binding key. Header is case-insensitive
+    //    per HTTP semantics; absent → `Sticky` falls back to
+    //    "first available" (strictly additive — identical to v1 behaviour).
+    // -----------------------------------------------------------------
+    ctx.conversation_id = header_lookup(&headers_vec, "x-conversation-id")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_owned());
+
     ctx.phase_end();
     Ok(())
 }

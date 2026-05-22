@@ -42,6 +42,12 @@ figment.workspace = true
 # implements against. Both are needed at link time.
 pingora.workspace = true
 pingora-proxy.workspace = true
+# rustls is reachable transitively via pingora-rustls. We need the crate
+# path directly so we can call `crypto::ring::default_provider().install_default()`
+# at startup — both `aws-lc-rs` (rustls 0.23 default) and `ring` (pingora-
+# rustls direct dep) end up linked, and rustls refuses to auto-select. See
+# `gw_gateway::run` for the install site.
+rustls = "0.23"
 tikv-jemallocator.workspace = true
 secrecy.workspace = true
 hex.workspace = true

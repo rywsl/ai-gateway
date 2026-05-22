@@ -40,6 +40,29 @@ impl AnyCodec {
         None
     }
 
+    /// ADR-S1: dispatch `path_implies_stream` to the concrete codec. Only
+    /// Gemini currently overrides the default (`false`); OpenAI and
+    /// Anthropic inherit it.
+    #[inline]
+    pub fn path_implies_stream(&self, path: &str) -> bool {
+        match self {
+            AnyCodec::OpenAi(_) => OpenAi::path_implies_stream(path),
+            AnyCodec::Anthropic(_) => Anthropic::path_implies_stream(path),
+            AnyCodec::Gemini(_) => Gemini::path_implies_stream(path),
+        }
+    }
+
+    /// ADR-S1b: dispatch `extract_path_model` to the concrete codec. Only
+    /// Gemini currently overrides the default (`None`).
+    #[inline]
+    pub fn extract_path_model<'a>(&self, path: &'a str) -> Option<&'a str> {
+        match self {
+            AnyCodec::OpenAi(_) => OpenAi::extract_path_model(path),
+            AnyCodec::Anthropic(_) => Anthropic::extract_path_model(path),
+            AnyCodec::Gemini(_) => Gemini::extract_path_model(path),
+        }
+    }
+
     #[inline]
     pub fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
         match self {

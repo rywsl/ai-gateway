@@ -33,10 +33,11 @@ use crate::strategy::fixed_order::FixedOrder;
 use crate::strategy::latency_first::LatencyFirst;
 use crate::strategy::load_balance::LoadBalance;
 use crate::strategy::round_robin::RoundRobin;
-use crate::strategy::sticky::Sticky;
+use crate::strategy::sticky::{Sticky, DEFAULT_STICKY_CAP, DEFAULT_STICKY_TTL_SECS};
 use crate::strategy::weighted_rr::WeightedRr;
 use crate::strategy::StrategyAny;
 use gw_core::entity::StrategyKind;
+use std::time::Duration;
 
 /// One instance of each of the 8 strategy variants, owned for the lifetime of
 /// the process and shared across all requests via `Arc<StrategySet>`.
@@ -57,8 +58,13 @@ pub struct StrategySet {
 }
 
 impl StrategySet {
-    /// Construct with the production defaults for each strategy.
-    pub fn new_default() -> Self {
+    /// Construct the 8 strategy variants with their production defaults,
+    /// parameterised on `sticky_ttl` so deployments can override the
+    /// `Sticky` binding TTL via `routing.sticky_ttl_secs` (ADR-S4).
+    ///
+    /// All other strategies use their existing defaults — only `Sticky`
+    /// reads a configurable knob in v1.
+    pub fn new(sticky_ttl: Duration) -> Self {
         Self {
             fixed_order: StrategyAny::FixedOrder(FixedOrder),
             round_robin: StrategyAny::RoundRobin(RoundRobin::default()),
@@ -67,8 +73,15 @@ impl StrategySet {
             cost_first: StrategyAny::CostFirst(CostFirst),
             latency_first: StrategyAny::LatencyFirst(LatencyFirst),
             cache_affinity: StrategyAny::CacheAffinity(CacheAffinity),
-            sticky: StrategyAny::Sticky(Sticky::default()),
+            sticky: StrategyAny::Sticky(Sticky::new_with_ttl(sticky_ttl, DEFAULT_STICKY_CAP)),
         }
+    }
+
+    /// Construct with the production defaults for each strategy, including
+    /// the compile-time `DEFAULT_STICKY_TTL_SECS` for `Sticky`. Tests that
+    /// pin "production default = 30 min" continue to call this.
+    pub fn new_default() -> Self {
+        Self::new(Duration::from_secs(DEFAULT_STICKY_TTL_SECS))
     }
 
     /// Sentinel constructor for Wave 0 scaffolding. Equivalent to

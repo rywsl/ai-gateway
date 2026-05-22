@@ -57,6 +57,12 @@ pub struct ReqCtx {
     pub is_stream: bool,
     pub idempotent: bool,
     pub cached_body: Option<Bytes>,
+    /// ADR-S3: optional client-supplied conversation identifier read from the
+    /// `X-Conversation-Id` request header in `early_request_filter`. Threaded
+    /// into `PickCtx.conversation_id` so the `Sticky` strategy can bind a
+    /// conversation to a vendor key. `None` when the header is absent —
+    /// strategies that consume it fall back to "first available" behaviour.
+    pub conversation_id: Option<String>,
 
     // --- Routing / vendor ---
     pub picked_vendor_key: Option<Arc<VendorKey>>,
@@ -162,6 +168,7 @@ impl ReqCtx {
             is_stream: false,
             idempotent: true,
             cached_body: None,
+            conversation_id: None,
             picked_vendor_key: None,
             picked_vendor: None,
             pricing: None,

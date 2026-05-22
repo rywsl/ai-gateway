@@ -13,6 +13,7 @@ use e2e_fake_upstream::inject::RefuseCounter;
 use e2e_fake_upstream::routes::make_counters;
 use e2e_fake_upstream::scenario::{self, default_scenario};
 use e2e_fake_upstream::server::{prime_refuse_counter, serve_admin, serve_business};
+use e2e_fake_upstream::tls::serve_tls;
 
 // ── CLI / env arg parsing ─────────────────────────────────────────────────────
 
@@ -91,6 +92,15 @@ async fn main() {
         tokio::spawn(async move { serve_business(business_listener, sc_b, ctr_b, refuse_b).await });
     let admin_task =
         tokio::spawn(async move { serve_admin(admin_listener, sc_a, ctr_a, refuse_a).await });
+    // ADR-S5: TLS variant of the business listener on port 9443. Standalone
+    // task — does NOT share the scenario engine (handshake-failure is the
+    // intended test path; scenarios are not reachable past a refused
+    // handshake). See `crates/e2e-fake-upstream/src/tls.rs` for details.
+    let tls_task = tokio::spawn(async move {
+        if let Err(e) = serve_tls("0.0.0.0:9443").await {
+            eprintln!("[fake-upstream] tls listener exited with error: {e}");
+        }
+    });
 
-    let _ = tokio::join!(business_task, admin_task);
+    let _ = tokio::join!(business_task, admin_task, tls_task);
 }

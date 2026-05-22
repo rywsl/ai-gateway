@@ -78,6 +78,14 @@ struct Wired {
 /// Library entrypoint. The bin's `main` calls this after installing the
 /// jemalloc global allocator.
 pub fn run() -> anyhow::Result<()> {
+    // Pin rustls to the `ring` crypto provider. Both `aws-lc-rs` (rustls
+    // 0.23's default feature) and `ring` (pingora-rustls direct dep) end up
+    // linked in this build, so rustls refuses to auto-select at handshake
+    // time and panics. Pick `ring` to match pingora-rustls + the
+    // `e2e-fake-upstream` listener. `install_default` is set-once and
+    // returns `Err` on a second call — ignored.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cfg = config::load().context("config load failed")?;
     observability::init(&cfg).context("observability init failed")?;
 
@@ -317,7 +325,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         trust_xff: cfg.security.trust_xff,
         business_port: cfg.server.business_port,
         jwt_validator,
-        strategies: Arc::new(gw_routing::strategy::set::StrategySet::new_default()),
+        strategies: Arc::new(gw_routing::strategy::set::StrategySet::new(
+            Duration::from_secs(cfg.routing.sticky_ttl_secs),
+        )),
         capability_resolver,
     })
 }

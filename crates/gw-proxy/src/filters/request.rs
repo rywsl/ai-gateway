@@ -500,6 +500,23 @@ pub async fn run(
             unreachable!()
         }
     };
+    // ADR-S1: some wire formats (Gemini) signal streaming via the URL path
+    // (`:streamGenerateContent`) rather than a body field. OR the codec's
+    // path-aware hook into `is_stream` so those requests are not rejected by
+    // the v1 non-stream gate below.
+    let path_str = session.req_header().uri.path();
+    let is_stream = is_stream || codec.path_implies_stream(path_str);
+    // ADR-S1b: Gemini carries the model in the URL path (`/v1[beta]/models/<M>:<verb>`)
+    // and `GeminiRequest::model` is `#[serde(skip)]`. Fall back to the
+    // codec's path extractor when the body parse returned an empty model.
+    let model_name = if model_name.as_ref().is_empty() {
+        codec
+            .extract_path_model(path_str)
+            .map(ModelName::from)
+            .unwrap_or(model_name)
+    } else {
+        model_name
+    };
     ctx.model = Some(model_name.clone());
     ctx.is_stream = is_stream;
     // POSTs that mutate vendor state are *not* idempotent. We can refine

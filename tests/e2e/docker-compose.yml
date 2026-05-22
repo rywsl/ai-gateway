@@ -32,6 +32,7 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+      - "9443:9443"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9001/healthz || exit 1"]
       interval: 2s
@@ -71,6 +72,9 @@ services:
       GW_SERVER__BUSINESS_PORT: "8000"
       GW_SERVER__METRICS_PORT: "9090"
       GW_SERVER__HEALTH_PORT: "8080"
+      # ADR-S4: shrink sticky TTL so the e2e test_routing_retry.py sticky
+      # TTL-expiry leg is exercisable inside CI (production default 1800).
+      GW_ROUTING__STICKY_TTL_SECS: "2"
     ports:
       - "8000:8000"
       - "9090:9090"

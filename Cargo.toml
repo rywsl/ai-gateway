@@ -61,8 +61,12 @@ subtle = "2.6"
 rand = "0.8"
 
 # 网关 / 网络
-pingora = "0.8"
-pingora-proxy = "0.8"
+# `rustls` feature: pingora-core 默认 `default = []`，不启用任何 TLS backend
+# 时 `HttpPeer.tls = true` 会落入 `noop_tls` 桩（poll_read→0、poll_write→丢
+# 弃），所有 https 上游会卡死在「读 response headers」。rustls 与本工作区
+# 其余 TLS 栈（reqwest / sqlx / tokio-tungstenite / e2e-fake-upstream）同源。
+pingora = { version = "0.8", features = ["rustls"] }
+pingora-proxy = { version = "0.8", features = ["rustls"] }
 fred = { version = "9", features = ["partial-tracing", "metrics", "subscriber-client"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "macros", "migrate", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
