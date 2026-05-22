@@ -98,3 +98,75 @@ async def test_run_one_request_records_client_side_failure():
     out = await _run_one_request(client, spec, handles, timeout_s=1)
     assert out.failed_client_side is True
     assert out.status is None
+
+
+import socket
+
+
+def test_soak_driver_runs_against_loopback(monkeypatch):
+    # Run a *very* short soak against a real loopback http server (httpx
+    # MockTransport doesn't compose with multi-thread asyncio nicely).
+    # 5 threads × 100 rps × 1s = ~500 reqs.
+    import http.server
+    import threading as _t
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("content-length", 0))
+            self.rfile.read(n)
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("transfer-encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"22\r\ndata: {\"choices\":[{\"delta\":{}}]}\n\n\r\n")
+            self.wfile.write(b"e\r\ndata: [DONE]\n\n\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        def log_message(self, *a, **k):  # silence
+            return
+        # livez/readyz
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    th = _t.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        from soak.driver import SoakConfig, SoakDriver
+        from soak.seed import SoakSeedHandles, SOAK_MODEL_OPENAI
+
+        cfg = SoakConfig(
+            duration_s=1,
+            target_rps=100,
+            n_threads=2,
+            max_inflight_per_thread=16,
+            per_request_timeout_s=5,
+            drain_grace_s=2,
+            n_users=2,
+            gateway_url=f"http://127.0.0.1:{port}",
+            livez_url=f"http://127.0.0.1:{port}/livez",
+            readyz_url=f"http://127.0.0.1:{port}/readyz",
+        )
+        handles = SoakSeedHandles(
+            users=[("u-1", "ak-1", "sk-1"), ("u-2", "ak-2", "sk-2")],
+            groups_by_kind={"open_ai": "g", "anthropic": "g",
+                            "gemini": "g", "cross": "g"},
+            models_by_kind={"open_ai": SOAK_MODEL_OPENAI,
+                            "anthropic": "x", "gemini": "y"},
+        )
+        report = SoakDriver(cfg, handles).run()
+        # Loose lower bound — CI may not sustain 100 rps exactly.
+        assert report.requests_completed >= 30, report
+        assert report.duration_ms >= 1000
+        assert report.by_status.get(200, 0) >= 30
+        assert report.livez_probes >= 1
+        assert report.livez_non_200 == 0
+    finally:
+        srv.shutdown()
+        th.join(timeout=2)

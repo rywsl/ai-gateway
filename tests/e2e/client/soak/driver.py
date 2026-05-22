@@ -237,3 +237,136 @@ def _thread_loop(
                     pass
 
     asyncio.run(runner())
+
+
+# ---------------------------------------------------------------------------
+# SoakDriver
+# ---------------------------------------------------------------------------
+
+import random
+import statistics
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+from soak.workload import WorkloadMix, sample_request_spec
+
+
+class SoakDriver:
+    def __init__(
+        self,
+        cfg: SoakConfig,
+        handles: SoakSeedHandles,
+        mix: WorkloadMix | None = None,
+        rng_seed: int = 0xC0FFEE,
+    ) -> None:
+        self.cfg = cfg
+        self.handles = handles
+        self.mix = mix or WorkloadMix.default()
+        self.rng_seed = rng_seed
+
+    # ── livez/readyz background probe ────────────────────────────────────
+
+    def _probe(self, url: str, period_s: float, stop: threading.Event,
+               counter: dict) -> None:
+        while not stop.is_set():
+            try:
+                r = urllib.request.urlopen(url, timeout=2)  # noqa: S310
+                counter["probes"] += 1
+                if r.status != 200:
+                    counter["non_200"] += 1
+            except Exception:
+                counter["probes"] += 1
+                counter["non_200"] += 1
+            stop.wait(period_s)
+
+    # ── main entry ───────────────────────────────────────────────────────
+
+    def run(self) -> SoakDriverReport:
+        cfg = self.cfg
+        target_count = cfg.target_count
+        rng = random.Random(self.rng_seed)
+
+        outcomes: list[RequestOutcome] = []
+        outcomes_lock = threading.Lock()
+        queues: list[SimpleQueue] = [SimpleQueue() for _ in range(cfg.n_threads)]
+        stop_event = threading.Event()
+
+        t0 = time.perf_counter()
+
+        # Spawn worker threads.
+        with ThreadPoolExecutor(max_workers=cfg.n_threads + 2) as pool:
+            for ti in range(cfg.n_threads):
+                pool.submit(
+                    _thread_loop, ti, cfg, self.handles, queues[ti],
+                    stop_event, outcomes, outcomes_lock,
+                )
+
+            livez_counter: dict[str, int] = {"probes": 0, "non_200": 0}
+            readyz_counter: dict[str, int] = {"probes": 0, "non_200": 0}
+            probe_stop = threading.Event()
+            pool.submit(self._probe, cfg.livez_url, 10.0, probe_stop, livez_counter)
+            pool.submit(self._probe, cfg.readyz_url, 10.0, probe_stop, readyz_counter)
+
+            deadline = t0 + cfg.duration_s
+            tick_interval = 1.0 / cfg.target_rps
+            sent = 0
+
+            for i in range(target_count):
+                # Absolute monotonic schedule — no naive sleep accumulation.
+                scheduled = t0 + i * tick_interval
+                now = time.perf_counter()
+                if scheduled > now:
+                    time.sleep(scheduled - now)
+                if time.perf_counter() >= deadline:
+                    break
+                spec = sample_request_spec(self.mix, self.handles, rng)
+                queues[i % cfg.n_threads].put(spec)
+                sent += 1
+
+            stop_event.set()
+            probe_stop.set()
+            # Workers drain on stop_event + final grace inside _thread_loop.
+
+        # Measure wall time after executor joins all workers (includes drain).
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+
+        # Aggregate.
+        completed = len(outcomes)
+        report = SoakDriverReport.empty(target_count=target_count)
+        report.duration_ms = duration_ms
+        report.requests_sent = sent
+        report.requests_completed = completed
+        report.livez_probes = livez_counter["probes"]
+        report.livez_non_200 = livez_counter["non_200"]
+        report.readyz_probes = readyz_counter["probes"]
+        report.readyz_non_200 = readyz_counter["non_200"]
+
+        latencies: list[float] = []
+        for o in outcomes:
+            if o.failed_client_side:
+                report.requests_failed_client_side += 1
+            else:
+                report.bytes_received_total += o.bytes_received
+                latencies.append(o.latency_ms)
+                if o.status is not None:
+                    report.by_status[o.status] = report.by_status.get(o.status, 0) + 1
+                if o.error_code:
+                    report.by_error_code[o.error_code] = (
+                        report.by_error_code.get(o.error_code, 0) + 1
+                    )
+            report.by_protocol[o.protocol] = (
+                report.by_protocol.get(o.protocol, 0) + 1
+            )
+            report.by_shape[o.shape] = report.by_shape.get(o.shape, 0) + 1
+            report.by_cross_proto[o.cross_protocol] = (
+                report.by_cross_proto.get(o.cross_protocol, 0) + 1
+            )
+
+        if latencies:
+            latencies.sort()
+            report.latency_ms_p50 = statistics.median(latencies)
+            report.latency_ms_p90 = latencies[int(len(latencies) * 0.90)]
+            report.latency_ms_p99 = latencies[int(len(latencies) * 0.99)]
+            report.latency_ms_max = latencies[-1]
+
+        return report
