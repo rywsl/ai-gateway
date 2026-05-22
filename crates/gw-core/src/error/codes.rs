@@ -50,6 +50,8 @@ pub const GW_ROUTING_NO_CAPABILITY_MATCH: &str = "GW_ROUTING_NO_CAPABILITY_MATCH
 // Upstream: connect / TLS failures surfaced via fail_to_connect retry (G10).
 pub const GW_UPSTREAM_CONNECT_FAILED: &str = "GW_UPSTREAM_CONNECT_FAILED";
 pub const GW_UPSTREAM_TLS_ERROR: &str = "GW_UPSTREAM_TLS_ERROR";
+// Upstream: codec `parse_response` decode failure on non-streaming path (T1-A/B/C).
+pub const GW_UPSTREAM_PROTOCOL_DECODE_ERROR: &str = "GW_UPSTREAM_PROTOCOL_DECODE_ERROR";
 
 // --- Tunnel codes (ADR-T-1 / spec §4) ---
 pub const GW_TUNNEL_NO_NODE: &str = "GW_TUNNEL_NO_NODE";
