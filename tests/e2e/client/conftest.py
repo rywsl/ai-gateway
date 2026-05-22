@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import subprocess
 import time
 from typing import Any, Optional
 
@@ -963,3 +964,74 @@ def seed_passthrough(
         "group": group,
         "model": model,
     }
+
+
+# ---------------------------------------------------------------------------
+# Gateway log / state helpers — used by the soak orchestrator
+# (tests/e2e/client/scenarios/test_chaos_soak.py). Module-level functions,
+# NOT fixtures — callers pass arguments explicitly.
+# ---------------------------------------------------------------------------
+
+
+def gateway_compose_logs_since(t0_iso: str) -> str:
+    """`docker compose logs gateway --since=<t0_iso>` text."""
+    proc = subprocess.run(
+        ["docker", "compose", "-f", "../docker-compose.yml",
+         "logs", "gateway", "--since", t0_iso, "--no-color"],
+        capture_output=True, text=True, timeout=30,
+    )
+    return proc.stdout + proc.stderr
+
+
+def gateway_container_state() -> dict:
+    """`docker compose ps gateway --format json` parsed."""
+    import json as _json
+    proc = subprocess.run(
+        ["docker", "compose", "-f", "../docker-compose.yml",
+         "ps", "gateway", "--format", "json"],
+        capture_output=True, text=True, timeout=15,
+    )
+    txt = proc.stdout.strip()
+    if not txt:
+        return {}
+    # `compose ps --format json` emits one JSON object per service per line.
+    return _json.loads(txt.splitlines()[0])
+
+
+def gateway_metrics_text(metrics_url: str) -> str:
+    """Fetch /metrics text from the gateway."""
+    return requests.get(f"{metrics_url.rstrip('/')}/metrics", timeout=10).text
+
+
+def gateway_rss_bytes() -> int | None:
+    """`docker stats --no-stream` mem usage for the gateway service.
+    Returns the parsed RSS in bytes, or None if parsing fails."""
+    # We must NOT pass `$(...)` syntax to subprocess with shell=False.
+    # Look up the container id first via `docker compose ps -q gateway`.
+    cid_proc = subprocess.run(
+        ["docker", "compose", "-f", "../docker-compose.yml",
+         "ps", "-q", "gateway"],
+        capture_output=True, text=True, timeout=10,
+    )
+    cid = cid_proc.stdout.strip()
+    if not cid:
+        return None
+    proc = subprocess.run(
+        ["docker", "stats", "--no-stream", "--format",
+         "{{.MemUsage}}", cid],
+        capture_output=True, text=True, timeout=15,
+    )
+    out = proc.stdout.strip()
+    if not out:
+        return None
+    # Format like "123.4MiB / 7.5GiB". Parse first token.
+    head = out.split("/")[0].strip()
+    units = {"B": 1, "KiB": 1024, "MiB": 1024**2,
+             "GiB": 1024**3, "TiB": 1024**4}
+    for u, mul in units.items():
+        if head.endswith(u):
+            try:
+                return int(float(head[:-len(u)]) * mul)
+            except ValueError:
+                return None
+    return None
