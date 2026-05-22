@@ -66,3 +66,17 @@ sticky_ttl_secs = 1800
 # `HardCapCfg` defaults. When it accepts caller-supplied caps, reintroduce
 # an `[auth]` section here with `hard_cap_max_input_tokens` and
 # `hard_cap_max_cost_micro` and thread them into `LlmGateway`.
+
+[tunnel]
+# Tunnel subsystem (ADR-T-5). Default off — pick_peer uses the Direct path.
+# Flipping to true requires restart (SIGHUP), not a hot-reload. Override
+# via GW_TUNNEL__ENABLED=true.
+enabled = false
+doh = "cloudflare"
+dns_cache_ttl_secs = 600
+target_whitelist = []
+heartbeat_interval_secs = 30
+missed_pong_threshold = 3
+backoff_min_secs = 1
+backoff_max_secs = 60
+max_streams_per_conn = 256
