@@ -219,6 +219,13 @@ async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result
             body_base64,
             delay_ms,
         } => inject::write_gzip_static(stream, status, headers, body_base64, delay_ms).await,
+        // Weighted dispatch is implemented in Task 2 (CHAOS_ENABLED env +
+        // dispatch unwrap). Reaching this arm before Task 2 lands is a logic
+        // error: validate_scenario must be called on every scenario post before
+        // it is stored, and the server only stores validated scenarios.
+        ResponseSpec::Weighted { .. } => {
+            unreachable!("Weighted variant must be resolved before dispatch (Task 2)")
+        }
     }
 }
 
