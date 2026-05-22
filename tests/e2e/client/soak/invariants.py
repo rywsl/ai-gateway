@@ -16,6 +16,8 @@ raw observation. Missing data is `passed: None` with `raw.reason`.
 """
 from __future__ import annotations
 
+import re
+
 from soak.driver import SoakDriverReport
 from soak.log_scan import PANIC_PATTERN, scan_panic_lines
 
@@ -143,5 +145,153 @@ def account_drain_quiescence_reached(*, window: dict) -> dict:
         raw={
             "drain_quiescent": quiescent,
             "drain_observation_series": window.get("drain_observation_series", []),
+        },
+    )
+
+
+# ── Group 3: resource_release (§7.1.3) ───────────────────────────────────
+
+_INFLIGHT_RE = re.compile(
+    r"^(?P<series>gw_[a-zA-Z0-9_]*in_?flight[a-zA-Z0-9_]*(\{[^}]*\})?)\s+(?P<v>[-+0-9eE.]+)\s*$",
+    re.MULTILINE,
+)
+
+
+def resource_all_in_flight_gauges_zero(metrics_text: str) -> dict:
+    non_zero: dict[str, float] = {}
+    for m in _INFLIGHT_RE.finditer(metrics_text):
+        try:
+            v = float(m.group("v"))
+        except ValueError:
+            continue
+        if v != 0:
+            non_zero[m.group("series")] = v
+    return _leaf(
+        "results.invariants.resource_release.all_in_flight_gauges_zero",
+        kind="hard",
+        passed=(len(non_zero) == 0),
+        source="gateway:/metrics",
+        raw={
+            "scan_pattern": "^gw_*in_flight* series",
+            "non_zero_gauges": non_zero,
+        },
+    )
+
+
+def resource_rss_growth_under_threshold(
+    *,
+    before_bytes: int,
+    after_bytes: int,
+    threshold_mib: int = 100,
+) -> dict:
+    growth_bytes = max(0, after_bytes - before_bytes)
+    growth_mib = growth_bytes / (1024 * 1024)
+    return _leaf(
+        "results.invariants.resource_release.rss_growth_under_threshold",
+        kind="hard",
+        passed=(growth_mib < threshold_mib),
+        source="docker.stats.gateway",
+        raw={
+            "rss_before_bytes": before_bytes,
+            "rss_after_bytes": after_bytes,
+            "growth_bytes": growth_bytes,
+            "growth_mib": round(growth_mib, 2),
+            "threshold_mib": threshold_mib,
+        },
+    )
+
+
+# ── Group 4: error_code_compliance (§7.1.4) ──────────────────────────────
+
+def error_code_compliance_all_in_catalog(
+    *,
+    observed: set[str],
+    catalog: set[str],
+    catalog_source: str,
+) -> dict:
+    unknown = sorted(observed - catalog)
+    return _leaf(
+        "results.invariants.error_code_compliance.all_codes_in_catalog",
+        kind="hard",
+        passed=(len(unknown) == 0),
+        source=f"driver.by_error_code ∪ fake_web.detailed_log_spectrum vs {catalog_source}",
+        raw={
+            "catalog_source": catalog_source,
+            "observed": sorted(observed),
+            "unknown": unknown,
+        },
+    )
+
+
+# ── Group 5: chaos_causal_reconciliation (§7.1.5) ────────────────────────
+
+# Spec Appendix A — pinned variant→error_code mapping.
+VARIANT_ERROR_CODE_MAP: dict[str, list[str]] = {
+    "tcp_reset_after_headers": ["GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED"],
+    "tcp_reset_mid_body":      ["GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED"],
+    "connection_refused_first_n": ["GW_UPSTREAM_CONNECT_FAILED"],
+    "slow_body_byte_per_second":  ["GW_UPSTREAM_TIMEOUT"],
+    "partial_sse_event": ["GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_TIMEOUT",
+                          "GW_UPSTREAM_CANCELLED"],
+    "status_with_retry_after": ["GW_UPSTREAM_OVERLOADED"],
+    "static":                  ["GW_UPSTREAM_5XX"],
+}
+
+
+def chaos_causal_per_variant(
+    chaos_stats: dict,
+    by_error_code: dict[str, int],
+    *,
+    min_ratio: float = 0.7,
+) -> dict:
+    """Spec §7.1.5 — per-variant `E ≥ floor(H × min_ratio)`.
+
+    The `sse` variant is skipped (the happy path is not a fault).
+    Variants with `hits == 0` are also skipped (no causality to check).
+    """
+    per_variant: dict[str, dict] = {}
+    overall_pass = True
+    for v in chaos_stats.get("variants", []):
+        kind = v.get("kind", "")
+        hits = int(v.get("hits", 0))
+        if kind == "sse" or hits == 0:
+            continue
+        mapped = VARIANT_ERROR_CODE_MAP.get(kind, [])
+        matched = sum(by_error_code.get(c, 0) for c in mapped)
+        required = int(hits * min_ratio)
+        passed = matched >= required
+        per_variant[kind] = {
+            "variant_index": v.get("variant_index"),
+            "variant_hits": hits,
+            "mapped_error_codes": mapped,
+            "matched_error_count": matched,
+            "ratio": round(matched / hits, 3) if hits else None,
+            "min_ratio": min_ratio,
+            "passed": passed,
+        }
+        if not passed:
+            overall_pass = False
+    return _leaf(
+        "results.invariants.chaos_causal_reconciliation.summary",
+        kind="hard",
+        passed=overall_pass if per_variant else True,
+        source="fake_upstream:/admin/chaos-stats + driver.by_error_code",
+        raw={"per_variant": per_variant},
+    )
+
+
+# ── Group 6: min_completion (§7.1.6) ─────────────────────────────────────
+
+def min_completion_at_least_half(rpt: SoakDriverReport) -> dict:
+    threshold = rpt.target_count * 0.5
+    return _leaf(
+        "results.invariants.min_completion.at_least_half_completed",
+        kind="hard",
+        passed=(rpt.requests_completed >= threshold),
+        source="driver.requests_completed",
+        raw={
+            "requests_completed": rpt.requests_completed,
+            "target_count": rpt.target_count,
+            "threshold_count": int(threshold),
         },
     )

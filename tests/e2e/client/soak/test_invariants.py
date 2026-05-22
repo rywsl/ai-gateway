@@ -121,3 +121,130 @@ def test_drain_quiescence_pass():
 def test_drain_quiescence_fail():
     leaf = account_drain_quiescence_reached(window={"drain_quiescent": False})
     assert leaf["passed"] is False
+
+
+from soak.invariants import (
+    resource_all_in_flight_gauges_zero,
+    resource_rss_growth_under_threshold,
+    error_code_compliance_all_in_catalog,
+    chaos_causal_per_variant,
+    min_completion_at_least_half,
+    VARIANT_ERROR_CODE_MAP,
+)
+
+
+def test_all_in_flight_gauges_zero_pass():
+    metrics_text = """\
+gw_routing_inflight_per_key{key_id="vk-1"} 0
+gw_proxy_streams_in_flight 0
+"""
+    leaf = resource_all_in_flight_gauges_zero(metrics_text)
+    assert leaf["passed"] is True
+    assert leaf["raw"]["non_zero_gauges"] == {}
+
+
+def test_all_in_flight_gauges_zero_fail():
+    metrics_text = """\
+gw_routing_inflight_per_key{key_id="vk-1"} 2
+gw_proxy_streams_in_flight 0
+"""
+    leaf = resource_all_in_flight_gauges_zero(metrics_text)
+    assert leaf["passed"] is False
+    assert leaf["raw"]["non_zero_gauges"][
+        'gw_routing_inflight_per_key{key_id="vk-1"}'
+    ] == 2.0
+
+
+def test_rss_growth_pass():
+    leaf = resource_rss_growth_under_threshold(
+        before_bytes=100 * 1024 * 1024,
+        after_bytes=180 * 1024 * 1024,
+        threshold_mib=100,
+    )
+    assert leaf["passed"] is True
+
+
+def test_rss_growth_fail():
+    leaf = resource_rss_growth_under_threshold(
+        before_bytes=100 * 1024 * 1024,
+        after_bytes=300 * 1024 * 1024,
+        threshold_mib=100,
+    )
+    assert leaf["passed"] is False
+
+
+def test_error_code_compliance_pass():
+    leaf = error_code_compliance_all_in_catalog(
+        observed={"GW_UPSTREAM_TIMEOUT", "GW_UPSTREAM_5XX"},
+        catalog={"GW_UPSTREAM_TIMEOUT", "GW_UPSTREAM_5XX", "GW_AUTH_INVALID_APIKEY"},
+        catalog_source="codes.rs@abc1234",
+    )
+    assert leaf["passed"] is True
+    assert leaf["raw"]["unknown"] == []
+
+
+def test_error_code_compliance_fail():
+    leaf = error_code_compliance_all_in_catalog(
+        observed={"GW_UPSTREAM_TIMEOUT", "GW_MADE_UP_CODE"},
+        catalog={"GW_UPSTREAM_TIMEOUT"},
+        catalog_source="codes.rs@abc1234",
+    )
+    assert leaf["passed"] is False
+    assert "GW_MADE_UP_CODE" in leaf["raw"]["unknown"]
+
+
+def test_variant_error_code_map_codes_exist_in_typical_catalog():
+    typical = {
+        "GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED",
+        "GW_UPSTREAM_TIMEOUT", "GW_UPSTREAM_OVERLOADED", "GW_UPSTREAM_5XX",
+    }
+    for variant_kind, codes in VARIANT_ERROR_CODE_MAP.items():
+        assert codes, f"variant {variant_kind} has empty code set"
+        for c in codes:
+            assert c in typical, f"{variant_kind}: {c} not in typical catalog"
+
+
+def test_chaos_causal_pass():
+    chaos_stats = {
+        "enabled": True,
+        "variants": [
+            {"variant_index": 0, "kind": "sse", "hits": 100, "weight": 80},
+            {"variant_index": 1, "kind": "tcp_reset_mid_body",
+             "hits": 10, "weight": 5},
+        ],
+    }
+    by_error_code = {"GW_UPSTREAM_CONNECT_FAILED": 9, "GW_UPSTREAM_CANCELLED": 0}
+    leaf = chaos_causal_per_variant(chaos_stats, by_error_code, min_ratio=0.7)
+    per = leaf["raw"]["per_variant"]
+    assert per["tcp_reset_mid_body"]["passed"] is True
+    assert per["tcp_reset_mid_body"]["matched_error_count"] == 9
+    assert leaf["passed"] is True
+
+
+def test_chaos_causal_fail_when_no_mapped_codes():
+    chaos_stats = {
+        "enabled": True,
+        "variants": [
+            {"variant_index": 0, "kind": "sse", "hits": 100, "weight": 80},
+            {"variant_index": 1, "kind": "tcp_reset_mid_body",
+             "hits": 100, "weight": 5},
+        ],
+    }
+    by_error_code = {"GW_UPSTREAM_CONNECT_FAILED": 0, "GW_UPSTREAM_CANCELLED": 0}
+    leaf = chaos_causal_per_variant(chaos_stats, by_error_code, min_ratio=0.7)
+    assert leaf["raw"]["per_variant"]["tcp_reset_mid_body"]["passed"] is False
+    assert leaf["passed"] is False
+
+
+def test_min_completion_pass():
+    rpt = SoakDriverReport.empty(target_count=49980)
+    rpt.requests_completed = 30000
+    leaf = min_completion_at_least_half(rpt)
+    assert leaf["passed"] is True
+
+
+def test_min_completion_fail():
+    rpt = SoakDriverReport.empty(target_count=49980)
+    rpt.requests_completed = 10000
+    leaf = min_completion_at_least_half(rpt)
+    assert leaf["passed"] is False
