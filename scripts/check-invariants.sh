@@ -282,7 +282,7 @@ fi
 # ---------------------------------------------------------------------------
 # tunnel_require_means_hard_fail (spec §8) — require_tunnel must be paired
 # with GW_TUNNEL_NO_NODE (no silent Direct fallback per ADR-T-4). Each
-# use-site source line must have a `GW_TUNNEL_NO_NODE` within 6 lines below.
+# use-site source line must have a `GW_TUNNEL_NO_NODE` within 8 lines (vline through vline+7) below.
 # Skips:
 #  - the field definition in gw-core::entity (docstring above defines the
 #    contract; no use-site code nearby)
@@ -302,7 +302,7 @@ while IFS=: read -r vfile vline _; do
     *'//'*) continue;;
   esac
   if ! sed -n "${vline},$((vline+7))p" "$vfile" 2>/dev/null | grep -q 'GW_TUNNEL_NO_NODE'; then
-    violations="${violations}${vfile}:${vline}: require_tunnel without GW_TUNNEL_NO_NODE within 6 lines\n"
+    violations="${violations}${vfile}:${vline}: require_tunnel without GW_TUNNEL_NO_NODE within 8 lines\n"
   fi
 done < <(grep -rn --include='*.rs' -E '\brequire_tunnel\b' crates/ 2>/dev/null)
 if [ -n "$violations" ]; then
