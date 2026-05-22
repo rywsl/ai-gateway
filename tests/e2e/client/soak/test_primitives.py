@@ -66,3 +66,94 @@ def test_seed_handles_shape():
     assert len(h.users) == 2
     assert h.groups_by_kind["cross"] == "soak-cross"
     assert h.models_by_kind["open_ai"] == SOAK_MODEL_OPENAI
+
+
+import random
+
+from soak.workload import (
+    RequestSpec,
+    WorkloadMix,
+    build_request,
+    sample_request_spec,
+)
+
+
+def _fake_handles() -> SoakSeedHandles:
+    return SoakSeedHandles(
+        users=[("u-1", "ak-1", "sk-1"), ("u-2", "ak-2", "sk-2")],
+        groups_by_kind={
+            "open_ai": "g-o", "anthropic": "g-a", "gemini": "g-g", "cross": "g-c",
+        },
+        models_by_kind={
+            "open_ai": SOAK_MODEL_OPENAI,
+            "anthropic": "claude-3-haiku-20240307",
+            "gemini": "gemini-2.0-flash",
+        },
+    )
+
+
+def test_sample_distribution_respects_weights():
+    rng = random.Random(42)
+    mix = WorkloadMix.default()
+    h = _fake_handles()
+    counts: dict[str, int] = {}
+    for _ in range(10_000):
+        spec = sample_request_spec(mix, h, rng)
+        counts[spec.protocol] = counts.get(spec.protocol, 0) + 1
+    # Each protocol gets ~33 % — 10k samples gives ±2 % wiggle.
+    for proto in ("open_ai", "anthropic", "gemini"):
+        pct = counts.get(proto, 0) / 10_000 * 100
+        assert 28 <= pct <= 38, f"{proto} pct={pct:.1f}"
+
+
+def test_build_request_openai_stream():
+    h = _fake_handles()
+    spec = RequestSpec(
+        protocol="open_ai",
+        shape="stream",
+        cross_protocol=False,
+        payload_size_bucket="small",
+        user_id="u-1",
+        api_key_id="ak-1",
+        api_key_plaintext="sk-1",
+    )
+    req = build_request(spec, h)
+    assert req["method"] == "POST"
+    assert req["path"] == "/v1/chat/completions"
+    assert req["headers"]["x-api-key"] == "sk-1"
+    assert req["headers"]["x-api-key-id"] == "ak-1"
+    assert req["json"]["model"] == SOAK_MODEL_OPENAI
+    assert req["json"]["stream"] is True
+
+
+def test_build_request_anthropic_non_stream():
+    h = _fake_handles()
+    spec = RequestSpec(
+        protocol="anthropic",
+        shape="non_stream",
+        cross_protocol=False,
+        payload_size_bucket="small",
+        user_id="u-1",
+        api_key_id="ak-1",
+        api_key_plaintext="sk-1",
+    )
+    req = build_request(spec, h)
+    assert req["path"] == "/v1/messages"
+    assert req["json"]["model"] == "claude-3-haiku-20240307"
+    assert req["json"].get("stream") in (False, None)
+
+
+def test_build_request_cross_protocol_targets_cross_group():
+    h = _fake_handles()
+    spec = RequestSpec(
+        protocol="open_ai",
+        shape="stream",
+        cross_protocol=True,
+        payload_size_bucket="small",
+        user_id="u-1",
+        api_key_id="ak-1",
+        api_key_plaintext="sk-1",
+    )
+    req = build_request(spec, h)
+    assert req["path"] == "/v1/chat/completions"
+    assert req["json"]["model"] == SOAK_MODEL_OPENAI
