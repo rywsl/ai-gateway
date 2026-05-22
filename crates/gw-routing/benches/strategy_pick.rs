@@ -42,6 +42,7 @@ fn fake_key(id: &str, priority: i32, weight: u32) -> Arc<VendorKey> {
         forced_capabilities: vec![],
         exclusive_capability_match: false,
         tunnel_preference: None,
+        oauth: None,
     })
 }
 

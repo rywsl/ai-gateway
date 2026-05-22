@@ -388,6 +388,7 @@ pub enum ModelAvailability {
 /// `gw-store::loader` so the back-edge `gw-core → gw-store` is avoided.
 /// Populated by `load_vendor_key` when the JSONB payload contains an `oauth`
 /// sub-object (G3 / go-onboarding-gaps T0).
+#[derive(Clone)]
 pub struct OAuthCredentials {
     pub access_token: SecretString,
     pub refresh_token: SecretString,
