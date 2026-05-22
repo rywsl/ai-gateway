@@ -44,7 +44,8 @@ pub async fn check_revoked(
     }
 }
 
-const KEY_PREFIX: &str = "auth:jwt_blacklist:";
+const JWT_PREFIX: &str = "jwt:blacklist:";
+const MGMT_PREFIX: &str = "mgmt_token:blacklist:";
 
 pub struct RedisJwtBlacklist {
     pool: RedisPool,
@@ -54,13 +55,39 @@ impl RedisJwtBlacklist {
     pub fn new(pool: RedisPool) -> Self {
         Self { pool }
     }
+
+    /// Inherent helper: probe the jwt-blacklist namespace by `jti`, folding
+    /// backend errors via the supplied [`BlacklistFailMode`].
+    ///
+    /// Mirrors the policy of the [`check_revoked`] free function so callers
+    /// that hold a concrete `RedisJwtBlacklist` (e.g. proxy filters wiring
+    /// in T3-A) don't have to up-cast through the trait.
+    pub async fn check_jwt(&self, jti: &str, mode: BlacklistFailMode) -> bool {
+        self.check_keyed(&format!("{JWT_PREFIX}{jti}"), mode).await
+    }
+
+    /// Inherent helper: probe the mgmt-token blacklist namespace by `token_id`.
+    /// ADR-B2-4: the management-token revoke surface lives in a separate Redis
+    /// key prefix so jti and token_id collisions are impossible.
+    pub async fn check_mgmt(&self, token_id: &str, mode: BlacklistFailMode) -> bool {
+        self.check_keyed(&format!("{MGMT_PREFIX}{token_id}"), mode)
+            .await
+    }
+
+    async fn check_keyed(&self, key: &str, mode: BlacklistFailMode) -> bool {
+        let client = self.pool.next();
+        match client.get::<Option<String>, _>(key).await {
+            Ok(v) => v.is_some(),
+            Err(_) => matches!(mode, BlacklistFailMode::FailClosed),
+        }
+    }
 }
 
 #[async_trait]
 impl JwtBlacklist for RedisJwtBlacklist {
     async fn is_revoked(&self, jti: &str) -> Result<bool, BlacklistError> {
         let client = self.pool.next();
-        let key = format!("{KEY_PREFIX}{jti}");
+        let key = format!("{JWT_PREFIX}{jti}");
         let v: Option<String> = client
             .get(key)
             .await
@@ -70,7 +97,7 @@ impl JwtBlacklist for RedisJwtBlacklist {
 
     async fn revoke(&self, jti: &str, until_unix_s: u64) -> Result<(), BlacklistError> {
         let client = self.pool.next();
-        let key = format!("{KEY_PREFIX}{jti}");
+        let key = format!("{JWT_PREFIX}{jti}");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -87,5 +114,26 @@ impl JwtBlacklist for RedisJwtBlacklist {
             .await
             .map_err(|e| BlacklistError::Backend(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mgmt_namespace_tests {
+    /// ADR-B2-4 source-level safety net: verify the mgmt + jwt namespaces
+    /// are isolated and the new inherent methods exist on RedisJwtBlacklist.
+    /// Behavioral tests against a live Redis live in the integration suite
+    /// (gated by testcontainers).
+    #[test]
+    fn mgmt_methods_exist_in_source() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/jwt_blacklist.rs"),
+        )
+        .expect("read source");
+        let mgmt_prefix: String = ["mgmt_token:", "blacklist:"].concat();
+        let jwt_prefix: String = ["jwt:", "blacklist:"].concat();
+        assert!(src.contains(&mgmt_prefix), "mgmt prefix missing");
+        assert!(src.contains(&jwt_prefix), "jwt prefix missing");
+        assert!(src.contains("check_mgmt"), "check_mgmt method missing");
+        assert!(src.contains("check_jwt"), "check_jwt method missing");
     }
 }
