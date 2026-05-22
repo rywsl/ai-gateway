@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 from typing import Any, Optional
 
@@ -143,6 +144,42 @@ def wait_for_records(
             return xlen
         time.sleep(0.1)
     return fake_web.usage_stats().get("records_xlen", 0)
+
+
+# ---------------------------------------------------------------------------
+# Prometheus metric helpers. Shared by scenario suites that assert on counter
+# deltas (E4-C routing/retry, E4-E reliability/DLQ). Both helpers are
+# stateless reads against `/metrics` — no fixture dependency, callers pass
+# `metrics_url` explicitly.
+# ---------------------------------------------------------------------------
+
+
+def metrics_snapshot(metric: str, metrics_url: str) -> dict[str, float]:
+    """Return `{label_pairs -> value}` for every series of `metric`.
+
+    `label_pairs` is the raw `{a="x",b="y"}` string (or "" when unlabelled).
+    Values are parsed as floats from the Prometheus text format so both
+    counters and gauges (which may carry fractional values) survive intact.
+    """
+    text = requests.get(f"{metrics_url.rstrip('/')}/metrics", timeout=5).text
+    out: dict[str, float] = {}
+    line_re = re.compile(
+        rf"^{re.escape(metric)}(?:\{{(?P<lbl>[^}}]*)\}})?\s+(?P<v>[-+0-9eE.]+)$"
+    )
+    for raw in text.splitlines():
+        m = line_re.match(raw)
+        if m:
+            out[m.group("lbl") or ""] = float(m.group("v"))
+    return out
+
+
+def label_delta(pre: dict[str, float], post: dict[str, float], labels: str) -> float:
+    """Return the post-minus-pre delta for one specific `labels` series.
+
+    Missing keys default to 0 so the helper is safe to call before the
+    metric has been emitted for that label set at all.
+    """
+    return post.get(labels, 0) - pre.get(labels, 0)
 
 
 # ---------------------------------------------------------------------------

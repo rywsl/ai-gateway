@@ -52,11 +52,9 @@ surfaces as a `ConnectError` → `fail_to_connect` is invoked.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 
 import pytest
-import requests
 
 from conftest import (
     BALANCE_LARGE,
@@ -65,7 +63,9 @@ from conftest import (
     FakeUpstreamClient,
     FakeWebClient,
     _error_code,
+    label_delta,
     make_openai_client,
+    metrics_snapshot,
     pair_headers,
     post_chat,
     seed_model_group,
@@ -88,28 +88,6 @@ from conftest import (
 # pingora's `fail_to_connect` hook (see module docstring).
 UNREACHABLE_BASE = "http://fake-upstream:9999"
 WORKING_BASE = "http://fake-upstream:9000"
-
-
-def _metrics_snapshot(metric: str, metrics_url: str) -> dict[str, int]:
-    """Return `{label_pairs -> int_value}` for every series of `metric`.
-
-    `label_pairs` is the raw `{a="x",b="y"}` string (or "" when unlabelled).
-    Counters are floats in the Prometheus text format; we floor to int.
-    """
-    text = requests.get(f"{metrics_url.rstrip('/')}/metrics", timeout=5).text
-    out: dict[str, int] = {}
-    line_re = re.compile(
-        rf"^{re.escape(metric)}(?:\{{(?P<lbl>[^}}]*)\}})?\s+(?P<v>[-+0-9eE.]+)$"
-    )
-    for raw in text.splitlines():
-        m = line_re.match(raw)
-        if m:
-            out[m.group("lbl") or ""] = int(float(m.group("v")))
-    return out
-
-
-def _label_delta(pre: dict[str, int], post: dict[str, int], label: str) -> int:
-    return post.get(label, 0) - pre.get(label, 0)
 
 
 def _redis_xrange(stream: str = "usage:records") -> list[dict]:
@@ -254,7 +232,7 @@ def test_connect_refused_first_key_falls_through_to_second_key(
     # Working vendor serves the default happy SSE (the autouse
     # isolate_state fixture already installed the baseline scenario before
     # this test ran; we don't override it).
-    pre = _metrics_snapshot("gw_retry_attempt_total", metrics_url)
+    pre = metrics_snapshot("gw_retry_attempt_total", metrics_url)
 
     client = make_openai_client(gateway_url, "sk-cr1", "ak-cr1")
     stream = client.chat.completions.create(
@@ -268,12 +246,12 @@ def test_connect_refused_first_key_falls_through_to_second_key(
             pieces.append(chunk.choices[0].delta.content)
     assert "".join(pieces) == "hi", pieces
 
-    post = _metrics_snapshot("gw_retry_attempt_total", metrics_url)
+    post = metrics_snapshot("gw_retry_attempt_total", metrics_url)
     # `outcome="recovered"` ticks for each retry that successfully tried
     # ANOTHER key. The first attempt on `vk-cr1-bad` produces exactly one
     # `recovered` increment before the second attempt on `vk-cr1-good`
     # succeeds.
-    delta_recovered = _label_delta(pre, post, 'outcome="recovered"')
+    delta_recovered = label_delta(pre, post, 'outcome="recovered"')
     assert delta_recovered >= 1, (
         f"expected gw_retry_attempt_total{{outcome=\"recovered\"}} to "
         f"increment by >=1 for the cross-key retry; pre={pre}, post={post}"
@@ -316,7 +294,7 @@ def test_three_keys_connect_refused_returns_5xx(
             ("vk-cr2-c", "v-cr2-c", UNREACHABLE_BASE),
         ],
     )
-    pre = _metrics_snapshot("gw_retry_attempt_total", metrics_url)
+    pre = metrics_snapshot("gw_retry_attempt_total", metrics_url)
 
     resp = post_chat(
         gateway_url,
@@ -334,8 +312,8 @@ def test_three_keys_connect_refused_returns_5xx(
     # pingora's default HTML/text. We assert 5xx + the `exhausted` metric.
     assert 500 <= resp.status_code < 600, (resp.status_code, resp.text[:200])
 
-    post = _metrics_snapshot("gw_retry_attempt_total", metrics_url)
-    delta_exhausted = _label_delta(pre, post, 'outcome="exhausted"')
+    post = metrics_snapshot("gw_retry_attempt_total", metrics_url)
+    delta_exhausted = label_delta(pre, post, 'outcome="exhausted"')
     assert delta_exhausted >= 1, (
         f"expected gw_retry_attempt_total{{outcome=\"exhausted\"}} to "
         f"increment when 3 keys all refuse connect; pre={pre}, post={post}"
