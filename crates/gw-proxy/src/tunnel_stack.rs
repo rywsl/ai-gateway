@@ -99,16 +99,17 @@ impl TunnelStack {
         host: &str,
         port: u16,
     ) -> Result<HttpPeer, TunnelPeerError> {
+        // Take one snapshot for the entire method so that a concurrent
+        // reload_nodes() cannot cause the two node-lookup sites to disagree.
+        let snapshot = self.nodes.load_full();
+
         // Lazily create the transport on first use.
         let transport = if let Some(t) = self.transports.get(node_id) {
             t.clone()
         } else {
-            // The node ws_url comes from the matching ProxyNodeView; in v1 we
-            // re-read it from the snapshot. If the node disappeared between
-            // resolve() and here, fall through to NoLive.
-            let url = match self
-                .nodes
-                .load()
+            // The node ws_url comes from the matching ProxyNodeView. If the
+            // node disappeared between resolve() and here, fall through to NoLive.
+            let url = match snapshot
                 .iter()
                 .find(|n| n.id == node_id)
                 .map(|n| n.ws_url.clone())
@@ -127,6 +128,9 @@ impl TunnelStack {
             t
         };
 
+        // Cold-start case: the ReconnectingTransport was just spawned and its
+        // WS handshake has not completed yet. Flow into R-E failover via
+        // GW_TUNNEL_NO_LIVE per spec §4.
         if transport.current().is_none() {
             metrics::counter!(
                 "gw_tunnel_open_total",
@@ -139,12 +143,18 @@ impl TunnelStack {
             });
         }
 
-        let target_url: url::Url = format!("https://{host}:{port}").parse().map_err(|_| {
-            TunnelPeerError::TargetDenied {
+        // Bracket bare IPv6 literals so url::Url::parse accepts them.
+        let host_for_url = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        };
+        let target_url: url::Url = format!("https://{host_for_url}:{port}")
+            .parse()
+            .map_err(|_| TunnelPeerError::TargetDenied {
                 host: host.to_owned(),
                 port,
-            }
-        })?;
+            })?;
         if gw_tunnel_client::target_filter::assert_target_allowed(&target_url).is_err() {
             metrics::counter!(
                 "gw_tunnel_open_total",
@@ -159,9 +169,8 @@ impl TunnelStack {
         }
 
         // Build the HttpPeer whose socket terminates at the WS node.
-        let view_url = self
-            .nodes
-            .load()
+        // Use the same snapshot taken at the top of this method.
+        let view_url = snapshot
             .iter()
             .find(|n| n.id == node_id)
             .map(|n| n.ws_url.clone())
