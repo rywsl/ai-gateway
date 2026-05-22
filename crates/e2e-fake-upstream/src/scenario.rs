@@ -195,5 +195,7 @@ fn validate_response(r: &ResponseSpec, route_idx: usize, depth: u32) -> Result<(
                 .map_err(|e| format!("route[{route_idx}].variants[{vi}]: {e}"))?;
         }
     }
+    // Non-Weighted variants carry no nested ResponseSpec today; if you add
+    // a variant that does, extend this walker.
     Ok(())
 }

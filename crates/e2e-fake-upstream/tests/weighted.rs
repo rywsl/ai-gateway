@@ -27,6 +27,8 @@ fn weighted_variant_round_trips() {
         }
         other => panic!("expected Weighted, got {other:?}"),
     }
+    // Positive case: a well-formed Weighted scenario must pass validation.
+    validate_scenario(&s).expect("happy-path Weighted scenario must validate");
 }
 
 #[test]
