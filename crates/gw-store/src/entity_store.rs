@@ -2,7 +2,7 @@
 //!
 //! Sized + TTL policy per entity class (ADR-006 / ADR-016):
 //! - user / user_group / apikey / ipblock: 300s TTL
-//! - vendor / vendor_key / model_group / pricing: 1800s TTL
+//! - vendor / vendor_key / model_group / pricing / proxy_node: 1800s TTL
 //! - jwks: 3600s TTL
 //!
 //! Hot-path callers should use the `*_or_load` methods, which dedupe concurrent
@@ -11,7 +11,8 @@
 
 use crate::loader::{
     load_apikey, load_auth_config, load_jwks, load_model, load_model_group, load_pricing,
-    load_user, load_user_group, load_vendor, load_vendor_key, LoaderCtx,
+    load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
+    load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -93,6 +94,10 @@ pub struct EntityStore {
         (String, gw_core::protocol::ProtocolKind),
         std::sync::Arc<gw_core::versioned::Versioned<gw_core::entity::ModelMapping>>,
     >,
+    /// Proxy-node entity cache (ADR-T-3). 1800s TTL, matching `vendor_key`.
+    /// Populated by [`EntityStore::proxy_node_or_load`]; invalidated by the
+    /// stream consumer on `proxy_node` namespace events (T1 / T5-B).
+    pub proxy_node: Cache<String, Arc<Versioned<ProxyNode>>>,
     /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
     /// `None` for unit tests that pre-populate caches by hand.
     loader: Option<Arc<LoaderCtx>>,
@@ -169,6 +174,10 @@ impl EntityStore {
                 .build(),
             model_mapping: Cache::builder()
                 .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(1800))
+                .build(),
+            proxy_node: Cache::builder()
+                .max_capacity(1_000)
                 .time_to_live(Duration::from_secs(1800))
                 .build(),
             loader,
@@ -409,5 +418,45 @@ impl EntityStore {
             })
             .await
             .ok()
+    }
+
+    /// Resolve a [`ProxyNode`] (ADR-T-3) by id. L1 Moka → cold load via
+    /// `load_proxy_node`. 1800s TTL matching `vendor_key`. Returns `None` on
+    /// miss/timeout; callers treat that as "node not available".
+    pub async fn proxy_node_or_load(&self, id: &str) -> Option<Arc<Versioned<ProxyNode>>> {
+        if let Some(hit) = self.proxy_node.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.to_owned();
+        let deadline = self.cold_load_timeout;
+        self.proxy_node
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("proxy_node", deadline, async move {
+                    load_proxy_node(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    /// Fetch the full live list of [`ProxyNode`]s from PG (bypasses the
+    /// per-id cache). Used by `TunnelStack::reload_nodes` (ADR-T-3, T5-B)
+    /// after a `proxy_node` invalidation event arrives on the entity stream.
+    /// The caller ArcSwaps the returned `Vec` into the tunnel stack; hot-path
+    /// reads are then lock-free.
+    ///
+    /// Returns `None` on timeout or loader error (caller should retain the
+    /// previous snapshot and log the failure).
+    pub async fn proxy_nodes_list_or_load(&self) -> Option<Vec<ProxyNode>> {
+        let loader = self.loader.as_ref()?.clone();
+        let deadline = self.cold_load_timeout;
+        with_cold_load_timeout("proxy_node_list", deadline, async move {
+            load_proxy_nodes_list(&loader).await
+        })
+        .await
     }
 }

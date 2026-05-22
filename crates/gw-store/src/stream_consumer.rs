@@ -177,6 +177,9 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "pricing" => store.pricing.invalidate(&ModelName::from(id)).await,
         "jwks" => store.jwks.invalidate(&Kid::from(id)).await,
         "ipblock" => store.ipblock.invalidate(&id.to_string()).await,
+        "proxy_node" => {
+            store.proxy_node.invalidate(&id.to_string()).await;
+        }
         "model_mapping" => {
             // id format: "alias|protocol", with protocol matching ProtocolKind's
             // snake_case serde tag ("openai" | "anthropic" | "gemini").
@@ -223,4 +226,56 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
 #[doc(hidden)]
 pub async fn apply_inline_for_test_helper(store: &Arc<EntityStore>, ns: &str, id: &str) {
     apply_entity_event(store, ns, id).await;
+}
+
+#[cfg(test)]
+mod proxy_node_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use gw_core::entity::ProxyNode;
+    use gw_core::versioned::Versioned;
+    use std::sync::Arc;
+
+    fn make_proxy_node(id: &str) -> ProxyNode {
+        ProxyNode {
+            id: id.to_string(),
+            ws_url: "ws://127.0.0.1:9999/tunnel".parse().unwrap(),
+            enabled: true,
+            latency_ms: 0,
+            allowed_provider_ids: vec![],
+            allowed_vendor_key_ids: vec![],
+            auth_token_enc: None,
+        }
+    }
+
+    /// Pre-populate `store.proxy_node` with a fake `ProxyNode`, call
+    /// `apply_entity_event`, and assert the cache key is then absent.
+    #[tokio::test]
+    async fn proxy_node_invalidation_removes_cache_entry() {
+        let store = Arc::new(EntityStore::new());
+        let node = make_proxy_node("node-1");
+        let versioned = Arc::new(Versioned {
+            version: 1,
+            value: Arc::new(node),
+        });
+
+        // Pre-populate the cache.
+        store
+            .proxy_node
+            .insert("node-1".to_string(), versioned)
+            .await;
+        assert!(
+            store.proxy_node.get("node-1").await.is_some(),
+            "pre-condition: cache entry must be present before invalidation"
+        );
+
+        // Fire the invalidation.
+        apply_entity_event(&store, "proxy_node", "node-1").await;
+
+        // The cache entry must be gone.
+        assert!(
+            store.proxy_node.get("node-1").await.is_none(),
+            "cache entry must be absent after invalidation"
+        );
+    }
 }
