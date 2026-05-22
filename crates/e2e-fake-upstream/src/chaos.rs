@@ -48,3 +48,19 @@ pub fn pick_weighted(variants: &[WeightedVariant]) -> ResponseSpec {
     let idx = dist.sample(&mut thread_rng());
     (*variants[idx].spec).clone()
 }
+
+/// Like [`pick_weighted`] but also returns the chosen variant index so the
+/// caller can attribute the hit to a per-variant counter.
+pub fn pick_weighted_indexed(variants: &[WeightedVariant]) -> (usize, ResponseSpec) {
+    debug_assert!(
+        !variants.is_empty(),
+        "validator must have rejected empty variants"
+    );
+    if variants.len() == 1 {
+        return (0, (*variants[0].spec).clone());
+    }
+    let weights = variants.iter().map(|v| v.weight.max(1));
+    let dist = WeightedIndex::new(weights).expect("all weights >= 1 after max");
+    let idx = dist.sample(&mut thread_rng());
+    (idx, (*variants[idx].spec).clone())
+}

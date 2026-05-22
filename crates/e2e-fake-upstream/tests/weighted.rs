@@ -113,7 +113,7 @@ fn weighted_route() -> Route {
 #[tokio::test(flavor = "current_thread")]
 async fn chaos_off_always_picks_first_variant() {
     use e2e_fake_upstream::inject::RefuseCounter;
-    use e2e_fake_upstream::routes::make_counters;
+    use e2e_fake_upstream::routes::{make_counters, make_weighted_counters};
     use e2e_fake_upstream::server::serve_business;
 
     set_enabled_for_test(false);
@@ -122,11 +122,13 @@ async fn chaos_off_always_picks_first_variant() {
         routes: vec![weighted_route()],
     };
     let counters = make_counters(&scenario);
+    let weighted_hits = make_weighted_counters(&scenario);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let s = Arc::new(RwLock::new(scenario));
     let c = Arc::new(RwLock::new(counters));
-    tokio::spawn(serve_business(listener, s, c, RefuseCounter::new()));
+    let wh = Arc::new(RwLock::new(weighted_hits));
+    tokio::spawn(serve_business(listener, s, c, wh, RefuseCounter::new()));
 
     // 5 sequential requests — chaos OFF, variant[0] (HAPPY sse) must win every time.
     for _ in 0..5 {

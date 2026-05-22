@@ -82,11 +82,13 @@ async fn main() {
     };
 
     let initial_counters = make_counters(&initial_scenario);
+    let initial_weighted = e2e_fake_upstream::routes::make_weighted_counters(&initial_scenario);
     let refuse = RefuseCounter::new();
     prime_refuse_counter(&initial_scenario, &refuse);
 
     let scenario = Arc::new(RwLock::new(initial_scenario));
     let counters = Arc::new(RwLock::new(initial_counters));
+    let weighted_hits = Arc::new(RwLock::new(initial_weighted));
 
     let business_addr: SocketAddr = "0.0.0.0:9000".parse().expect("valid address");
     let admin_addr: SocketAddr = "0.0.0.0:9001".parse().expect("valid address");
@@ -103,11 +105,14 @@ async fn main() {
     let sc_a = Arc::clone(&scenario);
     let ctr_a = Arc::clone(&counters);
     let refuse_a = refuse.clone();
+    let wh_b = Arc::clone(&weighted_hits);
+    let wh_a = Arc::clone(&weighted_hits);
 
-    let business_task =
-        tokio::spawn(async move { serve_business(business_listener, sc_b, ctr_b, refuse_b).await });
+    let business_task = tokio::spawn(async move {
+        serve_business(business_listener, sc_b, ctr_b, wh_b, refuse_b).await
+    });
     let admin_task =
-        tokio::spawn(async move { serve_admin(admin_listener, sc_a, ctr_a, refuse_a).await });
+        tokio::spawn(async move { serve_admin(admin_listener, sc_a, ctr_a, wh_a, refuse_a).await });
     // ADR-S5: TLS variant of the business listener on port 9443. Standalone
     // task — does NOT share the scenario engine (handshake-failure is the
     // intended test path; scenarios are not reachable past a refused
