@@ -403,9 +403,12 @@ async fn handle_admin(
             }
         }
 
-        _ => Ok(json_response(
-            StatusCode::NOT_FOUND,
-            r#"{"error":"unknown admin endpoint"}"#,
-        )),
+        _ => {
+            let _ = empty_body();
+            Ok(json_response(
+                StatusCode::NOT_FOUND,
+                r#"{"error":"unknown admin endpoint"}"#,
+            ))
+        }
     }
 }
