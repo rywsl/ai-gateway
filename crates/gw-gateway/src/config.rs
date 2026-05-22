@@ -30,6 +30,8 @@ pub struct Config {
     pub security: SecurityCfg,
     #[serde(default)]
     pub loader: LoaderCfg,
+    #[serde(default)]
+    pub routing: RoutingCfg,
     // TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
     // `HardCapCfg` defaults. Once it accepts caller-supplied caps, reintroduce
     // an `[auth]` section here and thread `hard_cap_max_input_tokens` /
@@ -134,6 +136,33 @@ impl Default for LoaderCfg {
     fn default() -> Self {
         Self {
             cold_load_timeout_ms: default_cold_load_timeout_ms(),
+        }
+    }
+}
+
+/// Routing-layer knobs.
+///
+/// `sticky_ttl_secs` controls how long the `Sticky` strategy keeps a
+/// `conversation_id → vendor_key_id` binding in its moka cache. Production
+/// default is 1800 s (30 min) — long enough to outlive most chat sessions,
+/// short enough that abandoned conversations don't pin keys forever. The
+/// e2e suite overrides this to 2 s via `GW_ROUTING__STICKY_TTL_SECS=2` so
+/// the TTL-expiry leg is exercisable inside CI without sleeping for half
+/// an hour. ADR-S4.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutingCfg {
+    #[serde(default = "default_sticky_ttl_secs")]
+    pub sticky_ttl_secs: u64,
+}
+
+fn default_sticky_ttl_secs() -> u64 {
+    1800
+}
+
+impl Default for RoutingCfg {
+    fn default() -> Self {
+        Self {
+            sticky_ttl_secs: default_sticky_ttl_secs(),
         }
     }
 }

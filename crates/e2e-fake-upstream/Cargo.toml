@@ -25,3 +25,13 @@ futures-util = "0.3"
 httparse = "1"
 socket2 = "0.5"
 base64 = "0.22"
+# ADR-S5: TLS variant of the business listener on port 9443. Self-signed cert
+# generated at startup; gateway truststore intentionally does not trust it,
+# so pingora's TLS handshake fails inside `fail_to_connect` with
+# ConnectErrorKind::Tls. Pinned to ring crypto provider to avoid pulling
+# aws-lc-rs (heavy build) and to match the workspace's existing `ring`
+# transitive dep via hickory-resolver.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = "1"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

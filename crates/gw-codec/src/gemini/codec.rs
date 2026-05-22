@@ -31,6 +31,28 @@ impl ProtocolCodec for Gemini {
         }
     }
 
+    /// ADR-S1: Gemini's JSON body carries no `stream` field; streaming is
+    /// signalled exclusively by the `:streamGenerateContent` URL token
+    /// (both `/v1/` and `/v1beta/` flavours use the same token).
+    #[inline]
+    fn path_implies_stream(path: &str) -> bool {
+        path.contains(":streamGenerateContent")
+    }
+
+    /// ADR-S1b: Gemini wire spec places the model in the URL path, not the
+    /// JSON body (`GeminiRequest::model` is `#[serde(skip)]`). Extract the
+    /// substring between `/models/` and the verb separator `:`.
+    #[inline]
+    fn extract_path_model(path: &str) -> Option<&str> {
+        let after = path.split_once("/models/")?.1;
+        let model = after.split_once(':').map(|(m, _)| m).unwrap_or(after);
+        if model.is_empty() {
+            None
+        } else {
+            Some(model)
+        }
+    }
+
     fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
         let req: GeminiRequest<'a> = serde_json::from_slice(body)
             .map_err(|e| bad_request_err(format!("gemini parse: {e}")))?;

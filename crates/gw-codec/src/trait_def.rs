@@ -21,6 +21,35 @@ pub trait ProtocolCodec: Send + Sync + 'static {
     where
         Self: Sized;
 
+    /// ADR-S1: derive `stream` from the request URL path when the wire format
+    /// signals streaming via the path rather than a body field.
+    ///
+    /// The default returns `false`. Gemini overrides this to return `true`
+    /// for paths containing `:streamGenerateContent`, since the Gemini JSON
+    /// body carries no `stream` field. `request_filter` ORs this into
+    /// `RequestIR.stream` after `parse_request`.
+    #[inline]
+    fn path_implies_stream(_path: &str) -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Return the model name embedded in the request URL path, if this
+    /// protocol carries it there (Gemini's `/v1[beta]/models/<MODEL>:<verb>`).
+    ///
+    /// Default returns `None`. `request_filter` falls back to this only when
+    /// `RequestIR.model` came back empty from `parse_request`, so codecs that
+    /// carry the model in the body (OpenAI, Anthropic) are unaffected.
+    #[inline]
+    fn extract_path_model(_path: &str) -> Option<&str>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>>;
     fn render_request(&self, ir: &RequestIR<'_>, buf: &mut BytesMut) -> Result<(), ErrorIR<'static>>;
 

@@ -217,7 +217,7 @@ pub async fn pick_peer(
     let pick_ctx = PickCtx {
         user_id: &perm.effective_user_id,
         model: &model,
-        conversation_id: None,
+        conversation_id: ctx.conversation_id.as_deref(),
         message_hash: None,
         api_format: client_codec_kind,
     };

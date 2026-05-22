@@ -28,7 +28,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /build/target/release/fake_upstream /usr/local/bin/fake_upstream
 
-EXPOSE 9000 9001
+EXPOSE 9000 9001 9443
 
 ENV RUST_LOG=info
 

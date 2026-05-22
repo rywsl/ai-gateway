@@ -24,16 +24,13 @@ to themselves. The constants below match the serde wire shape.
 
 from __future__ import annotations
 
-import pytest
-
 from conftest import (
     BALANCE_LARGE,
     PROTO_OPENAI,
     FakeUpstreamClient,
     FakeWebClient,
     make_anthropic_client,
-    # Retained for re-enable once the gateway sets ir.stream for :streamGenerateContent (see test_gemini_stream_happy skip).
-    make_gemini_client,  # noqa: F401
+    make_gemini_client,
     make_openai_client,
     seed_passthrough,
     wait_for_records,
@@ -231,7 +228,6 @@ def test_anthropic_stream_happy(
 
 
 def _gemini_sse_events() -> list[dict]:
-    # Retained for re-enable once the gateway sets ir.stream for :streamGenerateContent (see test_gemini_stream_happy skip).
     return [
         {
             "data": (
@@ -253,29 +249,43 @@ def _gemini_sse_events() -> list[dict]:
 def test_gemini_stream_happy(
     gateway_url: str, fake_web: FakeWebClient, fake_upstream: FakeUpstreamClient
 ) -> None:
-    """SKIPPED in v1: the gateway's Gemini codec does not derive
-    `RequestIR.stream` from either the request body OR the URL path
-    (`:streamGenerateContent`). `parse_request` only reads the JSON body,
-    and Gemini's wire format carries no `stream` field — so `ir.stream`
-    is always `false`, and the request_filter rejects the request with
-    `GW_REQUEST_NONSTREAM_NOT_SUPPORTED` (400) BEFORE the request can
-    reach the fake upstream.
-
-    See `crates/gw-codec/src/gemini/codec.rs::parse_request` and
-    `crates/gw-codec/src/gemini/wire.rs::GeminiRequest` — neither has a
-    path-aware override that would set `stream=true` for the
-    `:streamGenerateContent` surface. This is a gateway-side gap
-    (docs/architecture.md §Known gaps candidate); E3-B cannot exercise
-    Gemini streaming end-to-end until that gap closes.
-
-    The OpenAI + Anthropic happy-path scenarios in this file DO exercise
-    the full stack and serve as the integration linchpin for E3-B; the
-    Gemini scenario is held until the codec sets `ir.stream` correctly.
-    """
-    pytest.skip(
-        "gateway gap: Gemini codec parse_request never sets ir.stream=true "
-        "(no body field, no path-based override), so the request_filter "
-        "rejects every Gemini call with GW_REQUEST_NONSTREAM_NOT_SUPPORTED. "
-        "Re-enable once crates/gw-codec/src/gemini/codec.rs derives stream "
-        "from the :streamGenerateContent path."
+    """Gemini streamGenerateContent happy path."""
+    seeded = seed_passthrough(
+        fake_web,
+        protocol=PROTO_GEMINI,
+        model="gemini-1.5-flash",
+        group="gemini-grp",
+        vendor_id="v-gemini",
+        key_id="vk-gemini",
+        user_id="u3",
+        api_key_id="ak3",
+        api_key_plaintext="sk-client-3",
     )
+    fake_web.set_balance(seeded["user_id"], BALANCE_LARGE)
+    fake_upstream.set_scenario(
+        {
+            "routes": [
+                {
+                    "match": {"method": "POST"},
+                    "response": {
+                        "kind": "sse",
+                        "delay_ms": 0,
+                        "events": _gemini_sse_events(),
+                    },
+                }
+            ]
+        }
+    )
+
+    client = make_gemini_client(gateway_url, "sk-client-3", "ak3")
+    pieces: list[str] = []
+    for chunk in client.models.generate_content_stream(
+        model="gemini-1.5-flash",
+        contents="hi",
+    ):
+        if chunk.text:
+            pieces.append(chunk.text)
+    assert "".join(pieces) == "hi", f"expected 'hi', got {pieces!r}"
+
+    xlen = _wait_for_records(fake_web)
+    assert xlen >= 1, f"expected at least one usage:records entry, got {xlen}"

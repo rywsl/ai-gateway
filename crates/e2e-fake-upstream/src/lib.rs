@@ -10,7 +10,9 @@ pub mod routes;
 pub mod scenario;
 pub mod server;
 pub mod sse;
+pub mod tls;
 
 pub use inject::RefuseCounter;
 pub use scenario::{default_scenario, Scenario};
 pub use server::{serve_admin, serve_business, SharedCounters, SharedScenario};
+pub use tls::serve_tls;

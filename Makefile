@@ -3,7 +3,7 @@
 e2e:
 	docker compose -f tests/e2e/docker-compose.yml up -d --build
 	./tests/e2e/wait_for_ready.sh
-	cd tests/e2e/client && python -m pytest -v
+	cd tests/e2e/client && .venv/bin/python3 -m pytest -v
 	docker compose -f tests/e2e/docker-compose.yml down -v
 
 e2e-up:

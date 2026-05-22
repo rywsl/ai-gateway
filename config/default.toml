@@ -54,6 +54,14 @@ include_response_body = false
 # closed (i.e. blocklist matches the LB's IP, not arbitrary clients).
 trust_xff = false
 
+[routing]
+# How long the `Sticky` strategy keeps a conversation_id → vendor_key_id
+# binding in its moka cache. Production default is 30 min — long enough to
+# outlive most chat sessions, short enough that abandoned conversations
+# don't pin keys forever. Override via `GW_ROUTING__STICKY_TTL_SECS=<n>`.
+# ADR-S4 (docs/superpowers/specs/2026-05-22-e2e-skip-closure-design.md).
+sticky_ttl_secs = 1800
+
 # TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
 # `HardCapCfg` defaults. When it accepts caller-supplied caps, reintroduce
 # an `[auth]` section here with `hard_cap_max_input_tokens` and
