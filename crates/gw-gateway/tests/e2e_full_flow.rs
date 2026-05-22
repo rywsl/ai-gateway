@@ -133,6 +133,8 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         None,
         Arc::new(gw_routing::strategy::set::StrategySet::new_default()),
         None,
+        #[cfg(feature = "tunnel")]
+        None,
     );
 
     // -----------------------------------------------------------------
