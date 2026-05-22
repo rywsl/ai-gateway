@@ -10,8 +10,6 @@
 //! ADR-T-2, ADR-T-3, ADR-T-4 in
 //! `docs/superpowers/specs/2026-05-22-tunnel-t-design.md`.
 
-#![cfg(feature = "tunnel")]
-
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use gw_core::entity::TunnelPreference;
@@ -237,8 +235,10 @@ mod tests {
             view("slow", 200, &["openai"]),
             view("fast", 10, &["openai"]),
         ]);
-        let mut pref = TunnelPreference::default();
-        pref.prefer_low_latency = true;
+        let pref = TunnelPreference {
+            prefer_low_latency: true,
+            ..Default::default()
+        };
         let r = stack.resolve("openai", "k", &pref);
         assert_eq!(r, TunnelResolution::Use("fast".into()));
     }
@@ -249,8 +249,10 @@ mod tests {
             view("a", 10, &["openai"]),
             view("b", 5, &["openai"]),
         ]);
-        let mut pref = TunnelPreference::default();
-        pref.preferred_node_ids = vec!["a".to_string()].into_iter().collect();
+        let pref = TunnelPreference {
+            preferred_node_ids: vec!["a".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
         let r = stack.resolve("openai", "k", &pref);
         assert_eq!(r, TunnelResolution::Use("a".into()));
     }
