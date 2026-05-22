@@ -53,6 +53,7 @@ impl AppState {
 /// - `POST /usage/drain`, `GET /usage/stats`
 /// - `POST /admin/reset`
 /// - `POST /soak/window/start`
+/// - `GET  /soak/window/report`
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -68,5 +69,6 @@ pub fn router(state: AppState) -> Router {
         .route("/usage/stats", get(usage_drain::stats))
         .route("/admin/reset", post(api::admin_reset))
         .route("/soak/window/start", post(soak::start))
+        .route("/soak/window/report", get(soak::report))
         .with_state(state)
 }

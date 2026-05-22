@@ -55,3 +55,42 @@ fn quiescence_check_empty_or_short_rejects() {
     let (q, _) = quiescence_check(&[100, 100, 100], 10);
     assert!(!q);
 }
+
+use e2e_fake_web::soak::aggregate_spectrum;
+
+#[test]
+fn spectrum_buckets_observed_fields_and_marks_absent() {
+    let entries: Vec<Vec<(String, String)>> = vec![
+        vec![
+            ("status".into(), "200".into()),
+            ("error_code".into(), "".into()),
+            ("protocol".into(), "open_ai".into()),
+            ("stream".into(), "true".into()),
+            ("protocol_conversion".into(), "false".into()),
+        ],
+        vec![
+            ("status".into(), "429".into()),
+            ("error_code".into(), "GW_UPSTREAM_OVERLOADED".into()),
+            ("protocol".into(), "anthropic".into()),
+            ("stream".into(), "false".into()),
+            ("protocol_conversion".into(), "true".into()),
+        ],
+        vec![
+            // missing protocol + stream
+            ("status".into(), "502".into()),
+            ("error_code".into(), "GW_UPSTREAM_5XX".into()),
+        ],
+    ];
+    let spec = aggregate_spectrum(&entries);
+    assert_eq!(spec.by_status.get("200"), Some(&1));
+    assert_eq!(spec.by_status.get("429"), Some(&1));
+    assert_eq!(spec.by_status.get("502"), Some(&1));
+    assert_eq!(spec.by_error_code.get("GW_UPSTREAM_OVERLOADED"), Some(&1));
+    assert_eq!(spec.by_error_code.get("__absent__"), Some(&1));
+    assert_eq!(spec.by_protocol.get("__absent__"), Some(&1));
+    assert_eq!(spec.by_shape.get("stream"), Some(&1));
+    assert_eq!(spec.by_shape.get("non_stream"), Some(&1));
+    assert_eq!(spec.by_shape.get("__absent__"), Some(&1));
+    assert_eq!(spec.by_cross_proto.get("true"), Some(&1));
+    assert_eq!(spec.by_cross_proto.get("false"), Some(&1));
+}
