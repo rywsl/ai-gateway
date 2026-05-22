@@ -180,6 +180,12 @@ impl TunnelStack {
         let node_host = view_url.host_str().unwrap_or("").to_string();
         let node_port = view_url.port_or_known_default().unwrap_or(443);
         let tls = view_url.scheme().eq_ignore_ascii_case("wss");
+        metrics::counter!(
+            "gw_tunnel_open_total",
+            "node_id" => node_id.to_owned(),
+            "result" => "ok",
+        )
+        .increment(1);
         Ok(HttpPeer::new(
             format!("{node_host}:{node_port}"),
             tls,

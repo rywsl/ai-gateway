@@ -271,7 +271,6 @@ pub async fn pick_peer(
         };
         match resolution {
             gw_tunnel_client::resolver::TunnelResolution::Direct => {
-                metrics::counter!("gw_tunnel_resolve_total", "result" => "direct").increment(1);
                 if pref.require_tunnel {
                     // ADR-T-4 — never silently fall back when require_tunnel=true.
                     metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node").increment(1);
@@ -286,6 +285,7 @@ pub async fn pick_peer(
                     )
                     .await;
                 }
+                metrics::counter!("gw_tunnel_resolve_total", "result" => "direct").increment(1);
                 ctx.tunnel_resolution = Some("direct".into());
                 peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
             }
@@ -294,16 +294,10 @@ pub async fn pick_peer(
                 match t.peer_for_node(&node_id, &host, port).await {
                     Ok(p) => {
                         metrics::counter!("gw_tunnel_resolve_total", "result" => "tunnel").increment(1);
-                        metrics::counter!(
-                            "gw_tunnel_open_total",
-                            "node_id" => node_id.clone(),
-                            "result" => "ok",
-                        )
-                        .increment(1);
                         ctx.tunnel_resolution = Some(node_id);
                         peer = p;
                     }
-                    Err(crate::tunnel_stack::TunnelPeerError::NoLive { node_id: _ }) => {
+                    Err(crate::tunnel_stack::TunnelPeerError::NoLive { .. }) => {
                         metrics::counter!("gw_tunnel_resolve_total", "result" => "no_live").increment(1);
                         // Push the failed key onto the retry blacklist so a
                         // retry on this request lands on a different key.
