@@ -29,6 +29,7 @@ Capability surface highlights:
 - **Routing**: 8 strategies (`FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky`). Multi-dim per-(key, format) health, sliding-window cooldown, per-key in-flight cap.
 - **Capability**: model → required capabilities → matching keys via `gw-capability::CapabilityResolver` (resolver injection into `LlmGateway` is the wave-7 follow-up T6-A).
 - **Tunnel**: optional WebSocket transport to remote proxy nodes (`--features tunnel`). When `cfg.tunnel.enabled = true`, `pick_peer` consults `TunnelStack::resolve` per-request; otherwise the byte-identical Direct path runs. `VendorKey.tunnel_preference.require_tunnel = true` makes a missing node a hard `GW_TUNNEL_NO_NODE` rather than a silent Direct fallback. Boot-time only — flipping `enabled` requires restart. See [`docs/superpowers/specs/2026-05-22-tunnel-t-design.md`](docs/superpowers/specs/2026-05-22-tunnel-t-design.md) and `[tunnel]` in `config/default.toml`.
+- **Soak / chaos harness**: a 50,000-req / 60-s end-to-end soak (3 protocols × stream/non-stream × `off|light|heavy` upstream chaos) driven from `tests/e2e/client/soak/`. Hard invariants cover process liveness, strict-equality account consistency (`usage:records + dlq == fake_upstream_hits_total` at drain steady state), resource gauge release, error-code catalog compliance, and chaos causal reconciliation. Reports are AI-consumable JSON+JSONL at `tests/e2e/client/.soak_report/`. See [`docs/superpowers/specs/2026-05-22-chaos-soak-design.md`](docs/superpowers/specs/2026-05-22-chaos-soak-design.md). Gateway code is not touched — soak only consumes existing surfaces (§C1).
 - **Observability**: `usage:records` (billing), `usage:detailed` (verbose, three-level redaction, XADD MAXLEN), Prometheus `/metrics`, `/livez` + `/readyz`, admin `/healthz/*` (token-gated).
 
 For the dependency DAG, traits, persistence namespaces, KEK rotation, and the full list of invariants & deliberate behaviours, read [`docs/architecture.md`](docs/architecture.md). For the request lifecycle (bootstrap, every filter phase, error fanout, streaming, cache invalidation), read [`docs/workflow.md`](docs/workflow.md).
@@ -74,6 +75,10 @@ bash scripts/check-invariants.sh
 # Benches (criterion). --no-run catches signature drift fast.
 cargo bench --workspace --no-run
 cargo bench -p gw-codec --bench passthrough -- --warm-up-time 1 --measurement-time 2 --sample-size 10
+
+# Soak / chaos harness. Long-running; not in default `make e2e`.
+make e2e-soak        # full 833 rps × 60s × off + heavy (spec §12.1 verification gate)
+make e2e-soak-smoke  # 100 rps × 10s smoke for driver/seed iteration
 ```
 
 Smoke-run the binary:
