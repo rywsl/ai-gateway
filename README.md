@@ -54,6 +54,8 @@ bash scripts/check-invariants.sh
 
 The full Pingora + wiremock + reqwest harness is `crates/gw-gateway/tests/e2e_full_flow.rs` (`#[ignore]`d); per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`.
 
+A docker-based black-box harness exercises the unmodified production binary through real sockets, Redis/Postgres, and the three vendor SDKs — run it with `make e2e` (or `make e2e-up` / `make e2e-down` to manage the stack manually). It covers 30 scenarios across auth, quotas, routing/retry, cross-protocol streaming, and reliability; see [`docs/architecture.md`](docs/architecture.md) §10 for the three-actor model, coverage matrix, and the gateway gaps it surfaced.
+
 ## Benches
 
 ```bash

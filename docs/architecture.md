@@ -204,6 +204,7 @@ Active lints (all green at HEAD):
 | `no_legacy_breaker` | `BreakerState` / `BreakerStore` retired (replaced by gw-health). |
 | `no_legacy_retry` | `gw-routing/src/retry.rs` deleted in Phase 1c. |
 | `no_patch_body` | Adapter trait v2 has no `patch_body` / `BodyPatch`. |
+| `e2e_fake_no_gw_codec_dep` | E2E fake crates (`e2e-fake-upstream`, `e2e-fake-web`) must not depend on `gw-codec` / `gw-proxy` / `gw-gateway` / `gw-auth` / `gw-store` / `gw-ledger`. `gw-core` (for `ids::*`) is allowed. |
 
 Pending lints (uncomment when target phase lands):
 
@@ -259,3 +260,94 @@ The 13 gaps G1-G13 catalogued in [`docs/superpowers/specs/2026-05-21-known-gaps-
 - **G13**: reconcile `ApiKeyEntry.force_capabilities` (SmallVec, singular `force_`) vs `VendorKey.forced_capabilities` (Vec, plural) into one breaking rename.
 
 The `e2e_full_flow.rs` Pingora+wiremock+reqwest harness is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`. The docker-based black-box harness lands on `feature/e2e-blackbox` (see [`docs/superpowers/specs/2026-05-21-e2e-blackbox-design.md`](superpowers/specs/2026-05-21-e2e-blackbox-design.md)).
+
+## 10. End-to-end testing — the black-box harness
+
+The docker-based E2E harness exercises the **unmodified production binary** through real network sockets, a real Redis + Postgres, real `events:entity` / `usage:records` streams, and the three real vendor SDKs. There is no test hook or conditional compilation — if a behaviour can be exercised here, it is real; if it cannot, no v1 deployment can either. Spec: [`docs/superpowers/specs/2026-05-21-e2e-blackbox-design.md`](superpowers/specs/2026-05-21-e2e-blackbox-design.md); plan: [`docs/superpowers/plans/2026-05-21-e2e-blackbox.md`](superpowers/plans/2026-05-21-e2e-blackbox.md).
+
+### 10.1 Three-actor model
+
+Three **fakes** sit at the gateway's external boundaries; the gateway itself is the production binary under test.
+
+```
+                                  Docker network: aether-e2e
+   ┌──────────────────────┐     ┌──────────────────────┐
+   │  fake_client (host)  │     │  fake_web_server     │
+   │  Python + 3 SDKs     │     │  Rust binary         │
+   │  (openai / anthropic │     │  Simulates Go web    │
+   │   / google-genai)    │     │  boundary            │
+   └──────────┬───────────┘     └──────────┬───────────┘
+              │ HTTP                       │ Postgres write
+              │ (port 8000)                │ Redis XADD/XREAD
+              ▼                            ▼
+        ┌──────────────────────────────────────┐
+        │  gw-gateway (under test)             │
+        │  Production binary, no test hooks    │
+        │  Ports: 8000/9090/8080               │
+        └────────────────┬──────────────┬──────┘
+                         │              │
+                    TCP/TLS         Redis/PG
+                         │              │
+                         ▼              ▼
+        ┌──────────────────────┐   ┌──────────────┐
+        │  fake_upstream_server│   │ redis + pg   │
+        │  Rust binary         │   │ (official    │
+        │  Simulates OpenAI /  │   │  containers) │
+        │  Anthropic / Gemini  │   └──────────────┘
+        └──────────────────────┘
+```
+
+### 10.2 Where the components live
+
+| Component | Path | What it is |
+|-----------|------|------------|
+| `fake_upstream_server` | [`crates/e2e-fake-upstream/`](../crates/e2e-fake-upstream/) | Rust (`hyper`, no Pingora). Scenario-driven HTTP server with a JSON/TOML DSL and TCP failure-injection primitives (RST, half-write, slow drip, 4xx/5xx, `Retry-After`, malformed SSE, `Content-Length` truncation). |
+| `fake_web_server` | [`crates/e2e-fake-web/`](../crates/e2e-fake-web/) | Rust (`axum` admin API on port 7000 + `usage:records` drain loop). Writes entity rows to Postgres, emits `events:entity`, writes back `counter:user:*:balance_micro` from a mock cost computation. |
+| `fake_client` harness | [`tests/e2e/client/`](../tests/e2e/client/) | Python `pytest` harness — 5 scenario files + `conftest.py` fixtures/helpers, driving the gateway through the real `openai` / `anthropic` / `google-genai` SDKs. |
+
+These two fake crates must never depend on the gateway's own crates (`gw-codec` / `gw-proxy` / `gw-gateway` / `gw-auth` / `gw-store` / `gw-ledger`) — sharing a codec or store would make the fakes co-evolve with the code under test and mask wire/persistence drift. `gw-core` is allowed (`ids::*` newtypes only). The `e2e_fake_no_gw_codec_dep` lint in `scripts/check-invariants.sh` (§7) enforces this.
+
+### 10.3 How to run it
+
+```bash
+make e2e-up      # docker-compose up: pg + redis + fake_upstream + fake_web + gw-gateway
+make e2e         # e2e-up, then run the pytest suite, then e2e-down
+make e2e-down    # tear the stack down
+```
+
+The stack is described by [`tests/e2e/docker-compose.yml`](../tests/e2e/docker-compose.yml). The global `auth_configs` row that the JWT scenarios depend on is **boot-seeded once** by the Postgres initdb step from [`tests/e2e/seed_auth_config.sql`](../tests/e2e/seed_auth_config.sql); the gateway loads it at boot via `auth_config_or_load("global")`. The harness's per-test `Store::reset` deliberately **preserves** `auth_configs` (it truncates `TRUNCATE_TABLES` = `ENTITY_TABLES` minus `auth_configs`) so a gateway restart mid-suite keeps its JWT validator config.
+
+### 10.4 Coverage matrix
+
+30 scenarios across 5 files — 27 pass, 3 documented skips.
+
+| File | Scenarios |
+|------|-----------|
+| `test_happy_streaming.py` | OpenAI streaming happy path · Anthropic streaming happy path · Gemini streaming happy path *(skip)*. |
+| `test_auth_failures.py` | Expired API key → 401 · IP not allowlisted → 403 · HMAC required-but-missing → 401 · HMAC bad signature → 401 · HMAC timestamp drift → 401 · JWT `iss` mismatch → 401 · JWT `aud` mismatch → 401 · JWKS rotation: old `kid` rejected / new accepted. |
+| `test_quotas.py` | Balance zero → 402 · Balance drained mid-traffic, next request → 402 · Daily-token quota exceeded → 403 · Yesterday's daily counter does not block today · Hard-cap input tokens → 400 · RPM exceeded → 429. |
+| `test_routing_retry.py` | Connect-refused first key falls through to second key · Three keys connect-refused → 5xx · TLS handshake error → 503, no retry *(skip)* · No key advertises required capability → 503 · Sticky strategy binds user to same key, then TTL expires *(skip on the TTL leg)*. |
+| `test_cross_protocol.py` | OpenAI client → Anthropic upstream cross-protocol stream · OpenAI client → Gemini upstream cross-protocol stream · Mid-stream upstream RST after some bytes · Malformed SSE partial event · Gzip response decoded transparently. |
+| `test_reliability.py` | DLQ grows when `usage:records` is corrupt · Entity update invalidates cache within 1 s · Gateway container restart recovers. |
+
+The three skips, each with its precise gateway-gap citation:
+
+- **Gemini streaming** (`test_gemini_stream_happy`): `crates/gw-codec/src/gemini/codec.rs::parse_request` never sets `ir.stream=true` — `GeminiRequest` has no `stream` field and no path-based override, so the request_filter rejects every Gemini call with `GW_REQUEST_NONSTREAM_NOT_SUPPORTED`.
+- **TLS handshake error path** (`test_tls_handshake_error_returns_503_no_retry`): pingora's HTTPS-against-plain-HTTP error surfaces via `fail_to_proxy`, not `fail_to_connect`, so `classify_connect_error` never runs and `gw_retry_attempt_total{outcome="tls_blocked"}` is never incremented; `fake_upstream` also has no TLS listener.
+- **Sticky TTL eviction** (`test_sticky_strategy_binds_user_to_same_key_then_expires`, TTL leg only): `DEFAULT_STICKY_TTL_SECS=1800` is too long for CI, and the gateway plumbs `conversation_id=None` (`crates/gw-proxy/src/filters/upstream.rs:220`), so the moka bind path is structurally unreachable. The same-key-binding half of the scenario passes.
+
+### 10.5 What this harness found
+
+Building the black-box harness surfaced real gateway behaviours and gaps that the in-process tests could not. Each item below is cited `file:line` so future work can address it; this list is the most valuable artefact of the harness work.
+
+- **CLAUDE.md staleness — cross-protocol response re-render** *(corrected alongside this section)*. CLAUDE.md previously claimed cross-protocol *response* re-render was "deferred". It is not: G8 closed in `50cd9e7`, and `crates/gw-proxy/src/filters/response.rs:60-94,111-184` wires per-chunk cross-render via the `gw_codec_cross_render_total{from,to}` metric. CLAUDE.md is corrected alongside this section.
+- **Gemini streaming gap.** `crates/gw-codec/src/gemini/{wire.rs,codec.rs}` — `GeminiRequest` has no `stream` field, and `parse_request` never sets `ir.stream=true` for `:streamGenerateContent`. A direct-Gemini-client streaming call is therefore rejected with `GW_REQUEST_NONSTREAM_NOT_SUPPORTED`. Fix: derive `stream` from the `:streamGenerateContent` path segment.
+- **TLS handshake error path unreachable.** `crates/gw-proxy/src/gateway.rs` — TLS-handshake failures route through `fail_to_proxy`, not `fail_to_connect`, so `classify_connect_error` never runs and `GW_UPSTREAM_TLS_ERROR` is end-to-end unreachable in v1 (it is only unit-covered in `gateway.rs` tests).
+- **No `fail_to_proxy` envelope emitter.** `crates/gw-proxy/src/gateway.rs` — `ctx.upstream_error_code` (e.g. `GW_UPSTREAM_CONNECT_FAILED`, stamped in `fail_to_connect` at `gateway.rs:299`) is never serialized to the response body; pingora's default `502` hits the wire instead. E2E tests must therefore assert via `gw_retry_attempt_total{outcome=...}` metrics rather than the response envelope.
+- **Sticky strategy `conversation_id=None`.** `crates/gw-proxy/src/filters/upstream.rs:220` — `PickCtx` hardcodes `conversation_id: None`, so `Sticky::pick` always takes the no-conversation fallback branch and never writes to its moka cache. TTL eviction is structurally unreachable in v1.
+- **`events:entity` invalidation only clears Moka, not the Redis L1.** `crates/gw-store/src/stream_consumer.rs` — the consumer invokes `EntityStore.{ns}.invalidate(id)`, which only touches the in-process Moka L1; the Redis L1 hash `entity:{ns}:{id}` written by `gw-store/src/loader.rs::load_entity` is NOT cleared. The harness compensates by `DEL`-ing the Redis L1 in `put_entity` / `delete_entity`. In a multi-pod deployment, one pod's invalidation would clear its own Moka but leave its Redis L1 stale for the L1 TTL.
+- **NOGROUP recovery missing.** `crates/gw-store/src/stream_consumer.rs:77-86` — if the `events:entity` / `events:counter` stream + consumer group are dropped under a running gateway (e.g. an admin Redis flush), `consume_loop` retries forever on a 500 ms NOGROUP backoff and never re-creates the group; cache invalidation is then permanently dead for the process lifetime. The harness avoids this by never touching `events:*` in `reset()`. This is a production resilience gap if Redis is ever flushed.
+- **`HardCapCfg.max_input_tokens` hardcoded.** `crates/gw-proxy/src/filters/request.rs:762` — `max_input_tokens` is hardcoded to `1_000_000` and is not entity-configurable, so exercising the cap requires a multi-MB request body.
+- **Malformed SSE silently dropped.** `crates/gw-proxy/src/filters/response.rs:121` — a `parse_stream_chunk` error only emits `tracing::warn!`; there is no metric, no error envelope, and no status flip. "Upstream sent garbage" is unobservable to operators.
+- **`ProtocolKind` has two wire spellings.** `crates/gw-core/src/protocol.rs` — `as_str()` returns `"openai"` (used in metric labels) while `#[serde(rename_all = "snake_case")]` serializes to `"open_ai"` (used in entity payloads' `accessible_endpoints`). Same enum, two strings — a footgun for anyone matching on the value.
+- **`fake_web /usage/stats` 500s on a corrupted `usage:records`.** Minor — when `usage:records` is deliberately corrupted as a string key, the fake's stats endpoint 500s. This is a harness-side limitation, not a gateway issue.

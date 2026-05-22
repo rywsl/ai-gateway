@@ -229,6 +229,41 @@ else
   ok "no patch_body / BodyPatch references"
 fi
 
+# ---------------------------------------------------------------------------
+# e2e_fake_no_gw_codec_dep — the two black-box test fakes
+# (e2e-fake-upstream, e2e-fake-web) sit at the gateway's external boundaries
+# and must stay independent of the gateway's own crates. They may depend on
+# `gw-core` only (for `ids::*` newtypes); they MUST NOT pull in
+# gw-codec / gw-proxy / gw-gateway / gw-auth / gw-store / gw-ledger.
+# Sharing a codec or store crate would make the fakes co-evolve with the
+# code under test and silently mask wire-format / persistence drift.
+#
+# We scan both Cargo.toml (dependency declarations) and src/tests (Rust
+# `use` / path imports). The regex anchors on a word boundary before the
+# crate name and either `_` or `-` as the separator so `gw-core` /
+# `gw_core` is NOT flagged, but `gw-codec`, `gw_proxy::`, etc. are.
+# ---------------------------------------------------------------------------
+echo "[e2e_fake_no_gw_codec_dep] e2e fake crates must not depend on gateway codec/auth/store/ledger/proxy/gateway"
+FAKE_FORBIDDEN_RE='\bgw[_-](codec|proxy|gateway|auth|store|ledger)\b'
+if grep -rnE "$FAKE_FORBIDDEN_RE" \
+     crates/e2e-fake-upstream/Cargo.toml \
+     crates/e2e-fake-web/Cargo.toml \
+     crates/e2e-fake-upstream/src crates/e2e-fake-upstream/tests \
+     crates/e2e-fake-web/src 2>/dev/null \
+   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+   | grep -q .
+then
+  grep -rnE "$FAKE_FORBIDDEN_RE" \
+     crates/e2e-fake-upstream/Cargo.toml \
+     crates/e2e-fake-web/Cargo.toml \
+     crates/e2e-fake-upstream/src crates/e2e-fake-upstream/tests \
+     crates/e2e-fake-web/src 2>/dev/null \
+   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'
+  bad "e2e fake crate depends on / imports a forbidden gateway crate"
+else
+  ok "e2e fake crates carry no gateway codec/auth/store/ledger/proxy/gateway dep"
+fi
+
 # ===========================================================================
 # PENDING lints — target code has not landed yet. Uncomment in the named phase.
 # ===========================================================================

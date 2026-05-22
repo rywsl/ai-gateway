@@ -7,3 +7,18 @@ rust-version = "1.86"
 [[bin]]
 name = "fake_web"
 path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+fred = { workspace = true }
+time = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = "0.7"
+rsa = { version = "0.9", features = ["pem"] }
+rand = { workspace = true }
+futures = { workspace = true }

@@ -283,6 +283,87 @@ pub async fn write_sse(
     Ok(())
 }
 
+// ── Variant: GzipStatic ───────────────────────────────────────────────────────
+
+/// Write a static response whose body is the raw gzip bytes obtained by base64-
+/// decoding `body_base64`. Adds `content-encoding: gzip` + `content-length`
+/// for the *encoded* bytes so the client decompressor picks it up. Caller-
+/// supplied headers (case-insensitive) override these defaults.
+///
+/// The variant exists so the gzip-transparent test (E4-D) can ship a real
+/// gzip frame through the otherwise UTF-8-only `Static.body: String` shape.
+/// Decoding base64 inside this function keeps the JSON-deserializable wire
+/// format pure text.
+pub async fn write_gzip_static(
+    mut stream: TcpStream,
+    status: u16,
+    headers: HashMap<String, String>,
+    body_base64: String,
+    delay_ms: u64,
+) -> std::io::Result<()> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+
+    if delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+
+    let body_bytes = match STANDARD.decode(body_base64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            // Fall back to a 500 so the test fails loudly rather than
+            // silently shipping zero bytes.
+            eprintln!("[fake-upstream] gzip body_base64 decode failed: {e}");
+            return write_static(
+                stream,
+                500,
+                HashMap::from([("content-type".into(), "application/json".into())]),
+                r#"{"error":"invalid body_base64 in GzipStatic"}"#.to_owned(),
+                0,
+            )
+            .await;
+        }
+    };
+
+    let mut hdrs: Vec<(String, String)> = headers.into_iter().collect();
+    if !hdrs
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+    {
+        hdrs.push(("content-encoding".into(), "gzip".into()));
+    }
+    if !hdrs
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+    {
+        hdrs.push(("content-length".into(), format!("{}", body_bytes.len())));
+    }
+    if !hdrs
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("connection"))
+    {
+        hdrs.push(("connection".into(), "close".into()));
+    }
+    if !hdrs
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+    {
+        // Default to text/event-stream so the OpenAI SDK happily treats the
+        // decompressed bytes as a stream; callers can override.
+        hdrs.push(("content-type".into(), "text/event-stream".into()));
+    }
+
+    let reason = reason_phrase(status);
+    let head = build_head(status, reason, hdrs);
+    stream.write_all(&head).await?;
+    if !body_bytes.is_empty() {
+        stream.write_all(&body_bytes).await?;
+    }
+    stream.flush().await?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
 // ── Misc ─────────────────────────────────────────────────────────────────────
 
 fn reason_phrase(status: u16) -> &'static str {

@@ -55,38 +55,56 @@ pub enum ResponseSpec {
         events: Vec<SseEvent>,
     },
 
-    // ── E1-B variants ───────────────────────────────────────────────────────
-    // These are declared here so the DSL is complete, but are NOT implemented
-    // until E1-B.  Selecting one in a scenario returns HTTP 501.
-    // Fields are unused until E1-B; suppress dead_code lint for now.
-    #[allow(dead_code)]
+    // ── E1-B failure-injection variants ─────────────────────────────────────
+    // Dispatched by `server::dispatch_spec` to the handlers in `crate::inject`.
     TcpResetAfterHeaders,
     TcpResetMidBody {
-        #[allow(dead_code)]
         after_bytes: usize,
     },
     ConnectionRefusedFirstN {
-        #[allow(dead_code)]
         n: u32,
     },
     SlowBodyBytePerSecond {
-        #[allow(dead_code)]
         body: String,
-        #[allow(dead_code)]
         bps: u32,
     },
     PartialSseEvent {
-        #[allow(dead_code)]
         half_body: String,
     },
     StatusWithRetryAfter {
-        #[allow(dead_code)]
         status: u16,
-        #[allow(dead_code)]
         retry_after_secs: u32,
-        #[allow(dead_code)]
         body: String,
     },
+
+    /// Static binary response with `Content-Encoding: gzip` set automatically.
+    ///
+    /// `body_base64` is the base64 of the **already-gzipped** payload bytes;
+    /// the fake decodes the base64 to raw bytes and ships them verbatim with
+    /// `content-encoding: gzip` + `content-length: <decoded.len()>`. Callers
+    /// (typically Python) gzip-encode a payload and then base64-encode the
+    /// gzip output, so the wire-side decompressor sees a real gzip frame.
+    ///
+    /// This variant exists because the plain `Static.body: String` cannot
+    /// carry non-UTF-8 bytes (gzip frames contain arbitrary binary), and
+    /// serde-deserializing binary through JSON requires a string carrier.
+    ///
+    /// Content-type defaults to `text/event-stream` (SSE-test-driven; callers
+    /// shipping a gzipped JSON or plain-text response should override the
+    /// `content-type` header explicitly in `headers`).
+    GzipStatic {
+        #[serde(default = "default_gzip_status")]
+        status: u16,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        body_base64: String,
+        #[serde(default)]
+        delay_ms: u64,
+    },
+}
+
+fn default_gzip_status() -> u16 {
+    200
 }
 
 /// A single SSE event payload (the `data:` line value) with an optional delay

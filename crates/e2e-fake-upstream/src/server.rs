@@ -21,16 +21,19 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use std::time::Duration;
+
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 
 use crate::inject::{self, RefuseCounter};
 use crate::routes::{make_counters, match_route, HitCounters};
@@ -79,9 +82,8 @@ pub async fn serve_business(
 
         let sc = Arc::clone(&scenario);
         let ctr = Arc::clone(&counters);
-        let refuse = refuse.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_business_conn(stream, sc, ctr, refuse).await {
+            if let Err(e) = handle_business_conn(stream, sc, ctr).await {
                 eprintln!("[fake-upstream] business conn error: {e}");
             }
         });
@@ -94,7 +96,6 @@ async fn handle_business_conn(
     mut stream: TcpStream,
     scenario: SharedScenario,
     counters: SharedCounters,
-    _refuse: RefuseCounter,
 ) -> std::io::Result<()> {
     // 1) Read until end-of-headers (\r\n\r\n) or a sanity cap.
     let (method, path, headers) = match read_head(&mut stream).await? {
@@ -212,29 +213,57 @@ async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result
             retry_after_secs,
             body,
         } => inject::status_with_retry_after(stream, status, retry_after_secs, body).await,
+        ResponseSpec::GzipStatic {
+            status,
+            headers,
+            body_base64,
+            delay_ms,
+        } => inject::write_gzip_static(stream, status, headers, body_base64, delay_ms).await,
     }
 }
 
 /// Read the request head (request line + headers) from `stream`, returning
-/// `(method, path, headers)`. Reads at most ~16 KiB before giving up.
+/// `(method, path, headers)`. Reads at most ~16 KiB and waits at most 5 s
+/// in total before giving up (a slow / stuck client must not park the task
+/// indefinitely, leaking the fd + Arcs across a test run).
 async fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<(String, String, HeaderMap)>> {
     const MAX_HEAD: usize = 16 * 1024;
-    let mut buf = Vec::with_capacity(2048);
-    let mut tmp = [0u8; 1024];
-    loop {
-        let n = stream.read(&mut tmp).await?;
-        if n == 0 {
-            return Ok(None); // Peer closed before sending a request.
+    const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let read_fut = async {
+        let mut buf = Vec::with_capacity(2048);
+        let mut tmp = [0u8; 1024];
+        // `search_from` tracks where the next CRLFCRLF scan should begin.
+        // Each iteration only scans new bytes plus a 3-byte overlap to
+        // catch a CRLFCRLF that straddles a read boundary.
+        let mut search_from: usize = 0;
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok::<_, std::io::Error>(None); // Peer closed.
+            }
+            let prev_len = buf.len();
+            buf.extend_from_slice(&tmp[..n]);
+            let scan_start = prev_len.saturating_sub(3).max(search_from);
+            if buf[scan_start..].windows(4).any(|w| w == b"\r\n\r\n") {
+                break Ok(Some(buf));
+            }
+            search_from = buf.len();
+            if buf.len() > MAX_HEAD {
+                return Ok(None);
+            }
         }
-        buf.extend_from_slice(&tmp[..n]);
-        // Search for end-of-headers.
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-        if buf.len() > MAX_HEAD {
+    };
+
+    let buf = match timeout(HEAD_READ_TIMEOUT, read_fut).await {
+        Ok(Ok(Some(b))) => b,
+        Ok(Ok(None)) => return Ok(None),
+        Ok(Err(e)) => return Err(e),
+        Err(_elapsed) => {
+            // Slow / stuck client. Drop the connection silently.
             return Ok(None);
         }
-    }
+    };
 
     let mut header_storage = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut header_storage);
@@ -279,10 +308,6 @@ pub fn prime_refuse_counter(scenario: &Scenario, refuse: &RefuseCounter) {
 
 fn full_body(b: impl Into<Bytes>) -> BoxBody<Bytes, Infallible> {
     Full::new(b.into()).boxed()
-}
-
-fn empty_body() -> BoxBody<Bytes, Infallible> {
-    Empty::new().boxed()
 }
 
 fn json_response(status: StatusCode, body: &str) -> Response<BoxBody<Bytes, Infallible>> {
