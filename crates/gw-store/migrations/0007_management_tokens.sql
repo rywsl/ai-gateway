@@ -1,5 +1,5 @@
 -- 0007_management_tokens.sql — ManagementTokenEntry persistence (B2 / ADR-B2-1).
--- 0005_proxy_nodes 与 0006_auth_configs 已先占编号。
+-- 0005_proxy_nodes 已合入;0006_auth_configs 由 gaps plan 占用,本提交跳到 0007。
 
 CREATE TABLE IF NOT EXISTS management_tokens (
     id          TEXT        PRIMARY KEY,

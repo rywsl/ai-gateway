@@ -484,7 +484,9 @@ impl MgmtScope {
 ///
 /// `hash` mirrors `ApiKeyEntry.hash` — plain `Vec<u8>`, serialised by
 /// `serde_json` as a JSON integer array (no `serde_with::base64` in tree).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// `Debug` is implemented manually below to redact `hash` (SHA-256 of the
+/// bearer secret) so `tracing::debug!(?entry)` cannot leak it.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ManagementTokenEntry {
     pub token_id: String,
     pub user_id: crate::ids::UserId,
@@ -495,6 +497,20 @@ pub struct ManagementTokenEntry {
     #[serde(default = "default_active_status")]
     pub status: KeyStatus,
     pub display_name: String,
+}
+
+impl std::fmt::Debug for ManagementTokenEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagementTokenEntry")
+            .field("token_id", &self.token_id)
+            .field("user_id", &self.user_id)
+            .field("scope", &self.scope)
+            .field("hash", &format_args!("[REDACTED; {} bytes]", self.hash.len()))
+            .field("expires_at", &self.expires_at)
+            .field("status", &self.status)
+            .field("display_name", &self.display_name)
+            .finish()
+    }
 }
 
 fn default_active_status() -> KeyStatus {
