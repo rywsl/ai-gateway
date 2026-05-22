@@ -213,6 +213,12 @@ async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result
             retry_after_secs,
             body,
         } => inject::status_with_retry_after(stream, status, retry_after_secs, body).await,
+        ResponseSpec::GzipStatic {
+            status,
+            headers,
+            body_base64,
+            delay_ms,
+        } => inject::write_gzip_static(stream, status, headers, body_base64, delay_ms).await,
     }
 }
 
