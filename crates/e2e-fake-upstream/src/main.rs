@@ -32,6 +32,10 @@ fn scenario_path() -> Option<String> {
 #[tokio::main]
 async fn main() {
     let mode = std::env::var("FAKE_UPSTREAM_MODE").unwrap_or_else(|_| "http".into());
+    e2e_fake_upstream::chaos::init_from_env();
+    if e2e_fake_upstream::chaos::enabled() {
+        eprintln!("[fake-upstream] chaos mode ENABLED (FAKE_UPSTREAM_CHAOS=on)");
+    }
     if mode == "tunnel" {
         let addr: std::net::SocketAddr = std::env::var("FAKE_UPSTREAM_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:9001".into())

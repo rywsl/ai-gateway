@@ -174,6 +174,18 @@ enum Outcome {
 }
 
 async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result<()> {
+    // §4.3: unwrap exactly one Weighted layer. Validator rejects nested
+    // Weighted and empty variants, so this branch is total.
+    let spec = match spec {
+        ResponseSpec::Weighted { variants } => {
+            if crate::chaos::enabled() {
+                crate::chaos::pick_weighted(&variants)
+            } else {
+                (*variants[0].spec).clone()
+            }
+        }
+        other => other,
+    };
     match spec {
         ResponseSpec::Static {
             status,
@@ -187,9 +199,6 @@ async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result
             inject::tcp_reset_mid_body(stream, after_bytes).await
         }
         ResponseSpec::ConnectionRefusedFirstN { .. } => {
-            // Refusal is enforced in the accept loop. If a connection got
-            // this far the counter was already exhausted — fall through
-            // with a normal 200 acknowledgement so the path isn't a hole.
             inject::write_static(
                 stream,
                 200,
@@ -219,12 +228,12 @@ async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result
             body_base64,
             delay_ms,
         } => inject::write_gzip_static(stream, status, headers, body_base64, delay_ms).await,
-        // Weighted dispatch is implemented in Task 2 (CHAOS_ENABLED env +
-        // dispatch unwrap). Reaching this arm before Task 2 lands is a logic
-        // error: validate_scenario must be called on every scenario post before
-        // it is stored, and the server only stores validated scenarios.
         ResponseSpec::Weighted { .. } => {
-            unreachable!("Weighted variant must be resolved before dispatch (Task 2)")
+            // Validator forbids nested Weighted (§4.3); reaching this arm
+            // is a bug. Log loudly and close the connection so the test
+            // notices instead of silently hanging.
+            eprintln!("[fake-upstream] BUG: nested Weighted slipped past validator");
+            Ok(())
         }
     }
 }
