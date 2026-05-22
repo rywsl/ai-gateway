@@ -10,7 +10,7 @@
   - [2026-05-19-gap-inventory.md](./2026-05-19-gap-inventory.md)（桶 6 B7 / B9 / B10）
   - [2026-05-19-codec-s4-response-and-cross-protocol.md](./2026-05-19-codec-s4-response-and-cross-protocol.md)（UsageSnapshot POD 来源）
   - [2026-05-19-billing-c-beta-estimate-pricing.md](./2026-05-19-billing-c-beta-estimate-pricing.md)（pricing_version 来源）
-  - [2026-05-19-billing-c-epsilon-go-contract.md](./2026-05-19-billing-c-epsilon-go-contract.md)（Go 消费 UsageRecord stream）
+  - [docs/go-contracts/parts/02-go-as-consumer.md](../../go-contracts/parts/02-go-as-consumer.md) §2.1（Go 消费 UsageRecord stream 的权威契约，吸收原 C-ε）
 - **范围**：把 `gw-ledger::BillingRecord` 改名为 `UsageRecord`，**删除 `cost_micro` 字段**；增加完整 `UsageSnapshot`（6 维 token 字段）、`pricing_version`、`markup_chain_snapshot`、其他给 Go 算 cost 时所需的快照字段。stream 名 `billing:records` 改为 `usage:records`。
 - **不在范围**：
   - cost 算法本身（→ Go 侧 + C-ε 文档）；

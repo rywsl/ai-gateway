@@ -346,7 +346,7 @@ Phase 1  脚手架（无业务）
                         - C-β EstimatePricing entity（Go writer，Rust read-only freeze 估算）
                         - C-γ 余额读写分工（Rust 仅写 frozen + events:counter 第 5 协议 consumer）
                         - C-δ usage:records DLQ + flusher 加固
-                        - C-ε Go 契约文档（并行编写，不阻塞实施）
+                        - Go 契约固化为 [`docs/go-contracts/`](../../go-contracts/main.md)（main + parts；原 C-ε 已吸收）
                         - MergedPermissions.markup_chain 接入（Bm1）
                   │
                   └──► Phase 6  Task Worker（依赖 Phase 3 adapter + Phase 5 UsageRecord ready）

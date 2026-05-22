@@ -142,7 +142,7 @@
 > - [C-β EstimatePricing entity](./2026-05-19-billing-c-beta-estimate-pricing.md)（Rust 用的保守估算 entity；撤销 cost 计算；timeout 字段分离）
 > - [C-γ 余额读写分工](./2026-05-19-billing-c-gamma-balance-split.md)（Go 唯一写 base/deducted；Rust 唯一写 frozen；events:counter 订阅）
 > - [C-δ Usage Stream DLQ](./2026-05-19-billing-c-delta-stream-dlq.md)（flusher 工程加固；三层兜底）
-> - [C-ε Go 侧契约](./2026-05-19-billing-c-epsilon-go-contract.md)（文档型；Rust 期望 Go 做的事）
+> - [C-ε Go 侧契约](../../go-contracts/main.md) — 已吸收至 `docs/go-contracts/`（main + parts），原文件 `2026-05-19-billing-c-epsilon-go-contract.md` 已删除
 > 依赖顺序：C-α + C-β 并行 → C-γ → C-δ。C-ε 是契约文档，与实施并行。
 
 | # | 能力 | Aether 来源 | 落点 |
@@ -282,7 +282,7 @@
 | Billing C-β：EstimatePricing entity | [2026-05-19-billing-c-beta-estimate-pricing.md](./2026-05-19-billing-c-beta-estimate-pricing.md) | Draft |
 | Billing C-γ：余额读写分工 | [2026-05-19-billing-c-gamma-balance-split.md](./2026-05-19-billing-c-gamma-balance-split.md) | Draft |
 | Billing C-δ：Stream DLQ | [2026-05-19-billing-c-delta-stream-dlq.md](./2026-05-19-billing-c-delta-stream-dlq.md) | Draft |
-| Billing C-ε：Go 侧契约 | [2026-05-19-billing-c-epsilon-go-contract.md](./2026-05-19-billing-c-epsilon-go-contract.md) | Doc |
+| Billing C-ε：Go 侧契约 | [docs/go-contracts/](../../go-contracts/main.md) | Absorbed（main + parts；按 Go 角色组织） |
 | Adapter A-T0：trait v2 | [2026-05-19-adapter-a-t0-trait-v2.md](./2026-05-19-adapter-a-t0-trait-v2.md) | Draft |
 | Adapter A-T1：claude_code | [2026-05-19-adapter-a-t1-claude-code.md](./2026-05-19-adapter-a-t1-claude-code.md) | Draft |
 | Adapter A-T2：gemini_cli | [2026-05-19-adapter-a-t2-gemini-cli.md](./2026-05-19-adapter-a-t2-gemini-cli.md) | Draft |

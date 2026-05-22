@@ -84,3 +84,37 @@ the code path it gates is unreachable."** Silent failures look identical
 to success in CI. None of #1–#6 are blocking; they are structural
 cleanup with measurable build-time and binary-size wins, plus #1 is a
 documentation-vs-reality discrepancy operators would notice.
+
+## Resolution log (2026-05-22)
+
+- **#2 / #3 / #4 — landed.** `reqwest` removed from
+  `[workspace.dependencies]` and from `crates/gw-gateway/Cargo.toml`
+  dev-deps; `sqlx` features reduced to
+  `["postgres", "runtime-tokio-rustls", "json"]`; `fred` features
+  reduced to `["metrics"]`. `cargo build --workspace --all-targets` is
+  green, `Cargo.lock` no longer contains `reqwest`, and
+  `bash scripts/check-invariants.sh` passes.
+- **#1 + #5 — promoted to a design spec.**
+  [`docs/superpowers/specs/2026-05-22-tunnel-t-design.md`](../superpowers/specs/2026-05-22-tunnel-t-design.md)
+  defines how `gw-tunnel-client` plugs into `upstream_peer`, persists
+  proxy nodes, threads `VendorKey.tunnel_preference`, and resolves the
+  hickory rustls 0.21 / pingora rustls 0.23 double-link. Spec ADR-T-6
+  proposes upgrading `hickory-resolver` to a release built on
+  rustls 0.23 to retire the second `rustls` from the dep graph.
+  `CLAUDE.md` §What this gateway does and `docs/architecture.md`
+  §Workspace layout were corrected to stop advertising the feature as
+  active.
+- **#6 — fix unfixable on `pingora 0.8`.** Verified directly against the
+  vendored manifest
+  `~/.cargo/registry/.../pingora-proxy-0.8.0/Cargo.toml:149-151`:
+  `pingora-proxy` declares `pingora-cache` as an **unconditional**
+  dependency, with no feature gate. Setting
+  `pingora = { default-features = false, features = ["rustls"] }` (as the
+  audit suggested) does not remove `pingora-cache` from the dep graph —
+  `pingora-proxy` pulls it regardless. The only way to drop
+  `pingora-cache` is to pin a `pingora` line ≥ 0.13 where the crate was
+  made optional inside `pingora-proxy`; that is a separate migration
+  (CLAUDE.md pins `Pingora 0.8` deliberately, see "Toolchain & build
+  pitfalls"). Status: **deferred** until a pingora line bump is
+  scheduled. The gateway does not need an HTTP cache for LLM relay
+  traffic, so the link cost is paid for code that will never execute.

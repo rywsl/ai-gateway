@@ -58,5 +58,4 @@ hex.workspace = true
 testcontainers.workspace = true
 testcontainers-modules.workspace = true
 sqlx = { workspace = true }
-reqwest.workspace = true
 bytes.workspace = true

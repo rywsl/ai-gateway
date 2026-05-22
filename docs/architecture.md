@@ -38,7 +38,7 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
 | `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
 | `gw-capability` | Business | Model-capability resolution: `Capability` enum, `RequiredCapabilities`, `ModelMapper`, `CapabilityResolver`, `AdapterCapabilityHook`, `CapabilityFilter`, `PricingReader`. |
-| `gw-tunnel-client` | Business | Tunnel transport to remote nodes: frame codec (magic `0xAE21`, 8 msg types), WebSocket transport w/ heartbeat / reconnect, DoH resolver, target-filter whitelist. Opt-in via `gw-gateway` feature `tunnel`. |
+| `gw-tunnel-client` | Business | Tunnel transport to remote nodes: frame codec (magic `0xAE21`, 8 msg types), WebSocket transport w/ heartbeat / reconnect, DoH resolver, target-filter whitelist. Crate is built behind `gw-gateway` feature `tunnel` but **not yet wired into the upstream-peer path** — implementation tracked in `docs/superpowers/specs/2026-05-22-tunnel-t-design.md`. |
 | `gw-proxy` | Execution | Pingora `ProxyHttp` impl. Filter chain, `ReqCtx`, error fanout, timeouts, body-verify hook, jemalloc sampling. |
 | `gw-gateway` | Execution | Binary entry. Figment config, observability, KMS init, bootstrap OS thread + tokio runtime, health HTTP server. |
 
@@ -122,6 +122,8 @@ Healthy(K_new)
 Invariants: max 2 KEKs concurrent; never drop only KEK; cannot drop active KEK; cannot enter dual-read twice.
 
 ## 5. Persistence
+
+> Schema details that double as **cross-process contracts with the Go management plane** (per-entity payload JSONB shape, encrypted `api_key` column, `version BIGINT` write protocol, KEK rotation choreography, all Redis stream payloads) live in [`docs/go-contracts/`](go-contracts/main.md). This section keeps the Rust-side index only.
 
 ### 5.1 PostgreSQL
 

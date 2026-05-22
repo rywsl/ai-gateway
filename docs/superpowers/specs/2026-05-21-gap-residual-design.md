@@ -26,7 +26,7 @@
   - [2026-05-19-key-health-k-a-state-machine.md](./2026-05-19-key-health-k-a-state-machine.md)（§ 1 错误编排消费 K-A 的 cooldown）
   - [2026-05-19-codec-s1-ir-and-codegen.md](./2026-05-19-codec-s1-ir-and-codegen.md) / s2 / s3 / s4 / s5（§ 4 残项依赖 codec 矩阵）
   - [2026-05-19-routing-r-ab-multi-score.md](./2026-05-19-routing-r-ab-multi-score.md) / r-d / r-e（§ 2 capability 决策喂入 routing filter）
-  - [2026-05-19-billing-c-alpha-usage-record.md](./2026-05-19-billing-c-alpha-usage-record.md) / c-ε（§ 2.6 / § 6 引用）
+  - [2026-05-19-billing-c-alpha-usage-record.md](./2026-05-19-billing-c-alpha-usage-record.md) / [`docs/go-contracts/`](../../go-contracts/main.md)（§ 2.6 / § 6 引用；原 c-ε 已吸收到 go-contracts）
 
 ## 0. 文档约定
 

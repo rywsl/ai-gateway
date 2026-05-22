@@ -13,6 +13,7 @@ When you make a change that crosses any of these boundaries, update the matching
 | `scripts/check-invariants.sh` lints (activated, retired, or renamed) | [`docs/architecture.md`](docs/architecture.md) §Invariants |
 | A behaviour that looks like a bug but is deliberate (fail-closed, generic error message, pair-header requirement, etc.) | [`docs/architecture.md`](docs/architecture.md) §Deliberate behaviours |
 | Deferred gap → implemented | Remove from [`docs/architecture.md`](docs/architecture.md) §Known gaps; if it was tracked in a spec or plan under `docs/superpowers/`, mark it landed there too |
+| Cross-process touchpoint with Go (Redis stream payload, `counter:*` key, PgSQL entity payload JSONB schema, encrypted column shape, KEK rotation) | [`docs/go-contracts/`](docs/go-contracts/main.md) — `main.md` + the relevant `parts/0{1,2,3}-*.md`. Adding a new touchpoint requires a new part or extending an existing one. |
 
 PRs that touch code in these areas without updating the index are incomplete.
 
@@ -27,7 +28,7 @@ Capability surface highlights:
 - **Permissions**: 5-tier merge (global → user-group → user → sub-account → api-key); model-permission regex with a 100 ms per-call ReDoS budget + auto-disable.
 - **Routing**: 8 strategies (`FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky`). Multi-dim per-(key, format) health, sliding-window cooldown, per-key in-flight cap.
 - **Capability**: model → required capabilities → matching keys via `gw-capability::CapabilityResolver` (resolver injection into `LlmGateway` is the wave-7 follow-up T6-A).
-- **Tunnel**: optional WebSocket transport to remote nodes (`--features tunnel`), DoH resolver + target-filter whitelist.
+- **Tunnel**: WebSocket transport crate `gw-tunnel-client` exists (frame codec, WS transport, DoH resolver, target-filter whitelist), but is **not yet wired into the data path** as of 2026-05-22 — `--features tunnel` only re-exports the crate. Implementation tracked in [`docs/superpowers/specs/2026-05-22-tunnel-t-design.md`](docs/superpowers/specs/2026-05-22-tunnel-t-design.md).
 - **Observability**: `usage:records` (billing), `usage:detailed` (verbose, three-level redaction, XADD MAXLEN), Prometheus `/metrics`, `/livez` + `/readyz`, admin `/healthz/*` (token-gated).
 
 For the dependency DAG, traits, persistence namespaces, KEK rotation, and the full list of invariants & deliberate behaviours, read [`docs/architecture.md`](docs/architecture.md). For the request lifecycle (bootstrap, every filter phase, error fanout, streaming, cache invalidation), read [`docs/workflow.md`](docs/workflow.md).
@@ -41,6 +42,7 @@ docs/
   architecture.md        Layered architecture, crates, traits, persistence, invariants
   workflow.md            Bootstrap + Pingora filter chain + error fanout
   dev-setup.md           Per-machine dev setup (Docker, Postgres, Redis)
+  go-contracts/          Rust ↔ Go cross-process contracts (main.md + parts/01-03)
   superpowers/specs/     Authoritative design specs
   superpowers/plans/     Implementation plans + status
   issues/                Operational gotchas (e.g. fred + redis:7 XREADGROUP parse warn)
