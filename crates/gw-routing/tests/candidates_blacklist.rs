@@ -36,6 +36,7 @@ fn seed_key(id: &str) -> VendorKey {
         tags: vec![],
         forced_capabilities: vec![],
         exclusive_capability_match: false,
+        tunnel_preference: None,
     }
 }
 

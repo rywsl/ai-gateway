@@ -189,6 +189,11 @@ pub struct VendorKey {
     /// present (strict match). When false, the resolver may use a looser
     /// containment check (T3-C / ADR-G13-1).
     pub exclusive_capability_match: bool,
+    /// Tunnel routing preference (ADR-T-4). `None` => follow the
+    /// global default policy (which is "Direct" until a node matches).
+    /// Always `None` in seed data; existing rows do not require backfill
+    /// per the spec's "non-breaking on rollout" guarantee.
+    pub tunnel_preference: Option<TunnelPreference>,
 }
 
 impl std::fmt::Debug for VendorKey {
@@ -366,6 +371,26 @@ pub enum ModelAvailability {
     Enabled,
     Disabled,
     ShadowOnly,
+}
+
+/// Per-vendor-key tunnel routing preference (ADR-T-4).
+///
+/// Sits in `gw-core` rather than `gw-tunnel-client` because `VendorKey`
+/// (also in `gw-core`) embeds it and `gw-core` is supporting-layer — it
+/// cannot depend on `gw-tunnel-client` (business-layer). The tunnel
+/// resolver re-exports a thin alias via `pub use gw_core::entity::TunnelPreference`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TunnelPreference {
+    /// Optional list of preferred node ids; empty = "any allowed node".
+    #[serde(default)]
+    pub preferred_node_ids: smallvec::SmallVec<[String; 4]>,
+    /// When true, `pick_peer` MUST tunnel — no available node => hard error
+    /// `GW_TUNNEL_NO_NODE` (no silent Direct fallback). See spec ADR-T-4.
+    #[serde(default)]
+    pub require_tunnel: bool,
+    /// Sort filtered nodes by ascending `latency_ms` before picking the first.
+    #[serde(default)]
+    pub prefer_low_latency: bool,
 }
 
 /// Helpers for entity types that carry encrypted blobs without a back-edge

@@ -67,8 +67,10 @@ fn vendor_key_capability_fields_default_construction() {
         tags: Vec::new(),
         forced_capabilities: Vec::new(),
         exclusive_capability_match: false,
+        tunnel_preference: None,
     };
 
     assert!(vk.forced_capabilities.is_empty());
     assert!(!vk.exclusive_capability_match);
+    assert!(vk.tunnel_preference.is_none());
 }

@@ -138,6 +138,10 @@ struct VendorKeyRow {
     /// exactly equal `forced_capabilities`. Defaults false.
     #[serde(default)]
     exclusive_capability_match: bool,
+    /// T2 — ADR-T-4. `None` means "follow global default" (Direct unless a
+    /// node opts in).
+    #[serde(default)]
+    tunnel_preference: Option<gw_core::entity::TunnelPreference>,
 }
 
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
@@ -225,6 +229,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
             // G13 (T3-C): read the capability fields from the JSONB payload.
             forced_capabilities: row.forced_capabilities,
             exclusive_capability_match: row.exclusive_capability_match,
+            tunnel_preference: row.tunnel_preference,
         })
     })
     .await
@@ -312,3 +317,28 @@ pub async fn load_proxy_nodes_list(
 // Note: IpBlockEntry has no cold-loader-by-id; its consumer iterates the
 // whole snapshot via `EntityStore::ipblock_snapshot`. v1 accepts an empty
 // runtime list; preload-from-PG is a follow-up.
+
+#[cfg(test)]
+mod tunnel_pref_tests {
+    use gw_core::entity::TunnelPreference;
+    use serde_json::json;
+
+    #[test]
+    fn vendor_key_row_decodes_tunnel_pref_when_absent() {
+        let pref: Option<TunnelPreference> =
+            serde_json::from_value(json!(null)).unwrap();
+        assert!(pref.is_none());
+    }
+
+    #[test]
+    fn vendor_key_row_decodes_tunnel_pref_when_present() {
+        let pref: TunnelPreference = serde_json::from_value(json!({
+            "preferred_node_ids": ["node-eu", "node-us"],
+            "require_tunnel": true,
+            "prefer_low_latency": true
+        })).unwrap();
+        assert_eq!(pref.preferred_node_ids.as_slice(), &["node-eu".to_string(), "node-us".to_string()]);
+        assert!(pref.require_tunnel);
+        assert!(pref.prefer_low_latency);
+    }
+}

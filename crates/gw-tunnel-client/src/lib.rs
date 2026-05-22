@@ -8,3 +8,5 @@ pub mod resolver;
 pub mod safe_dns;
 pub mod target_filter;
 pub mod transport;
+
+pub use resolver::{resolve_tunnel, ProxyNodeView, TunnelPreference, TunnelResolution, TunnelResolveCtx};
