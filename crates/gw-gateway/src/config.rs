@@ -349,4 +349,36 @@ mod tunnel_cfg_tests {
             .unwrap();
         assert!(cfg.validate().is_err());
     }
+
+    #[test]
+    fn tunnel_rejects_zero_backoff_min() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\nbackoff_min_secs = 0\n";
+        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_rejects_min_greater_than_max() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\nbackoff_min_secs = 60\nbackoff_max_secs = 1\n";
+        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_rejects_zero_missed_pong() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\nmissed_pong_threshold = 0\n";
+        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_validates_when_enabled_with_defaults() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\n";
+        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        assert!(cfg.validate().is_ok());
+    }
 }
