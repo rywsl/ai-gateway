@@ -17,4 +17,8 @@ fn tunnel_feature_optional() {
         "[features] table missing"
     );
     assert!(manifest.contains("tunnel"), "tunnel feature missing");
+    assert!(
+        manifest.contains("gw-proxy/tunnel"),
+        "tunnel feature must forward to gw-proxy/tunnel (T5-B)"
+    );
 }
