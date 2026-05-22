@@ -13,6 +13,3 @@ CREATE TABLE IF NOT EXISTS proxy_nodes (
     deleted_at  TIMESTAMPTZ NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_proxy_nodes_alive
-    ON proxy_nodes (id)
-    WHERE deleted_at IS NULL;

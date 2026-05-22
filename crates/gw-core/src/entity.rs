@@ -380,8 +380,9 @@ pub mod entity_helpers {
     /// back-edge to `gw-store`, so this parallel type is defined here;
     /// `gw-store`'s loader converts between them at decode time.
     ///
-    /// `Vec<u8>` fields are serialised by `serde_json` as standard
-    /// base64-encoded strings, matching the on-disk JSONB shape.
+    /// `Vec<u8>` fields are serialised by `serde_json` as JSON arrays of
+    /// integers (the default; no `serde_with::base64`). This matches the
+    /// on-disk JSONB shape of `gw_store::encrypt::EncryptedKey` exactly.
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct EncryptedBlob {
         pub ciphertext: Vec<u8>,
@@ -424,10 +425,9 @@ fn proxy_node_default_enabled() -> bool {
 mod tests {
     use super::entity_helpers::EncryptedBlob;
 
-    /// Verifies that `EncryptedBlob` round-trips through `serde_json` — i.e.
-    /// `Vec<u8>` fields serialise as base64 strings and deserialise back to the
-    /// same bytes. This guards against a silent breakage if the `serde_json`
-    /// byte-array serialisation ever changes behaviour.
+    /// Verifies that `EncryptedBlob` round-trips through `serde_json`. `Vec<u8>`
+    /// fields serialise as JSON integer arrays (serde_json default) and
+    /// deserialise back to the same bytes.
     #[test]
     fn encrypted_blob_serde_roundtrip() {
         let original = EncryptedBlob {

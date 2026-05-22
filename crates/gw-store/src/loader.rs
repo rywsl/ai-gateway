@@ -9,7 +9,7 @@ use std::sync::Arc;
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::RedisMap;
 use secrecy::SecretString;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
     ApiKeyEntry, AuthConfig, JwksEntry, Model, ModelGroup, Pricing, ProxyNode, UserEntry,
@@ -299,7 +299,6 @@ pub async fn load_proxy_node(
 pub async fn load_proxy_nodes_list(
     ctx: &LoaderCtx,
 ) -> anyhow::Result<Vec<ProxyNode>> {
-    use sqlx::Row;
     let rows = sqlx::query(PROXY_NODE_LIST_SQL).fetch_all(&ctx.pg).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
