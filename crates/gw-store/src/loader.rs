@@ -182,12 +182,10 @@ const PROXY_NODE_SQL: &str =
     "SELECT payload, version FROM proxy_nodes WHERE id = $1 AND deleted_at IS NULL";
 const PROXY_NODE_LIST_SQL: &str =
     "SELECT payload, version FROM proxy_nodes WHERE deleted_at IS NULL ORDER BY id";
-// TODO(T1-E): the `auth_configs` table does not yet exist in
-// `migrations/0001_initial.sql`. Until it lands, this query errors at the PG
-// layer, `with_cold_load_timeout` swallows the error into `None`, and
-// `auth_config_or_load` returns `None` — which T1-E treats as "no AuthConfig"
-// and falls back to permissive JWT defaults. Once the table is added, this
-// constant needs no change.
+// `auth_configs` is created by `migrations/0006_auth_configs.sql` (G2,
+// go-onboarding-gaps T1-A). When the `global` row is absent the SQL returns
+// no rows; `with_cold_load_timeout` collapses other errors into `None`; the
+// bootstrap warn path in gw-gateway::lib falls back to the legacy validator.
 const AUTH_CONFIG_SQL: &str =
     "SELECT payload, version FROM auth_configs WHERE id = $1 AND deleted_at IS NULL";
 
@@ -297,10 +295,10 @@ pub async fn load_jwks(ctx: &LoaderCtx, id: &Kid) -> anyhow::Result<Versioned<Jw
 /// [`load_jwks`]: Redis L1 → PgSQL `auth_configs` L2 → Redis write-back.
 ///
 /// The well-known id is `"global"` (T1-E reads `AuthConfig.global`), but the
-/// loader is id-generic so per-tenant configs can be added later. See the
-/// TODO on [`AUTH_CONFIG_SQL`]: the table is not in the v1 schema yet, so until
-/// it lands this returns `Err` (swallowed to `None` by the store wrapper) and
-/// T1-E falls back to permissive defaults.
+/// loader is id-generic so per-tenant configs can be added later. The table is
+/// created by `migrations/0006_auth_configs.sql`; when the `global` row is absent
+/// the store wrapper collapses the empty result into `None` and the bootstrap
+/// warn path in gw-gateway::lib falls back to the legacy validator.
 pub async fn load_auth_config(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versioned<AuthConfig>> {
     load_entity(ctx, "auth_config", id, AUTH_CONFIG_SQL, |v| {
         serde_json::from_value::<AuthConfig>(v.clone()).map_err(Into::into)

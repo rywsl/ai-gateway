@@ -304,9 +304,10 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
                 Some(Arc::new(v))
             }
             None => {
-                tracing::info!(
+                tracing::warn!(
                     target: "gw_gateway",
-                    "AuthConfig.global absent; client-bearer JWT path stays on legacy verify_jwt"
+                    "auth_configs.global missing; falling back to legacy JWT exp-only validation. \
+                     Populate the `global` row via the management plane to enable iss/aud/nbf checks (0006_auth_configs)."
                 );
                 None
             }
