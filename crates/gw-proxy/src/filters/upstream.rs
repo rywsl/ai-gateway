@@ -278,7 +278,7 @@ pub async fn pick_peer(
                         session,
                         ctx,
                         envelope_for(
-                            "GW_TUNNEL_NO_NODE",
+                            codes::GW_TUNNEL_NO_NODE,
                             "no tunnel node available",
                             502,
                         ),
@@ -306,7 +306,7 @@ pub async fn pick_peer(
                             session,
                             ctx,
                             envelope_for(
-                                "GW_TUNNEL_NO_LIVE",
+                                codes::GW_TUNNEL_NO_LIVE,
                                 "tunnel node not live",
                                 502,
                             ),
@@ -319,7 +319,7 @@ pub async fn pick_peer(
                             session,
                             ctx,
                             envelope_for(
-                                "GW_TUNNEL_TARGET_DENIED",
+                                codes::GW_TUNNEL_TARGET_DENIED,
                                 "tunnel target denied",
                                 502,
                             ),
