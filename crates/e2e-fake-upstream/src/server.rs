@@ -199,6 +199,9 @@ async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result
             inject::tcp_reset_mid_body(stream, after_bytes).await
         }
         ResponseSpec::ConnectionRefusedFirstN { .. } => {
+            // Refusal is enforced in the accept loop. If a connection got
+            // this far the counter was already exhausted — fall through
+            // with a normal 200 acknowledgement so the path isn't a hole.
             inject::write_static(
                 stream,
                 200,
