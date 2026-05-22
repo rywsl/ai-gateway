@@ -295,3 +295,95 @@ def min_completion_at_least_half(rpt: SoakDriverReport) -> dict:
             "threshold_count": int(threshold),
         },
     )
+
+
+# ── Soft warnings (§7.2; thresholds §11.2) ───────────────────────────────
+
+_SOFT_THRESHOLDS = {
+    "off":   {"success_rate_2xx_pct": 99.9, "latency_p99_ms": 200,
+              "completion_rate_pct": 90,  "thread_cpu_max_pct": 80,
+              "chaos_variant_hit_deviation_pct": None,
+              "records_to_2xx_ratio_max": 1.10},
+    "light": {"success_rate_2xx_pct": 95.0, "latency_p99_ms": 300,
+              "completion_rate_pct": 80,  "thread_cpu_max_pct": 80,
+              "chaos_variant_hit_deviation_pct": 25,
+              "records_to_2xx_ratio_max": 1.10},
+    "heavy": {"success_rate_2xx_pct": 80.0, "latency_p99_ms": 500,
+              "completion_rate_pct": 60,  "thread_cpu_max_pct": 80,
+              "chaos_variant_hit_deviation_pct": 25,
+              "records_to_2xx_ratio_max": 1.10},
+}
+
+
+def _soft_leaf(path: str, source: str, raw: dict, status: str) -> dict:
+    return {"path": path, "kind": "soft", "status": status,
+            "source": source, "raw": raw}
+
+
+def soft_success_rate(rpt: SoakDriverReport, *, chaos_mode: str) -> dict:
+    s2xx = sum(c for s, c in rpt.by_status.items() if 200 <= s < 300)
+    completed = rpt.requests_completed or sum(rpt.by_status.values())
+    pct = (s2xx / completed * 100.0) if completed else 0.0
+    th = _SOFT_THRESHOLDS[chaos_mode]["success_rate_2xx_pct"]
+    return _soft_leaf(
+        "results.soft_warnings.success_rate_2xx_pct",
+        "driver.by_status",
+        {"actual_pct": round(pct, 2), "threshold_pct": th,
+         "completed": completed, "count_2xx": s2xx},
+        "ok" if pct >= th else "warn",
+    )
+
+
+def soft_latency_p99(rpt: SoakDriverReport, *, chaos_mode: str) -> dict:
+    p99 = rpt.latency_ms_p99
+    th = _SOFT_THRESHOLDS[chaos_mode]["latency_p99_ms"]
+    status = "ok" if (p99 is not None and p99 < th) else "warn"
+    return _soft_leaf(
+        "results.soft_warnings.latency_p99_ms",
+        "driver.latency_ms_p99",
+        {"actual_ms": p99, "threshold_ms": th},
+        status,
+    )
+
+
+def soft_completion_rate(rpt: SoakDriverReport, *, chaos_mode: str) -> dict:
+    pct = (rpt.requests_completed / rpt.target_count * 100.0) if rpt.target_count else 0.0
+    th = _SOFT_THRESHOLDS[chaos_mode]["completion_rate_pct"]
+    return _soft_leaf(
+        "results.soft_warnings.completion_rate_pct",
+        "driver.requests_completed / target_count",
+        {"actual_pct": round(pct, 2), "threshold_pct": th},
+        "ok" if pct >= th else "warn",
+    )
+
+
+def soft_records_to_2xx_ratio(rpt: SoakDriverReport, *, records_delta: int) -> dict:
+    s2xx = sum(c for s, c in rpt.by_status.items() if 200 <= s < 300) or 1
+    ratio = records_delta / s2xx
+    th = 1.10
+    return _soft_leaf(
+        "results.soft_warnings.records_to_2xx_ratio",
+        "fake_web.usage_records_delta / driver.by_status[2xx]",
+        {"ratio": round(ratio, 3), "threshold_max": th,
+         "records_delta": records_delta, "count_2xx": s2xx},
+        "ok" if ratio <= th else "warn",
+    )
+
+
+# ── Startup validator: spec Appendix A vs codes.rs ───────────────────────
+
+def validate_variant_map_against_catalog(catalog: set[str]) -> str | None:
+    """Per spec §10 + C6 — every code in VARIANT_ERROR_CODE_MAP must be in
+    `catalog` (parsed from codes.rs). Returns an error string if any
+    mapping is stale, else None."""
+    all_codes: set[str] = set()
+    for codes in VARIANT_ERROR_CODE_MAP.values():
+        all_codes.update(codes)
+    missing = sorted(all_codes - catalog)
+    if missing:
+        return (
+            f"variant→error_code mapping references codes not in codes.rs "
+            f"catalog: {missing}. Update VARIANT_ERROR_CODE_MAP in "
+            f"soak/invariants.py and Appendix A of the spec."
+        )
+    return None

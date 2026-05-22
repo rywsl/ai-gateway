@@ -248,3 +248,70 @@ def test_min_completion_fail():
     rpt.requests_completed = 10000
     leaf = min_completion_at_least_half(rpt)
     assert leaf["passed"] is False
+
+
+from soak.invariants import (
+    soft_success_rate,
+    soft_latency_p99,
+    soft_completion_rate,
+    soft_records_to_2xx_ratio,
+    validate_variant_map_against_catalog,
+)
+
+
+def test_soft_success_rate_ok():
+    rpt = SoakDriverReport.empty(target_count=100)
+    rpt.by_status = {200: 100}
+    leaf = soft_success_rate(rpt, chaos_mode="off")
+    assert leaf["status"] == "ok"
+
+
+def test_soft_success_rate_warn():
+    rpt = SoakDriverReport.empty(target_count=100)
+    rpt.by_status = {200: 50, 500: 50}
+    leaf = soft_success_rate(rpt, chaos_mode="off")
+    assert leaf["status"] == "warn"
+
+
+def test_soft_latency_p99_ok():
+    rpt = SoakDriverReport.empty(target_count=100)
+    rpt.latency_ms_p99 = 150.0
+    leaf = soft_latency_p99(rpt, chaos_mode="off")
+    assert leaf["status"] == "ok"
+
+
+def test_soft_latency_p99_warn():
+    rpt = SoakDriverReport.empty(target_count=100)
+    rpt.latency_ms_p99 = 300.0
+    leaf = soft_latency_p99(rpt, chaos_mode="off")
+    assert leaf["status"] == "warn"
+
+
+def test_soft_completion_rate_ok():
+    rpt = SoakDriverReport.empty(target_count=100)
+    rpt.requests_completed = 95
+    leaf = soft_completion_rate(rpt, chaos_mode="off")
+    assert leaf["status"] == "ok"
+
+
+def test_soft_records_to_2xx_warn_on_double_emit():
+    rpt = SoakDriverReport.empty(target_count=100)
+    rpt.by_status = {200: 10}
+    leaf = soft_records_to_2xx_ratio(rpt, records_delta=15)
+    assert leaf["status"] == "warn"
+    assert leaf["raw"]["ratio"] == 1.5
+
+
+def test_validate_variant_map_passes_for_full_catalog():
+    full_catalog = {
+        "GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED",
+        "GW_UPSTREAM_TIMEOUT", "GW_UPSTREAM_OVERLOADED", "GW_UPSTREAM_5XX",
+    }
+    err = validate_variant_map_against_catalog(full_catalog)
+    assert err is None
+
+
+def test_validate_variant_map_fails_on_missing():
+    err = validate_variant_map_against_catalog({"GW_UPSTREAM_TIMEOUT"})
+    assert err is not None
+    assert "GW_UPSTREAM_CONNECT_FAILED" in err
