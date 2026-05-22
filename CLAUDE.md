@@ -22,7 +22,7 @@ A Rust LLM gateway on **Pingora 0.8**. It accepts OpenAI- / Anthropic- / Gemini-
 
 Capability surface highlights:
 
-- **Wire formats**: OpenAI Chat + Responses, Anthropic Messages, Gemini Generate. Same-protocol passthrough is zero-copy; cross-protocol *request* re-render is wired (response re-render deferred — see [`docs/architecture.md`](docs/architecture.md) §Known gaps).
+- **Wire formats**: OpenAI Chat + Responses, Anthropic Messages, Gemini Generate. Same-protocol passthrough is zero-copy; cross-protocol request AND response re-render are wired (G8 closed in `50cd9e7`) — both directions emit the `gw_codec_cross_render_total{from,to}` metric.
 - **Auth**: `(x-api-key, x-api-key-id)` pair, `Authorization: Bearer <JWT>` (HS256/RS256, `iss`/`aud`/`nbf`/leeway on the management-token surface), optional HMAC signing with ±300 s replay window.
 - **Permissions**: 5-tier merge (global → user-group → user → sub-account → api-key); model-permission regex with a 100 ms per-call ReDoS budget + auto-disable.
 - **Routing**: 8 strategies (`FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky`). Multi-dim per-(key, format) health, sliding-window cooldown, per-key in-flight cap.

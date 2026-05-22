@@ -418,39 +418,16 @@ def test_gateway_container_restart_recovers(
     fake_web: FakeWebClient,
     fake_upstream: FakeUpstreamClient,
 ) -> None:
-    # IMPORTANT: re-seed auth_configs.global before the restart. The
-    # boot-time SQL in `tests/e2e/seed_auth_config.sql` only runs on a
-    # FRESH postgres data dir (initdb-once semantics), and the per-test
-    # `isolate_state.reset()` TRUNCATEs every entity table INCLUDING
-    # `auth_configs` (allowlisted in `crates/e2e-fake-web/src/store.rs:21`).
-    # The first gateway boot picked the row up before the first reset, so
-    # the in-memory `JwtValidator` lives on for the original process even
-    # after the truncate. After a restart, the new process re-reads
-    # `auth_config_or_load("global")` — and finds nothing — wiring the
-    # `None` legacy branch instead. Every subsequent JWT test (in this
-    # session OR a later one if pytest is interrupted between restart and
-    # the next `make e2e-down`) would then receive a generic
-    # `GW_AUTH_INVALID_JWT` instead of `GW_AUTH_JWT_INVALID_ISS/_AUD`.
-    # Re-seeding the row through fake_web (which writes via the standard
-    # `put_entity` path) restores the validator wiring for the new
-    # gateway process. The auth_config_or_load path is L1 Moka → cold
-    # load → PG, so as long as the row exists in PG by the time
-    # `/readyz` runs, the new gateway picks it up.
-    fake_web.put_auth_config(
-        {
-            "expected_iss": ["e2e-issuer"],
-            "expected_aud": ["e2e-aud"],
-            "leeway_secs": 30,
-            "require_nbf": False,
-            "blacklist_fail_mode": "fail_closed",
-            # UTF-8 bytes of "e2e-hs256-secret-key" as a JSON int array —
-            # serde deserializes Vec<u8> from a JSON array; mirrors the
-            # boot-seed payload in tests/e2e/seed_auth_config.sql.
-            "static_secret_hs256": list(b"e2e-hs256-secret-key"),
-            "static_pem_rs256": None,
-        }
-    )
-
+    # NOTE: no auth_config re-seed needed here. The boot-time SQL in
+    # `tests/e2e/seed_auth_config.sql` runs once on a FRESH postgres data
+    # dir (initdb-once semantics), and the per-test `isolate_state.reset()`
+    # deliberately PRESERVES `auth_configs` — it TRUNCATEs `TRUNCATE_TABLES`,
+    # which is `ENTITY_TABLES` minus `auth_configs` (see
+    # `crates/e2e-fake-web/src/store.rs`). So the boot-seeded global
+    # `auth_configs.global` row survives every reset and is still in PG
+    # when the restarted gateway runs `auth_config_or_load("global")` on
+    # its cold path. The JwtValidator wiring therefore survives the
+    # restart without any harness-side re-seed.
     seed_passthrough(
         fake_web,
         protocol=PROTO_OPENAI,

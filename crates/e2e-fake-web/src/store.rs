@@ -31,8 +31,38 @@ const ENTITY_TABLES: &[&str] = &[
     "models",
     // `auth_configs` is owned by the fake control-plane (gateway TODO
     // table not yet in migrations). No consumer ns — same treatment as
-    // `models` — so we skip emitting invalidation for it.
+    // `models` — so we skip emitting invalidation for it. It IS a real
+    // entity the harness writes via `put_entity`/`delete_entity` (the JWT
+    // scenarios upsert it), but it is deliberately EXCLUDED from
+    // [`TRUNCATE_TABLES`] — see the `reset()` doc-comment for why.
     "auth_configs",
+];
+
+/// Subset of [`ENTITY_TABLES`] that `reset()` is allowed to TRUNCATE.
+///
+/// This is `ENTITY_TABLES` minus `auth_configs`. The single global
+/// `auth_configs` row is seeded ONCE by Postgres initdb
+/// (`tests/e2e/seed_auth_config.sql`) and read by the gateway at boot;
+/// it is owned by the boot lifecycle, not by any individual test. If
+/// `reset()` truncated it, the first per-test reset would drop the row
+/// and a later gateway restart (e.g. the restart-recovery scenario)
+/// would re-read `auth_config_or_load("global")`, find nothing, and wire
+/// the legacy `None` JWT-validator branch — turning every subsequent
+/// `GW_AUTH_JWT_INVALID_ISS/_AUD` into a generic `GW_AUTH_INVALID_JWT`.
+/// So `reset()` PRESERVES `auth_configs` across resets; the JWT
+/// scenarios that need a different config still overwrite it explicitly
+/// via `put_entity` (which remains in the `ENTITY_TABLES` allowlist).
+const TRUNCATE_TABLES: &[&str] = &[
+    "users",
+    "user_groups",
+    "api_keys",
+    "vendors",
+    "vendor_keys",
+    "model_groups",
+    "pricings",
+    "jwks",
+    "ip_blocks",
+    "models",
 ];
 
 /// Map an entity table name to the `ns` field emitted on `events:entity`.
@@ -214,7 +244,15 @@ impl Store {
     /// and `events:counter` (and therefore the gateway's consumer groups),
     /// and deletes only the harness-owned keys:
     ///
-    /// 1. PG: TRUNCATE every entity table with `RESTART IDENTITY CASCADE`.
+    /// 1. PG: TRUNCATE every entity table with `RESTART IDENTITY CASCADE`,
+    ///    EXCEPT `auth_configs`. The single global `auth_configs` row is
+    ///    seeded once by Postgres initdb (`tests/e2e/seed_auth_config.sql`)
+    ///    and loaded by the gateway at boot — it is owned by the boot
+    ///    lifecycle, not by any test. Truncating it on the first reset
+    ///    would leave a later gateway restart with no JWT validator
+    ///    config; so `reset()` preserves it (table list = [`TRUNCATE_TABLES`],
+    ///    which is [`ENTITY_TABLES`] minus `auth_configs`). JWT scenarios
+    ///    that need a different config still overwrite it via `put_entity`.
     /// 2. Redis: DEL every `counter:*` key (per-user balances + daily
     ///    token windows; prefix from `gw-store/src/counter_store.rs`).
     /// 3. Redis: DEL every `entity:*` key — the gateway's L1 Redis-side
@@ -239,8 +277,11 @@ impl Store {
     /// rather than silently, so a botched reset can't masquerade as a pass.
     pub async fn reset(&self) -> anyhow::Result<()> {
         // 1. PG truncate (one statement → atomic; can't half-truncate).
-        //    Table list matches the `ENTITY_TABLES` allowlist.
-        let tables = ENTITY_TABLES.join(", ");
+        //    Table list = `TRUNCATE_TABLES` = `ENTITY_TABLES` minus
+        //    `auth_configs` — the boot-seeded global auth_config row is
+        //    preserved so gateway-restart scenarios keep their JWT
+        //    validator config (see the doc-comment above + `TRUNCATE_TABLES`).
+        let tables = TRUNCATE_TABLES.join(", ");
         let sql = format!("TRUNCATE {tables} RESTART IDENTITY CASCADE");
         sqlx::query(&sql).execute(&self.pg).await?;
 
