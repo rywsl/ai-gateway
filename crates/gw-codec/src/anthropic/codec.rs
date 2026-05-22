@@ -15,6 +15,30 @@ use super::wire::AnthropicRequest;
 
 pub struct Anthropic;
 
+/// Subset of the Anthropic Messages non-stream response body needed for
+/// `parse_response`. Field names match Anthropic's wire shape.
+///
+/// `cache_creation_input_tokens` is intentionally not deserialised because v1
+/// `UsageIR` has no field for it; it will be wired when codec-s4 v2 extends
+/// `UsageIR`.
+#[derive(serde::Deserialize)]
+struct AnthropicResponseUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct AnthropicResponseBody {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    usage: Option<AnthropicResponseUsage>,
+}
+
 impl ProtocolCodec for Anthropic {
     #[inline]
     fn detect_request(path: &str, _h: &Headers, _body_head: &[u8]) -> Option<Self> {
@@ -132,11 +156,41 @@ impl ProtocolCodec for Anthropic {
         Ok(())
     }
 
-    fn parse_response<'a>(&self, _body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
-        // TODO(v2): non-streaming 2xx response handling.
-        unimplemented!(
-            "v1: anthropic non-stream response not implemented; 2xx flows through stream"
-        )
+    fn parse_response<'a>(&self, body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
+        // v1.x: extract usage + model/id from Anthropic Messages non-stream
+        // response. `messages` / `finish_reason` are not yet reconstructed
+        // because same-protocol passthrough does not need them — the bytes
+        // are forwarded verbatim by the proxy layer. Will be revisited when
+        // codec-s4 v2 wires cross-protocol non-stream re-render.
+        let parsed: AnthropicResponseBody =
+            serde_json::from_slice(body).map_err(|e| ErrorIR {
+                category: gw_core::error::ErrorCategory::UpstreamError,
+                status: 502,
+                upstream_status: None,
+                code: Cow::Borrowed(
+                    gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR,
+                ),
+                message: Cow::Owned(format!("anthropic parse_response: {e}")),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            })?;
+
+        let usage = parsed.usage.map(|u| gw_core::ir::UsageIR {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cached_tokens: u.cache_read_input_tokens,
+        });
+
+        Ok(ResponseIR {
+            id: Cow::Owned(parsed.id),
+            model: Cow::Owned(parsed.model),
+            messages: Vec::new(),
+            finish_reason: None,
+            usage,
+            metadata: Default::default(),
+        })
     }
 
     fn render_response(
@@ -194,5 +248,60 @@ impl ProtocolCodec for Anthropic {
                 | MessageIR::Assistant { content, .. } => approx_tokens(content),
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trait_def::ProtocolCodec;
+
+    #[test]
+    fn parse_response_extracts_usage() {
+        let body = br#"{
+            "id":"msg_abc",
+            "type":"message",
+            "role":"assistant",
+            "content":[{"type":"text","text":"hi"}],
+            "model":"claude-3-5-sonnet",
+            "stop_reason":"end_turn",
+            "usage":{
+                "input_tokens":20,
+                "output_tokens":5,
+                "cache_read_input_tokens":15,
+                "cache_creation_input_tokens":0
+            }
+        }"#;
+        let codec = Anthropic;
+        let ir = codec.parse_response(body).expect("parse_response ok");
+        let usage = ir.usage.expect("usage present");
+        assert_eq!(usage.input_tokens, 20);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cached_tokens, Some(15));
+        assert_eq!(ir.model.as_ref(), "claude-3-5-sonnet");
+    }
+
+    #[test]
+    fn parse_response_no_cache_fields() {
+        let body = br#"{"id":"x","type":"message","role":"assistant","content":[],
+            "model":"m","stop_reason":"end_turn",
+            "usage":{"input_tokens":3,"output_tokens":1}}"#;
+        let codec = Anthropic;
+        let usage = codec.parse_response(body).unwrap().usage.unwrap();
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 1);
+        assert_eq!(usage.cached_tokens, None);
+    }
+
+    #[test]
+    fn parse_response_returns_protocol_decode_error_on_garbage() {
+        let body = b"not json";
+        let codec = Anthropic;
+        let err = codec.parse_response(body).expect_err("must fail");
+        assert_eq!(err.status, 502);
+        assert_eq!(
+            err.code.as_ref(),
+            gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR
+        );
     }
 }
