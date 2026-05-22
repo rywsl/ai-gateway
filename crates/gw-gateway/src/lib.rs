@@ -333,6 +333,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         // Whitelist mapping: "host:port" strings → Vec<(String, u16)>.
         let mut wl = Vec::with_capacity(cfg.tunnel.target_whitelist.len());
         for entry in &cfg.tunnel.target_whitelist {
+            // IPv6 hosts must be bracketed: "[::1]:443" parses correctly because
+            // rsplit_once finds the last ':'. Bare "::1:443" would parse to host
+            // "::1" — not supported in v1.
             let (h, p) = entry
                 .rsplit_once(':')
                 .ok_or_else(|| anyhow::anyhow!(
@@ -360,6 +363,17 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         };
         let dns = Arc::new(SafeDnsResolver::cloudflare_default());
 
+        fn node_to_view(n: gw_core::entity::ProxyNode) -> gw_tunnel_client::resolver::ProxyNodeView {
+            gw_tunnel_client::resolver::ProxyNodeView {
+                id: n.id,
+                ws_url: n.ws_url,
+                enabled: n.enabled,
+                latency_ms: n.latency_ms,
+                allowed_provider_ids: n.allowed_provider_ids,
+                allowed_vendor_key_ids: n.allowed_vendor_key_ids,
+            }
+        }
+
         // Initial node snapshot. Plan defines ProxyNode -> ProxyNodeView mapping;
         // including `ws_url` (added in T3-A).
         let initial_nodes: Vec<ProxyNodeView> = store
@@ -367,14 +381,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(|n| ProxyNodeView {
-                id: n.id,
-                ws_url: n.ws_url,
-                enabled: n.enabled,
-                latency_ms: n.latency_ms,
-                allowed_provider_ids: n.allowed_provider_ids,
-                allowed_vendor_key_ids: n.allowed_vendor_key_ids,
-            })
+            .map(node_to_view)
             .collect();
 
         let stack = Arc::new(gw_proxy::tunnel_stack::TunnelStack::new(
@@ -398,6 +405,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
                 if let Some(nodes) = store_clone.proxy_nodes_list_or_load().await {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
+                    // DefaultHasher uses a randomised per-process seed (since Rust 1.36), so
+                    // the signature is intra-process only — it'll spuriously reload once on
+                    // every restart, which is harmless.
                     let sig = nodes.iter().fold(0u64, |acc, n| {
                         let mut h = DefaultHasher::new();
                         n.id.hash(&mut h);
@@ -409,14 +419,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
                         last_signature = sig;
                         let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> = nodes
                             .into_iter()
-                            .map(|n| gw_tunnel_client::resolver::ProxyNodeView {
-                                id: n.id,
-                                ws_url: n.ws_url,
-                                enabled: n.enabled,
-                                latency_ms: n.latency_ms,
-                                allowed_provider_ids: n.allowed_provider_ids,
-                                allowed_vendor_key_ids: n.allowed_vendor_key_ids,
-                            })
+                            .map(node_to_view)
                             .collect();
                         stack_clone.reload_nodes(view);
                     }
