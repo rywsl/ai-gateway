@@ -35,16 +35,19 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 
 from conftest import (
+    BALANCE_LARGE,
+    MODEL,
+    PROTO_OPENAI,
     FakeUpstreamClient,
     FakeWebClient,
+    _error_code,
     make_openai_client,
+    pair_headers,
+    post_chat,
     seed_passthrough,
     seed_user_apikey,
 )
 
-
-PROTO_OPENAI = "open_ai"
-MODEL = "gpt-4"
 
 _CHAT_BODY = {
     "model": MODEL,
@@ -53,36 +56,23 @@ _CHAT_BODY = {
 }
 
 
-# --- shared helpers -------------------------------------------------------
+# --- thin shims preserving the pre-refactor `_post` / `_pair_headers` / ---
+# `_error_code` call sites. The implementations now live in conftest so
+# E4-C/D/E share them; these aliases keep the existing test bodies untouched.
 
 
 def _post(gateway_url: str, *, headers: dict, body: dict | None = None,
           timeout: float = 30) -> requests.Response:
-    return requests.post(
-        f"{gateway_url.rstrip('/')}/v1/chat/completions",
-        json=body if body is not None else _CHAT_BODY,
-        headers=headers,
+    return post_chat(
+        gateway_url,
+        headers,
+        body if body is not None else _CHAT_BODY,
         timeout=timeout,
     )
 
 
-def _error_code(resp: requests.Response) -> str | None:
-    try:
-        payload = resp.json()
-    except ValueError:
-        return None
-    err = payload.get("error")
-    if isinstance(err, dict):
-        return err.get("code")
-    return None
-
-
 def _pair_headers(api_key: str, key_id: str) -> dict:
-    return {
-        "x-api-key": api_key,
-        "x-api-key-id": key_id,
-        "content-type": "application/json",
-    }
+    return pair_headers(api_key, key_id)
 
 
 def _today_utc() -> str:
@@ -225,7 +215,7 @@ def test_daily_quota_exceeded_rejects_403(
         daily_quota_tokens=100,
     )
     # Positive balance so the balance gate passes and we reach daily quota.
-    fake_web.set_balance(uid, 1_000_000_000)
+    fake_web.set_balance(uid, BALANCE_LARGE)
     today = _today_utc()
     fake_web.set_raw_counter(f"counter:user:{uid}:daily_tokens:{today}", 100)
 
@@ -273,7 +263,7 @@ def test_daily_quota_yesterday_does_not_block_today(
         allowed_groups=[seeded["group"]],
         daily_quota_tokens=100_000,
     )
-    fake_web.set_balance(seeded["user_id"], 1_000_000_000)
+    fake_web.set_balance(seeded["user_id"], BALANCE_LARGE)
     fake_upstream.reset_scenario()
 
     # Yesterday's key is wildly over today's quota, but it's keyed by date so
@@ -325,7 +315,7 @@ def test_hard_cap_input_tokens_rejects_400(
         api_key_plaintext="sk-cap",
         allowed_groups=["grp-cap"],
     )
-    fake_web.set_balance("u-cap", 1_000_000_000)
+    fake_web.set_balance("u-cap", BALANCE_LARGE)
 
     # 5_000_001 chars -> approx 1_250_000 tokens, comfortably over the 1M cap.
     huge = "x" * 5_000_001
@@ -382,7 +372,7 @@ def test_rpm_exceeded_rejects_429(
         rpm_limit=2,
         api_key_rpm_limit=2,
     )
-    fake_web.set_balance(seeded["user_id"], 1_000_000_000)
+    fake_web.set_balance(seeded["user_id"], BALANCE_LARGE)
     fake_upstream.reset_scenario()
 
     headers = _pair_headers(seeded["api_key_plaintext"], seeded["api_key_id"])

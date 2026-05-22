@@ -24,11 +24,11 @@ to themselves. The constants below match the serde wire shape.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from conftest import (
+    BALANCE_LARGE,
+    PROTO_OPENAI,
     FakeUpstreamClient,
     FakeWebClient,
     make_anthropic_client,
@@ -36,31 +36,22 @@ from conftest import (
     make_gemini_client,  # noqa: F401
     make_openai_client,
     seed_passthrough,
+    wait_for_records,
 )
 
 
 # Protocol tags as they appear in vendor_keys.accessible_endpoints
-# (ProtocolKind serde wire form).
-PROTO_OPENAI = "open_ai"
+# (ProtocolKind serde wire form). `PROTO_OPENAI` is exported from conftest
+# (shared across scenarios); the other two only appear in this file so they
+# stay local.
 PROTO_ANTHROPIC = "anthropic"
 PROTO_GEMINI = "gemini"
 
 
 def _wait_for_records(fake_web: FakeWebClient, min_records: int = 1, timeout: float = 3.0) -> int:
-    """Poll usage_stats() until records_xlen >= min_records, or timeout.
-
-    Ledger flushes are async/batched — give them a few hundred ms. Returns
-    the final observed xlen (caller asserts).
-    """
-    deadline = time.monotonic() + timeout
-    xlen = 0
-    while time.monotonic() < deadline:
-        xlen = fake_web.usage_stats().get("records_xlen", 0)
-        if xlen >= min_records:
-            return xlen
-        time.sleep(0.1)
-    # one last read after the loop for diagnostic accuracy
-    return fake_web.usage_stats().get("records_xlen", 0)
+    """Thin wrapper preserving the pre-refactor call signature. Delegates to
+    the shared `wait_for_records` helper in conftest."""
+    return wait_for_records(fake_web, min_xlen=min_records, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +77,7 @@ def test_openai_stream_happy(
         api_key_id="ak1",
         api_key_plaintext="sk-client-1",
     )
-    fake_web.set_balance(seeded["user_id"], 1_000_000_000)
+    fake_web.set_balance(seeded["user_id"], BALANCE_LARGE)
     fake_upstream.set_scenario(
         {
             "routes": [
@@ -198,7 +189,7 @@ def test_anthropic_stream_happy(
         api_key_id="ak2",
         api_key_plaintext="sk-client-2",
     )
-    fake_web.set_balance(seeded["user_id"], 1_000_000_000)
+    fake_web.set_balance(seeded["user_id"], BALANCE_LARGE)
     fake_upstream.set_scenario(
         {
             "routes": [

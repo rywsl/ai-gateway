@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from typing import Any, Optional
 
 import httpx
@@ -43,6 +44,105 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 KEK_HEX = os.environ.get("GW_KEK_HEX", "deadbeef" * 8)
+
+
+# ---------------------------------------------------------------------------
+# Generic scenario constants + HTTP helpers used by every scenario file. Lifted
+# from the per-file copies in test_auth_failures / test_happy_streaming /
+# test_quotas so E4-C/D/E (and future suites) can reuse them.
+#
+# `BALANCE_LARGE` is comfortably above any freeze estimate the gateway will
+# compute for a single test request — using it everywhere keeps positive
+# scenarios from accidentally tripping the balance gate.
+# `MODEL`/`PROTO_OPENAI` are the happy-path defaults; only the few scenario
+# files that exercise non-OpenAI/non-`gpt-4` cases override them.
+# ---------------------------------------------------------------------------
+
+BALANCE_LARGE = 1_000_000_000
+
+MODEL = "gpt-4"
+PROTO_OPENAI = "open_ai"
+
+# Reuse a single Session across `post_chat` invocations: connection pooling
+# halves the per-test wall-time for negative scenarios that just POST + assert.
+_HTTP_SESSION = requests.Session()
+
+
+def post_chat(
+    gateway_url: str,
+    headers: dict,
+    body: dict,
+    *,
+    timeout: float = 10,
+) -> requests.Response:
+    """One-shot POST to the gateway's `/v1/chat/completions` surface.
+
+    Lifted from the per-file `_post(...)` duplicates in the scenario files —
+    they all hit the same URL with the same shape. Reads the whole response;
+    callers that care about a stream open their own SDK client instead.
+    """
+    return _HTTP_SESSION.post(
+        f"{gateway_url.rstrip('/')}/v1/chat/completions",
+        json=body,
+        headers=headers,
+        timeout=timeout,
+    )
+
+
+def pair_headers(api_key: str, key_id: str, **extra: str) -> dict:
+    """Build the gateway pair-auth header dict.
+
+    Always includes `content-type: application/json` (every scenario POSTs
+    JSON). Extra kwargs are merged in last so a caller can append (or
+    override) headers like `x-signature` / `x-timestamp` / `x-require-capability`.
+    """
+    h = {
+        "x-api-key": api_key,
+        "x-api-key-id": key_id,
+        "content-type": "application/json",
+    }
+    h.update(extra)
+    return h
+
+
+def _error_code(resp: requests.Response) -> Optional[str]:
+    """Pull `body["error"]["code"]` out of the gateway's OpenAI-style error
+    envelope (`crates/gw-codec/src/openai/codec.rs::render_error`).
+
+    Returns None when the body is not the expected JSON shape (so the
+    caller can fall back to status). Tolerant of non-JSON bodies.
+    """
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(err, dict):
+        return err.get("code")
+    return None
+
+
+def wait_for_records(
+    fake_web: "FakeWebClient",
+    *,
+    min_xlen: int = 1,
+    timeout: float = 3.0,
+) -> int:
+    """Poll `usage_stats().records_xlen` until it reaches `min_xlen`, or
+    timeout. Returns the final observed xlen (caller asserts).
+
+    The gateway's logging filter XADDs `usage:records` asynchronously after
+    stream completion, so positive scenarios that need to observe the ledger
+    must wait. 3s is the same budget the original per-file copies used.
+    """
+    deadline = time.monotonic() + timeout
+    xlen = 0
+    while time.monotonic() < deadline:
+        xlen = fake_web.usage_stats().get("records_xlen", 0)
+        if xlen >= min_xlen:
+            return xlen
+        time.sleep(0.1)
+    return fake_web.usage_stats().get("records_xlen", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +218,12 @@ def fake_upstream_admin_url() -> str:
     """Base URL of the fake upstream's scenario admin API (NOT the
     business port that the gateway forwards traffic to)."""
     return os.environ.get("FAKE_UPSTREAM_ADMIN_URL", "http://localhost:9001")
+
+
+@pytest.fixture(scope="session")
+def metrics_url() -> str:
+    """Base URL of the gateway's Prometheus `/metrics` surface."""
+    return os.environ.get("METRICS_URL", "http://localhost:9090")
 
 
 # ---------------------------------------------------------------------------

@@ -53,19 +53,22 @@ import jwt as pyjwt
 import requests
 
 from conftest import (
+    BALANCE_LARGE,
     FakeWebClient,
     HS256_SECRET,
     JWT_AUD,
     JWT_ISS,
+    MODEL,
+    PROTO_OPENAI,
+    _error_code,
+    pair_headers,
+    post_chat,
     seed_model_group,
     seed_pricing,
     seed_user_apikey,
     seed_vendor,
     seed_vendor_key,
 )
-
-PROTO_OPENAI = "open_ai"
-MODEL = "gpt-4"
 
 # `ApiKeyEntry.expires_at` is `Option<time::OffsetDateTime>` and the workspace
 # builds `time` with only the `serde` feature (NOT `serde-human-readable`), so
@@ -117,44 +120,25 @@ def _seed_routable_graph(
         fake_web, group=group, vendor_key_ids=[vendor_key_id], strategy="fixed_order"
     )
     seed_pricing(fake_web, model=MODEL)
-    fake_web.set_balance(user_id, 1_000_000_000)
+    fake_web.set_balance(user_id, BALANCE_LARGE)
 
 
 def _post(
     gateway_url: str, *, headers: dict, body: dict | None = None
 ) -> requests.Response:
-    """Raw POST to the gateway's chat-completions surface. We read the whole
-    response; for these tests we only care about the status line + the error
-    envelope, which arrives before/instead of any stream frames."""
-    return requests.post(
-        f"{gateway_url.rstrip('/')}/v1/chat/completions",
-        json=body if body is not None else _CHAT_BODY,
-        headers=headers,
-        timeout=30,
+    """Raw POST to the gateway's chat-completions surface — thin wrapper around
+    the shared `post_chat` so the test bodies stay readable. We use the shared
+    helper's default 10s timeout (was 30s pre-refactor — auth-rejection bodies
+    arrive instantly, no need for the long budget)."""
+    return post_chat(
+        gateway_url,
+        headers,
+        body if body is not None else _CHAT_BODY,
     )
 
 
-def _error_code(resp: requests.Response) -> str | None:
-    """Pull the GW_AUTH_* code out of the gateway error envelope, or None if the
-    body isn't the expected JSON shape (so the caller can fall back to status)."""
-    try:
-        payload = resp.json()
-    except ValueError:
-        return None
-    err = payload.get("error")
-    if isinstance(err, dict):
-        return err.get("code")
-    return None
-
-
 def _pair_headers(api_key: str, key_id: str, **extra: str) -> dict:
-    h = {
-        "x-api-key": api_key,
-        "x-api-key-id": key_id,
-        "content-type": "application/json",
-    }
-    h.update(extra)
-    return h
+    return pair_headers(api_key, key_id, **extra)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +190,7 @@ def test_ip_not_allowlisted_rejects_403(
         allowed_groups=["grp-ip"],
         ip_allowlist=["203.0.113.0/24"],
     )
-    fake_web.set_balance("u-ip", 1_000_000_000)
+    fake_web.set_balance("u-ip", BALANCE_LARGE)
 
     resp = _post(gateway_url, headers=_pair_headers("sk-ip", "ak-ip"))
     assert resp.status_code == 403, resp.text
@@ -231,7 +215,7 @@ def _seed_hmac_key(fake_web: FakeWebClient, *, suffix: str) -> tuple[str, str]:
         signature_required=True,
         signature_algo="hmac_sha256",
     )
-    fake_web.set_balance(user_id, 1_000_000_000)
+    fake_web.set_balance(user_id, BALANCE_LARGE)
     return api_key_id, f"sk-sig-{suffix}"
 
 
