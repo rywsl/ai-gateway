@@ -6,6 +6,9 @@ pub use gw_core::entity::TunnelPreference;
 #[derive(Debug, Clone)]
 pub struct ProxyNodeView {
     pub id: String,
+    /// `ws[s]://host:port/path` — the endpoint `TunnelStack::peer_for_node`
+    /// dials when building the `HttpPeer`. Mirrors `gw_core::entity::ProxyNode::ws_url`.
+    pub ws_url: url::Url,
     pub enabled: bool,
     pub latency_ms: u32,
     pub allowed_provider_ids: Vec<String>,

@@ -2,10 +2,15 @@ use gw_tunnel_client::resolver::{
     resolve_tunnel, ProxyNodeView, TunnelPreference, TunnelResolution, TunnelResolveCtx,
 };
 
+fn dummy_url() -> url::Url {
+    "wss://node.example.com:443/tunnel".parse().unwrap()
+}
+
 fn nodes() -> Vec<ProxyNodeView> {
     vec![
         ProxyNodeView {
             id: "n1".into(),
+            ws_url: dummy_url(),
             enabled: true,
             latency_ms: 30,
             allowed_provider_ids: vec!["openai".into()],
@@ -13,6 +18,7 @@ fn nodes() -> Vec<ProxyNodeView> {
         },
         ProxyNodeView {
             id: "n2".into(),
+            ws_url: dummy_url(),
             enabled: true,
             latency_ms: 10,
             allowed_provider_ids: vec!["anthropic".into()],
@@ -20,6 +26,7 @@ fn nodes() -> Vec<ProxyNodeView> {
         },
         ProxyNodeView {
             id: "n3".into(),
+            ws_url: dummy_url(),
             enabled: false,
             latency_ms: 5,
             allowed_provider_ids: vec!["openai".into()],
@@ -60,6 +67,7 @@ fn returns_direct_when_no_match() {
 fn disabled_nodes_skipped() {
     let only_disabled = vec![ProxyNodeView {
         id: "x".into(),
+        ws_url: dummy_url(),
         enabled: false,
         latency_ms: 1,
         allowed_provider_ids: vec!["openai".into()],
@@ -81,6 +89,7 @@ fn disabled_nodes_skipped() {
 fn vendor_key_whitelist_filters() {
     let nodes = vec![ProxyNodeView {
         id: "n1".into(),
+        ws_url: dummy_url(),
         enabled: true,
         latency_ms: 10,
         allowed_provider_ids: vec!["openai".into()],
@@ -104,6 +113,7 @@ fn prefer_low_latency_sorts_nodes() {
     let mixed_nodes = vec![
         ProxyNodeView {
             id: "n1".into(),
+            ws_url: dummy_url(),
             enabled: true,
             latency_ms: 30,
             allowed_provider_ids: vec!["openai".into()],
@@ -111,6 +121,7 @@ fn prefer_low_latency_sorts_nodes() {
         },
         ProxyNodeView {
             id: "n4".into(),
+            ws_url: dummy_url(),
             enabled: true,
             latency_ms: 5,
             allowed_provider_ids: vec!["openai".into()],
