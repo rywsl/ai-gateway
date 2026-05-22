@@ -85,8 +85,10 @@ async fn handle_conn(stream: TcpStream) {
             Some(t) => t,
             None => continue,
         };
-        let end = (14 + length).min(bin.len());
-        let payload = &bin[14..end];
+        if bin.len() < 14 + length {
+            continue; // truncated frame — skip rather than process garbage
+        }
+        let payload = &bin[14..14 + length];
         match mt {
             x if x == Mt::Ping as u8 => {
                 let pong = encode(Mt::Pong, stream_id, payload);
@@ -108,7 +110,9 @@ async fn handle_conn(stream: TcpStream) {
             x if x == Mt::Close as u8 => {
                 streams.lock().await.remove(&stream_id);
             }
-            _ => {}
+            _ => {
+                eprintln!("tunnel-mock: unhandled msg_type {mt:#x} (stream {stream_id})");
+            }
         }
     }
 }
@@ -163,6 +167,6 @@ async fn forward(
             break;
         }
     }
-    drop(read_task);
+    read_task.abort();
     streams.lock().await.remove(&stream_id);
 }
