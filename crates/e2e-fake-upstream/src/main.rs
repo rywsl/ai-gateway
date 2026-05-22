@@ -31,6 +31,18 @@ fn scenario_path() -> Option<String> {
 
 #[tokio::main]
 async fn main() {
+    let mode = std::env::var("FAKE_UPSTREAM_MODE").unwrap_or_else(|_| "http".into());
+    if mode == "tunnel" {
+        let addr: std::net::SocketAddr = std::env::var("FAKE_UPSTREAM_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:9001".into())
+            .parse()
+            .expect("bad FAKE_UPSTREAM_ADDR");
+        e2e_fake_upstream::tunnel_node::run(addr)
+            .await
+            .expect("tunnel listener exited");
+        return;
+    }
+
     let load_scenario_file = |path: &str| -> Option<scenario::Scenario> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| eprintln!("[fake-upstream] cannot read scenario file {path:?}: {e}"))

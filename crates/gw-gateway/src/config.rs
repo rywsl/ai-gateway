@@ -32,6 +32,8 @@ pub struct Config {
     pub loader: LoaderCfg,
     #[serde(default)]
     pub routing: RoutingCfg,
+    #[serde(default)]
+    pub tunnel: TunnelCfg,
     // TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
     // `HardCapCfg` defaults. Once it accepts caller-supplied caps, reintroduce
     // an `[auth]` section here and thread `hard_cap_max_input_tokens` /
@@ -167,6 +169,60 @@ impl Default for RoutingCfg {
     }
 }
 
+/// Tunnel subsystem knobs (ADR-T-5). `enabled = false` (default) keeps the
+/// gateway on the byte-identical Direct path. Boot-time only — flipping
+/// requires SIGHUP / restart, not a hot-reload, because constructing the
+/// stack requires DNS + transport setup at startup.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TunnelCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// DoH provider name. v1 only `cloudflare` is supported; the loader
+    /// errors at startup on any other value to keep the surface explicit.
+    #[serde(default = "default_doh")]
+    pub doh: String,
+    #[serde(default = "default_dns_cache_ttl_secs")]
+    pub dns_cache_ttl_secs: u32,
+    /// `host:port` strings the gateway is allowed to tunnel to. Mapped
+    /// into `gw_tunnel_client::target_filter::set_whitelist` at boot.
+    #[serde(default)]
+    pub target_whitelist: Vec<String>,
+    #[serde(default = "default_heartbeat_secs")]
+    pub heartbeat_interval_secs: u32,
+    #[serde(default = "default_missed_pong")]
+    pub missed_pong_threshold: u32,
+    #[serde(default = "default_backoff_min_secs")]
+    pub backoff_min_secs: u32,
+    #[serde(default = "default_backoff_max_secs")]
+    pub backoff_max_secs: u32,
+    #[serde(default = "default_max_streams")]
+    pub max_streams_per_conn: u32,
+}
+
+fn default_doh() -> String { "cloudflare".into() }
+fn default_dns_cache_ttl_secs() -> u32 { 600 }
+fn default_heartbeat_secs() -> u32 { 30 }
+fn default_missed_pong() -> u32 { 3 }
+fn default_backoff_min_secs() -> u32 { 1 }
+fn default_backoff_max_secs() -> u32 { 60 }
+fn default_max_streams() -> u32 { 256 }
+
+impl Default for TunnelCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            doh: default_doh(),
+            dns_cache_ttl_secs: default_dns_cache_ttl_secs(),
+            target_whitelist: Vec::new(),
+            heartbeat_interval_secs: default_heartbeat_secs(),
+            missed_pong_threshold: default_missed_pong(),
+            backoff_min_secs: default_backoff_min_secs(),
+            backoff_max_secs: default_backoff_max_secs(),
+            max_streams_per_conn: default_max_streams(),
+        }
+    }
+}
+
 impl RedisCfg {
     /// Expose the connection URL for the redis client. The string is only
     /// consumed at startup by the connect call.
@@ -228,6 +284,24 @@ impl Config {
             );
         }
 
+        if self.tunnel.enabled {
+            if self.tunnel.doh != "cloudflare" {
+                anyhow::bail!(
+                    "invalid config: tunnel.doh = {:?} (only 'cloudflare' supported in v1)",
+                    self.tunnel.doh
+                );
+            }
+            if self.tunnel.backoff_min_secs == 0 || self.tunnel.backoff_max_secs == 0 {
+                anyhow::bail!("invalid config: tunnel.backoff_* must be > 0");
+            }
+            if self.tunnel.backoff_min_secs > self.tunnel.backoff_max_secs {
+                anyhow::bail!("invalid config: tunnel.backoff_min_secs > backoff_max_secs");
+            }
+            if self.tunnel.missed_pong_threshold == 0 {
+                anyhow::bail!("invalid config: tunnel.missed_pong_threshold must be > 0");
+            }
+        }
+
         Ok(())
     }
 }
@@ -240,4 +314,71 @@ pub fn load() -> anyhow::Result<Config> {
         .extract()?;
     cfg.validate()?;
     Ok(cfg)
+}
+
+#[cfg(test)]
+mod tunnel_cfg_tests {
+    use super::*;
+    use figment::{providers::{Format, Toml}, Figment};
+
+    fn extract(toml: &str) -> anyhow::Result<Config> {
+        Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .map_err(Into::into)
+    }
+
+    #[test]
+    fn tunnel_disabled_by_default() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = extract(toml).unwrap();
+        cfg.validate().unwrap();
+        assert!(!cfg.tunnel.enabled);
+    }
+
+    #[test]
+    fn tunnel_rejects_unknown_doh_provider() {
+        // Build config from defaults, then override just the tunnel fields via
+        // a second TOML string that Figment merges on top (higher precedence).
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\ndoh = \"google\"\n";
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_rejects_zero_backoff_min() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\nbackoff_min_secs = 0\n";
+        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_rejects_min_greater_than_max() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\nbackoff_min_secs = 60\nbackoff_max_secs = 1\n";
+        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_rejects_zero_missed_pong() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\nmissed_pong_threshold = 0\n";
+        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_validates_when_enabled_with_defaults() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[tunnel]\nenabled = true\n";
+        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        assert!(cfg.validate().is_ok());
+    }
 }

@@ -86,6 +86,8 @@ fn llm_gateway_constructor_signature_smoke() {
             jwt_validator,
             strategies,
             capability_resolver,
+            #[cfg(feature = "tunnel")]
+            None,
         )
     }
     // Do not call it — `Ledger::start` would need a live Redis. We only need

@@ -91,6 +91,8 @@ pub async fn pick_peer(
     health: &Arc<KeyHealthStore>,
     in_flight: &Arc<InFlightStore>,
     strategies: &Arc<StrategySet>,
+    #[cfg(feature = "tunnel")]
+    tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
 ) -> Result<Box<HttpPeer>> {
     // The remaining `ErrorType::Custom(...)` short-circuits in this function
     // stay as bare-500 errors (no JSON envelope) on purpose. They signal
@@ -252,7 +254,87 @@ pub async fn pick_peer(
         .to_string();
     let port = base.port_or_known_default().unwrap_or(443);
     let scheme_tls = base.scheme().eq_ignore_ascii_case("https");
-    let mut peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host);
+
+    // ADR-T-1: insert the tunnel decision between strategy.pick and HttpPeer
+    // construction. Without `feature = "tunnel"` or with `tunnel = None` the
+    // legacy Direct path is byte-identical.
+    let mut peer;
+    #[cfg(feature = "tunnel")]
+    {
+        let provider_id = vendor.value.id.as_ref();
+        let key_id = picked_arc.key_id.as_ref();
+        let default_pref = gw_core::entity::TunnelPreference::default();
+        let pref = picked_arc.tunnel_preference.as_ref().unwrap_or(&default_pref);
+        let resolution = match tunnel {
+            Some(t) => t.resolve(provider_id, key_id, pref),
+            None => gw_tunnel_client::resolver::TunnelResolution::Direct,
+        };
+        match resolution {
+            gw_tunnel_client::resolver::TunnelResolution::Direct => {
+                if pref.require_tunnel {
+                    // ADR-T-4 — never silently fall back when require_tunnel=true.
+                    metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node").increment(1);
+                    return emit_envelope_and_bail(
+                        session,
+                        ctx,
+                        envelope_for(
+                            codes::GW_TUNNEL_NO_NODE,
+                            "no tunnel node available",
+                            502,
+                        ),
+                    )
+                    .await;
+                }
+                metrics::counter!("gw_tunnel_resolve_total", "result" => "direct").increment(1);
+                ctx.tunnel_resolution = Some("direct".into());
+                peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
+            }
+            gw_tunnel_client::resolver::TunnelResolution::Use(node_id) => {
+                let t = tunnel.expect("TunnelStack present implied by Use(_)");
+                match t.peer_for_node(&node_id, &host, port).await {
+                    Ok(p) => {
+                        metrics::counter!("gw_tunnel_resolve_total", "result" => "tunnel").increment(1);
+                        ctx.tunnel_resolution = Some(node_id);
+                        peer = p;
+                    }
+                    Err(crate::tunnel_stack::TunnelPeerError::NoLive { .. }) => {
+                        metrics::counter!("gw_tunnel_resolve_total", "result" => "no_live").increment(1);
+                        // Push the failed key onto the retry blacklist so a
+                        // retry on this request lands on a different key.
+                        ctx.retry_blacklist.push(picked_arc.key_id.clone());
+                        return emit_envelope_and_bail(
+                            session,
+                            ctx,
+                            envelope_for(
+                                codes::GW_TUNNEL_NO_LIVE,
+                                "tunnel node not live",
+                                502,
+                            ),
+                        )
+                        .await;
+                    }
+                    Err(crate::tunnel_stack::TunnelPeerError::TargetDenied { .. }) => {
+                        metrics::counter!("gw_tunnel_resolve_total", "result" => "denied").increment(1);
+                        return emit_envelope_and_bail(
+                            session,
+                            ctx,
+                            envelope_for(
+                                codes::GW_TUNNEL_TARGET_DENIED,
+                                "tunnel target denied",
+                                502,
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "tunnel"))]
+    {
+        ctx.tunnel_resolution = Some("direct".into());
+        peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
+    }
 
     // -------------------------------------------------------------
     // Timeouts (G4). Ladder: hardcoded default < Vendor.timeout_overrides

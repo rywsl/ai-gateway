@@ -73,6 +73,9 @@ struct Wired {
     strategies: Arc<gw_routing::strategy::set::StrategySet>,
     /// Capability resolver (T3-C). `None` until wired.
     capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
+    /// TunnelStack (T5-B). `Some` iff `cfg.tunnel.enabled = true`.
+    #[cfg(feature = "tunnel")]
+    tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -167,6 +170,8 @@ pub fn run() -> anyhow::Result<()> {
         wired.jwt_validator,
         wired.strategies,
         wired.capability_resolver,
+        #[cfg(feature = "tunnel")]
+        wired.tunnel,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -314,6 +319,121 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         gw_capability::EntityStoreResolveBackend::new(store.clone()),
     ))));
 
+    // T5 / ADR-T-2 — Build TunnelStack iff `cfg.tunnel.enabled`. Skipping the
+    // entire stack on `false` keeps the byte-identical Direct path: pick_peer
+    // sees `tunnel = None` and never branches.
+    #[cfg(feature = "tunnel")]
+    let tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>> = if cfg.tunnel.enabled {
+        use gw_tunnel_client::pool::PoolConfig;
+        use gw_tunnel_client::resolver::ProxyNodeView;
+        use gw_tunnel_client::safe_dns::SafeDnsResolver;
+        use gw_tunnel_client::target_filter;
+        use gw_tunnel_client::transport::TransportConfig;
+
+        // Whitelist mapping: "host:port" strings → Vec<(String, u16)>.
+        let mut wl = Vec::with_capacity(cfg.tunnel.target_whitelist.len());
+        for entry in &cfg.tunnel.target_whitelist {
+            // IPv6 hosts must be bracketed: "[::1]:443" parses correctly because
+            // rsplit_once finds the last ':'. Bare "::1:443" would parse to host
+            // "::1" — not supported in v1.
+            let (h, p) = entry
+                .rsplit_once(':')
+                .ok_or_else(|| anyhow::anyhow!(
+                    "tunnel.target_whitelist entry missing ':' — {entry}"
+                ))?;
+            let port: u16 = p.parse().map_err(|_| anyhow::anyhow!(
+                "tunnel.target_whitelist entry has non-numeric port — {entry}"
+            ))?;
+            wl.push((h.to_string(), port));
+        }
+        target_filter::set_whitelist(wl);
+
+        let pool_cfg = PoolConfig {
+            heartbeat_interval: Duration::from_secs(cfg.tunnel.heartbeat_interval_secs as u64),
+            max_streams_per_conn: cfg.tunnel.max_streams_per_conn,
+            backoff_min: Duration::from_secs(cfg.tunnel.backoff_min_secs as u64),
+            backoff_max: Duration::from_secs(cfg.tunnel.backoff_max_secs as u64),
+            backoff_jitter: 0.2,
+        };
+        let transport_template = TransportConfig {
+            url: "ws://placeholder:0/".parse().unwrap(), // overwritten per node in peer_for_node
+            heartbeat_interval: pool_cfg.heartbeat_interval,
+            missed_pong_threshold: cfg.tunnel.missed_pong_threshold,
+            max_streams_per_conn: cfg.tunnel.max_streams_per_conn,
+        };
+        let dns = Arc::new(SafeDnsResolver::cloudflare_default());
+
+        fn node_to_view(n: gw_core::entity::ProxyNode) -> gw_tunnel_client::resolver::ProxyNodeView {
+            gw_tunnel_client::resolver::ProxyNodeView {
+                id: n.id,
+                ws_url: n.ws_url,
+                enabled: n.enabled,
+                latency_ms: n.latency_ms,
+                allowed_provider_ids: n.allowed_provider_ids,
+                allowed_vendor_key_ids: n.allowed_vendor_key_ids,
+            }
+        }
+
+        // Initial node snapshot. Plan defines ProxyNode -> ProxyNodeView mapping;
+        // including `ws_url` (added in T3-A).
+        let initial_nodes: Vec<ProxyNodeView> = store
+            .proxy_nodes_list_or_load()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(node_to_view)
+            .collect();
+
+        let stack = Arc::new(gw_proxy::tunnel_stack::TunnelStack::new(
+            initial_nodes,
+            dns,
+            pool_cfg,
+            transport_template,
+        ));
+
+        // Refresh-on-invalidation: spawn a 5s polling watcher. The stream
+        // consumer in gw-store already invalidates the Moka cache on
+        // `proxy_node` events; this watcher pushes the refreshed snapshot
+        // into the ArcSwap inside TunnelStack. v1 uses polling because
+        // `stream_consumer` does not yet expose a per-namespace callback.
+        let stack_clone = stack.clone();
+        let store_clone = store.clone();
+        tokio::spawn(async move {
+            let mut last_signature: u64 = 0;
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if let Some(nodes) = store_clone.proxy_nodes_list_or_load().await {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    // DefaultHasher uses a randomised per-process seed (since Rust 1.36), so
+                    // the signature is intra-process only — it'll spuriously reload once on
+                    // every restart, which is harmless.
+                    let sig = nodes.iter().fold(0u64, |acc, n| {
+                        let mut h = DefaultHasher::new();
+                        n.id.hash(&mut h);
+                        n.enabled.hash(&mut h);
+                        n.latency_ms.hash(&mut h);
+                        acc ^ h.finish()
+                    });
+                    if sig != last_signature {
+                        last_signature = sig;
+                        let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> = nodes
+                            .into_iter()
+                            .map(node_to_view)
+                            .collect();
+                        stack_clone.reload_nodes(view);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(target: "gw_gateway", "TunnelStack constructed (tunnel.enabled=true)");
+        Some(stack)
+    } else {
+        tracing::info!(target: "gw_gateway", "tunnel.enabled=false; skipping TunnelStack");
+        None
+    };
+
     Ok(Wired {
         store,
         health,
@@ -329,5 +449,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             Duration::from_secs(cfg.routing.sticky_ttl_secs),
         )),
         capability_resolver,
+        #[cfg(feature = "tunnel")]
+        tunnel,
     })
 }

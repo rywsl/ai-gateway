@@ -140,6 +140,11 @@ pub struct ReqCtx {
     /// `LlmGateway`; `None` in v1 (see TODO in `filters::request`).
     pub required_caps: Option<gw_capability::types::RequiredCapabilities>,
 
+    // --- Tunnel (ADR-T-2) ---
+    /// T6 / ADR-T-2 — set by `pick_peer` to `"direct"` or `Some(node_id)`.
+    /// Read by `logging` for the detailed-log field and by metrics labels.
+    pub tunnel_resolution: Option<String>,
+
     // --- Debug ---
     pub trace: TraceBuffer,
     pub debug: DebugMode,
@@ -197,6 +202,7 @@ impl ReqCtx {
             signature_secret: Vec::new(),
             mgmt: false,
             required_caps: None,
+            tunnel_resolution: None,
             trace: TraceBuffer::new(),
             debug: DebugMode::DISABLED,
         }

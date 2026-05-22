@@ -156,6 +156,31 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "fail_to_connect retry decisions (G10); label=outcome (recovered/exhausted/tls_blocked)",
     },
+    MetricSpec {
+        name: "gw_tunnel_open_total",
+        kind: MetricKind::Counter,
+        help: "tunnel stream-open outcome per node; labels=node_id,result (ok/no_live/target_denied/err)",
+    },
+    MetricSpec {
+        name: "gw_tunnel_resolve_total",
+        kind: MetricKind::Counter,
+        help: "tunnel decision outcome; label=result (direct/tunnel/denied/no_node/no_live)",
+    },
+    MetricSpec {
+        name: "gw_tunnel_transport_alive",
+        kind: MetricKind::Gauge,
+        help: "1 if ReconnectingTransport::current() is Some, else 0; label=node_id",
+    },
+    MetricSpec {
+        name: "gw_tunnel_reconnect_total",
+        kind: MetricKind::Counter,
+        help: "reconnect supervisor attempts; labels=node_id,reason",
+    },
+    MetricSpec {
+        name: "gw_tunnel_doh_resolve_total",
+        kind: MetricKind::Counter,
+        help: "SafeDnsResolver outcome; label=result (ok/blocked/nx)",
+    },
 ];
 
 pub fn describe_all() {

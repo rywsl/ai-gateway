@@ -9,11 +9,11 @@ use std::sync::Arc;
 use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::RedisMap;
 use secrecy::SecretString;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
-    ApiKeyEntry, AuthConfig, JwksEntry, Model, ModelGroup, Pricing, UserEntry, UserGroup, Vendor,
-    VendorKey,
+    ApiKeyEntry, AuthConfig, JwksEntry, Model, ModelGroup, Pricing, ProxyNode, UserEntry,
+    UserGroup, Vendor, VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -88,7 +88,7 @@ where
 fn ttl_for(ns: &str) -> u64 {
     match ns {
         "user" | "user_group" | "apikey" | "ipblock" => 300,
-        "vendor" | "vendor_key" | "model_group" | "pricing" | "model" => 1800,
+        "vendor" | "vendor_key" | "model_group" | "pricing" | "model" | "proxy_node" => 1800,
         "jwks" | "auth_config" => 3600,
         _ => 300,
     }
@@ -138,6 +138,10 @@ struct VendorKeyRow {
     /// exactly equal `forced_capabilities`. Defaults false.
     #[serde(default)]
     exclusive_capability_match: bool,
+    /// T2 — ADR-T-4. `None` means "follow global default" (Direct unless a
+    /// node opts in).
+    #[serde(default)]
+    tunnel_preference: Option<gw_core::entity::TunnelPreference>,
 }
 
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
@@ -155,6 +159,10 @@ const PRICING_SQL: &str =
     "SELECT payload, version FROM pricings WHERE id = $1 AND deleted_at IS NULL";
 const JWKS_SQL: &str = "SELECT payload, version FROM jwks WHERE id = $1 AND deleted_at IS NULL";
 const MODEL_SQL: &str = "SELECT payload, version FROM models WHERE id = $1 AND deleted_at IS NULL";
+const PROXY_NODE_SQL: &str =
+    "SELECT payload, version FROM proxy_nodes WHERE id = $1 AND deleted_at IS NULL";
+const PROXY_NODE_LIST_SQL: &str =
+    "SELECT payload, version FROM proxy_nodes WHERE deleted_at IS NULL ORDER BY id";
 // TODO(T1-E): the `auth_configs` table does not yet exist in
 // `migrations/0001_initial.sql`. Until it lands, this query errors at the PG
 // layer, `with_cold_load_timeout` swallows the error into `None`, and
@@ -221,6 +229,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
             // G13 (T3-C): read the capability fields from the JSONB payload.
             forced_capabilities: row.forced_capabilities,
             exclusive_capability_match: row.exclusive_capability_match,
+            tunnel_preference: row.tunnel_preference,
         })
     })
     .await
@@ -275,6 +284,61 @@ pub async fn load_model(ctx: &LoaderCtx, name: &ModelName) -> anyhow::Result<Ver
     .await
 }
 
+/// Cold-load a [`ProxyNode`] (ADR-T-3) by id. Mirrors [`load_model`]:
+/// Redis L1 → PgSQL `proxy_nodes` L2 → Redis write-back. 1800s TTL matching
+/// `vendor_key`. T5-B's `TunnelStack` reads the per-id cache to resolve nodes.
+pub async fn load_proxy_node(
+    ctx: &LoaderCtx,
+    id: &str,
+) -> anyhow::Result<Versioned<ProxyNode>> {
+    load_entity(ctx, "proxy_node", id, PROXY_NODE_SQL, |v| {
+        serde_json::from_value::<ProxyNode>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+/// Whole-table scan for the live `proxy_nodes` list. Used by
+/// `TunnelStack::reload_nodes` (ADR-T-3). The list is small in practice
+/// (≤ low hundreds) so a single PG round-trip is fine; the ArcSwap inside
+/// TunnelStack is what makes hot-path reads lock-free.
+pub async fn load_proxy_nodes_list(
+    ctx: &LoaderCtx,
+) -> anyhow::Result<Vec<ProxyNode>> {
+    let rows = sqlx::query(PROXY_NODE_LIST_SQL).fetch_all(&ctx.pg).await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let payload: serde_json::Value = row.try_get("payload")?;
+        let node: ProxyNode = serde_json::from_value(payload)?;
+        out.push(node);
+    }
+    Ok(out)
+}
+
 // Note: IpBlockEntry has no cold-loader-by-id; its consumer iterates the
 // whole snapshot via `EntityStore::ipblock_snapshot`. v1 accepts an empty
 // runtime list; preload-from-PG is a follow-up.
+
+#[cfg(test)]
+mod tunnel_pref_tests {
+    use gw_core::entity::TunnelPreference;
+    use serde_json::json;
+
+    #[test]
+    fn vendor_key_row_decodes_tunnel_pref_when_absent() {
+        let pref: Option<TunnelPreference> =
+            serde_json::from_value(json!(null)).unwrap();
+        assert!(pref.is_none());
+    }
+
+    #[test]
+    fn vendor_key_row_decodes_tunnel_pref_when_present() {
+        let pref: TunnelPreference = serde_json::from_value(json!({
+            "preferred_node_ids": ["node-eu", "node-us"],
+            "require_tunnel": true,
+            "prefer_low_latency": true
+        })).unwrap();
+        assert_eq!(pref.preferred_node_ids.as_slice(), &["node-eu".to_string(), "node-us".to_string()]);
+        assert!(pref.require_tunnel);
+        assert!(pref.prefer_low_latency);
+    }
+}

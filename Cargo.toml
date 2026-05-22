@@ -78,7 +78,7 @@ flate2 = "1"
 regex = "1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
-hickory-resolver = { version = "0.24", features = ["dns-over-https-rustls", "tokio-runtime"] }
+hickory-resolver = { version = "0.25", features = ["https-ring", "tokio"] }
 
 # 可观测
 tracing = "0.1"

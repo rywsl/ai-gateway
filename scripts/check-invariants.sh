@@ -264,6 +264,70 @@ else
   ok "e2e fake crates carry no gateway codec/auth/store/ledger/proxy/gateway dep"
 fi
 
+# ---------------------------------------------------------------------------
+# no_dead_tunnel_use_alias (spec §8) — `pub use gw_tunnel_client` in
+# gw-gateway must coexist with TunnelStack references in gw-proxy. Either
+# both present (tunnel wired) or both absent (feature removed).
+# ---------------------------------------------------------------------------
+echo "[no_dead_tunnel_use_alias] gw-tunnel-client re-export must align with TunnelStack use"
+re_export_count=$(grep -rn 'pub use gw_tunnel_client' crates/gw-gateway/src/ 2>/dev/null | wc -l | tr -d ' ')
+tunnel_stack_count=$(grep -rn 'TunnelStack' crates/gw-proxy/src/ 2>/dev/null | wc -l | tr -d ' ')
+if { [ "$re_export_count" -eq 0 ] && [ "$tunnel_stack_count" -ne 0 ]; } \
+   || { [ "$re_export_count" -ne 0 ] && [ "$tunnel_stack_count" -eq 0 ]; }; then
+  bad "tunnel re-export ($re_export_count) and TunnelStack ($tunnel_stack_count) must be both zero or both nonzero"
+else
+  ok "tunnel re-export / TunnelStack alignment ok"
+fi
+
+# ---------------------------------------------------------------------------
+# tunnel_require_means_hard_fail (spec §8) — require_tunnel must be paired
+# with GW_TUNNEL_NO_NODE (no silent Direct fallback per ADR-T-4). Each
+# use-site source line must have a `GW_TUNNEL_NO_NODE` within 8 lines (vline through vline+7) below.
+# Skips:
+#  - the field definition in gw-core::entity (docstring above defines the
+#    contract; no use-site code nearby)
+#  - persistence-layer JSON decode tests (loader.rs)
+#  - resolver.rs doc comment that names both tokens on the same line
+#  - pure comment lines (the documentation match noted in the plan)
+# ---------------------------------------------------------------------------
+echo "[tunnel_require_means_hard_fail] require_tunnel implies GW_TUNNEL_NO_NODE"
+violations=""
+while IFS=: read -r vfile vline _; do
+  case "$vfile" in
+    */entity.rs|*/loader.rs|*/resolver.rs) continue;;
+    *_test.rs|*/tests/*) continue;;
+  esac
+  vcontent=$(sed -n "${vline}p" "$vfile" 2>/dev/null)
+  case "$vcontent" in
+    *'//'*) continue;;
+  esac
+  if ! sed -n "${vline},$((vline+7))p" "$vfile" 2>/dev/null | grep -q 'GW_TUNNEL_NO_NODE'; then
+    violations="${violations}${vfile}:${vline}: require_tunnel without GW_TUNNEL_NO_NODE within 8 lines\n"
+  fi
+done < <(grep -rn --include='*.rs' -E '\brequire_tunnel\b' crates/ 2>/dev/null)
+if [ -n "$violations" ]; then
+  bad "$(printf '%b' "$violations")"
+else
+  ok "require_tunnel always paired with GW_TUNNEL_NO_NODE"
+fi
+
+# ---------------------------------------------------------------------------
+# no_double_rustls (spec §8) — only one rustls version may appear in
+# Cargo.lock. T4's hickory bump removed the 0.21 entry.
+# ---------------------------------------------------------------------------
+echo "[no_double_rustls] Cargo.lock must hold exactly one rustls version"
+if grep -q '^name = "rustls"' Cargo.lock 2>/dev/null; then
+  v_count=$(grep -A1 '^name = "rustls"$' Cargo.lock | grep '^version = ' | sort -u | wc -l | tr -d ' ')
+  if [ "$v_count" -gt 1 ]; then
+    bad "Cargo.lock has $v_count distinct rustls versions; want 1"
+    grep -B1 -A1 '^name = "rustls"$' Cargo.lock
+  else
+    ok "single rustls version"
+  fi
+else
+  note "rustls not in Cargo.lock; skipping"
+fi
+
 # ===========================================================================
 # PENDING lints — target code has not landed yet. Uncomment in the named phase.
 # ===========================================================================

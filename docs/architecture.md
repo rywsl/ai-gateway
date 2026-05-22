@@ -38,7 +38,7 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
 | `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
 | `gw-capability` | Business | Model-capability resolution: `Capability` enum, `RequiredCapabilities`, `ModelMapper`, `CapabilityResolver`, `AdapterCapabilityHook`, `CapabilityFilter`, `PricingReader`. |
-| `gw-tunnel-client` | Business | Tunnel transport to remote nodes: frame codec (magic `0xAE21`, 8 msg types), WebSocket transport w/ heartbeat / reconnect, DoH resolver, target-filter whitelist. Crate is built behind `gw-gateway` feature `tunnel` but **not yet wired into the upstream-peer path** — implementation tracked in `docs/superpowers/specs/2026-05-22-tunnel-t-design.md`. |
+| `gw-tunnel-client` | Business | Tunnel transport to remote nodes: frame codec (magic `0xAE21`, 8 msg types), WebSocket transport w/ heartbeat / reconnect, DoH resolver, target-filter whitelist. Consumed by `gw-proxy::tunnel_stack::TunnelStack` (under `feature = "tunnel"`). Active when `cfg.tunnel.enabled = true`; otherwise `pick_peer` runs the byte-identical Direct path. |
 | `gw-proxy` | Execution | Pingora `ProxyHttp` impl. Filter chain, `ReqCtx`, error fanout, timeouts, body-verify hook, jemalloc sampling. |
 | `gw-gateway` | Execution | Binary entry. Figment config, observability, KMS init, bootstrap OS thread + tokio runtime, health HTTP server. |
 
@@ -88,16 +88,17 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 
 ### 4.1 TOML tables
 
-| Table | Purpose |
-|-------|---------|
-| `[server]` | `business_port` (8000), `metrics_port` (9090), `health_port` (8080) |
-| `[redis]` | URL, pool size |
-| `[pgsql]` | URL, max connections |
-| `[ratelimit]` | Workspace `global_rpm` ceiling (per-user lives in DB) |
-| `[ledger]` | `channel_capacity`, `batch_size`, `flush_interval_ms` for the billing flusher |
-| `[kms]` | KEK identifier; secret is env-only |
-| `[debug]` | Sampling rate + body-capture toggles for detailed logs |
-| `[security]` | `trust_xff` (default `false`) |
+| Table | Keys / Purpose | Notes |
+|-------|----------------|-------|
+| `[server]` | `business_port` (8000), `metrics_port` (9090), `health_port` (8080) | |
+| `[redis]` | URL, pool size | |
+| `[pgsql]` | URL, max connections | |
+| `[ratelimit]` | Workspace `global_rpm` ceiling (per-user lives in DB) | |
+| `[ledger]` | `channel_capacity`, `batch_size`, `flush_interval_ms` for the billing flusher | |
+| `[kms]` | KEK identifier; secret is env-only | |
+| `[debug]` | Sampling rate + body-capture toggles for detailed logs | |
+| `[security]` | `trust_xff` (default `false`) | |
+| `[tunnel]` | `enabled`, `doh`, `dns_cache_ttl_secs`, `target_whitelist`, `heartbeat_interval_secs`, `missed_pong_threshold`, `backoff_min_secs`, `backoff_max_secs`, `max_streams_per_conn` | Tunnel subsystem (ADR-T-5). Default `enabled = false`. Boot-time only. |
 
 Secrets must come from env, never the TOML.
 
@@ -207,6 +208,9 @@ Active lints (all green at HEAD):
 | `no_legacy_retry` | `gw-routing/src/retry.rs` deleted in Phase 1c. |
 | `no_patch_body` | Adapter trait v2 has no `patch_body` / `BodyPatch`. |
 | `e2e_fake_no_gw_codec_dep` | E2E fake crates (`e2e-fake-upstream`, `e2e-fake-web`) must not depend on `gw-codec` / `gw-proxy` / `gw-gateway` / `gw-auth` / `gw-store` / `gw-ledger`. `gw-core` (for `ids::*`) is allowed. |
+| `no_dead_tunnel_use_alias` | `pub use gw_tunnel_client` in gw-gateway and `TunnelStack` use in gw-proxy must coexist (both-zero or both-nonzero). |
+| `tunnel_require_means_hard_fail` | Every `require_tunnel` use must be paired with `GW_TUNNEL_NO_NODE` within 8 lines below (no silent Direct fallback). |
+| `no_double_rustls` | Cargo.lock holds exactly one `rustls` version (T4 removed the 0.21 fork). |
 
 Pending lints (uncomment when target phase lands):
 
@@ -229,6 +233,7 @@ Pending lints (uncomment when target phase lands):
 | `gw-core::ir` not renamed to `::schema` yet | Phase 1d landed the *scaffolding* parts of S1 v2 without breaking the runtime IR path. The strict A10 form lands atomically in Phase 2 alongside the wire→wire matrix migration. | `crates/gw-core/src/ir.rs`, `no_ir_runtime_struct` lint stays PENDING. |
 | Daily-quota UTC midnight race | The pre-check in `request_filter` reads `counter:user:{eid}:daily_tokens:{day_N}`, but the post-increment in `logging` may run after the request crosses the UTC midnight boundary and land on day N+1's counter. Affects < 0.001 % of traffic; daily quota is best-effort accounting, not security. | `crates/gw-proxy/src/filters/request.rs` daily-quota pre-check, `crates/gw-proxy/src/filters/logging.rs` post-increment |
 | Capability field-name / type asymmetry (`ApiKeyEntry.force_capabilities: SmallVec<[String;4]>` vs `VendorKey.forced_capabilities: Vec<String>`) | G13 (T3-C) reads forced caps from two different entities: the resolver pulls *required* caps from `ApiKeyEntry.force_capabilities` + `ApiKeyEntry.match_mode_exclusive` (caller-side requirement), while the candidate filter reads *advertised* caps from `VendorKey.forced_capabilities` + `VendorKey.exclusive_capability_match` (channel-side capability). The two were introduced by different waves (T4-B vs T0-C) and the naming/collection-type drift is left as-is rather than risk a churny rename; reconciliation is a follow-up. | `crates/gw-capability/src/backend.rs`, `crates/gw-routing/src/candidates.rs` |
+| **`require_tunnel = true` is fail-closed.** When a `VendorKey.tunnel_preference.require_tunnel = true` resolves to `Direct` (no node matches the provider/key), `pick_peer` emits `GW_TUNNEL_NO_NODE` rather than silently falling back to Direct. This is enforced by the `tunnel_require_means_hard_fail` invariant. | Fail-closed design: a key that demands a tunnel must not silently use a Direct path. | `crates/gw-proxy/src/filters/upstream.rs`, `scripts/check-invariants.sh` |
 
 ## 9. Known gaps (closed by `feature/known-gaps-closure`)
 
@@ -262,6 +267,8 @@ The 13 gaps G1-G13 catalogued in [`docs/superpowers/specs/2026-05-21-known-gaps-
 - **G13**: reconcile `ApiKeyEntry.force_capabilities` (SmallVec, singular `force_`) vs `VendorKey.forced_capabilities` (Vec, plural) into one breaking rename.
 
 The `e2e_full_flow.rs` Pingora+wiremock+reqwest harness is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`. The docker-based black-box harness lands on `feature/e2e-blackbox` (see [`docs/superpowers/specs/2026-05-21-e2e-blackbox-design.md`](superpowers/specs/2026-05-21-e2e-blackbox-design.md)).
+
+- Tunnel data-path round-trip e2e test: T7-B currently covers storage + `TunnelStack::resolve` semantics via testcontainers. A full Pingora → tunnel-node → fake-upstream HTTP round-trip is deferred to a follow-up wave (matches the v2 scope marker on `e2e_full_flow.rs`).
 
 ## 10. End-to-end testing — the black-box harness
 

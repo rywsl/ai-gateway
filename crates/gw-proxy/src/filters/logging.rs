@@ -320,6 +320,7 @@ pub async fn run(
             ttft_ms,
             request_body_preview,
             response_body_preview,
+            tunnel_resolution: ctx.tunnel_resolution.clone(),
         };
         tracing::info!(
             target: "gw_detailed_log",

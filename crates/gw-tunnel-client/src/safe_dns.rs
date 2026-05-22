@@ -9,7 +9,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use arc_swap::ArcSwap;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::{Resolver, TokioResolver};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,7 +109,7 @@ impl Drop for OverrideGuard {
 
 /// DoH-backed resolver with LRU cache + IP blocklist post-filter.
 pub struct SafeDnsResolver {
-    inner: TokioAsyncResolver,
+    inner: TokioResolver,
     cache: Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
     cache_ttl: Duration,
     cache_cap: usize,
@@ -118,7 +119,12 @@ impl SafeDnsResolver {
     /// Cloudflare DoH over HTTPS (1.1.1.1 / 1.0.0.1). Best default for v1.
     pub fn cloudflare_default() -> Self {
         let opts = ResolverOpts::default();
-        let inner = TokioAsyncResolver::tokio(ResolverConfig::cloudflare_https(), opts);
+        let inner = Resolver::builder_with_config(
+            ResolverConfig::cloudflare_https(),
+            TokioConnectionProvider::default(),
+        )
+        .with_options(opts)
+        .build();
         Self {
             inner,
             cache: Mutex::new(HashMap::new()),

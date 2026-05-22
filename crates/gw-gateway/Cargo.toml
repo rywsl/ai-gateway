@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-tunnel = ["dep:gw-tunnel-client"]
+tunnel = ["dep:gw-tunnel-client", "gw-proxy/tunnel"]
 
 [dependencies]
 gw-core = { path = "../gw-core" }

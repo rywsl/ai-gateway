@@ -93,6 +93,12 @@ pub struct LlmGateway {
     /// Capability resolver (T3-C). `None` until wired; `filters::request`
     /// then leaves `ctx.required_caps` empty (v1 behaviour).
     pub capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
+    /// Tunnel decision stack (ADR-T-2). `None` ⇒ pick_peer always picks Direct,
+    /// behaviour byte-identical to pre-tunnel builds. Built under
+    /// `feature = "tunnel"` by `gw-gateway::bootstrap` only when
+    /// `cfg.tunnel.enabled = true`.
+    #[cfg(feature = "tunnel")]
+    pub tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
 }
 
 impl LlmGateway {
@@ -109,6 +115,8 @@ impl LlmGateway {
         jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
         strategies: Arc<gw_routing::strategy::set::StrategySet>,
         capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
+        #[cfg(feature = "tunnel")]
+        tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
     ) -> Self {
         Self {
             store,
@@ -122,6 +130,8 @@ impl LlmGateway {
             jwt_validator,
             strategies,
             capability_resolver,
+            #[cfg(feature = "tunnel")]
+            tunnel,
         }
     }
 }
@@ -169,6 +179,8 @@ impl ProxyHttp for LlmGateway {
             &self.health,
             &self.in_flight,
             &self.strategies,
+            #[cfg(feature = "tunnel")]
+            self.tunnel.as_ref(),
         )
         .await?;
         ctx.phase_end();

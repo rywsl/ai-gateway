@@ -189,6 +189,11 @@ pub struct VendorKey {
     /// present (strict match). When false, the resolver may use a looser
     /// containment check (T3-C / ADR-G13-1).
     pub exclusive_capability_match: bool,
+    /// Tunnel routing preference (ADR-T-4). `None` => follow the
+    /// global default policy (which is "Direct" until a node matches).
+    /// Always `None` in seed data; existing rows do not require backfill
+    /// per the spec's "non-breaking on rollout" guarantee.
+    pub tunnel_preference: Option<TunnelPreference>,
 }
 
 impl std::fmt::Debug for VendorKey {
@@ -366,4 +371,102 @@ pub enum ModelAvailability {
     Enabled,
     Disabled,
     ShadowOnly,
+}
+
+/// Per-vendor-key tunnel routing preference (ADR-T-4).
+///
+/// Sits in `gw-core` rather than `gw-tunnel-client` because `VendorKey`
+/// (also in `gw-core`) embeds it and `gw-core` is supporting-layer — it
+/// cannot depend on `gw-tunnel-client` (business-layer). The tunnel
+/// resolver re-exports a thin alias via `pub use gw_core::entity::TunnelPreference`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TunnelPreference {
+    /// Optional list of preferred node ids; empty = "any allowed node".
+    #[serde(default)]
+    pub preferred_node_ids: smallvec::SmallVec<[String; 4]>,
+    /// When true, `pick_peer` MUST tunnel — no available node => hard error
+    /// `GW_TUNNEL_NO_NODE` (no silent Direct fallback). See spec ADR-T-4.
+    #[serde(default)]
+    pub require_tunnel: bool,
+    /// Sort filtered nodes by ascending `latency_ms` before picking the first.
+    #[serde(default)]
+    pub prefer_low_latency: bool,
+}
+
+/// Helpers for entity types that carry encrypted blobs without a back-edge
+/// to `gw-store` (which owns the AES-256-GCM `EncryptedKey` type).
+/// The wire shape is intentionally isomorphic to `gw_store::encrypt::EncryptedKey`
+/// so JSONB payloads round-trip between the two crates without re-encoding.
+pub mod entity_helpers {
+    /// AES-256-GCM ciphertext blob stored in a JSONB payload column.
+    ///
+    /// Field layout mirrors `gw_store::encrypt::EncryptedKey` exactly
+    /// (`ciphertext`, `nonce`, `auth_tag`, `kek_kid`). `gw-core` cannot
+    /// back-edge to `gw-store`, so this parallel type is defined here;
+    /// `gw-store`'s loader converts between them at decode time.
+    ///
+    /// `Vec<u8>` fields are serialised by `serde_json` as JSON arrays of
+    /// integers (the default; no `serde_with::base64`). This matches the
+    /// on-disk JSONB shape of `gw_store::encrypt::EncryptedKey` exactly.
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    pub struct EncryptedBlob {
+        pub ciphertext: Vec<u8>,
+        pub nonce: Vec<u8>,
+        pub auth_tag: Vec<u8>,
+        pub kek_kid: String,
+    }
+}
+
+/// Proxy-node entity (ADR-T-3). A WS-reachable remote relay that
+/// `TunnelStack` can route upstream traffic through. Cached by
+/// `EntityStore::proxy_node` (1800s TTL, matching vendor_key).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ProxyNode {
+    pub id: String,
+    /// `ws[s]://host:port/path` — base WebSocket URL the gateway dials.
+    pub ws_url: url::Url,
+    #[serde(default = "proxy_node_default_enabled")]
+    pub enabled: bool,
+    /// Most recent latency observation from the periodic health prober.
+    #[serde(default)]
+    pub latency_ms: u32,
+    #[serde(default)]
+    pub allowed_provider_ids: Vec<String>,
+    /// Empty = unrestricted across keys for the allowed providers.
+    #[serde(default)]
+    pub allowed_vendor_key_ids: Vec<String>,
+    /// AES-256-GCM ciphertext of the node-auth bearer token (encrypted
+    /// under the active KEK). `None` means the node accepts unauthenticated
+    /// CONNECT frames.
+    #[serde(default)]
+    pub auth_token_enc: Option<entity_helpers::EncryptedBlob>,
+}
+
+fn proxy_node_default_enabled() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entity_helpers::EncryptedBlob;
+
+    /// Verifies that `EncryptedBlob` round-trips through `serde_json`. `Vec<u8>`
+    /// fields serialise as JSON integer arrays (serde_json default) and
+    /// deserialise back to the same bytes.
+    #[test]
+    fn encrypted_blob_serde_roundtrip() {
+        let original = EncryptedBlob {
+            ciphertext: vec![0xde, 0xad, 0xbe, 0xef],
+            nonce: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            auth_tag: vec![0xaa; 16],
+            kek_kid: "test-kid-1".to_string(),
+        };
+        let serialised = serde_json::to_string(&original).expect("serialise");
+        let restored: EncryptedBlob =
+            serde_json::from_str(&serialised).expect("deserialise");
+        assert_eq!(restored.ciphertext, original.ciphertext);
+        assert_eq!(restored.nonce, original.nonce);
+        assert_eq!(restored.auth_tag, original.auth_tag);
+        assert_eq!(restored.kek_kid, original.kek_kid);
+    }
 }

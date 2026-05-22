@@ -28,6 +28,9 @@ pub struct DetailedLogRecord {
     pub request_body_preview: Option<String>,
     /// Truncated, redacted preview of the response body.
     pub response_body_preview: Option<String>,
+    /// `"direct"`, or the node_id when tunnel was used. `None` when
+    /// `upstream_peer` short-circuited before the decision. Spec §6.
+    pub tunnel_resolution: Option<String>,
 }
 
 /// Maximum preview size kept inline in the log record. Larger bodies are
