@@ -145,6 +145,12 @@ pub struct ReqCtx {
     /// Read by `logging` for the detailed-log field and by metrics labels.
     pub tunnel_resolution: Option<String>,
 
+    // --- Long-running operation (G5 / go-onboarding-gaps T0) ---
+    /// G5: Gemini `:predictLongRunning` / OpenAI `/v1/videos` top-level
+    /// `name: "operations/..."` extracted by `codec.parse_response`.
+    /// `None` for all ordinary (non-LRO) requests.
+    pub operation_id: Option<String>,
+
     // --- Debug ---
     pub trace: TraceBuffer,
     pub debug: DebugMode,
@@ -203,6 +209,7 @@ impl ReqCtx {
             mgmt: false,
             required_caps: None,
             tunnel_resolution: None,
+            operation_id: None,
             trace: TraceBuffer::new(),
             debug: DebugMode::DISABLED,
         }

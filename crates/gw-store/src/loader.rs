@@ -12,8 +12,8 @@ use secrecy::SecretString;
 use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
-    ApiKeyEntry, AuthConfig, JwksEntry, Model, ModelGroup, Pricing, ProxyNode, UserEntry,
-    UserGroup, Vendor, VendorKey,
+    ApiKeyEntry, AuthConfig, JwksEntry, Model, ModelGroup, OAuthCredentials, Pricing, ProxyNode,
+    UserEntry, UserGroup, Vendor, VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -94,6 +94,21 @@ fn ttl_for(ns: &str) -> u64 {
     }
 }
 
+/// Wire shape of the `oauth` sub-object inside a `vendor_keys.payload` row.
+/// Tokens are AES-256-GCM encrypted at rest; `load_vendor_key` decrypts them
+/// into `OAuthCredentials` held only in process memory (G3 / T0).
+#[derive(serde::Deserialize)]
+struct OAuthCredentialsRow {
+    access_token_enc: EncryptedKey,
+    refresh_token_enc: EncryptedKey,
+    /// Unix seconds timestamp (serde: integer).
+    #[serde(with = "time::serde::timestamp")]
+    access_expires_at: time::OffsetDateTime,
+    token_endpoint: String,
+    #[serde(default)]
+    scope: Vec<String>,
+}
+
 /// Wire shape of a `vendor_keys.payload` row. The plaintext `api_key` is held
 /// encrypted on disk under `api_key_enc`; decryption happens at decode time so
 /// the cache always stores the decrypted form.
@@ -142,6 +157,10 @@ struct VendorKeyRow {
     /// node opts in).
     #[serde(default)]
     tunnel_preference: Option<gw_core::entity::TunnelPreference>,
+    /// G3 / go-onboarding-gaps T0: optional OAuth credentials sub-object.
+    /// Absent for all static-API-key rows.
+    #[serde(default)]
+    oauth: Option<OAuthCredentialsRow>,
 }
 
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
@@ -208,6 +227,20 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
     load_entity(ctx, "vendor_key", id.as_ref(), VENDOR_KEY_SQL, move |v| {
         let row: VendorKeyRow = serde_json::from_value(v.clone())?;
         let secret: SecretString = decrypt(&row.api_key_enc, &kek)?;
+        let oauth = row
+            .oauth
+            .map(|o| {
+                let access_token = decrypt(&o.access_token_enc, &kek)?;
+                let refresh_token = decrypt(&o.refresh_token_enc, &kek)?;
+                Ok::<OAuthCredentials, anyhow::Error>(OAuthCredentials {
+                    access_token,
+                    refresh_token,
+                    access_expires_at: o.access_expires_at,
+                    token_endpoint: o.token_endpoint,
+                    scope: o.scope,
+                })
+            })
+            .transpose()?;
         Ok(VendorKey {
             key_id: row.key_id,
             vendor_id: row.vendor_id,
@@ -230,6 +263,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
             forced_capabilities: row.forced_capabilities,
             exclusive_capability_match: row.exclusive_capability_match,
             tunnel_preference: row.tunnel_preference,
+            oauth,
         })
     })
     .await
@@ -340,5 +374,57 @@ mod tunnel_pref_tests {
         assert_eq!(pref.preferred_node_ids.as_slice(), &["node-eu".to_string(), "node-us".to_string()]);
         assert!(pref.require_tunnel);
         assert!(pref.prefer_low_latency);
+    }
+}
+
+#[cfg(test)]
+mod oauth_row_tests {
+    use super::VendorKeyRow;
+    use serde_json::json;
+
+    /// Builds a minimal EncryptedKey JSON value (fields as integer arrays,
+    /// matching the on-disk JSONB shape of `gw_store::encrypt::EncryptedKey`).
+    fn enc_key_json() -> serde_json::Value {
+        json!({
+            "ciphertext": [1, 2, 3, 4],
+            "nonce": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+            "auth_tag": [0xaa, 0xbb, 0xcc, 0xdd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "kek_kid": "kid-1"
+        })
+    }
+
+    #[test]
+    fn vendor_key_row_oauth_field_roundtrip() {
+        // access_expires_at is stored as a Unix seconds integer
+        // (OAuthCredentialsRow uses `#[serde(with = "time::serde::timestamp")]`).
+        let payload = json!({
+            "key_id": "key-123",
+            "vendor_id": "v-1",
+            "api_key_enc": enc_key_json(),
+            "status": "active",
+            "oauth": {
+                "access_token_enc": enc_key_json(),
+                "refresh_token_enc": enc_key_json(),
+                "access_expires_at": 1893456000_i64,
+                "token_endpoint": "https://oauth.example.com/token",
+                "scope": ["chat.completions"]
+            }
+        });
+        let row: VendorKeyRow = serde_json::from_value(payload).unwrap();
+        let oauth = row.oauth.expect("oauth should be Some");
+        assert_eq!(oauth.token_endpoint, "https://oauth.example.com/token");
+        assert_eq!(oauth.scope, vec!["chat.completions".to_string()]);
+    }
+
+    #[test]
+    fn vendor_key_row_oauth_omitted_defaults_to_none() {
+        let payload = json!({
+            "key_id": "key-456",
+            "vendor_id": "v-2",
+            "api_key_enc": enc_key_json(),
+            "status": "active"
+        });
+        let row: VendorKeyRow = serde_json::from_value(payload).unwrap();
+        assert!(row.oauth.is_none());
     }
 }

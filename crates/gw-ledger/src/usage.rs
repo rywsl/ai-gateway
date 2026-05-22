@@ -54,6 +54,13 @@ pub struct UsageRecord {
 
     // --- Markup snapshot (Go re-computes cost) ---
     pub markup_chain_snapshot: MarkupChainSnapshot,
+
+    // --- Long-running operation (G5 / go-onboarding-gaps T0) ---
+    /// Gemini `:predictLongRunning` / OpenAI `/v1/videos` operation name
+    /// (`"operations/..."`) extracted by `codec.parse_response`. `None` for
+    /// all ordinary (non-LRO) requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -108,6 +115,7 @@ mod tests {
             freeze_amount_micro: 1500,
             estimate_pricing_version: 0,
             markup_chain_snapshot: MarkupChainSnapshot::placeholder(),
+            operation_id: None,
         };
         let s = serde_json::to_string(&rec).unwrap();
         // Smoke: critical fields appear; the retired field is GONE.
@@ -116,5 +124,21 @@ mod tests {
         assert!(s.contains("\"markup_chain_snapshot\""));
         assert!(s.contains("\"estimate_pricing_version\":0"));
         assert!(!s.contains("cost_micro"), "Rust must not emit cost_micro");
+        // operation_id: None must be omitted via skip_serializing_if.
+        assert!(
+            !s.contains("operation_id"),
+            "operation_id must be omitted when None"
+        );
+
+        // operation_id: Some serialises as the string value.
+        let rec_with_op = UsageRecord {
+            operation_id: Some("operations/xyz-123".into()),
+            ..rec
+        };
+        let s2 = serde_json::to_string(&rec_with_op).unwrap();
+        assert!(
+            s2.contains("\"operation_id\":\"operations/xyz-123\""),
+            "operation_id must appear when Some"
+        );
     }
 }

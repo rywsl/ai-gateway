@@ -110,6 +110,7 @@ fn seed_key(id: &str, forced: &[&str], exclusive: bool) -> VendorKey {
         forced_capabilities: forced.iter().map(|s| s.to_string()).collect(),
         exclusive_capability_match: exclusive,
         tunnel_preference: None,
+        oauth: None,
     }
 }
 

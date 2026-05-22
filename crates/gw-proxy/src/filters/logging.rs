@@ -238,6 +238,7 @@ pub async fn run(
                 .as_ref()
                 .map(|m| m.markup_chain)
                 .unwrap_or_else(MarkupChainSnapshot::placeholder),
+            operation_id: ctx.operation_id.clone(),
         };
         let _ = ledger.try_send(rec);
 
