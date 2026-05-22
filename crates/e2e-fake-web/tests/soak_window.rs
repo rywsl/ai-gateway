@@ -30,3 +30,28 @@ fn snapshot_serialises_with_required_fields() {
     assert_eq!(v["t0_ms"], 1_716_412_200_000_i64);
     assert_eq!(v["balance_micros"]["u-1"], 1_000_000_000_000_i64);
 }
+
+use e2e_fake_web::soak::quiescence_check;
+
+#[test]
+fn quiescence_check_accepts_consecutive_match() {
+    let series = vec![100, 105, 110, 110, 110, 110, 110, 110, 110, 110, 110, 110];
+    let (quiescent, last) = quiescence_check(&series, 10);
+    assert!(quiescent);
+    assert_eq!(last, 110);
+}
+
+#[test]
+fn quiescence_check_rejects_recent_drift() {
+    let series = vec![100, 110, 110, 110, 110, 110, 110, 110, 110, 110, 111];
+    let (quiescent, _) = quiescence_check(&series, 10);
+    assert!(!quiescent);
+}
+
+#[test]
+fn quiescence_check_empty_or_short_rejects() {
+    let (q, _) = quiescence_check(&[], 10);
+    assert!(!q);
+    let (q, _) = quiescence_check(&[100, 100, 100], 10);
+    assert!(!q);
+}

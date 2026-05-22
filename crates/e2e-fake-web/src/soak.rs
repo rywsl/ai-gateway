@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -146,4 +147,45 @@ async fn capture_snapshot(
         detailed_last_id: last_id,
         balance_micros,
     })
+}
+
+/// Pure decision: do the last `window` entries of `series` all match?
+///
+/// Returns `(quiescent, last_value)`. `last_value` is the most recent
+/// observation for caller logging; defined to be 0 if `series` is empty.
+pub fn quiescence_check(series: &[u64], window: usize) -> (bool, u64) {
+    if series.len() < window {
+        return (false, *series.last().unwrap_or(&0));
+    }
+    let tail = &series[series.len() - window..];
+    let first = tail[0];
+    (tail.iter().all(|&v| v == first), *series.last().unwrap())
+}
+
+/// Poll `XLEN usage:records` once per second; return when the last
+/// `quiescence_s` samples match, or when `max_wait_s` elapses.
+///
+/// Returns `(quiescent_reached, observed_series)`. The series is the
+/// full observation list — the caller writes it into the report's
+/// `drain_observation_series` field.
+pub async fn wait_for_quiescence(
+    store: &Arc<Store>,
+    quiescence_s: usize,
+    max_wait_s: u64,
+) -> (bool, Vec<u64>) {
+    let mut series: Vec<u64> = Vec::with_capacity(max_wait_s as usize + 1);
+    let deadline = Instant::now() + Duration::from_secs(max_wait_s);
+    loop {
+        let xlen_i64: i64 = store.xlen("usage:records").await.unwrap_or(0);
+        let xlen = xlen_i64.max(0) as u64;
+        series.push(xlen);
+        let (quiescent, _) = quiescence_check(&series, quiescence_s);
+        if quiescent {
+            return (true, series);
+        }
+        if Instant::now() >= deadline {
+            return (false, series);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
