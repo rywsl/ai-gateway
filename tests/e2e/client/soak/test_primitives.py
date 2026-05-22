@@ -42,3 +42,27 @@ def test_codes_catalog_parses_known_codes():
     # All entries match the GW_* prefix and uppercase shape.
     for c in catalog:
         assert c.startswith("GW_") and c.isupper(), c
+
+
+from soak.seed import SOAK_MODEL_OPENAI, SOAK_MODEL_ANTHROPIC, SOAK_MODEL_GEMINI, SoakSeedHandles
+
+
+def test_seed_handles_shape():
+    # Pure-data sanity: handles dataclass shape that the driver consumes.
+    h = SoakSeedHandles(
+        users=[("u-1", "ak-1", "sk-1"), ("u-2", "ak-2", "sk-2")],
+        groups_by_kind={
+            "open_ai": "soak-open_ai",
+            "anthropic": "soak-anthropic",
+            "gemini": "soak-gemini",
+            "cross": "soak-cross",
+        },
+        models_by_kind={
+            "open_ai": SOAK_MODEL_OPENAI,
+            "anthropic": SOAK_MODEL_ANTHROPIC,
+            "gemini": SOAK_MODEL_GEMINI,
+        },
+    )
+    assert len(h.users) == 2
+    assert h.groups_by_kind["cross"] == "soak-cross"
+    assert h.models_by_kind["open_ai"] == SOAK_MODEL_OPENAI
