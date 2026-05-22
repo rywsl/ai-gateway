@@ -32,3 +32,69 @@ def test_driver_report_target_count_is_product():
     assert rpt.target_count == 49980
     assert rpt.requests_sent == 0
     assert rpt.requests_completed == 0
+
+
+import asyncio
+import threading
+
+import httpx
+import pytest
+
+from soak.driver import RequestOutcome, _run_one_request, SoakConfig
+from soak.seed import SoakSeedHandles, SOAK_MODEL_OPENAI
+from soak.workload import RequestSpec
+
+
+@pytest.mark.asyncio
+async def test_run_one_request_records_status_and_latency(monkeypatch):
+    transport = httpx.MockTransport(lambda r: httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        text='data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+    ))
+    client = httpx.AsyncClient(transport=transport, timeout=5.0,
+                               base_url="http://gateway.local")
+
+    spec = RequestSpec(
+        protocol="open_ai", shape="stream", cross_protocol=False,
+        payload_size_bucket="small",
+        user_id="u-1", api_key_id="ak-1", api_key_plaintext="sk-1",
+    )
+    handles = SoakSeedHandles(
+        users=[("u-1", "ak-1", "sk-1")],
+        groups_by_kind={"open_ai": "g", "anthropic": "g", "gemini": "g", "cross": "g"},
+        models_by_kind={"open_ai": SOAK_MODEL_OPENAI,
+                        "anthropic": "x", "gemini": "y"},
+    )
+
+    out = await _run_one_request(client, spec, handles, timeout_s=5)
+    assert isinstance(out, RequestOutcome)
+    assert out.status == 200
+    assert out.failed_client_side is False
+    assert out.latency_ms > 0
+    assert out.bytes_received > 0
+    assert out.protocol == "open_ai"
+    assert out.shape == "stream"
+
+
+@pytest.mark.asyncio
+async def test_run_one_request_records_client_side_failure():
+    transport = httpx.MockTransport(lambda r: (_ for _ in ()).throw(
+        httpx.ConnectError("simulated")
+    ))
+    client = httpx.AsyncClient(transport=transport, timeout=1.0,
+                               base_url="http://gateway.local")
+    spec = RequestSpec(
+        protocol="open_ai", shape="non_stream", cross_protocol=False,
+        payload_size_bucket="small",
+        user_id="u-1", api_key_id="ak-1", api_key_plaintext="sk-1",
+    )
+    handles = SoakSeedHandles(
+        users=[("u-1", "ak-1", "sk-1")],
+        groups_by_kind={"open_ai": "g", "anthropic": "g", "gemini": "g", "cross": "g"},
+        models_by_kind={"open_ai": SOAK_MODEL_OPENAI,
+                        "anthropic": "x", "gemini": "y"},
+    )
+    out = await _run_one_request(client, spec, handles, timeout_s=1)
+    assert out.failed_client_side is True
+    assert out.status is None

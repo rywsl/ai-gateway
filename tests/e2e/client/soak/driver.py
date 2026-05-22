@@ -12,8 +12,18 @@ This file is split across Tasks 11–13:
 """
 from __future__ import annotations
 
+import asyncio
+import re
+import threading
+import time
 from dataclasses import dataclass, field
+from queue import SimpleQueue, Empty
 from typing import Literal
+
+import httpx
+
+from soak.seed import SoakSeedHandles
+from soak.workload import RequestSpec, build_request
 
 
 ChaosMode = Literal["off", "light", "heavy"]
@@ -97,3 +107,133 @@ class SoakDriverReport:
             requests_completed=0,
             requests_failed_client_side=0,
         )
+
+
+# ---------------------------------------------------------------------------
+# Error-code extraction
+# ---------------------------------------------------------------------------
+
+# Best-effort parser for the error_code embedded in the gateway's
+# OpenAI/Anthropic/Gemini error envelopes. All three families wrap the
+# code under `{"error": {"code": "..."}}` per
+# crates/gw-codec/src/*/codec.rs::render_error. SSE error frames also
+# embed the same envelope as a `data: ` line — we grep for the first one.
+_ERR_CODE_RE = re.compile(rb'"code"\s*:\s*"(GW_[A-Z_]+)"')
+
+
+def _extract_error_code(body_bytes: bytes) -> str | None:
+    m = _ERR_CODE_RE.search(body_bytes)
+    return m.group(1).decode() if m else None
+
+
+# ---------------------------------------------------------------------------
+# Per-request async runner
+# ---------------------------------------------------------------------------
+
+async def _run_one_request(
+    client: httpx.AsyncClient,
+    spec: RequestSpec,
+    handles: SoakSeedHandles,
+    timeout_s: float,
+) -> RequestOutcome:
+    req = build_request(spec, handles)
+    t0 = time.perf_counter()
+    status: int | None = None
+    error_code: str | None = None
+    bytes_received = 0
+    failed = False
+    try:
+        async with client.stream(
+            req["method"], req["path"],
+            headers=req["headers"],
+            json=req["json"],
+            timeout=timeout_s,
+        ) as resp:
+            status = resp.status_code
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes():
+                bytes_received += len(chunk)
+                buf.extend(chunk)
+                if bytes_received > 64 * 1024:
+                    # Cap memory per response — we only need the head to
+                    # find the error_code envelope. Real content can be
+                    # streamed indefinitely without OOM.
+                    break
+            error_code = _extract_error_code(bytes(buf))
+    except (httpx.HTTPError, asyncio.TimeoutError):
+        failed = True
+
+    latency_ms = (time.perf_counter() - t0) * 1000.0
+    return RequestOutcome(
+        protocol=spec.protocol,
+        shape=spec.shape,
+        cross_protocol=spec.cross_protocol,
+        status=status,
+        error_code=error_code,
+        latency_ms=latency_ms,
+        bytes_received=bytes_received,
+        failed_client_side=failed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-thread loop
+# ---------------------------------------------------------------------------
+
+def _thread_loop(
+    thread_idx: int,
+    cfg: SoakConfig,
+    handles: SoakSeedHandles,
+    in_queue: SimpleQueue,
+    stop_event: threading.Event,
+    outcomes: list[RequestOutcome],
+    outcomes_lock: threading.Lock,
+) -> None:
+    """Run one OS thread. Owns one asyncio loop + one AsyncClient."""
+    async def runner() -> None:
+        limits = httpx.Limits(
+            max_connections=cfg.max_inflight_per_thread * 4,
+            max_keepalive_connections=cfg.max_inflight_per_thread * 2,
+        )
+        async with httpx.AsyncClient(
+            base_url=cfg.gateway_url,
+            limits=limits,
+            timeout=cfg.per_request_timeout_s,
+        ) as client:
+            sem = asyncio.Semaphore(cfg.max_inflight_per_thread)
+            inflight: set[asyncio.Task] = set()
+
+            async def fire(spec: RequestSpec) -> None:
+                async with sem:
+                    out = await _run_one_request(
+                        client, spec, handles, cfg.per_request_timeout_s
+                    )
+                    with outcomes_lock:
+                        outcomes.append(out)
+
+            # Drain the queue until stop_event AND queue is empty.
+            while True:
+                try:
+                    spec = in_queue.get(timeout=0.05)
+                except Empty:
+                    if stop_event.is_set() and not inflight:
+                        break
+                    # Reap finished tasks to bound the set size.
+                    inflight = {t for t in inflight if not t.done()}
+                    await asyncio.sleep(0)
+                    continue
+                task = asyncio.create_task(fire(spec))
+                inflight.add(task)
+                inflight = {t for t in inflight if not t.done()}
+
+            # Final grace: await all in-flight up to drain_grace_s.
+            if inflight:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*inflight, return_exceptions=True),
+                        timeout=cfg.drain_grace_s,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
+    asyncio.run(runner())
