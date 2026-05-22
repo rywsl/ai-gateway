@@ -11,6 +11,7 @@ pub mod scenario;
 pub mod server;
 pub mod sse;
 pub mod tls;
+pub mod tunnel_node;
 
 pub use inject::RefuseCounter;
 pub use scenario::{default_scenario, Scenario};
