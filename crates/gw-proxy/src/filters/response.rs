@@ -43,10 +43,16 @@ pub fn run(
             .fetch_add(b.len() as u64, Ordering::Relaxed);
     }
 
-    // Non-stream path: nothing to incrementally parse. Final usage will be
-    // pulled from the buffered response in the logging filter once we cache
-    // the full response. v1: skip.
+    // Non-stream path: accumulate the upstream body into
+    // `ctx.upstream_body_accum`; on EOS, hand the buffer to
+    // `upstream_codec.parse_response` so `ctx.usage` is populated from the
+    // wire instead of leaving the logging filter to fall through to the
+    // freeze-time estimate (ADR-B1-3 / T2-B). Decode failure increments
+    // `gw_codec_parse_response_failure_total` and leaves `ctx.usage` at zero;
+    // the logging filter already falls back to `UsageSource::Estimated` when
+    // `output_tokens == 0`.
     if !ctx.is_stream {
+        handle_non_stream_chunk(body.as_ref(), end_of_stream, ctx);
         return Ok(None);
     }
 
@@ -180,5 +186,146 @@ fn handle_event(
     // wrongly zero out the outbound body.
     if cross_protocol && !acc.is_empty() {
         ctx.pending_client_body = Some(acc);
+    }
+}
+
+/// T2-B / ADR-B1-3 — non-stream upstream body accumulator. Pingora delivers
+/// the response body in chunks; we buffer them into `ctx.upstream_body_accum`
+/// and only invoke `codec.parse_response` once `end_of_stream` is set so the
+/// codec sees the full JSON document. The accumulator is *taken* on EOS so a
+/// successful parse leaves it `None` (a stray empty follow-up chunk doesn't
+/// re-parse the same body).
+///
+/// Failure semantics: any error from `parse_response` increments the counter
+/// `gw_codec_parse_response_failure_total{codec, upstream_status}` and leaves
+/// `ctx.usage` at its default zero. The logging filter already maps
+/// `output_tokens == 0` to `UsageSource::Estimated`, so no extra plumbing is
+/// needed downstream.
+pub(crate) fn handle_non_stream_chunk(
+    chunk: Option<&Bytes>,
+    end_of_stream: bool,
+    ctx: &mut ReqCtx,
+) {
+    if let Some(b) = chunk {
+        ctx.upstream_body_accum
+            .get_or_insert_with(BytesMut::new)
+            .extend_from_slice(b);
+    }
+
+    if !end_of_stream {
+        return;
+    }
+
+    // EOS path: take the accumulator (leaves the field `None`) and decode.
+    let Some(body) = ctx.upstream_body_accum.take() else {
+        return;
+    };
+    let Some(codec) = ctx.upstream_codec.as_ref() else {
+        // No codec means we can't parse — silently skip; the logging filter
+        // will fall back to the freeze-time estimate.
+        return;
+    };
+    let codec_kind = codec.kind();
+    // Bind the result to a local so `body` (declared earlier) stays alive for
+    // the full lifetime of the borrowed `ResponseIR<'_>` / `ErrorIR<'_>`.
+    // Inline `match codec.parse_response(&body) { ... }` would create a
+    // temporary `Result` whose drop is sequenced *after* `body`'s drop and
+    // fails borrowck.
+    let parse_result = codec.parse_response(&body);
+    match parse_result {
+        Ok(ir) => {
+            if let Some(u) = ir.usage {
+                ctx.usage.input_tokens = u.input_tokens;
+                ctx.usage.output_tokens = u.output_tokens;
+                ctx.usage.cached_tokens = u.cached_tokens;
+            }
+        }
+        Err(e) => {
+            metrics::counter!(
+                "gw_codec_parse_response_failure_total",
+                "codec" => codec_kind.as_str(),
+                "upstream_status" => ctx.upstream_status.unwrap_or(0).to_string(),
+            )
+            .increment(1);
+            tracing::warn!(error = ?e.code, "non-stream parse_response failed");
+        }
+    }
+}
+
+#[cfg(test)]
+mod non_stream_branch_tests {
+    use super::*;
+    use crate::ctx::ReqCtx;
+    use bytes::Bytes;
+    use gw_codec::AnyCodec;
+    use gw_codec::openai::OpenAi;
+
+    fn make_ctx_non_stream() -> ReqCtx {
+        // `ReqCtx::default()` builds a fully-initialised context with empty
+        // IDs — fine for unit tests of the non-stream branch.
+        ReqCtx {
+            is_stream: false,
+            upstream_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            ..ReqCtx::default()
+        }
+    }
+
+    #[test]
+    fn non_stream_eos_parses_usage_into_ctx() {
+        let mut ctx = make_ctx_non_stream();
+        // Chunk 1: head of body.
+        let chunk1 = Bytes::from_static(
+            br#"{"id":"x","object":"chat.completion","created":0,"model":"gpt","choices":[],"#,
+        );
+        handle_non_stream_chunk(Some(&chunk1), false, &mut ctx);
+        assert!(
+            ctx.upstream_body_accum.is_some(),
+            "first chunk must allocate accumulator"
+        );
+
+        // Chunk 2: tail of body + EOS.
+        let chunk2 = Bytes::from_static(
+            br#""usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}"#,
+        );
+        handle_non_stream_chunk(Some(&chunk2), true, &mut ctx);
+
+        assert_eq!(ctx.usage.input_tokens, 7);
+        assert_eq!(ctx.usage.output_tokens, 2);
+        // After EOS the accum has been taken — must be None so a stray empty
+        // follow-up chunk doesn't re-parse the same body.
+        assert!(ctx.upstream_body_accum.is_none());
+    }
+
+    #[test]
+    fn non_stream_decode_error_increments_metric() {
+        let mut ctx = make_ctx_non_stream();
+        let body = Bytes::from_static(b"not json");
+        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+        // usage stays at zero — the logging filter falls back to
+        // UsageSource::Estimated when output_tokens == 0.
+        assert_eq!(ctx.usage.input_tokens, 0);
+        assert_eq!(ctx.usage.output_tokens, 0);
+        // Accumulator was consumed on EOS regardless of decode outcome.
+        assert!(ctx.upstream_body_accum.is_none());
+    }
+
+    #[test]
+    fn non_stream_eos_without_chunk_is_noop() {
+        // Pingora may deliver a final `(None, end_of_stream=true)` callback
+        // when the upstream body terminated on the previous chunk. The helper
+        // must tolerate that: nothing to parse, nothing changes.
+        let mut ctx = make_ctx_non_stream();
+        handle_non_stream_chunk(None, true, &mut ctx);
+        assert_eq!(ctx.usage.output_tokens, 0);
+        assert!(ctx.upstream_body_accum.is_none());
+    }
+
+    #[test]
+    fn non_stream_missing_codec_is_noop() {
+        let mut ctx = make_ctx_non_stream();
+        ctx.upstream_codec = None;
+        let body = Bytes::from_static(b"{\"usage\":{}}");
+        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+        assert_eq!(ctx.usage.output_tokens, 0);
     }
 }
