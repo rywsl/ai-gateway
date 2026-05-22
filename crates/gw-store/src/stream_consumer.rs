@@ -180,6 +180,9 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "proxy_node" => {
             store.proxy_node.invalidate(&id.to_string()).await;
         }
+        "management_token" => {
+            store.invalidate_mgmt_token(id).await;
+        }
         "model_mapping" => {
             // id format: "alias|protocol", with protocol matching ProtocolKind's
             // snake_case serde tag ("openai" | "anthropic" | "gemini").
@@ -275,6 +278,57 @@ mod proxy_node_tests {
         // The cache entry must be gone.
         assert!(
             store.proxy_node.get("node-1").await.is_none(),
+            "cache entry must be absent after invalidation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mgmt_token_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use gw_core::entity::{KeyStatus, ManagementTokenEntry, MgmtScope};
+    use gw_core::ids::UserId;
+    use gw_core::versioned::Versioned;
+    use std::sync::Arc;
+
+    fn make_mgmt_token(token_id: &str) -> ManagementTokenEntry {
+        ManagementTokenEntry {
+            token_id: token_id.to_string(),
+            user_id: UserId::from("u-1"),
+            scope: MgmtScope::AdminRead,
+            hash: vec![0u8; 32],
+            expires_at: None,
+            status: KeyStatus::Active,
+            display_name: "test-token".to_string(),
+        }
+    }
+
+    /// Pre-populate `store.mgmt_token` with a fake entry, dispatch a
+    /// `ns=management_token` event, and assert the cache entry is gone.
+    /// Mirrors `proxy_node_invalidation_removes_cache_entry`.
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_mgmt_token() {
+        let store = Arc::new(EntityStore::new());
+        let entry = make_mgmt_token("tk-1");
+        let versioned = Arc::new(Versioned {
+            version: 1,
+            value: Arc::new(entry),
+        });
+
+        store
+            .mgmt_token
+            .insert("tk-1".to_string(), versioned)
+            .await;
+        assert!(
+            store.mgmt_token.get("tk-1").await.is_some(),
+            "pre-condition: cache entry must be present before invalidation"
+        );
+
+        apply_entity_event(&store, "management_token", "tk-1").await;
+
+        assert!(
+            store.mgmt_token.get("tk-1").await.is_none(),
             "cache entry must be absent after invalidation"
         );
     }
