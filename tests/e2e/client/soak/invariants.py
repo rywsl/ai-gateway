@@ -88,3 +88,60 @@ def process_alive_no_container_restart(*, before: dict, after: dict) -> dict:
             "state_after": state_after,
         },
     )
+
+
+# ── Group 2: account_consistency (§7.1.2) ────────────────────────────────
+
+def account_records_equals_upstream_hits(*, window: dict, hits: dict) -> dict:
+    rs = window.get("redis_streams") or {}
+    records = int(rs.get("usage_records_delta", 0))
+    dlq = int(rs.get("usage_records_dlq_delta", 0))
+    routes_sum = int(hits.get("routes_hit_sum", 0))
+    refused_sum = int(hits.get("refused_hit_sum", 0))
+    total = int(hits.get("total", routes_sum + refused_sum))
+    diff = abs((records + dlq) - total)
+    return _leaf(
+        "results.invariants.account_consistency.records_equals_upstream_hits",
+        kind="hard",
+        passed=(diff == 0),
+        source="fake_web:/soak/window/report + fake_upstream:/admin/hits-total",
+        raw={
+            "records_delta": records,
+            "dlq_delta": dlq,
+            "upstream_routes_hit_sum": routes_sum,
+            "upstream_refused_hit_sum": refused_sum,
+            "upstream_hits_total": total,
+            "diff": diff,
+            "drain_observation_series": window.get("drain_observation_series", []),
+        },
+        threshold="==",
+    )
+
+
+def account_balance_monotonic_decreasing(*, window: dict) -> dict:
+    decs: dict[str, int] = window.get("balance_decrement_micros") or {}
+    negative = [u for u, v in decs.items() if v < 0]
+    return _leaf(
+        "results.invariants.account_consistency.balance_monotonic_decreasing",
+        kind="hard",
+        passed=(len(negative) == 0),
+        source="fake_web:/soak/window/report.balance_decrement_micros",
+        raw={
+            "user_count": len(decs),
+            "negative_users": negative,
+        },
+    )
+
+
+def account_drain_quiescence_reached(*, window: dict) -> dict:
+    quiescent = bool(window.get("drain_quiescent", False))
+    return _leaf(
+        "results.invariants.account_consistency.drain_quiescence_reached",
+        kind="hard",
+        passed=quiescent,
+        source="fake_web:/soak/window/report.drain_quiescent",
+        raw={
+            "drain_quiescent": quiescent,
+            "drain_observation_series": window.get("drain_observation_series", []),
+        },
+    )

@@ -56,3 +56,68 @@ def test_no_container_restart_fail_on_restart_increment():
     )
     assert leaf["passed"] is False
     assert leaf["raw"]["restart_count_delta"] == 1
+
+
+from soak.invariants import (
+    account_records_equals_upstream_hits,
+    account_balance_monotonic_decreasing,
+    account_drain_quiescence_reached,
+)
+
+
+def test_records_equals_hits_pass():
+    leaf = account_records_equals_upstream_hits(
+        window={
+            "redis_streams": {
+                "usage_records_delta": 50001,
+                "usage_records_dlq_delta": 0,
+            },
+            "drain_observation_series": [49991, 50001, 50001, 50001, 50001,
+                                          50001, 50001, 50001, 50001, 50001],
+        },
+        hits={"routes_hit_sum": 50001, "refused_hit_sum": 0, "total": 50001},
+    )
+    assert leaf["passed"] is True
+    assert leaf["raw"]["diff"] == 0
+    assert leaf["threshold"] == "=="
+
+
+def test_records_equals_hits_fail_diff_1():
+    leaf = account_records_equals_upstream_hits(
+        window={
+            "redis_streams": {
+                "usage_records_delta": 49997,
+                "usage_records_dlq_delta": 3,
+            },
+            "drain_observation_series": [49997, 50000, 50000, 50000, 50000,
+                                          50000, 50000, 50000, 50000, 50000],
+        },
+        hits={"routes_hit_sum": 49998, "refused_hit_sum": 3, "total": 50001},
+    )
+    assert leaf["passed"] is False
+    assert leaf["raw"]["diff"] == 1
+
+
+def test_balance_monotonic_pass():
+    leaf = account_balance_monotonic_decreasing(
+        window={"balance_decrement_micros": {"u-1": 1000, "u-2": 0, "u-3": 50}},
+    )
+    assert leaf["passed"] is True
+
+
+def test_balance_monotonic_fail_on_negative_decrement():
+    leaf = account_balance_monotonic_decreasing(
+        window={"balance_decrement_micros": {"u-1": 1000, "u-2": -50}},
+    )
+    assert leaf["passed"] is False
+    assert leaf["raw"]["negative_users"] == ["u-2"]
+
+
+def test_drain_quiescence_pass():
+    leaf = account_drain_quiescence_reached(window={"drain_quiescent": True})
+    assert leaf["passed"] is True
+
+
+def test_drain_quiescence_fail():
+    leaf = account_drain_quiescence_reached(window={"drain_quiescent": False})
+    assert leaf["passed"] is False
