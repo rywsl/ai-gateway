@@ -446,6 +446,87 @@ fn proxy_node_default_enabled() -> bool {
     true
 }
 
+// --- Management-token persisted entity (B2 / ADR-B2-1) ---
+//
+// `ManagementToken` (above) was the v1.0 in-flight shape for `/admin/*` and is
+// retained for backwards compatibility with that surface. The Go-onboarding
+// blocker B2 introduces a parallel, narrower entity persisted under
+// `management_tokens` (migration 0007) and consumed by request_filter on the
+// management-path branch (T3-A/B/C). Scope is a single enum value rather than
+// a free-form string set so the verification helper can return a typed answer.
+
+/// Scope granted by a `ManagementTokenEntry`. Ordered loosely by privilege —
+/// `AdminFull` ⊇ `AdminRead` ⊇ `UserSelf`. Verification call sites compare
+/// the token's scope against the route-required scope via `covers`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MgmtScope {
+    UserSelf,
+    AdminRead,
+    AdminFull,
+}
+
+impl MgmtScope {
+    /// `true` iff `self` is authorised to act under the `required` scope.
+    pub fn covers(self, required: MgmtScope) -> bool {
+        use MgmtScope::*;
+        matches!(
+            (self, required),
+            (AdminFull, _) | (AdminRead, AdminRead | UserSelf) | (UserSelf, UserSelf)
+        )
+    }
+}
+
+/// Persisted management-token entity (B2). Loaded from the `management_tokens`
+/// table by `gw-store` (T1-D) and cached by `EntityStore::management_token`.
+/// Verification: SHA-256 of the presented bearer is compared constant-time
+/// against `hash` after the entity is fetched by `token_id`.
+///
+/// `hash` mirrors `ApiKeyEntry.hash` — plain `Vec<u8>`, serialised by
+/// `serde_json` as a JSON integer array (no `serde_with::base64` in tree).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ManagementTokenEntry {
+    pub token_id: String,
+    pub user_id: crate::ids::UserId,
+    pub scope: MgmtScope,
+    pub hash: Vec<u8>,
+    #[serde(default)]
+    pub expires_at: Option<time::OffsetDateTime>,
+    #[serde(default = "default_active_status")]
+    pub status: KeyStatus,
+    pub display_name: String,
+}
+
+fn default_active_status() -> KeyStatus {
+    KeyStatus::Active
+}
+
+#[cfg(test)]
+mod mgmt_scope_tests {
+    use super::MgmtScope::*;
+
+    #[test]
+    fn admin_full_covers_all() {
+        assert!(AdminFull.covers(AdminFull));
+        assert!(AdminFull.covers(AdminRead));
+        assert!(AdminFull.covers(UserSelf));
+    }
+
+    #[test]
+    fn admin_read_covers_admin_read_and_user_self() {
+        assert!(AdminRead.covers(AdminRead));
+        assert!(AdminRead.covers(UserSelf));
+        assert!(!AdminRead.covers(AdminFull));
+    }
+
+    #[test]
+    fn user_self_covers_only_self() {
+        assert!(UserSelf.covers(UserSelf));
+        assert!(!UserSelf.covers(AdminRead));
+        assert!(!UserSelf.covers(AdminFull));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::entity_helpers::EncryptedBlob;
