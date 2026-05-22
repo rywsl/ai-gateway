@@ -525,34 +525,6 @@ pub async fn run(
     ctx.idempotent = !is_stream;
 
     // ---------------------------------------------------------------------
-    // 4b. v1 limitation: reject non-stream completions outright. The codec
-    //     `parse_response` method is `unimplemented!()` for every protocol
-    //     in v1 scope, which means a non-stream path through `logging`
-    //     would release the freeze (Rust never computes cost; cost lives in Go)
-    //     and the user would be billed nothing. Surfacing a clear 400 here
-    //     fails closed and avoids silent free traffic; v1.1 lifts this once
-    //     `parse_response` lands per the codec contract.
-    // ---------------------------------------------------------------------
-    if !is_stream {
-        let err = ErrorIR {
-            category: ErrorCategory::ClientBadRequest,
-            status: 400,
-            upstream_status: None,
-            code: Cow::Borrowed(codes::GW_REQUEST_NONSTREAM_NOT_SUPPORTED),
-            message: Cow::Borrowed(
-                "v1 gateway requires stream=true on every request; \
-                 non-stream completions will land in v1.1",
-            ),
-            retryable: false,
-            upstream_raw: None,
-            request_id: "",
-            retry_after_secs: None,
-        };
-        emit_and_bail(session, ctx, &err, &request_id).await?;
-        unreachable!()
-    }
-
-    // ---------------------------------------------------------------------
     // 4c. G5 (T2-B) — pre-load Pricing for the resolved model now that
     //     `model_name` is known. The EntityStore is Moka-memoised so a later
     //     fetch in `upstream_peer` is a hit; pulling the load forward lets
@@ -888,4 +860,25 @@ async fn emit_and_bail(
     error_emit::send_error(session, &codec, &scoped).await;
     ctx.phase_end();
     Err(short_circuit(err.status))
+}
+
+#[cfg(test)]
+mod non_stream_unit {
+    /// B1-2: non-stream short-circuit must be deleted from request_filter.
+    /// Pingora Session is awkward to mock at unit-test level, so we assert
+    /// the absence of the guard via source-grep. End-to-end coverage lives
+    /// in T4-A docker e2e (test_non_stream.py).
+    #[test]
+    fn non_stream_guard_removed_from_source() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/filters/request.rs")
+        ).expect("read source");
+        // Build the needle at runtime so the literal in this test does not
+        // self-match when the source file is read.
+        let needle: String = ["GW_REQUEST_", "NONSTREAM_", "NOT_SUPPORTED"].concat();
+        assert!(
+            !src.contains(&needle),
+            "non-stream short-circuit must be removed in B1-2"
+        );
+    }
 }
