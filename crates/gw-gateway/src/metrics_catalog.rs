@@ -156,6 +156,11 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "fail_to_connect retry decisions (G10); label=outcome (recovered/exhausted/tls_blocked)",
     },
+    MetricSpec {
+        name: "gw_tunnel_open_total",
+        kind: MetricKind::Counter,
+        help: "tunnel stream-open outcome per node; labels=node_id,result (ok/no_live/target_denied/err)",
+    },
 ];
 
 pub fn describe_all() {
