@@ -26,5 +26,11 @@ impl ErrorListener for OAuthListener {
             "outcome" => outcome.to_string(),
         )
         .increment(1);
+        // T2-B (G3-4): when this site also XADDs `events:entity ns=vendor_key
+        // op=status_change field=oauth_failed`, increment
+        // `gw_oauth_refresh_failed_xadd_total` (registered in
+        // metrics_catalog) — NOT `gw_oauth_refresh_total`. The two counters
+        // mean different things; getting it wrong leaves the new metric at
+        // zero forever.
     }
 }

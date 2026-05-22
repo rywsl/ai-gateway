@@ -59,7 +59,7 @@ pub struct UsageRecord {
     /// Gemini `:predictLongRunning` / OpenAI `/v1/videos` operation name
     /// (`"operations/..."`) extracted by `codec.parse_response`. `None` for
     /// all ordinary (non-LRO) requests.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
 }
 

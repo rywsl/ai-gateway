@@ -414,6 +414,10 @@ mod oauth_row_tests {
         let oauth = row.oauth.expect("oauth should be Some");
         assert_eq!(oauth.token_endpoint, "https://oauth.example.com/token");
         assert_eq!(oauth.scope, vec!["chat.completions".to_string()]);
+        // Pin the wire format: integer Unix seconds, NOT milliseconds and
+        // NOT a default-time serde array — getting this wrong gives dates
+        // a thousand times off without a compile error.
+        assert_eq!(oauth.access_expires_at.unix_timestamp(), 1893456000);
     }
 
     #[test]
