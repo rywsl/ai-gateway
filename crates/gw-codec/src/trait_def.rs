@@ -57,28 +57,36 @@ pub trait ProtocolCodec: Send + Sync + 'static {
         buf: &mut BytesMut,
     ) -> Result<(), ErrorIR<'static>>;
 
+    /// Build a fresh accumulator state for a new SSE response stream.
+    ///
+    /// The filter holds the `Box<dyn StreamState>` for the lifetime of the
+    /// response but does not inspect its fields. Each codec's State carries
+    /// codec-internal accumulation (e.g. tool_call argument deltas,
+    /// thinking signatures). Called once per response in `request_filter`
+    /// when `RequestIR.stream` is true.
+    fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState>;
+
     /// Parse one already-framed SSE event chunk.
     ///
     /// CONTRACT: The caller pre-frames the upstream byte stream on `\n\n`
     /// boundaries and passes exactly one complete event to this method. The
-    /// codec implementation does NOT split or accumulate across calls; it
-    /// interprets exactly one event and returns an empty `SmallVec` if the
-    /// chunk contains no usable IR payload (e.g. an SSE comment line,
-    /// keep-alive, or unknown event).
+    /// `state` argument persists across chunks so the codec can buffer
+    /// partial events (e.g. tool_call.arguments deltas) and emit only when
+    /// a complete logical event lands. A single chunk may therefore produce
+    /// 0, 1, or multiple `StreamEventIR`s.
     ///
     /// A single framed event may decompose into more than one IR event —
     /// notably Gemini's combined final chunk carrying both `text` and
-    /// `finishReason` decomposes into `[Delta, Finish]`. The common case
-    /// is one IR event per framed chunk and stays inline (no heap) thanks
-    /// to the `SmallVec<[_; 1]>` storage.
+    /// `finishReason` decomposes into `[Delta, Finish]`.
     ///
     /// Codecs are expected to be tolerant of malformed `data:` payloads:
-    /// they return an empty `SmallVec` (with a `tracing::warn!`) rather
-    /// than `Err`, so that streaming is not short-circuited mid-response.
+    /// they return an empty `Vec` (with a `tracing::warn!`) rather than
+    /// `Err`, so that streaming is not short-circuited mid-response.
     fn parse_stream_chunk<'a>(
         &self,
+        state: &mut dyn gw_core::ir::StreamState,
         chunk: &'a [u8],
-    ) -> Result<smallvec::SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>>;
+    ) -> Result<Vec<StreamEventIR<'a>>, ErrorIR<'static>>;
     fn render_stream_chunk(
         &self,
         ir: &StreamEventIR<'_>,
@@ -96,4 +104,19 @@ pub trait ProtocolCodec: Send + Sync + 'static {
     fn render_error(&self, err: &ErrorIR<'_>, buf: &mut BytesMut);
 
     fn estimate_input_tokens(&self, ir: &RequestIR<'_>) -> u32;
+}
+
+/// Placeholder `StreamState` for the T2 → T4 intermediate window. Each codec
+/// returns `Box::new(EmptyStreamState)` from `new_stream_state` until T4-A/B/C
+/// replaces it with a codec-specific accumulator. A functional empty type is
+/// used rather than an unimplemented panic, because the proxy creates the
+/// state for every streaming request — a panicking placeholder would break
+/// all unrelated streaming tests.
+#[derive(Default)]
+pub struct EmptyStreamState;
+
+impl gw_core::ir::StreamState for EmptyStreamState {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

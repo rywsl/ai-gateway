@@ -15,7 +15,7 @@ data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}
 "#;
     let upstream_codec = Anthropic;
     let client_codec = OpenAi;
-    let events = upstream_codec.parse_stream_chunk(upstream_chunk).unwrap();
+    let events = upstream_codec.parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, upstream_chunk).unwrap();
     assert!(!events.is_empty());
     let mut buf = BytesMut::new();
     for ev in &events {
@@ -37,7 +37,7 @@ fn gemini_combined_chunk_renders_all_events_to_openai_client() {
     let client = OpenAi;
     let upstream_chunk =
         br#"data: {"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}"#;
-    let events = upstream.parse_stream_chunk(upstream_chunk).unwrap();
+    let events = upstream.parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, upstream_chunk).unwrap();
     assert!(
         events.len() >= 2,
         "Gemini combined chunk must decompose into >=2 events"
@@ -67,7 +67,7 @@ fn same_protocol_openai_round_trips_unchanged() {
     // reproduces a well-formed delta frame.
     let codec = OpenAi;
     let upstream_chunk = br#"data: {"choices":[{"index":0,"delta":{"content":"x"}}]}"#;
-    let events = codec.parse_stream_chunk(upstream_chunk).unwrap();
+    let events = codec.parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, upstream_chunk).unwrap();
     assert_eq!(events.len(), 1);
     let mut buf = BytesMut::new();
     for ev in &events {

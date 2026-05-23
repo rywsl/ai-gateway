@@ -14,37 +14,12 @@ use super::wire::OpenAiRequest;
 
 pub struct OpenAi;
 
-impl ProtocolCodec for OpenAi {
-    #[inline]
-    fn detect_request(path: &str, _h: &Headers, _body_head: &[u8]) -> Option<Self> {
-        if path.starts_with("/v1/chat/completions") {
-            Some(OpenAi)
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
-        let req: OpenAiRequest<'a> = serde_json::from_slice(body)
-            .map_err(|e| bad_request_err(format!("openai parse: {e}")))?;
-        Ok(req.into())
-    }
-
-    #[inline]
-    fn render_request(
-        &self,
-        ir: &RequestIR<'_>,
-        buf: &mut BytesMut,
-    ) -> Result<(), ErrorIR<'static>> {
-        let req = OpenAiRequest::try_from(ir)?;
-        let bytes =
-            serde_json::to_vec(&req).map_err(|_| internal_err("openai serialize failed"))?;
-        buf.extend_from_slice(&bytes);
-        Ok(())
-    }
-
-    fn parse_stream_chunk<'a>(
+impl OpenAi {
+    /// v1 stateless body for parsing one SSE chunk. Preserved verbatim
+    /// across T2 so streaming continues to function in the intermediate
+    /// state; T4-A replaces the `parse_stream_chunk` trait method with
+    /// a stateful implementation and removes this helper.
+    fn legacy_parse_stream_chunk_v1<'a>(
         &self,
         chunk: &'a [u8],
     ) -> Result<SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
@@ -89,6 +64,52 @@ impl ProtocolCodec for OpenAi {
             }
         }
         Ok(SmallVec::new())
+    }
+}
+
+impl ProtocolCodec for OpenAi {
+    #[inline]
+    fn detect_request(path: &str, _h: &Headers, _body_head: &[u8]) -> Option<Self> {
+        if path.starts_with("/v1/chat/completions") {
+            Some(OpenAi)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
+        let req: OpenAiRequest<'a> = serde_json::from_slice(body)
+            .map_err(|e| bad_request_err(format!("openai parse: {e}")))?;
+        Ok(req.into())
+    }
+
+    #[inline]
+    fn render_request(
+        &self,
+        ir: &RequestIR<'_>,
+        buf: &mut BytesMut,
+    ) -> Result<(), ErrorIR<'static>> {
+        let req = OpenAiRequest::try_from(ir)?;
+        let bytes =
+            serde_json::to_vec(&req).map_err(|_| internal_err("openai serialize failed"))?;
+        buf.extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState> {
+        Box::new(crate::trait_def::EmptyStreamState)
+    }
+
+    fn parse_stream_chunk<'a>(
+        &self,
+        _state: &mut dyn gw_core::ir::StreamState,
+        chunk: &'a [u8],
+    ) -> Result<Vec<StreamEventIR<'a>>, ErrorIR<'static>> {
+        // T2: forward to the v1 stateless body. T4-A replaces this with a
+        // real stateful implementation backed by the codec-specific
+        // `StreamState`.
+        Ok(self.legacy_parse_stream_chunk_v1(chunk)?.into_vec())
     }
 
     fn render_stream_chunk(

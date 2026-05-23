@@ -86,14 +86,24 @@ impl AnyCodec {
     }
 
     #[inline]
+    pub fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState> {
+        match self {
+            AnyCodec::OpenAi(c) => c.new_stream_state(),
+            AnyCodec::Anthropic(c) => c.new_stream_state(),
+            AnyCodec::Gemini(c) => c.new_stream_state(),
+        }
+    }
+
+    #[inline]
     pub fn parse_stream_chunk<'a>(
         &self,
+        state: &mut dyn gw_core::ir::StreamState,
         chunk: &'a [u8],
-    ) -> Result<smallvec::SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
+    ) -> Result<Vec<StreamEventIR<'a>>, ErrorIR<'static>> {
         match self {
-            AnyCodec::OpenAi(c) => c.parse_stream_chunk(chunk),
-            AnyCodec::Anthropic(c) => c.parse_stream_chunk(chunk),
-            AnyCodec::Gemini(c) => c.parse_stream_chunk(chunk),
+            AnyCodec::OpenAi(c) => c.parse_stream_chunk(state, chunk),
+            AnyCodec::Anthropic(c) => c.parse_stream_chunk(state, chunk),
+            AnyCodec::Gemini(c) => c.parse_stream_chunk(state, chunk),
         }
     }
 

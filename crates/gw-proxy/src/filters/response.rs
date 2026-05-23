@@ -136,10 +136,22 @@ fn handle_event(
     cross_protocol: bool,
     client_kind: Option<ProtocolKind>,
 ) {
-    let events = match codec.parse_stream_chunk(event_bytes) {
+    // S-codec T2: parse_stream_chunk now takes a `&mut dyn StreamState` for
+    // codec-internal cross-chunk accumulation. We `take()` the state out of
+    // ctx to satisfy the borrow checker for the rest of the function, then
+    // put it back at the end. `stream_state` is initialized in
+    // `request_filter` when `is_stream` is true; if for any reason it is
+    // missing on a stream response (codec mismatch / mis-init), lazily
+    // synthesise one from the upstream codec so streaming doesn't break.
+    let mut state = ctx
+        .stream_state
+        .take()
+        .unwrap_or_else(|| codec.new_stream_state());
+    let events = match codec.parse_stream_chunk(state.as_mut(), event_bytes) {
         Ok(evs) => evs,
         Err(e) => {
             tracing::warn!(error = ?e.code, "stream parse error");
+            ctx.stream_state = Some(state);
             return;
         }
     };
@@ -209,6 +221,9 @@ fn handle_event(
     if cross_protocol && !acc.is_empty() {
         ctx.pending_client_body = Some(acc);
     }
+
+    // S-codec T2: restore the stream state for the next framed event.
+    ctx.stream_state = Some(state);
 }
 
 /// T2-B / ADR-B1-3 — non-stream upstream body accumulator. Pingora delivers

@@ -15,63 +15,12 @@ use super::wire::GeminiRequest;
 
 pub struct Gemini;
 
-impl ProtocolCodec for Gemini {
-    #[inline]
-    fn detect_request(path: &str, _h: &Headers, _body_head: &[u8]) -> Option<Self> {
-        // Gemini paths look like:
-        // `/v1beta/models/<model>:generateContent`
-        // `/v1beta/models/<model>:streamGenerateContent`
-        // `/v1/models/<model>:generateContent`
-        if (path.starts_with("/v1beta/models/") || path.starts_with("/v1/models/"))
-            && (path.contains(":generateContent") || path.contains(":streamGenerateContent"))
-        {
-            Some(Gemini)
-        } else {
-            None
-        }
-    }
-
-    /// ADR-S1: Gemini's JSON body carries no `stream` field; streaming is
-    /// signalled exclusively by the `:streamGenerateContent` URL token
-    /// (both `/v1/` and `/v1beta/` flavours use the same token).
-    #[inline]
-    fn path_implies_stream(path: &str) -> bool {
-        path.contains(":streamGenerateContent")
-    }
-
-    /// ADR-S1b: Gemini wire spec places the model in the URL path, not the
-    /// JSON body (`GeminiRequest::model` is `#[serde(skip)]`). Extract the
-    /// substring between `/models/` and the verb separator `:`.
-    #[inline]
-    fn extract_path_model(path: &str) -> Option<&str> {
-        let after = path.split_once("/models/")?.1;
-        let model = after.split_once(':').map(|(m, _)| m).unwrap_or(after);
-        if model.is_empty() {
-            None
-        } else {
-            Some(model)
-        }
-    }
-
-    fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
-        let req: GeminiRequest<'a> = serde_json::from_slice(body)
-            .map_err(|e| bad_request_err(format!("gemini parse: {e}")))?;
-        Ok(req.into())
-    }
-
-    fn render_request(
-        &self,
-        ir: &RequestIR<'_>,
-        buf: &mut BytesMut,
-    ) -> Result<(), ErrorIR<'static>> {
-        let req = GeminiRequest::try_from(ir)?;
-        let bytes =
-            serde_json::to_vec(&req).map_err(|_| internal_err("gemini serialize failed"))?;
-        buf.extend_from_slice(&bytes);
-        Ok(())
-    }
-
-    fn parse_stream_chunk<'a>(
+impl Gemini {
+    /// v1 stateless body for parsing one SSE chunk. Preserved verbatim
+    /// across T2 so streaming continues to function in the intermediate
+    /// state; T4-D replaces the `parse_stream_chunk` trait method with
+    /// a stateful implementation and removes this helper.
+    fn legacy_parse_stream_chunk_v1<'a>(
         &self,
         chunk: &'a [u8],
     ) -> Result<SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
@@ -142,6 +91,78 @@ impl ProtocolCodec for Gemini {
             }
         }
         Ok(SmallVec::new())
+    }
+}
+
+impl ProtocolCodec for Gemini {
+    #[inline]
+    fn detect_request(path: &str, _h: &Headers, _body_head: &[u8]) -> Option<Self> {
+        // Gemini paths look like:
+        // `/v1beta/models/<model>:generateContent`
+        // `/v1beta/models/<model>:streamGenerateContent`
+        // `/v1/models/<model>:generateContent`
+        if (path.starts_with("/v1beta/models/") || path.starts_with("/v1/models/"))
+            && (path.contains(":generateContent") || path.contains(":streamGenerateContent"))
+        {
+            Some(Gemini)
+        } else {
+            None
+        }
+    }
+
+    /// ADR-S1: Gemini's JSON body carries no `stream` field; streaming is
+    /// signalled exclusively by the `:streamGenerateContent` URL token
+    /// (both `/v1/` and `/v1beta/` flavours use the same token).
+    #[inline]
+    fn path_implies_stream(path: &str) -> bool {
+        path.contains(":streamGenerateContent")
+    }
+
+    /// ADR-S1b: Gemini wire spec places the model in the URL path, not the
+    /// JSON body (`GeminiRequest::model` is `#[serde(skip)]`). Extract the
+    /// substring between `/models/` and the verb separator `:`.
+    #[inline]
+    fn extract_path_model(path: &str) -> Option<&str> {
+        let after = path.split_once("/models/")?.1;
+        let model = after.split_once(':').map(|(m, _)| m).unwrap_or(after);
+        if model.is_empty() {
+            None
+        } else {
+            Some(model)
+        }
+    }
+
+    fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
+        let req: GeminiRequest<'a> = serde_json::from_slice(body)
+            .map_err(|e| bad_request_err(format!("gemini parse: {e}")))?;
+        Ok(req.into())
+    }
+
+    fn render_request(
+        &self,
+        ir: &RequestIR<'_>,
+        buf: &mut BytesMut,
+    ) -> Result<(), ErrorIR<'static>> {
+        let req = GeminiRequest::try_from(ir)?;
+        let bytes =
+            serde_json::to_vec(&req).map_err(|_| internal_err("gemini serialize failed"))?;
+        buf.extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState> {
+        Box::new(crate::trait_def::EmptyStreamState)
+    }
+
+    fn parse_stream_chunk<'a>(
+        &self,
+        _state: &mut dyn gw_core::ir::StreamState,
+        chunk: &'a [u8],
+    ) -> Result<Vec<StreamEventIR<'a>>, ErrorIR<'static>> {
+        // T2: forward to the v1 stateless body. T4-D replaces this with a
+        // real stateful implementation backed by the codec-specific
+        // `StreamState`.
+        Ok(self.legacy_parse_stream_chunk_v1(chunk)?.into_vec())
     }
 
     fn render_stream_chunk(

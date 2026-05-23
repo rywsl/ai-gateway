@@ -504,6 +504,17 @@ pub async fn rewrite_request(
     ctx.cached_body = Some(outbound.clone());
     ctx.upstream_codec = Some(upstream_codec);
 
+    // S-codec T2: initialise the codec-internal SSE accumulator now that the
+    // upstream codec is known. Done here (rather than in `request_filter`)
+    // because the upstream codec is resolved only after `pick_peer` /
+    // `rewrite_request`. Only stream requests need it; non-stream paths leave
+    // `stream_state = None`.
+    if ctx.is_stream {
+        if let Some(codec) = ctx.upstream_codec.as_ref() {
+            ctx.stream_state = Some(codec.new_stream_state());
+        }
+    }
+
     // Archive: snapshot the upstream-bound request now that `outbound` is the
     // wire form. `upstream_request` headers have already been mutated by this
     // point (Authorization injected etc.) so the archive sees what vendor sees.

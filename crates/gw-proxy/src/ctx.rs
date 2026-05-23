@@ -110,6 +110,13 @@ pub struct ReqCtx {
     /// `\n\n` boundary.
     pub sse_leftover: Vec<u8>,
 
+    /// Codec-internal SSE accumulator. Set in `request_filter` when the
+    /// request is a streaming one; threaded into `parse_stream_chunk` for
+    /// every framed event so the codec can buffer partial events (tool-call
+    /// argument deltas, thinking signatures, …) across chunk boundaries.
+    /// `None` on the non-stream path.
+    pub stream_state: Option<Box<dyn gw_core::ir::StreamState>>,
+
     // --- HTTP status seen on response ---
     pub upstream_status: Option<u16>,
     pub retry_count: u32,
@@ -252,6 +259,7 @@ impl ReqCtx {
             bytes_sent_to_client: AtomicU64::new(0),
             inflight_guard: None,
             sse_leftover: Vec::new(),
+            stream_state: None,
             upstream_status: None,
             retry_count: 0,
             retry_blacklist: Vec::new(),

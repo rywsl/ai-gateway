@@ -368,7 +368,7 @@ use std::any::Any;
 
 /// Codec 内部的 SSE 累积器状态。filter 持有 `Box<dyn StreamState>` 但不窥视字段。
 /// 每个 codec 在 `ProtocolCodec::new_stream_state()` 中返回自家具体类型的 Box。
-pub trait StreamState: Send + Any {
+pub trait StreamState: Send + Sync + Any {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
