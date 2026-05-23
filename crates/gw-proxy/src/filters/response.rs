@@ -118,11 +118,16 @@ pub fn run(
     let Some(upstream_kind) = ctx.upstream_codec.as_ref().map(AnyCodec::kind) else {
         return Ok(None);
     };
-    // Cross-protocol render (G8) requires a known client codec whose kind
-    // differs from upstream. If `client_codec` is absent we fall back to
-    // same-protocol passthrough (forward upstream bytes verbatim).
+    // Cross-protocol render (G8) requires a known client codec whose wire
+    // form differs from upstream. We compare on `WireFormat` (4-way: distinguishes
+    // OpenAI Chat vs OpenAI Responses) — `ProtocolKind` collapses them to 3-way
+    // and would treat Chat ⇄ Responses as same-protocol, silently skipping the
+    // re-render. Codec *dispatch* below still uses `kind`/`codec_for` since both
+    // Chat and Responses share the same `OpenAi` ProtocolCodec impl today.
+    let upstream_wire = ctx.upstream_codec.as_ref().map(WireFormat::from_any_codec);
+    let client_wire = ctx.client_codec.as_ref().map(WireFormat::from_any_codec);
+    let cross_protocol = matches!((client_wire, upstream_wire), (Some(cw), Some(uw)) if cw != uw);
     let client_kind = ctx.client_codec.as_ref().map(AnyCodec::kind);
-    let cross_protocol = matches!(client_kind, Some(ck) if ck != upstream_kind);
 
     if let Some(chunk) = body.as_ref() {
         ctx.sse_leftover.extend_from_slice(chunk);

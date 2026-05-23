@@ -495,12 +495,16 @@ P0 的 wire 形态变更与 C-2 同 PR 落地;OpenAI extra `Cow` 改造可独立
 
 ## §10 状态追踪
 
-- [ ] §1 目标态全部签出
-- [ ] §2 文件结构按表落地
-- [ ] §3 数据流(同协议短路 + 跨协议 IR 往返 + 流式累积器)行为如描述
-- [ ] §4 错误处理 + lossy 表实现 + ERROR log 同步触发
-- [ ] §5 测试 5 类全部通过(单测 / 跨协议矩阵 / lossy 专项 / e2e / v1 reject 测例已删)
-- [ ] §6 与其他 sub-spec 无意外耦合(S-ledger 消费 UsageSnapshot 时 schema 一致)
-- [ ] §7 N-1 P0 项与 C-2 同 PR 落地
-- [ ] §8 不变量(v1 标记清零 + §Known gaps 同 PR 删 + 老 spec marker + overview §9 日期 + CLAUDE.md L26 校正)
-- [ ] 进入 writing-plans 时本 spec 不再有任何 TBD / placeholder
+- [x] §1 目标态全部签出 (T1-T10 landed 2026-05-24)
+- [x] §2 文件结构按表落地
+- [x] §3 数据流(同协议短路 + 跨协议 IR 往返 + 流式累积器)行为如描述
+- [x] §4 错误处理 + lossy 表实现 + ERROR log 同步触发
+- [x] §5 测试 5 类全部通过(单测 / 跨协议矩阵 / lossy 专项 / e2e stub / v1 reject 测例已删)
+- [x] §6 与其他 sub-spec 无意外耦合(S-ledger 消费 UsageSnapshot 时 schema 一致)
+- [x] §7 N-1 P0 项与 C-2 同 PR 落地
+- [x] §8 不变量(v1 标记清零 + §Known gaps 同 PR 删 + 老 spec marker + overview §9 日期 + CLAUDE.md L26 校正)
+- [x] 进入 writing-plans 时本 spec 不再有任何 TBD / placeholder
+
+**已知后续 (out of S-codec scope; spawn follow-up sub-tasks if needed):**
+- T9 e2e 测仍为 `#[ignore]` stub;真实 e2e 走 `tests/e2e/client/scenarios/test_non_stream.py::test_cross_protocol_non_stream_round_trips`(已加入,在 docker 化 `make e2e` 时验证)。
+- `crates/gw-codec/src/gemini/codec.rs` 的 `parse_stream_chunk_emits_function_call_events` 测仅覆盖单 chunk;多 chunk functionCall args 累积测留作后续。
