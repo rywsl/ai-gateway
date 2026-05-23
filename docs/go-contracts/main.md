@@ -23,7 +23,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
                                                   counter:user:*:frozen_micro  ◄── Rust HINCRBY
                           ◄──────XADD──────────  usage:records (UsageRecord)
                           ◄──────XADD──────────  usage:records:dlq
-                          ◄──────XADD──────────  usage:detailed（可选）
+                          ◄──────XADD──────────  usage:detailed（必需,180d 归档）
                           ◄──────XADD──────────  events:entity（status_change / 自动封禁）
    entity:estimate_pricing ────────────────►     EntityStore 懒加载
    entity:management_token ────────────────►     EntityStore.mgmt_token（mgmt verify chain）
@@ -71,7 +71,7 @@ PgSQL 同步表则携带 `version BIGINT`（详见 Part 03）。
 | `events:counter` | Go | Rust StreamConsumer | `<instance_id>`（每副本独立 group） |
 | `usage:records` | Rust Ledger flusher | Go settler | `go-billing-settler`（推荐） |
 | `usage:records:dlq` | Rust flusher（主路径失败） | Go drainer（可选） | `go-billing-dlq`（推荐） |
-| `usage:detailed` | Rust DetailedLogSink | Go 可选 consumer | 由 Go 自决 |
+| `usage:detailed` | Rust DetailedArchive flusher pool | Go drainer（**必需**） | `go-archive-drainer`（推荐） |
 
 **XREADGROUP 锚点**：Rust 启动期对 `events:*` 用 `$`（参 `crates/gw-store/src/stream_consumer.rs:41`），仅消费启动后事件；启动前状态靠冷加载链获取。Go consumer 自决（settle 通常从 `0` 开始消费全量）。
 

@@ -4,7 +4,7 @@
 //! without Docker. Run explicitly with `cargo test -p gw-store -- --ignored`.
 
 use gw_store::encrypt::KekCache;
-use gw_store::loader::{LoaderCtx, load_entity};
+use gw_store::loader::{load_entity, LoaderCtx};
 use gw_store::pg_client;
 use gw_store::redis_client::RedisCtx;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;

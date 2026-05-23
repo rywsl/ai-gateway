@@ -15,7 +15,7 @@ use fred::interfaces::StreamsInterface;
 use fred::types::{XCap, XCapKind, XCapTrim};
 use gw_store::redis_client::RedisCtx;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, interval};
+use tokio::time::{interval, Duration};
 
 const USAGE_STREAM: &str = "usage:records";
 const DLQ_STREAM: &str = "usage:records:dlq";

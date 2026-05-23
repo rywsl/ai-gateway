@@ -21,6 +21,8 @@ impl RedisCtx {
             pool_size,
         )?;
         pool.init().await?;
-        Ok(Self { pool: Arc::new(pool) })
+        Ok(Self {
+            pool: Arc::new(pool),
+        })
     }
 }

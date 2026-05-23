@@ -30,10 +30,7 @@ impl Strategy for LoadBalance {
             if !h.is_available(&k.key_id, ctx.api_format) {
                 continue;
             }
-            let in_flight = f
-                .get_or_create(&k.key_id)
-                .count
-                .load(Ordering::Relaxed) as f32;
+            let in_flight = f.get_or_create(&k.key_id).count.load(Ordering::Relaxed) as f32;
             let score = ALPHA_IN_FLIGHT * in_flight;
             match best {
                 Some((bs, _)) if bs <= score => {}

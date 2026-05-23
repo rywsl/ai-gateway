@@ -208,7 +208,9 @@ pub fn aggregate_spectrum(entries: &[Vec<(String, String)>]) -> DetailedSpectrum
     let mut out = DetailedSpectrum::default();
     for fields in entries {
         let get = |k: &str| -> Option<&str> {
-            fields.iter().find_map(|(fk, fv)| (fk == k).then_some(fv.as_str()))
+            fields
+                .iter()
+                .find_map(|(fk, fv)| (fk == k).then_some(fv.as_str()))
         };
 
         bucket(&mut out.by_status, get("status"));

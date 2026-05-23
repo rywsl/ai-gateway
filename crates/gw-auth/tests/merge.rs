@@ -135,10 +135,7 @@ async fn rpm_takes_min_across_tiers() {
     let store = EntityStore::new();
     store
         .user
-        .insert(
-            UserId::from("u1"),
-            user("u1", None, &[], 100, &["g1"], 1.0),
-        )
+        .insert(UserId::from("u1"), user("u1", None, &[], 100, &["g1"], 1.0))
         .await;
     store
         .user_group
@@ -146,10 +143,7 @@ async fn rpm_takes_min_across_tiers() {
         .await;
     store
         .apikey
-        .insert(
-            ApiKeyId::from("ak1"),
-            apikey("ak1", "u1", &[], 200, 1.0),
-        )
+        .insert(ApiKeyId::from("ak1"), apikey("ak1", "u1", &[], 200, 1.0))
         .await;
 
     let ctx = AuthCtx {
@@ -166,7 +160,10 @@ async fn sub_account_effective_user_id_is_parent() {
     let store = EntityStore::new();
     store
         .user
-        .insert(UserId::from("parent"), user("parent", None, &[], 0, &[], 1.0))
+        .insert(
+            UserId::from("parent"),
+            user("parent", None, &[], 0, &[], 1.0),
+        )
         .await;
     store
         .user
@@ -199,10 +196,7 @@ async fn markup_is_product_of_tiers() {
         .await;
     store
         .apikey
-        .insert(
-            ApiKeyId::from("ak1"),
-            apikey("ak1", "u1", &[], 0, 3.0),
-        )
+        .insert(ApiKeyId::from("ak1"), apikey("ak1", "u1", &[], 0, 3.0))
         .await;
 
     let ctx = AuthCtx {

@@ -190,27 +190,126 @@ Drainer 是 Go 端**可选**实现。不实现的代价：主路径写失败时�
 - DLQ 条目**不**包含 `cost_micro`（由 `no_cost_in_dlq` invariant 强制）。
 - DLQ 主路径失败的 Rust 行为：`tracing::warn!` + metric +（v1）drop。
 
-## 2.3 `usage:detailed` Stream（可选）
+## 2.3 `usage:detailed` Stream（必需 consumer / 完整归档）
 
-### 2.3.1 Stream 定义
+### 2.3.1 角色
+
+- Rust：writer（单向），按 [`docs/workflow.md`](../workflow.md) §filter chain 的 5 个触发点 XADD
+- Go：**必需 consumer**（不再"可选"）；长期归档（180 天合规）责任方
+
+### 2.3.2 Stream 定义
 
 | 字段 | 值 |
 |---|---|
 | Stream name | `usage:detailed` |
-| Writer | Rust `gw-ledger::log_sink::RedisStreamSink`（`crates/gw-ledger/src/log_sink.rs`） |
-| Reader | Go 可选 consumer / 归档 worker |
-| MAXLEN | Rust 写时 `MAXLEN ~ <配置值>`（参 `[debug]` 表，详见 [`docs/architecture.md`](../architecture.md) §4.1） |
-| 触发条件 | `[debug]` sampling rate 命中，或 `ApiKeyEntry.debug_enabled / UserEntry.debug_enabled` 命中 |
+| Writer | Rust `gw-ledger::flusher`（`crates/gw-ledger/src/flusher.rs`），独立 flusher pool 异步 XADD |
+| Reader | Go drainer（**必需**）|
+| 推荐 consumer group | `go-archive-drainer` |
+| MAXLEN | Rust 写时 `MAXLEN ~ <配置值>`（参 `[detailed_log]` 表，详见 [`docs/architecture.md`](../architecture.md) §4.1） |
+| 保留期 | Go 端实现 180 天（法律合规）；Rust 无保留期参数 |
 
-### 2.3.2 Payload schema
+### 2.3.3 Redis Stream entry 字段集
 
-每条携带完整请求 / 响应快照（三级 redaction 后）。字段集随 `[debug] body_capture_*` toggle 变化，不在本契约 stable surface 内。Go 端如要消费，应当读 `payload` 字段 JSON，按字段名兜底。
+```
+ts_ms      i64    UTC wall-clock 毫秒
+request_id text   r_*
+trace_id   text   t_*
+kind       enum   downstream_request | upstream_request | upstream_response | downstream_response | summary
+encoding   enum   raw+json | lz4+json | zstd+json
+payload    bytes  encoding 决定如何解码；解码后是 JSON
+```
 
-Go 端实现归档建议：直接 XREADGROUP 串到对象存储（gzip 压缩，分 1h 文件），保留 7 天。本契约**不**约束 Go 端是否消费。
+### 2.3.4 Encoding 解码规则
 
-### 2.3.3 三级 redaction 规则
+| encoding 值 | 解码方式 |
+|---|---|
+| `raw+json` | 直接解析 JSON（payload 字段即 UTF-8 JSON 文本） |
+| `lz4+json` | LZ4 帧解压后解析 JSON |
+| `zstd+json` | zstd 解压后解析 JSON |
 
-由 Rust 写入前应用，详见 [`docs/architecture.md`](../architecture.md) §3 `Redactor` trait。Go 端**禁止**对接收到的 payload 再做反向脱敏（已脱敏字段就是脱敏后的样子）。
+选择策略（由 Rust 侧自动判定）：
+- JSON 序列化后 < 1 KiB → `raw+json`
+- 1 KiB ≤ 字节 < 64 KiB → `lz4+json`
+- ≥ 64 KiB → `zstd+json`
+
+### 2.3.5 Payload 解码后 JSON Schema（按 kind 分支）
+
+#### `kind = downstream_request` / `upstream_request`
+
+```json
+{
+  "method": "POST",
+  "url": "/v1/chat/completions",
+  "http_version": "HTTP/1.1",
+  "headers": [["host", "..."], ["authorization", "..."], ...],
+  "body_b64": "..."
+}
+```
+
+- `headers`：数组，保持出现顺序，**不**去重、**不**脱敏。`Authorization` / `x-api-key` / `Cookie` 完整保留。
+- `body_b64`：base64-standard（RFC 4648），不含换行。空 body 时为 `""`。
+
+#### `kind = upstream_response` / `downstream_response`
+
+```json
+{
+  "status": 200,
+  "headers": [["content-type", "application/json"], ...],
+  "body_b64": "..."
+}
+```
+
+- `upstream_response.body_b64`：vendor 给的**原始字节**（含 `content-encoding` 未解压形态）
+- `downstream_response.body_b64`：发给客户端的最终字节（codec 重渲染后形态）
+- 流式响应：聚合整个流的全部字节（SSE event 串接、按 wire 顺序）
+
+#### `kind = summary`
+
+```json
+{
+  "user_id": "u_...",
+  "api_key_id": "ak_...",
+  "model": "claude-sonnet-4.6",
+  "client_protocol": "openai_chat",
+  "upstream_protocol": "anthropic_messages",
+  "http_status": 200,
+  "error_code": null,
+  "is_stream": true,
+  "input_tokens": 1234,
+  "output_tokens": 567,
+  "latency_ms": 8901,
+  "ttft_ms": 234,
+  "tunnel_resolution": "direct"
+}
+```
+
+### 2.3.6 Go consumer 义务
+
+1. **消费**：`XREADGROUP GROUP go-archive-drainer <consumer_id> COUNT N BLOCK <ms> STREAMS usage:detailed >`，起始位置 `0`（消费全量）
+2. **按 kind 分支解码**：根据 `encoding` 字段选择解压算法，再解析 JSON
+3. **索引与重组**：按 `(request_id, kind)` 建立索引。一个请求的完整快照 = 5 条 entry：`downstream_request` + `upstream_request` + `upstream_response` + `downstream_response` + `summary`
+4. **缺失语义**：
+   - 某 surface 缺失 = 该 surface 在 Rust 侧未归档成功（mpsc 满 / 压缩失败 / XADD 失败 / 进程崩溃）。**不**表示请求该 surface 不存在
+   - `summary` 缺失 = 请求未到达 logging filter（进程崩溃 / mpsc 满）。建议 Go 设置 fallback 超时（收到首个 surface 后 60 秒内 `summary` 未到 → 标记该 request_id 为不完整快照）
+   - 全部 5 个都缺 = 请求未触发任何归档（早期 filter 抛错 / mpsc 全满）
+5. **长期归档**：批量将 entry 落到长期存储（S3 / GCS / parquet / lakehouse，任选），保留期 180 天
+6. **XACK**：成功归档后 ack；失败由 Go 自决重试或落 Go 侧 DLQ（**不走 Rust DLQ**）
+
+### 2.3.7 监控义务（Go 端）
+
+| 指标 | 类型 | 阈值 |
+|---|---|---|
+| `usage_detailed_consume_lag_secs` | gauge | > 60s 告警 |
+| `usage_detailed_xlen` | gauge | > MAXLEN × 0.8 告警 |
+| `usage_detailed_processed_total` | counter | 仅观测 |
+| `usage_detailed_decode_failure_total{reason}` | counter | > 0 排查 |
+| `usage_detailed_archive_failure_total` | counter | > 1% 告警 |
+
+### 2.3.8 强度与 SLA
+
+- **无 DLQ**：`usage:detailed` 不是账务流。Go drainer 跟不上 Redis MAXLEN 滚动 → 永久丢失未消费 entry。180 天合规要求 = Go drainer 必须不挂；挂了的处置是运维 oncall 问题，不在协议保证内
+- **单向**：Rust 写、Go 读。Go **禁止**反向写 `usage:detailed`
+- **完整性**：body 不截断、不脱敏；header 包含 `Authorization` / `x-api-key` / `Cookie` 等敏感字段。Go drainer 如需脱敏，在自己的归档 sink 上处理，Rust 不知情
 
 ## 2.4 `events:entity` 反向写入（Rust XADD）
 

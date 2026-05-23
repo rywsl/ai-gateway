@@ -36,10 +36,7 @@ fn openai_single_delta_does_not_spill() {
     let chunk = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n";
     let evs = codec.parse_stream_chunk(chunk).unwrap();
     assert_eq!(evs.len(), 1);
-    assert!(
-        !evs.spilled(),
-        "single-event chunk must not spill to heap"
-    );
+    assert!(!evs.spilled(), "single-event chunk must not spill to heap");
     assert!(matches!(evs[0], StreamEventIR::Delta { .. }));
 }
 

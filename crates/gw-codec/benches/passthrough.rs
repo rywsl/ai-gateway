@@ -64,12 +64,9 @@ fn bench_passthrough(c: &mut Criterion) {
 
     c.bench_function("openai_same_proto_no_mutation_6kb", |b| {
         b.iter(|| {
-            let out = same_protocol_passthrough(
-                &codec,
-                black_box(&large),
-                black_box(&Mutations::NONE),
-            )
-            .expect("passthrough");
+            let out =
+                same_protocol_passthrough(&codec, black_box(&large), black_box(&Mutations::NONE))
+                    .expect("passthrough");
             black_box(out);
         });
     });

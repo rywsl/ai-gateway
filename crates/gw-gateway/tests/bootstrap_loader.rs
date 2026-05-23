@@ -22,15 +22,16 @@ async fn missing_auth_configs_row_does_not_fail_bootstrap() {
 
     use gw_store::{encrypt::KekCache, loader::LoaderCtx, EntityStore};
 
-    const MIGRATION_0001: &str =
-        include_str!("../../gw-store/migrations/0001_initial.sql");
-    const MIGRATION_0006: &str =
-        include_str!("../../gw-store/migrations/0006_auth_configs.sql");
+    const MIGRATION_0001: &str = include_str!("../../gw-store/migrations/0001_initial.sql");
+    const MIGRATION_0006: &str = include_str!("../../gw-store/migrations/0006_auth_configs.sql");
 
     let pg_node = Postgres::default().start().await.expect("start postgres");
     let redis_node = Redis::default().start().await.expect("start redis");
     let pg_port = pg_node.get_host_port_ipv4(5432).await.expect("pg port");
-    let redis_port = redis_node.get_host_port_ipv4(6379).await.expect("redis port");
+    let redis_port = redis_node
+        .get_host_port_ipv4(6379)
+        .await
+        .expect("redis port");
 
     let pg = gw_store::pg_client::connect(
         &format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres"),
@@ -38,20 +39,31 @@ async fn missing_auth_configs_row_does_not_fail_bootstrap() {
     )
     .await
     .expect("pg connect");
-    let redis = gw_store::redis_client::RedisCtx::connect(
-        &format!("redis://127.0.0.1:{redis_port}"),
-        4,
-    )
-    .await
-    .expect("redis connect");
+    let redis =
+        gw_store::redis_client::RedisCtx::connect(&format!("redis://127.0.0.1:{redis_port}"), 4)
+            .await
+            .expect("redis connect");
 
-    sqlx::raw_sql(MIGRATION_0001).execute(&pg).await.expect("apply 0001");
-    sqlx::raw_sql(MIGRATION_0006).execute(&pg).await.expect("apply 0006");
+    sqlx::raw_sql(MIGRATION_0001)
+        .execute(&pg)
+        .await
+        .expect("apply 0001");
+    sqlx::raw_sql(MIGRATION_0006)
+        .execute(&pg)
+        .await
+        .expect("apply 0006");
 
-    let loader = LoaderCtx { redis, pg, kek: KekCache::default() };
+    let loader = LoaderCtx {
+        redis,
+        pg,
+        kek: KekCache::default(),
+    };
     let store = Arc::new(EntityStore::with_loader(loader));
 
     // No `global` row seeded — must return None, not panic.
     let result = store.auth_config_or_load("global").await;
-    assert!(result.is_none(), "expected None when global row absent, got Some");
+    assert!(
+        result.is_none(),
+        "expected None when global row absent, got Some"
+    );
 }

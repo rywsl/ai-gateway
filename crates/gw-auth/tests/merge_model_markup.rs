@@ -93,7 +93,9 @@ async fn no_pricing_defaults_to_one() {
         api_key_id: None,
         client_ip: ip(),
     };
-    let perm = merge_permissions(&ctx, &store, 0, None).await.expect("merge");
+    let perm = merge_permissions(&ctx, &store, 0, None)
+        .await
+        .expect("merge");
     assert!(
         (perm.markup_chain.model_markup - 1.0).abs() < 1e-4,
         "expected model_markup=1.0 placeholder when pricing is None, got {}",

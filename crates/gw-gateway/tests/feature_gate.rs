@@ -2,8 +2,8 @@
 
 #[test]
 fn tunnel_feature_optional() {
-    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .unwrap();
+    let manifest =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
     assert!(
         manifest.contains("gw-tunnel-client"),
         "tunnel-client not declared in manifest"
@@ -12,10 +12,7 @@ fn tunnel_feature_optional() {
         manifest.contains("optional = true"),
         "tunnel-client not optional"
     );
-    assert!(
-        manifest.contains("[features]"),
-        "[features] table missing"
-    );
+    assert!(manifest.contains("[features]"), "[features] table missing");
     assert!(manifest.contains("tunnel"), "tunnel feature missing");
     assert!(
         manifest.contains("gw-proxy/tunnel"),

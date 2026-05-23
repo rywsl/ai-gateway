@@ -7,8 +7,8 @@
 use dashmap::DashMap;
 use gw_core::ids::UserId;
 use once_cell::sync::Lazy;
-use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Debug)]

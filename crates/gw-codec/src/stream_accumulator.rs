@@ -29,8 +29,8 @@ where
     let mut model = None::<String>;
     let mut id = None::<String>;
     for raw in chunks {
-        let v: Value = serde_json::from_slice(raw)
-            .map_err(|e| AccumulateError::Parse(e.to_string()))?;
+        let v: Value =
+            serde_json::from_slice(raw).map_err(|e| AccumulateError::Parse(e.to_string()))?;
         if let Some(s) = v.get("model").and_then(|v| v.as_str()) {
             model = Some(s.into());
         }
@@ -86,8 +86,8 @@ where
     let mut blocks: Vec<Value> = Vec::new();
     let mut stop_reason = None::<String>;
     for raw in events {
-        let v: Value = serde_json::from_slice(raw)
-            .map_err(|e| AccumulateError::Parse(e.to_string()))?;
+        let v: Value =
+            serde_json::from_slice(raw).map_err(|e| AccumulateError::Parse(e.to_string()))?;
         let typ = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match typ {
             "message_start" => {

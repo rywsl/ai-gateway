@@ -54,7 +54,10 @@ async fn per_key_when_vendor_overrides_present() {
         pricing_strategy_ref: None,
     });
     let m = ModelMapper::new(Arc::new(be));
-    let mapped = m.map_for_routing("gpt-5", ProtocolKind::OpenAi).await.unwrap();
+    let mapped = m
+        .map_for_routing("gpt-5", ProtocolKind::OpenAi)
+        .await
+        .unwrap();
     assert_eq!(mapped.source, MappingSource::PerKey);
 }
 

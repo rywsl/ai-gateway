@@ -16,9 +16,15 @@ async fn incrby_returns_new_value() {
         .await
         .unwrap();
     let cs = CounterStore { redis };
-    let v1 = cs.incrby("user", "u1", "balance_micro", 1000).await.unwrap();
+    let v1 = cs
+        .incrby("user", "u1", "balance_micro", 1000)
+        .await
+        .unwrap();
     assert_eq!(v1, 1000);
-    let v2 = cs.incrby("user", "u1", "balance_micro", -300).await.unwrap();
+    let v2 = cs
+        .incrby("user", "u1", "balance_micro", -300)
+        .await
+        .unwrap();
     assert_eq!(v2, 700);
     let g = cs.get("user", "u1", "balance_micro").await.unwrap();
     assert_eq!(g, 700);

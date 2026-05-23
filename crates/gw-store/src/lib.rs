@@ -11,6 +11,6 @@ pub mod redis_client;
 pub mod stream_consumer;
 
 pub use counter_store::CounterStore;
-pub use deduction::{CircuitReason, DEDUCT, DeductionState, USER_CIRCUIT, UserCircuit};
+pub use deduction::{CircuitReason, DeductionState, UserCircuit, DEDUCT, USER_CIRCUIT};
 pub use entity_store::EntityStore;
 pub use loader::LoaderCtx;

@@ -2,8 +2,8 @@
 
 use gw_core::ids::KeyId;
 use gw_routing::in_flight::{InFlightCounter, InFlightGuard, InFlightStore};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[test]
 fn counter_starts_at_zero() {

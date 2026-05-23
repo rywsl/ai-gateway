@@ -54,7 +54,11 @@ fn sse_error_emits_event_error_frame() {
         body_json: json!({"error":"oops"}),
         is_sse: true,
     };
-    let out = render_error_to_client(ProtocolKind::Anthropic, &body, ErrorClass::UpstreamTransient);
+    let out = render_error_to_client(
+        ProtocolKind::Anthropic,
+        &body,
+        ErrorClass::UpstreamTransient,
+    );
     let s = std::str::from_utf8(&out).unwrap();
     assert!(s.starts_with("event: error\n"));
     assert!(s.contains("data: "));

@@ -17,13 +17,19 @@ macro_rules! id_newtype {
             }
         }
         impl From<String> for $name {
-            fn from(s: String) -> Self { Self(s) }
+            fn from(s: String) -> Self {
+                Self(s)
+            }
         }
         impl From<&str> for $name {
-            fn from(s: &str) -> Self { Self(s.to_owned()) }
+            fn from(s: &str) -> Self {
+                Self(s.to_owned())
+            }
         }
         impl AsRef<str> for $name {
-            fn as_ref(&self) -> &str { &self.0 }
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
         }
     };
 }

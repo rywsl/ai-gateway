@@ -16,6 +16,10 @@ time.workspace = true
 fred.workspace = true
 tracing.workspace = true
 metrics.workspace = true
+lz4_flex = { workspace = true }
+zstd = { workspace = true }
+base64 = { workspace = true }
+bytes.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "test-util"] }

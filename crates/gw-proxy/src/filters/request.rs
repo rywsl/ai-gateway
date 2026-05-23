@@ -107,7 +107,10 @@ pub async fn run(
         // 4. Mgmt-token blacklist. FailClosed: a Redis outage rejects the
         //    request rather than serving stale-allow.
         if mgmt_blacklist
-            .check_mgmt(parts.token_id, gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed)
+            .check_mgmt(
+                parts.token_id,
+                gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed,
+            )
             .await
         {
             mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_REVOKED);
@@ -423,6 +426,25 @@ pub async fn run(
     }
     let body_bytes = bytes::Bytes::from(body_buf);
     ctx.cached_body = Some(body_bytes.clone());
+
+    // Wire-fidelity archive: snapshot the raw downstream request. `cached_body`
+    // is overwritten by `upstream::rewrite_request` on the cross-protocol path,
+    // so the snapshot must happen now while we still have the original bytes.
+    ctx.downstream_request_body = Some(Arc::new(body_bytes.clone()));
+    {
+        use crate::ctx::DownstreamRequestMeta;
+        let req = session.req_header();
+        ctx.downstream_request_meta = Some(DownstreamRequestMeta {
+            method: req.method.as_str().to_owned(),
+            url: req.uri.to_string(),
+            http_version: format!("{:?}", req.version),
+            headers: req
+                .headers
+                .iter()
+                .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+                .collect(),
+        });
+    }
 
     // ---------------------------------------------------------------------
     // 3b. G7 / T1-D — HMAC body-after verification. If the resolved api-key

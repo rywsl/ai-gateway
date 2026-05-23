@@ -82,7 +82,8 @@ fn estimate_input_tokens_nonzero() {
 #[test]
 fn parse_error_400() {
     let codec = Anthropic;
-    let body = br#"{"type":"error","error":{"type":"invalid_request_error","message":"missing model"}}"#;
+    let body =
+        br#"{"type":"error","error":{"type":"invalid_request_error","message":"missing model"}}"#;
     let err = codec.parse_error(400, body);
     assert_eq!(err.status, 400);
     assert_eq!(err.message.as_ref(), "missing model");

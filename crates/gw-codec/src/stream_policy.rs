@@ -36,11 +36,12 @@ pub struct UpstreamStreamCapability {
 /// | true  | _     | true  | PassThroughStream |
 /// | true  | true  | false | SimulateStreamFromSync |
 /// | _     | false | false | PassThroughSync (caller error) |
-pub fn decide(
-    client_wants_stream: bool,
-    caps: UpstreamStreamCapability,
-) -> UpstreamStreamPolicy {
-    match (client_wants_stream, caps.supports_sync, caps.supports_stream) {
+pub fn decide(client_wants_stream: bool, caps: UpstreamStreamCapability) -> UpstreamStreamPolicy {
+    match (
+        client_wants_stream,
+        caps.supports_sync,
+        caps.supports_stream,
+    ) {
         (false, true, _) => UpstreamStreamPolicy::PassThroughSync,
         (false, false, true) => UpstreamStreamPolicy::AccumulateUpstreamStream,
         (true, _, true) => UpstreamStreamPolicy::PassThroughStream,

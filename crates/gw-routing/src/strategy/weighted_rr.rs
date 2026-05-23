@@ -58,9 +58,7 @@ impl Strategy for WeightedRr {
         let total: i32 = c.iter().map(Self::weight_of).sum();
         if total <= 0 {
             // All weights zero — degenerate; fall back to the first available.
-            return c
-                .iter()
-                .find(|k| h.is_available(&k.key_id, ctx.api_format));
+            return c.iter().find(|k| h.is_available(&k.key_id, ctx.api_format));
         }
 
         // Phase 1: bump every current[i] by weight[i].
@@ -92,10 +90,7 @@ impl Strategy for WeightedRr {
 
         let i = best_idx?;
         // Phase 3: subtract total weight from the winner.
-        if let Some(cur) = self
-            .current
-            .get(&(ctx.model.clone(), c[i].key_id.clone()))
-        {
+        if let Some(cur) = self.current.get(&(ctx.model.clone(), c[i].key_id.clone())) {
             cur.fetch_sub(total, Ordering::Relaxed);
         }
         Some(&c[i])

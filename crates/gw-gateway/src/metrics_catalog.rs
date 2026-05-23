@@ -127,9 +127,34 @@ pub static METRICS: &[MetricSpec] = &[
         help: "cooldown fallback used",
     },
     MetricSpec {
-        name: "gw_detailed_log_oversized_total",
+        name: "gw_detailed_log_channel_depth",
+        kind: MetricKind::Gauge,
+        help: "Detailed-archive mpsc channel depth",
+    },
+    MetricSpec {
+        name: "gw_detailed_log_compress_seconds",
+        kind: MetricKind::Histogram,
+        help: "Compression duration per detailed-archive entry (labels: encoding)",
+    },
+    MetricSpec {
+        name: "gw_detailed_log_drop_total",
         kind: MetricKind::Counter,
-        help: "detailed log dropped due to size",
+        help: "Detailed-archive entries dropped (labels: reason, kind)",
+    },
+    MetricSpec {
+        name: "gw_detailed_log_emit_total",
+        kind: MetricKind::Counter,
+        help: "Detailed-archive entries emitted (labels: kind, encoding)",
+    },
+    MetricSpec {
+        name: "gw_detailed_log_payload_bytes",
+        kind: MetricKind::Histogram,
+        help: "Compressed payload size per detailed-archive entry (labels: kind, encoding)",
+    },
+    MetricSpec {
+        name: "gw_detailed_log_pre_compress_bytes",
+        kind: MetricKind::Histogram,
+        help: "Uncompressed JSON size per detailed-archive entry (labels: kind)",
     },
     MetricSpec {
         name: "gw_usage_dlq_enqueued_total",

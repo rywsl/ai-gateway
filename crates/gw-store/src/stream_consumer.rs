@@ -336,10 +336,7 @@ mod mgmt_token_tests {
             value: Arc::new(entry),
         });
 
-        store
-            .mgmt_token
-            .insert("tk-1".to_string(), versioned)
-            .await;
+        store.mgmt_token.insert("tk-1".to_string(), versioned).await;
         assert!(
             store.mgmt_token.get("tk-1").await.is_some(),
             "pre-condition: cache entry must be present before invalidation"

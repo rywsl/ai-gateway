@@ -20,9 +20,31 @@ use gw_core::permissions::MergedPermissions;
 use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
 use gw_routing::in_flight::InFlightGuard;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Instant;
+
+#[derive(Debug, Clone)]
+pub struct DownstreamRequestMeta {
+    pub method: String,
+    pub url: String,
+    pub http_version: String,
+    pub headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamRequestMeta {
+    pub method: String,
+    pub url: String,
+    pub http_version: String,
+    pub headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResponseMeta {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
 
 /// Mutable accumulator for token-usage seen on either the unary-response path
 /// or in stream `Usage` events. The `logging` filter reads these counters
@@ -164,6 +186,29 @@ pub struct ReqCtx {
     /// B2: management-path verified scope (set alongside `mgmt_user_id`).
     pub mgmt_scope: Option<gw_core::entity::MgmtScope>,
 
+    // --- Detailed archive (wire-fidelity capture) ---
+    /// Raw client-facing request body bytes (before any codec render). `None`
+    /// until `request_filter` has finished reading the body.
+    pub downstream_request_body: Option<Arc<Bytes>>,
+    /// Method+URL+headers snapshot for the downstream request. Captured at the
+    /// same point as `downstream_request_body`.
+    pub downstream_request_meta: Option<DownstreamRequestMeta>,
+    /// Final upstream-bound request body bytes. Captured at the end of
+    /// `upstream::rewrite_request` (after any codec re-render).
+    pub upstream_request_body: Option<Arc<Bytes>>,
+    /// Method+URL+headers snapshot for the upstream-bound request.
+    pub upstream_request_meta: Option<UpstreamRequestMeta>,
+    /// Accumulator for raw upstream response bytes (always-on; the legacy B1
+    /// `upstream_body_accum` was streaming-conditional and is now subsumed).
+    pub archive_upstream_response_body: bytes::BytesMut,
+    /// Accumulator for downstream-bound (post-render) response bytes.
+    pub archive_downstream_response_body: bytes::BytesMut,
+    /// Upstream response headers + status snapshot, taken in `response_filter`.
+    pub archive_upstream_response_meta: Option<ResponseMeta>,
+    /// Downstream response headers + status snapshot, taken at EOS in
+    /// `response_body_filter` (after any codec header rewrite via response_filter).
+    pub archive_downstream_response_meta: Option<ResponseMeta>,
+
     // --- Debug ---
     pub trace: TraceBuffer,
     pub debug: DebugMode,
@@ -226,6 +271,14 @@ impl ReqCtx {
             upstream_body_accum: None,
             mgmt_user_id: None,
             mgmt_scope: None,
+            downstream_request_body: None,
+            downstream_request_meta: None,
+            upstream_request_body: None,
+            upstream_request_meta: None,
+            archive_upstream_response_body: bytes::BytesMut::new(),
+            archive_downstream_response_body: bytes::BytesMut::new(),
+            archive_upstream_response_meta: None,
+            archive_downstream_response_meta: None,
             trace: TraceBuffer::new(),
             debug: DebugMode::DISABLED,
         }

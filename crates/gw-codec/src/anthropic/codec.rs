@@ -132,7 +132,9 @@ impl ProtocolCodec for Anthropic {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::End { .. } => {
-                buf.extend_from_slice(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+                buf.extend_from_slice(
+                    b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                );
             }
             StreamEventIR::Error(err) => {
                 // Anthropic SSE error shape: `event: error\ndata: {json}\n\n`.
@@ -162,20 +164,17 @@ impl ProtocolCodec for Anthropic {
         // because same-protocol passthrough does not need them — the bytes
         // are forwarded verbatim by the proxy layer. Will be revisited when
         // codec-s4 v2 wires cross-protocol non-stream re-render.
-        let parsed: AnthropicResponseBody =
-            serde_json::from_slice(body).map_err(|e| ErrorIR {
-                category: gw_core::error::ErrorCategory::UpstreamError,
-                status: 502,
-                upstream_status: None,
-                code: Cow::Borrowed(
-                    gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR,
-                ),
-                message: Cow::Owned(format!("anthropic parse_response: {e}")),
-                retryable: false,
-                upstream_raw: None,
-                request_id: "",
-                retry_after_secs: None,
-            })?;
+        let parsed: AnthropicResponseBody = serde_json::from_slice(body).map_err(|e| ErrorIR {
+            category: gw_core::error::ErrorCategory::UpstreamError,
+            status: 502,
+            upstream_status: None,
+            code: Cow::Borrowed(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
+            message: Cow::Owned(format!("anthropic parse_response: {e}")),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        })?;
 
         let usage = parsed.usage.map(|u| gw_core::ir::UsageIR {
             input_tokens: u.input_tokens,

@@ -86,6 +86,8 @@ struct Wired {
     /// Constructed once in bootstrap so the `/healthz/resilience` snapshot
     /// (T3-C) and the proxy error fanout (T3-A) share a single instance.
     resilience: Arc<ResilienceState>,
+    /// Detailed-log archive (T10). Flusher pool started during bootstrap.
+    detailed_archive: Arc<gw_ledger::detailed_archive::DetailedArchive>,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -184,6 +186,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.resilience,
         #[cfg(feature = "tunnel")]
         wired.tunnel,
+        wired.detailed_archive,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -266,6 +269,35 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         Duration::from_millis(cfg.ledger.flush_interval_ms),
     ));
 
+    // 4b. Detailed-log archive (T10). Workers is auto when configured to 0:
+    // use 1/4 of available parallelism, minimum 1.
+    let archive_cfg = gw_ledger::detailed_archive::DetailedArchiveCfg {
+        stream: cfg.detailed_log.stream.clone(),
+        maxlen: cfg.detailed_log.maxlen,
+        channel_capacity: cfg.detailed_log.channel.capacity,
+        workers: if cfg.detailed_log.flusher.workers == 0 {
+            (std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                / 4)
+            .max(1)
+        } else {
+            cfg.detailed_log.flusher.workers
+        },
+        single_payload_soft_cap_bytes: cfg.detailed_log.limits.single_payload_soft_cap_bytes,
+        compression: gw_ledger::encoding::CompressionCfg {
+            thresholds: gw_ledger::encoding::TierThresholds {
+                small_threshold_bytes: cfg.detailed_log.compression.small_threshold_bytes,
+                medium_threshold_bytes: cfg.detailed_log.compression.medium_threshold_bytes,
+            },
+            zstd_level: cfg.detailed_log.compression.zstd_level,
+        },
+    };
+    let detailed_archive = Arc::new(gw_ledger::detailed_archive::DetailedArchive::start(
+        (*redis.pool).clone(),
+        archive_cfg,
+    ));
+
     // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
     // The consumer's join handle is intentionally dropped: the task lives for
     // the life of the bootstrap runtime (which itself is parked on pending()).
@@ -317,36 +349,38 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // available. Absent → validator stays None and request_filter falls back
     // to the legacy `verify_jwt` so deployments without AuthConfig keep
     // working with v1 semantics (exp-only, JWKS-by-kid).
-    let jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>> =
-        match store.auth_config_or_load("global").await {
-            Some(cfg_v) => {
-                let vcfg = gw_auth::jwt::JwtValidatorConfig {
-                    static_secret_hs256: cfg_v.value.static_secret_hs256.clone(),
-                    static_pem_rs256: cfg_v.value.static_pem_rs256.clone(),
-                    expected_iss: cfg_v.value.expected_iss.clone(),
-                    expected_aud: cfg_v.value.expected_aud.clone(),
-                    leeway_secs: cfg_v.value.leeway_secs,
-                    require_nbf: cfg_v.value.require_nbf,
-                };
-                let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
-                v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
-                    store: store.clone(),
-                }));
-                tracing::info!(
-                    target: "gw_gateway",
-                    "JwtValidator wired from AuthConfig.global (G6, T1-E)"
-                );
-                Some(Arc::new(v))
-            }
-            None => {
-                tracing::warn!(
-                    target: "gw_gateway",
-                    "auth_configs.global missing; falling back to legacy JWT exp-only validation. \
-                     Populate the `global` row via the management plane to enable iss/aud/nbf checks (0006_auth_configs)."
-                );
-                None
-            }
-        };
+    let jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>> = match store
+        .auth_config_or_load("global")
+        .await
+    {
+        Some(cfg_v) => {
+            let vcfg = gw_auth::jwt::JwtValidatorConfig {
+                static_secret_hs256: cfg_v.value.static_secret_hs256.clone(),
+                static_pem_rs256: cfg_v.value.static_pem_rs256.clone(),
+                expected_iss: cfg_v.value.expected_iss.clone(),
+                expected_aud: cfg_v.value.expected_aud.clone(),
+                leeway_secs: cfg_v.value.leeway_secs,
+                require_nbf: cfg_v.value.require_nbf,
+            };
+            let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
+            v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
+                store: store.clone(),
+            }));
+            tracing::info!(
+                target: "gw_gateway",
+                "JwtValidator wired from AuthConfig.global (G6, T1-E)"
+            );
+            Some(Arc::new(v))
+        }
+        None => {
+            tracing::warn!(
+                target: "gw_gateway",
+                "auth_configs.global missing; falling back to legacy JWT exp-only validation. \
+                 Populate the `global` row via the management plane to enable iss/aud/nbf checks (0006_auth_configs)."
+            );
+            None
+        }
+    };
 
     // G13 (T3-C) — production capability resolver backed by the EntityStore.
     // `Model.capabilities` / `ApiKeyEntry.force_capabilities` /
@@ -487,5 +521,6 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         tunnel,
         mgmt_blacklist,
         resilience,
+        detailed_archive,
     })
 }

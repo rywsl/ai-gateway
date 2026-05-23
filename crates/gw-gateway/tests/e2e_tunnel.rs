@@ -57,10 +57,7 @@ async fn e2e_tunnel_constructs_when_enabled_with_no_nodes() {
     let pg_node = Postgres::default().start().await.expect("start postgres");
     let redis_node = Redis::default().start().await.expect("start redis");
 
-    let pg_port = pg_node
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("pg port");
+    let pg_port = pg_node.get_host_port_ipv4(5432).await.expect("pg port");
     let redis_port = redis_node
         .get_host_port_ipv4(6379)
         .await
@@ -152,10 +149,7 @@ async fn e2e_tunnel_resolves_use_when_node_matches_provider() {
     let pg_node = Postgres::default().start().await.expect("start postgres");
     let redis_node = Redis::default().start().await.expect("start redis");
 
-    let pg_port = pg_node
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("pg port");
+    let pg_port = pg_node.get_host_port_ipv4(5432).await.expect("pg port");
     let redis_port = redis_node
         .get_host_port_ipv4(6379)
         .await

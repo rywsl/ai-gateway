@@ -7,9 +7,7 @@ use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventI
 use smallvec::{smallvec, SmallVec};
 use std::borrow::Cow;
 
-use crate::common::{
-    approx_tokens, bad_request_err, classify, internal_err, map_code,
-};
+use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
 use crate::trait_def::{Headers, ProtocolCodec};
 
 use super::wire::OpenAiRequest;
@@ -28,8 +26,8 @@ impl ProtocolCodec for OpenAi {
 
     #[inline]
     fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
-        let req: OpenAiRequest<'a> =
-            serde_json::from_slice(body).map_err(|e| bad_request_err(format!("openai parse: {e}")))?;
+        let req: OpenAiRequest<'a> = serde_json::from_slice(body)
+            .map_err(|e| bad_request_err(format!("openai parse: {e}")))?;
         Ok(req.into())
     }
 
@@ -40,7 +38,8 @@ impl ProtocolCodec for OpenAi {
         buf: &mut BytesMut,
     ) -> Result<(), ErrorIR<'static>> {
         let req = OpenAiRequest::try_from(ir)?;
-        let bytes = serde_json::to_vec(&req).map_err(|_| internal_err("openai serialize failed"))?;
+        let bytes =
+            serde_json::to_vec(&req).map_err(|_| internal_err("openai serialize failed"))?;
         buf.extend_from_slice(&bytes);
         Ok(())
     }
@@ -138,18 +137,17 @@ impl ProtocolCodec for OpenAi {
         // ChatCompletion body. `choices` is intentionally not parsed — v2
         // cross-protocol non-stream response render (B1-4) will need it but
         // currently short-circuits 503 until then.
-        let parsed: OpenAiResponseBody =
-            serde_json::from_slice(body).map_err(|e| ErrorIR {
-                category: ErrorCategory::UpstreamError,
-                status: 502,
-                upstream_status: None,
-                code: Cow::Borrowed(codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
-                message: Cow::Owned(format!("openai parse_response: {e}")),
-                retryable: false,
-                upstream_raw: None,
-                request_id: "",
-                retry_after_secs: None,
-            })?;
+        let parsed: OpenAiResponseBody = serde_json::from_slice(body).map_err(|e| ErrorIR {
+            category: ErrorCategory::UpstreamError,
+            status: 502,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
+            message: Cow::Owned(format!("openai parse_response: {e}")),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        })?;
 
         let usage = parsed.usage.map(|u| UsageIR {
             input_tokens: u.prompt_tokens,

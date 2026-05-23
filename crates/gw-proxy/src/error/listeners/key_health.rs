@@ -17,9 +17,8 @@ impl ErrorListener for KeyHealthListener {
         if oc.cooldown.is_none() {
             return;
         }
-        let wired = ctx.vendor_key_id.is_some()
-            && ctx.api_format.is_some()
-            && ctx.key_health.is_some();
+        let wired =
+            ctx.vendor_key_id.is_some() && ctx.api_format.is_some() && ctx.key_health.is_some();
         let kind = if wired { "wired" } else { "unwired" };
         metrics::counter!(
             "gw_classifier_listener_observed_total",

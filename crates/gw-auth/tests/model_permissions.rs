@@ -9,7 +9,10 @@ fn allow_then_deny_specific() {
         ModelPermission::new("^claude-3-haiku.*$", PermissionEffect::Deny).unwrap(),
     ];
     assert!(check_model_against_permissions("claude-3-opus", &p));
-    assert!(!check_model_against_permissions("claude-3-haiku-20240307", &p));
+    assert!(!check_model_against_permissions(
+        "claude-3-haiku-20240307",
+        &p
+    ));
 }
 
 #[test]

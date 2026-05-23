@@ -22,7 +22,12 @@ fn catalog_includes_required_families() {
         "gw_resilience_redis_error_total",
         "gw_resilience_freeze_fallback_total",
         "gw_resilience_cooldown_fallback_total",
-        "gw_detailed_log_oversized_total",
+        "gw_detailed_log_channel_depth",
+        "gw_detailed_log_compress_seconds",
+        "gw_detailed_log_drop_total",
+        "gw_detailed_log_emit_total",
+        "gw_detailed_log_payload_bytes",
+        "gw_detailed_log_pre_compress_bytes",
     ] {
         assert!(names.contains(&required), "missing metric: {required}");
     }
@@ -30,9 +35,18 @@ fn catalog_includes_required_families() {
 
 #[test]
 fn catalog_kind_distribution_sane() {
-    let counters = METRICS.iter().filter(|m| matches!(m.kind, MetricKind::Counter)).count();
-    let histograms = METRICS.iter().filter(|m| matches!(m.kind, MetricKind::Histogram)).count();
-    let gauges = METRICS.iter().filter(|m| matches!(m.kind, MetricKind::Gauge)).count();
+    let counters = METRICS
+        .iter()
+        .filter(|m| matches!(m.kind, MetricKind::Counter))
+        .count();
+    let histograms = METRICS
+        .iter()
+        .filter(|m| matches!(m.kind, MetricKind::Histogram))
+        .count();
+    let gauges = METRICS
+        .iter()
+        .filter(|m| matches!(m.kind, MetricKind::Gauge))
+        .count();
     assert!(counters >= 10);
     assert!(histograms >= 2);
     assert!(gauges >= 2);

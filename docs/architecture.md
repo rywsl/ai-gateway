@@ -80,7 +80,7 @@ Execution:
 | `ResolveBackend` | gw-capability | Model / key capability lookup | (injected at boot) |
 | `JwtBlacklist` | gw-auth | Token revocation check | `RedisJwtBlacklist` (with `FailMode`) |
 | `HeaderView` | gw-adapter | Borrow-friendly header access | (per-adapter) |
-| `ContentFilter` / `TokenEstimator` / `Redactor` | gw-core | Pluggable scrubbing / sizing | `Noop*` |
+| `ContentFilter` / `TokenEstimator` | gw-core | Pluggable scrubbing / sizing | `Noop*` |
 
 ## 4. Configuration
 
@@ -146,7 +146,7 @@ Migrations live at `crates/gw-store/migrations/`. **Not auto-applied** — run `
 | `events:entity` | Cache-invalidation stream | Control plane | `StreamConsumer` → `EntityStore::invalidate` |
 | `events:counter` | Counter event echo (Phase 5) | (deferred) | `StreamConsumer` (observability only in v1) |
 | `usage:records` | Billing records | `Ledger` flusher (XADD batched) | Go billing service |
-| `usage:detailed` | Verbose request/response log | `RedisStreamSink` (XADD MAXLEN) | Optional Go consumer |
+| `usage:detailed` | Wire-fidelity per-surface archive. 5 entries per request (downstream/upstream × request/response + summary). `encoding` ∈ {raw,lz4,zstd}+json picked by size. Headers + bodies stored raw (no redaction). XADD MAXLEN bounds Redis memory; Go drainer is mandatory consumer for 180d retention. Drop-on-outage (no DLQ). See [`detailed-log-complete-design`](superpowers/specs/2026-05-23-detailed-log-complete-design.md). | `DetailedFlusher` (async pool, per-surface XADD) | Go drainer (mandatory) |
 | (in-process) | Sticky assignment | `Sticky` strategy | `Sticky` strategy. G12 (T2-C) moved bindings to an in-process `moka::sync::Cache` (`time_to_live = 30 min`, `max_capacity = 100_000`, LRU eviction on overflow); no Redis namespace is used. |
 | `jwt:blacklist:*` | JWT revocation (T1-C) | Control plane | `RedisJwtBlacklist` (with `FailMode::ClosedOnError` / `OpenOnError`) |
 | `lock:*`, `key_health:*`, `circuit:*`, `dedup:*` | Reserved for Phase 5+ | — | — |
@@ -218,6 +218,8 @@ Active lints (all green at HEAD):
 | `no_dead_tunnel_use_alias` | `pub use gw_tunnel_client` in gw-gateway and `TunnelStack` use in gw-proxy must coexist (both-zero or both-nonzero). |
 | `tunnel_require_means_hard_fail` | Every `require_tunnel` use must be paired with `GW_TUNNEL_NO_NODE` within 8 lines below (no silent Direct fallback). |
 | `no_double_rustls` | Cargo.lock holds exactly one `rustls` version (T4 removed the 0.21 fork). |
+| `no_detailed_redaction` | scripts/check-invariants.sh | redact_*/REDACT_HEADER_* names forbidden in gw-ledger/gw-proxy |
+| `no_detailed_truncation` | scripts/check-invariants.sh | PREVIEW_MAX_BYTES / MAX_DETAILED_LOG_BYTES forbidden in gw-ledger/gw-proxy |
 
 Pending lints (uncomment when target phase lands):
 

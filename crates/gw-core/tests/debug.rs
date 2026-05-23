@@ -28,7 +28,7 @@ fn phase_overflow_truncates_silently() {
 #[test]
 fn phase_end_without_start_is_noop() {
     let mut tb = gw_core::debug::TraceBuffer::new();
-    tb.phase_end(123);  // should not panic or corrupt phases[0]
+    tb.phase_end(123); // should not panic or corrupt phases[0]
     assert_eq!(tb.phase_count, 0);
     let p0 = &tb.phases[0];
     assert_eq!(p0.name, "");

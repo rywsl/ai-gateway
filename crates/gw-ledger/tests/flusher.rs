@@ -62,9 +62,9 @@ async fn batch_flush_writes_usage_stream_no_balance_decr() {
     assert_eq!(len, 2);
     // (2) Critical invariant: Rust must not have touched balance_micro.
     use fred::interfaces::KeysInterface;
-    let bal: Option<i64> = client
-        .get("counter:user:u1:balance_micro")
-        .await
-        .unwrap();
-    assert!(bal.is_none(), "Rust must not write counter:user:*:balance_micro");
+    let bal: Option<i64> = client.get("counter:user:u1:balance_micro").await.unwrap();
+    assert!(
+        bal.is_none(),
+        "Rust must not write counter:user:*:balance_micro"
+    );
 }

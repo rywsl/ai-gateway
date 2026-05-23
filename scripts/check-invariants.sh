@@ -382,6 +382,34 @@ fi
 #   grep -rq "e2e_deploy_matrix_$t" crates/ || bad "missing deploy matrix test: $t"
 # done
 
+# ---------------------------------------------------------------------------
+# no_detailed_redaction — detailed archive must not reintroduce redaction.
+# Spec: docs/superpowers/specs/2026-05-23-detailed-log-complete-design.md §10.2
+# ---------------------------------------------------------------------------
+echo "[no_detailed_redaction] redaction helpers must not appear in gw-ledger/gw-proxy"
+hits=$(grep -RnE 'redact_body|redact_headers|redact_message_content|redacted_preview|REDACT_HEADER_DENYLIST|REDACT_HEADER_ALLOWLIST' \
+    crates/gw-ledger/src crates/gw-proxy/src 2>/dev/null | grep -v '^Binary file' || true)
+if [ -n "$hits" ]; then
+  echo "$hits"
+  bad "detailed archive redaction helpers reintroduced"
+else
+  ok "no detailed-archive redaction helpers in gw-ledger/gw-proxy"
+fi
+
+# ---------------------------------------------------------------------------
+# no_detailed_truncation — body preview / hard cap constants must not return.
+# Spec: docs/superpowers/specs/2026-05-23-detailed-log-complete-design.md §10.2
+# ---------------------------------------------------------------------------
+echo "[no_detailed_truncation] truncation constants must not appear in gw-ledger/gw-proxy"
+hits=$(grep -RnE 'PREVIEW_MAX_BYTES|MAX_DETAILED_LOG_BYTES' \
+    crates/gw-ledger/src crates/gw-proxy/src 2>/dev/null | grep -v '^Binary file' || true)
+if [ -n "$hits" ]; then
+  echo "$hits"
+  bad "detailed archive truncation constants reintroduced"
+else
+  ok "no detailed-archive truncation constants in gw-ledger/gw-proxy"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "INVARIANT CHECK FAILED"
   exit 1

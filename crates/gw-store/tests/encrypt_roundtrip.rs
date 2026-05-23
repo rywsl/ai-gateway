@@ -1,6 +1,6 @@
 //! AES-256-GCM round-trip tests (pure unit, no containers).
 
-use gw_store::encrypt::{KekCache, decrypt, encrypt_for_test_only};
+use gw_store::encrypt::{decrypt, encrypt_for_test_only, KekCache};
 use secrecy::ExposeSecret;
 use std::collections::HashMap;
 

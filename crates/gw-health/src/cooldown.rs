@@ -140,7 +140,11 @@ mod tests {
 
     #[test]
     fn circuit_state_roundtrips() {
-        for c in [CircuitState::Closed, CircuitState::Open, CircuitState::HalfOpen] {
+        for c in [
+            CircuitState::Closed,
+            CircuitState::Open,
+            CircuitState::HalfOpen,
+        ] {
             assert_eq!(CircuitState::from_u8(c.as_u8()), c);
         }
     }

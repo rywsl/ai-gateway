@@ -34,13 +34,19 @@ pub fn resolve_tunnel(ctx: &TunnelResolveCtx<'_>, nodes: &[ProxyNodeView]) -> Tu
         .filter(|n| n.allowed_provider_ids.iter().any(|p| p == ctx.provider_id))
         .filter(|n| {
             n.allowed_vendor_key_ids.is_empty()
-                || n.allowed_vendor_key_ids.iter().any(|k| k == ctx.vendor_key_id)
+                || n.allowed_vendor_key_ids
+                    .iter()
+                    .any(|k| k == ctx.vendor_key_id)
         })
         .collect();
 
     if !ctx.preference.preferred_node_ids.is_empty() {
-        let allow: std::collections::HashSet<&str> =
-            ctx.preference.preferred_node_ids.iter().map(String::as_str).collect();
+        let allow: std::collections::HashSet<&str> = ctx
+            .preference
+            .preferred_node_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
         filtered.retain(|n| allow.contains(n.id.as_str()));
     }
 

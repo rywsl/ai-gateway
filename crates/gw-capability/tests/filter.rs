@@ -19,7 +19,10 @@ fn key_disabled_by_redos_returns_unavailable() {
         vendor_key_id: "vk1",
         detected_capabilities: vec![Capability::Vision],
     };
-    assert_eq!(f.evaluate(&req, &candidate), CapabilityFilterResult::ApiKeyDisabled);
+    assert_eq!(
+        f.evaluate(&req, &candidate),
+        CapabilityFilterResult::ApiKeyDisabled
+    );
 }
 
 #[test]
@@ -47,7 +50,10 @@ fn exclusive_mode_rejects_superset() {
         vendor_key_id: "vk1",
         detected_capabilities: vec![Capability::Vision, Capability::Thinking],
     };
-    assert_eq!(f.evaluate(&req, &candidate), CapabilityFilterResult::ExtraCaps);
+    assert_eq!(
+        f.evaluate(&req, &candidate),
+        CapabilityFilterResult::ExtraCaps
+    );
 }
 
 #[test]
@@ -88,5 +94,8 @@ fn exclusive_mode_with_empty_required_rejects_anything_present() {
         vendor_key_id: "vk1",
         detected_capabilities: vec![Capability::Vision],
     };
-    assert_eq!(f.evaluate(&req, &candidate), CapabilityFilterResult::ExtraCaps);
+    assert_eq!(
+        f.evaluate(&req, &candidate),
+        CapabilityFilterResult::ExtraCaps
+    );
 }

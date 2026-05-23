@@ -147,12 +147,13 @@ impl TunnelStack {
         } else {
             host.to_owned()
         };
-        let target_url: url::Url = format!("https://{host_for_url}:{port}")
-            .parse()
-            .map_err(|_| TunnelPeerError::TargetDenied {
-                host: host.to_owned(),
-                port,
-            })?;
+        let target_url: url::Url =
+            format!("https://{host_for_url}:{port}")
+                .parse()
+                .map_err(|_| TunnelPeerError::TargetDenied {
+                    host: host.to_owned(),
+                    port,
+                })?;
         if gw_tunnel_client::target_filter::assert_target_allowed(&target_url).is_err() {
             metrics::counter!(
                 "gw_tunnel_open_total",
@@ -245,10 +246,7 @@ mod tests {
 
     #[test]
     fn resolve_honours_preferred_node_ids() {
-        let stack = empty_stack(vec![
-            view("a", 10, &["openai"]),
-            view("b", 5, &["openai"]),
-        ]);
+        let stack = empty_stack(vec![view("a", 10, &["openai"]), view("b", 5, &["openai"])]);
         let pref = TunnelPreference {
             preferred_node_ids: vec!["a".to_string()].into_iter().collect(),
             ..Default::default()

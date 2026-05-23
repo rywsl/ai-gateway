@@ -33,7 +33,9 @@ fn fanout_with_real_ctx_does_not_panic() {
             ttl_secs: 3600,
             reset_consecutive: false,
         }),
-        oauth_signal: Some(OAuthSignal { kind: OAuthSignalKind::AccountBlocked }),
+        oauth_signal: Some(OAuthSignal {
+            kind: OAuthSignalKind::AccountBlocked,
+        }),
         rate_limit_hint: Some(RateLimitHint {
             kind: RateLimitKind::Unknown,
             retry_after_secs: None,
