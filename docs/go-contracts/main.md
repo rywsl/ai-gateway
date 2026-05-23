@@ -38,6 +38,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
 | [parts/01-go-as-producer.md](parts/01-go-as-producer.md) | **Go → Rust** | Go 主动写、Rust 消费。涵盖：PgSQL 实体写、`events:entity`、`events:counter`、`counter:*` 余额、`entity:estimate_pricing`、`jwt:blacklist:*`、KEK 轮换 producer 责任 |
 | [parts/02-go-as-consumer.md](parts/02-go-as-consumer.md) | **Rust → Go** | Rust 主动写、Go 消费。涵盖：`usage:records`（吸收原 C-ε §2）、`usage:records:dlq`、`usage:detailed`、Rust 反向 `events:entity`（`vendor_key.rate_limited` / `ipblock` 自动封禁）、`counter:*:frozen_micro` / `daily_tokens` 读路径 |
 | [parts/03-shared-schema.md](parts/03-shared-schema.md) | **共享 schema** | 双方都接触的 PgSQL 表清单、entity payload JSONB shape、`version BIGINT` 协议、AES-256-GCM 加密 payload、KEK 轮换 |
+| [parts/04-proxy-nodes.md](parts/04-proxy-nodes.md) | **Proxy Nodes** | Rust tunnel client ↔ Go Hub 契约;节点 entity / 心跳分工 / status 状态机 |
 
 ## 3. 通用约定（所有 part 共享）
 
