@@ -1801,6 +1801,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "bytes",
  "fred",
  "gw-core",
  "gw-store",
