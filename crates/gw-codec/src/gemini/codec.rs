@@ -1,98 +1,24 @@
 //! Gemini `ProtocolCodec` impl. Streaming uses the
-//! `streamGenerateContent?alt=sse` SSE format: each chunk is `data: {json}\n\n`
-//! and the stream ends with the final chunk's `finishReason`.
+//! `streamGenerateContent?alt=sse` SSE format: each chunk is a
+//! `data: <json>\r\n\r\n` frame carrying a partial `GeminiResponse` (with
+//! `candidates[]`, optional `usageMetadata`, optional `finishReason`). T4-D
+//! makes parsing stateful so function-call deltas can be threaded into the
+//! IR's `ToolCallStart` / `ToolCallDelta` events; pure text frames still
+//! decompose 1:1.
 
-use bytes::BytesMut;
-use gw_core::error::ErrorIR;
-use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR};
-use smallvec::{smallvec, SmallVec};
+use bytes::{BufMut, BytesMut};
+use gw_core::error::{codes, ErrorCategory, ErrorIR};
+use gw_core::ir::{MessageIR, RequestIR, ResponseIR, StreamEventIR, UsageIR};
 use std::borrow::Cow;
 
 use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
 use crate::trait_def::{Headers, ProtocolCodec};
 
-use super::wire::GeminiRequest;
+use super::state::{GeminiFunctionCallBuilder, GeminiStreamState};
+use super::via::{map_finish_reason_in, map_finish_reason_out};
+use super::wire::{GeminiPart, GeminiRequest, GeminiResponse};
 
 pub struct Gemini;
-
-impl Gemini {
-    /// v1 stateless body for parsing one SSE chunk. Preserved verbatim
-    /// across T2 so streaming continues to function in the intermediate
-    /// state; T4-D replaces the `parse_stream_chunk` trait method with
-    /// a stateful implementation and removes this helper.
-    fn legacy_parse_stream_chunk_v1<'a>(
-        &self,
-        chunk: &'a [u8],
-    ) -> Result<SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
-        let s = std::str::from_utf8(chunk).map_err(|_| internal_err("invalid utf8 in chunk"))?;
-        for line in s.split('\n') {
-            let line = line.trim_end_matches('\r');
-            let Some(payload) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let payload = payload.trim();
-            if payload.is_empty() {
-                continue;
-            }
-            let val: serde_json::Value = match serde_json::from_str(payload) {
-                Ok(v) => v,
-                Err(_) => {
-                    // CONTRACT: malformed SSE payloads do not short-circuit
-                    // the stream — log and continue scanning the chunk.
-                    tracing::warn!("malformed SSE data on gemini");
-                    continue;
-                }
-            };
-            let candidate = val.get("candidates").and_then(|c| c.get(0));
-            let txt = candidate
-                .and_then(|c| c.get("content"))
-                .and_then(|c| c.get("parts"))
-                .and_then(|p| p.get(0))
-                .and_then(|p| p.get("text"))
-                .and_then(|t| t.as_str())
-                .map(|s| Cow::Owned(s.to_owned()));
-            let finish = candidate
-                .and_then(|c| c.get("finishReason"))
-                .and_then(|r| r.as_str())
-                .map(|reason| match reason {
-                    "STOP" => FinishReasonIR::Stop,
-                    "MAX_TOKENS" => FinishReasonIR::Length,
-                    "SAFETY" => FinishReasonIR::ContentFilter,
-                    other => FinishReasonIR::Other(std::borrow::Cow::Owned(other.to_owned())),
-                });
-
-            // ADR-G9-1: a single Gemini SSE frame may carry BOTH `text` and
-            // `finishReason` (the "combined final event"). Decompose into
-            // `[Delta, End]` so downstream consumers (cross-protocol render,
-            // usage accounting) see each IR event distinctly. The common
-            // single-event cases still fit in the inline `[_; 1]` storage.
-            match (txt, finish) {
-                (Some(t), Some(fr)) => {
-                    let mut out: SmallVec<[StreamEventIR<'a>; 1]> = SmallVec::new();
-                    out.push(StreamEventIR::Delta {
-                        text: Some(t),
-                        tool_call: None,
-                        thinking: None,
-                    });
-                    out.push(StreamEventIR::End { finish_reason: fr });
-                    return Ok(out);
-                }
-                (Some(t), None) => {
-                    return Ok(smallvec![StreamEventIR::Delta {
-                        text: Some(t),
-                        tool_call: None,
-                        thinking: None,
-                    }]);
-                }
-                (None, Some(fr)) => {
-                    return Ok(smallvec![StreamEventIR::End { finish_reason: fr }]);
-                }
-                (None, None) => continue,
-            }
-        }
-        Ok(SmallVec::new())
-    }
-}
 
 impl ProtocolCodec for Gemini {
     #[inline]
@@ -151,18 +77,37 @@ impl ProtocolCodec for Gemini {
     }
 
     fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState> {
-        Box::new(crate::trait_def::EmptyStreamState)
+        Box::new(GeminiStreamState::default())
     }
 
     fn parse_stream_chunk<'a>(
         &self,
-        _state: &mut dyn gw_core::ir::StreamState,
+        state: &mut dyn gw_core::ir::StreamState,
         chunk: &'a [u8],
     ) -> Result<Vec<StreamEventIR<'a>>, ErrorIR<'static>> {
-        // T2: forward to the v1 stateless body. T4-D replaces this with a
-        // real stateful implementation backed by the codec-specific
-        // `StreamState`.
-        Ok(self.legacy_parse_stream_chunk_v1(chunk)?.into_vec())
+        let st = state
+            .as_any_mut()
+            .downcast_mut::<GeminiStreamState>()
+            .ok_or_else(stream_state_mismatch)?;
+
+        let mut events: Vec<StreamEventIR<'a>> = Vec::new();
+
+        // The trait contract pre-frames chunks; Gemini's SSE format is
+        // `data: <json>\r?\n\r?\n` repeated, so walk each line and feed
+        // each `data:` payload to the JSON parser independently.
+        for line in chunk.split(|b| *b == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let Some(payload) = line.strip_prefix(b"data:") else {
+                continue;
+            };
+            let payload = trim_ascii_start(payload);
+            if payload.is_empty() {
+                continue;
+            }
+            dispatch_payload(st, payload, &mut events);
+        }
+
+        Ok(events)
     }
 
     fn render_stream_chunk(
@@ -186,14 +131,63 @@ impl ProtocolCodec for Gemini {
                 buf.extend_from_slice(&bytes);
                 buf.extend_from_slice(b"\n\n");
             }
+            StreamEventIR::ToolCallStart { name, .. } => {
+                // Gemini's stream emits the functionCall name + (typically
+                // complete) args in a single frame; the IR splits this into
+                // ToolCallStart (carrying name) and ToolCallDelta (carrying
+                // the args JSON). On render we emit a single Gemini frame
+                // with the name and an empty args object; the ToolCallDelta
+                // that follows produces a second frame with the full args.
+                let payload = serde_json::json!({
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{ "functionCall": { "name": name, "args": {} } }],
+                        },
+                    }]
+                });
+                buf.extend_from_slice(b"data: ");
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|_| internal_err("serialize tool_call start"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::ToolCallDelta {
+                arguments_chunk, ..
+            } => {
+                let args: serde_json::Value = serde_json::from_str(arguments_chunk.as_ref())
+                    .unwrap_or(serde_json::Value::Null);
+                let payload = serde_json::json!({
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{ "functionCall": { "name": "", "args": args } }],
+                        },
+                    }]
+                });
+                buf.extend_from_slice(b"data: ");
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|_| internal_err("serialize tool_call delta"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::Usage(u) => {
+                let payload = serde_json::json!({
+                    "candidates": [],
+                    "usageMetadata": {
+                        "promptTokenCount": u.input_tokens,
+                        "candidatesTokenCount": u.output_tokens,
+                        "cachedContentTokenCount": u.cached_tokens,
+                    }
+                });
+                buf.extend_from_slice(b"data: ");
+                let bytes =
+                    serde_json::to_vec(&payload).map_err(|_| internal_err("serialize usage"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
+            }
             StreamEventIR::End { finish_reason } => {
-                let reason = match finish_reason {
-                    FinishReasonIR::Stop => "STOP",
-                    FinishReasonIR::Length => "MAX_TOKENS",
-                    FinishReasonIR::ContentFilter => "SAFETY",
-                    FinishReasonIR::ToolCalls => "STOP",
-                    FinishReasonIR::Other(_) => "OTHER",
-                };
+                let reason = map_finish_reason_out(finish_reason);
                 let payload = serde_json::json!({
                     "candidates": [{ "finishReason": reason }]
                 });
@@ -213,104 +207,54 @@ impl ProtocolCodec for Gemini {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::Start { .. } => {
-                tracing::warn!("gemini: StreamEventIR::Start dropped (no wire equivalent in v1)");
-            }
-            StreamEventIR::Usage(_) => {
-                tracing::warn!("gemini: StreamEventIR::Usage dropped (no wire equivalent in v1)");
+                tracing::warn!(
+                    "gemini: StreamEventIR::Start dropped (no wire equivalent in this codec)"
+                );
             }
             StreamEventIR::ThinkingDelta { .. } => {
-                tracing::warn!(
-                    "gemini: StreamEventIR::ThinkingDelta dropped (no wire equivalent in v1)"
-                );
-            }
-            StreamEventIR::ToolCallStart { .. } => {
-                tracing::warn!(
-                    "gemini: StreamEventIR::ToolCallStart dropped (no wire equivalent in v1)"
-                );
-            }
-            StreamEventIR::ToolCallDelta { .. } => {
-                tracing::warn!(
-                    "gemini: StreamEventIR::ToolCallDelta dropped (no wire equivalent in v1)"
-                );
+                tracing::warn!("gemini: StreamEventIR::ThinkingDelta dropped (no wire equivalent)");
             }
         }
         Ok(())
     }
 
     fn parse_response<'a>(&self, body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
-        // Local serde shape — Gemini's `GenerateContentResponse`. We only
-        // pull out the fields the gateway needs for billing (`usageMetadata`)
-        // and observability (`modelVersion`). Candidate parts are intentionally
-        // ignored: v1 does not surface the assistant text to downstream
-        // re-rendering through this path (streaming covers that case).
-        #[derive(serde::Deserialize)]
-        struct GeminiUsageMetadata {
-            #[serde(default, rename = "promptTokenCount")]
-            prompt_token_count: u32,
-            #[serde(default, rename = "candidatesTokenCount")]
-            candidates_token_count: u32,
-            #[serde(default, rename = "cachedContentTokenCount")]
-            cached_content_token_count: Option<u32>,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct GeminiResponseBody {
-            // ADR-G5-1: long-running operations (e.g. `:predictLongRunning`)
-            // emit a top-level `name: "operations/<uuid>"`; non-LRO chat
-            // responses have no `name` field and this stays empty. The
-            // response filter promotes ids that start with `operations/` into
-            // `ctx.operation_id` for downstream billing/correlation.
-            #[serde(default)]
-            name: String,
-            #[serde(default, rename = "modelVersion")]
-            model_version: String,
-            #[serde(default, rename = "usageMetadata")]
-            usage_metadata: Option<GeminiUsageMetadata>,
-        }
-
-        let parsed: GeminiResponseBody = serde_json::from_slice(body).map_err(|e| ErrorIR {
+        let wire: GeminiResponse<'a> = serde_json::from_slice(body).map_err(|e| ErrorIR {
             // ADR-B1-1: protocol decode failure on a 2xx upstream body is an
             // upstream-side defect from the gateway's perspective — surface as
             // 502 with the dedicated GW_UPSTREAM_PROTOCOL_DECODE_ERROR code.
-            category: gw_core::error::ErrorCategory::UpstreamError,
+            category: ErrorCategory::UpstreamError,
             status: 502,
             upstream_status: None,
-            code: Cow::Borrowed(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
+            code: Cow::Borrowed(codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
             message: Cow::Owned(format!("gemini parse_response: {e}")),
             retryable: false,
             upstream_raw: None,
             request_id: "",
             retry_after_secs: None,
         })?;
-
-        let usage = parsed.usage_metadata.map(|u| gw_core::ir::UsageIR {
-            input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count,
-            cached_tokens: u.cached_content_token_count,
-            reasoning_tokens: None,
-        });
-
-        Ok(ResponseIR {
-            // Gemini's GenerateContentResponse carries no `id` field; only
-            // long-running operation responses set a top-level `name`.
-            id: Cow::Owned(parsed.name),
-            model: Cow::Owned(parsed.model_version),
-            messages: Vec::new(),
-            finish_reason: None,
-            usage,
-            metadata: Default::default(),
-            thinking: None,
-            reasoning: None,
-            tool_use_blocks: None,
-        })
+        Ok(wire.into())
     }
 
     fn render_response(
         &self,
-        _ir: &ResponseIR<'_>,
-        _buf: &mut BytesMut,
+        ir: &ResponseIR<'_>,
+        buf: &mut BytesMut,
     ) -> Result<(), ErrorIR<'static>> {
-        unimplemented!("v1: gemini non-stream response not implemented")
+        let wire: GeminiResponse<'_> = ir.try_into()?;
+        let mut writer = buf.writer();
+        serde_json::to_writer(&mut writer, &wire).map_err(|e| ErrorIR {
+            category: ErrorCategory::GatewayInternal,
+            status: 500,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_CODEC_RENDER_RESPONSE),
+            message: Cow::Owned(format!("gemini render: {e}")),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        })?;
+        Ok(())
     }
 
     fn parse_error<'a>(&self, status: u16, body: &'a [u8]) -> ErrorIR<'a> {
@@ -363,10 +307,147 @@ impl ProtocolCodec for Gemini {
     }
 }
 
+// ─── streaming dispatch ───────────────────────────────────────────────────
+
+fn dispatch_payload<'a>(
+    st: &mut GeminiStreamState,
+    payload: &'a [u8],
+    events: &mut Vec<StreamEventIR<'a>>,
+) {
+    let wire: GeminiResponse<'a> = match serde_json::from_slice(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            // CONTRACT: malformed payloads must not short-circuit the stream.
+            tracing::warn!(error = %e, "gemini stream: malformed data payload");
+            return;
+        }
+    };
+    st.seen_response = true;
+
+    for candidate in wire.candidates {
+        if let Some(content) = candidate.content {
+            for part in content.parts {
+                match part {
+                    GeminiPart::Text { text } => {
+                        if !text.is_empty() {
+                            events.push(StreamEventIR::Delta {
+                                text: Some(text),
+                                tool_call: None,
+                                thinking: None,
+                            });
+                        }
+                    }
+                    GeminiPart::FunctionCall { function_call } => {
+                        // Match by function name across chunks — Gemini
+                        // doesn't ship an id. If we've already seen this
+                        // call, append the args delta to the existing
+                        // builder; otherwise start a new one.
+                        let name_str = function_call.name.as_ref();
+                        let existing_idx = st
+                            .pending_function_calls
+                            .iter()
+                            .position(|b| b.name == name_str);
+
+                        let builder_idx = match existing_idx {
+                            Some(i) => i,
+                            None => {
+                                let next = st.pending_function_calls.len() as u32;
+                                st.pending_function_calls.push(GeminiFunctionCallBuilder {
+                                    name: name_str.to_owned(),
+                                    args_json: String::new(),
+                                    emitted_start: false,
+                                    ir_index: next,
+                                });
+                                st.pending_function_calls.len() - 1
+                            }
+                        };
+
+                        let builder = &mut st.pending_function_calls[builder_idx];
+                        if !builder.emitted_start {
+                            builder.emitted_start = true;
+                            events.push(StreamEventIR::ToolCallStart {
+                                index: builder.ir_index,
+                                id: Cow::Borrowed(""),
+                                name: Cow::Owned(builder.name.clone()),
+                            });
+                        }
+                        // Serialize the args fragment to a JSON string and
+                        // emit as a ToolCallDelta. Gemini usually delivers
+                        // args in one shot, but the IR contract is
+                        // fragment-friendly so we re-emit each chunk's
+                        // payload as it arrives.
+                        let frag = serde_json::to_string(&function_call.args)
+                            .unwrap_or_else(|_| "null".to_owned());
+                        if !frag.is_empty() && frag != "null" && frag != "{}" {
+                            builder.args_json.push_str(&frag);
+                            events.push(StreamEventIR::ToolCallDelta {
+                                index: builder.ir_index,
+                                arguments_chunk: Cow::Owned(frag),
+                            });
+                        }
+                    }
+                    GeminiPart::FunctionResponse { .. }
+                    | GeminiPart::InlineData { .. }
+                    | GeminiPart::FileData { .. } => {
+                        // Not surfaced through streaming today.
+                    }
+                }
+            }
+        }
+        if let Some(reason) = candidate.finish_reason.as_deref() {
+            events.push(StreamEventIR::End {
+                finish_reason: map_finish_reason_in(reason),
+            });
+        }
+    }
+
+    if let Some(u) = wire.usage_metadata {
+        events.push(StreamEventIR::Usage(UsageIR {
+            input_tokens: u.prompt_token_count,
+            output_tokens: u.candidates_token_count,
+            cached_tokens: u.cached_content_token_count,
+            reasoning_tokens: None,
+        }));
+    }
+}
+
+#[inline]
+fn stream_state_mismatch() -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::GatewayInternal,
+        status: 500,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_CODEC_PARSE_STREAM_CHUNK),
+        message: Cow::Borrowed("expected GeminiStreamState"),
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    }
+}
+
+#[inline]
+fn trim_ascii_start(mut s: &[u8]) -> &[u8] {
+    while let Some((&first, rest)) = s.split_first() {
+        if first.is_ascii_whitespace() {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trait_def::ProtocolCodec;
+    use bytes::BytesMut;
+    use gw_core::ir::{
+        ContentIR, FinishReasonIR, MessageIR, ResponseIR, StreamEventIR, StreamState, ToolCallIR,
+        UsageIR,
+    };
+    use serde_json::value::RawValue;
+    use std::borrow::Cow;
 
     #[test]
     fn parse_response_extracts_usage_metadata() {
@@ -416,8 +497,7 @@ mod tests {
     fn parse_response_extracts_operation_id_when_present() {
         let body = br#"{
             "name":"operations/foo-bar-12345",
-            "metadata":{},
-            "done":false
+            "candidates":[]
         }"#;
         let codec = Gemini;
         let ir = codec.parse_response(body).unwrap();
@@ -431,5 +511,98 @@ mod tests {
         let codec = Gemini;
         let ir = codec.parse_response(body).unwrap();
         assert_eq!(ir.id.as_ref(), "");
+    }
+
+    #[test]
+    fn render_response_with_function_call_round_trip() {
+        let args = RawValue::from_string(r#"{"city":"SF"}"#.to_owned()).expect("valid JSON");
+        let ir = ResponseIR {
+            id: Cow::Borrowed(""),
+            model: Cow::Borrowed("gemini-1.5-pro"),
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Text(Cow::Borrowed("")),
+                tool_calls: Some(vec![ToolCallIR {
+                    id: Cow::Borrowed(""),
+                    name: Cow::Borrowed("get_weather"),
+                    arguments_json: Cow::Owned(args),
+                }]),
+            }],
+            finish_reason: Some(FinishReasonIR::ToolCalls),
+            usage: Some(UsageIR {
+                input_tokens: 7,
+                output_tokens: 2,
+                cached_tokens: None,
+                reasoning_tokens: None,
+            }),
+            ..ResponseIR::default()
+        };
+
+        let mut buf = BytesMut::new();
+        Gemini.render_response(&ir, &mut buf).unwrap();
+        let parsed: ResponseIR = Gemini.parse_response(&buf).unwrap();
+
+        // finish_reason mapping: ToolCalls renders as "STOP" → reads back as Stop
+        assert!(matches!(parsed.finish_reason, Some(FinishReasonIR::Stop)));
+
+        // Assistant message preserves the tool_call entry.
+        let tool_calls = match &parsed.messages[0] {
+            MessageIR::Assistant { tool_calls, .. } => {
+                tool_calls.as_ref().expect("tool_calls present")
+            }
+            _ => panic!("expected Assistant"),
+        };
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name.as_ref(), "get_weather");
+        assert!(tool_calls[0].arguments_json.get().contains("SF"));
+    }
+
+    #[test]
+    fn parse_response_safety_finish_reason_maps_to_content_filter() {
+        let body = br#"{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}],
+            "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":0}}"#;
+        let codec = Gemini;
+        let ir = codec.parse_response(body).unwrap();
+        assert!(matches!(
+            ir.finish_reason,
+            Some(FinishReasonIR::ContentFilter)
+        ));
+    }
+
+    #[test]
+    fn parse_stream_chunk_emits_function_call_events() {
+        let codec = Gemini;
+        let mut state: Box<dyn StreamState> = codec.new_stream_state();
+
+        let chunk = br#"data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"SF"}}}]},"finishReason":"STOP"}]}
+
+"#;
+        let events = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+
+        // Expected sequence: ToolCallStart, ToolCallDelta, End.
+        assert!(
+            events.len() >= 3,
+            "expected ToolCallStart + ToolCallDelta + End, got {events:?}"
+        );
+        match &events[0] {
+            StreamEventIR::ToolCallStart { name, .. } => {
+                assert_eq!(name.as_ref(), "get_weather");
+            }
+            other => panic!("expected ToolCallStart first, got {other:?}"),
+        }
+        match &events[1] {
+            StreamEventIR::ToolCallDelta {
+                arguments_chunk, ..
+            } => {
+                assert!(
+                    arguments_chunk.contains("SF"),
+                    "args chunk should carry payload: {arguments_chunk}"
+                );
+            }
+            other => panic!("expected ToolCallDelta second, got {other:?}"),
+        }
+        match events.last().unwrap() {
+            StreamEventIR::End { .. } => {}
+            other => panic!("expected End last, got {other:?}"),
+        }
     }
 }

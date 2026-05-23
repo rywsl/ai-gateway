@@ -43,8 +43,9 @@ fn gemini_combined_chunk_renders_all_events_to_openai_client() {
     let client = OpenAi;
     let upstream_chunk =
         br#"data: {"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}"#;
+    let mut state = upstream.new_stream_state();
     let events = upstream
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, upstream_chunk)
+        .parse_stream_chunk(state.as_mut(), upstream_chunk)
         .unwrap();
     assert!(
         events.len() >= 2,

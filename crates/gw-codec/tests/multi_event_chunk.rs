@@ -18,9 +18,8 @@ use gw_core::ir::StreamEventIR;
 fn gemini_combined_final_event_splits_into_two() {
     let codec = Gemini;
     let chunk = b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"bye\"}]},\"finishReason\":\"STOP\"}]}\n\n";
-    let evs = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, chunk)
-        .unwrap();
+    let mut state = codec.new_stream_state();
+    let evs = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
     assert_eq!(evs.len(), 2, "expected Delta + End from combined event");
     match &evs[0] {
         StreamEventIR::Delta { text, .. } => {
@@ -58,9 +57,8 @@ fn anthropic_single_delta_does_not_spill() {
 fn gemini_text_only_returns_single_delta() {
     let codec = Gemini;
     let chunk = b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hi\"}]}}]}\n\n";
-    let evs = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, chunk)
-        .unwrap();
+    let mut state = codec.new_stream_state();
+    let evs = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
     assert_eq!(evs.len(), 1);
     assert!(matches!(evs[0], StreamEventIR::Delta { .. }));
 }
@@ -69,9 +67,8 @@ fn gemini_text_only_returns_single_delta() {
 fn gemini_finish_only_returns_single_end() {
     let codec = Gemini;
     let chunk = b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n";
-    let evs = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, chunk)
-        .unwrap();
+    let mut state = codec.new_stream_state();
+    let evs = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
     assert_eq!(evs.len(), 1);
     assert!(matches!(evs[0], StreamEventIR::End { .. }));
 }
