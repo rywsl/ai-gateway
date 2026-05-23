@@ -22,7 +22,12 @@ fn catalog_includes_required_families() {
         "gw_resilience_redis_error_total",
         "gw_resilience_freeze_fallback_total",
         "gw_resilience_cooldown_fallback_total",
-        "gw_detailed_log_oversized_total",
+        "gw_detailed_log_channel_depth",
+        "gw_detailed_log_compress_seconds",
+        "gw_detailed_log_drop_total",
+        "gw_detailed_log_emit_total",
+        "gw_detailed_log_payload_bytes",
+        "gw_detailed_log_pre_compress_bytes",
     ] {
         assert!(names.contains(&required), "missing metric: {required}");
     }
