@@ -163,6 +163,32 @@ pub struct GeminiSafetySetting<'a> {
     pub threshold: Cow<'a, str>,
 }
 
+/// Anthropic 风格 tool_use 块（wire 端 content array 内的 ToolUse 块，与 OpenAI 扁平 tool_calls 一一对应）。
+#[derive(Clone, Debug)]
+pub struct ToolUseBlockIR<'a> {
+    pub id: Cow<'a, str>,
+    pub name: Cow<'a, str>,
+    pub input: Cow<'a, RawValue>,
+}
+
+/// 响应侧 thinking 块集合（Anthropic 与 OpenAI Responses 共用）。
+#[derive(Clone, Debug, Default)]
+pub struct ResponseThinkingIR<'a> {
+    pub blocks: Vec<ThinkingBlockIR<'a>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ThinkingBlockIR<'a> {
+    pub text: Cow<'a, str>,
+    pub signature: Option<Cow<'a, str>>,
+}
+
+/// OpenAI Responses 风格 reasoning 摘要块。
+#[derive(Clone, Debug, Default)]
+pub struct ReasoningBlockIR<'a> {
+    pub summary: Cow<'a, str>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ResponseIR<'a> {
     pub id: Cow<'a, str>,
@@ -171,6 +197,9 @@ pub struct ResponseIR<'a> {
     pub finish_reason: Option<FinishReasonIR>,
     pub usage: Option<UsageIR>,
     pub metadata: MetadataIR<'a>,
+    pub thinking: Option<ResponseThinkingIR<'a>>,
+    pub reasoning: Option<ReasoningBlockIR<'a>>,
+    pub tool_use_blocks: Option<Vec<ToolUseBlockIR<'a>>>,
 }
 
 impl Default for ResponseIR<'_> {
@@ -182,18 +211,23 @@ impl Default for ResponseIR<'_> {
             finish_reason: None,
             usage: None,
             metadata: MetadataIR::default(),
+            thinking: None,
+            reasoning: None,
+            tool_use_blocks: None,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReasonIR {
     Stop,
     Length,
     ToolCalls,
     ContentFilter,
-    Other,
+    /// 载荷为 vendor 原始字符串（如 "pause_turn", "RECITATION"）；
+    /// 跨协议 re-render 时由 cross_render::map_finish_reason 决定降级 + lossy log。
+    Other(Cow<'static, str>),
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -201,6 +235,8 @@ pub struct UsageIR {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cached_tokens: Option<u32>,
+    /// OpenAI Responses completion_tokens_details.reasoning_tokens; Anthropic 无对等，保持 None。
+    pub reasoning_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +248,22 @@ pub enum StreamEventIR<'a> {
         text: Option<Cow<'a, str>>,
         tool_call: Option<ToolCallIR<'a>>,
         thinking: Option<Cow<'a, str>>,
+    },
+    /// Anthropic / OpenAI Responses 流式 thinking 块的逐 chunk delta。
+    ThinkingDelta {
+        text: Cow<'a, str>,
+        signature_chunk: Option<Cow<'a, str>>,
+    },
+    /// 新 tool_call 开启（index 在响应中此 tool_call 的位置）。
+    ToolCallStart {
+        index: u32,
+        id: Cow<'a, str>,
+        name: Cow<'a, str>,
+    },
+    /// 已开启 tool_call 的 arguments JSON 片段追加（累积到完整 JSON 后由 codec 决定何时 emit）。
+    ToolCallDelta {
+        index: u32,
+        arguments_chunk: Cow<'a, str>,
     },
     Usage(UsageIR),
     End {
@@ -309,5 +361,61 @@ mod mutations_bits_tests {
             ("response_format", Mutations::set_response_format),
             ("stream", Mutations::set_stream),
         ]
+    }
+}
+
+use std::any::Any;
+
+/// Codec 内部的 SSE 累积器状态。filter 持有 `Box<dyn StreamState>` 但不窥视字段。
+/// 每个 codec 在 `ProtocolCodec::new_stream_state()` 中返回自家具体类型的 Box。
+pub trait StreamState: Send + Any {
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+#[cfg(test)]
+mod ir_v2_tests {
+    use super::*;
+
+    #[test]
+    fn response_ir_extension_fields_default_none() {
+        let r = ResponseIR::default();
+        assert!(r.thinking.is_none());
+        assert!(r.reasoning.is_none());
+        assert!(r.tool_use_blocks.is_none());
+    }
+
+    #[test]
+    fn finish_reason_other_carries_payload() {
+        let r = FinishReasonIR::Other(Cow::Borrowed("pause_turn"));
+        match r {
+            FinishReasonIR::Other(s) => assert_eq!(s, "pause_turn"),
+            _ => panic!("expected Other"),
+        }
+    }
+
+    #[test]
+    fn usage_ir_default_zero_with_optional_reasoning() {
+        let u = UsageIR::default();
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+        assert!(u.cached_tokens.is_none());
+        assert!(u.reasoning_tokens.is_none());
+    }
+
+    #[test]
+    fn stream_event_ir_new_variants_compile() {
+        let _ = StreamEventIR::ThinkingDelta {
+            text: Cow::Borrowed("thinking..."),
+            signature_chunk: None,
+        };
+        let _ = StreamEventIR::ToolCallStart {
+            index: 0,
+            id: Cow::Borrowed("call_1"),
+            name: Cow::Borrowed("get_weather"),
+        };
+        let _ = StreamEventIR::ToolCallDelta {
+            index: 0,
+            arguments_chunk: Cow::Borrowed("{\"loc"),
+        };
     }
 }

@@ -109,7 +109,7 @@ impl ProtocolCodec for Gemini {
                     "STOP" => FinishReasonIR::Stop,
                     "MAX_TOKENS" => FinishReasonIR::Length,
                     "SAFETY" => FinishReasonIR::ContentFilter,
-                    _ => FinishReasonIR::Other,
+                    other => FinishReasonIR::Other(std::borrow::Cow::Owned(other.to_owned())),
                 });
 
             // ADR-G9-1: a single Gemini SSE frame may carry BOTH `text` and
@@ -171,7 +171,7 @@ impl ProtocolCodec for Gemini {
                     FinishReasonIR::Length => "MAX_TOKENS",
                     FinishReasonIR::ContentFilter => "SAFETY",
                     FinishReasonIR::ToolCalls => "STOP",
-                    FinishReasonIR::Other => "OTHER",
+                    FinishReasonIR::Other(_) => "OTHER",
                 };
                 let payload = serde_json::json!({
                     "candidates": [{ "finishReason": reason }]
@@ -196,6 +196,21 @@ impl ProtocolCodec for Gemini {
             }
             StreamEventIR::Usage(_) => {
                 tracing::warn!("gemini: StreamEventIR::Usage dropped (no wire equivalent in v1)");
+            }
+            StreamEventIR::ThinkingDelta { .. } => {
+                tracing::warn!(
+                    "gemini: StreamEventIR::ThinkingDelta dropped (no wire equivalent in v1)"
+                );
+            }
+            StreamEventIR::ToolCallStart { .. } => {
+                tracing::warn!(
+                    "gemini: StreamEventIR::ToolCallStart dropped (no wire equivalent in v1)"
+                );
+            }
+            StreamEventIR::ToolCallDelta { .. } => {
+                tracing::warn!(
+                    "gemini: StreamEventIR::ToolCallDelta dropped (no wire equivalent in v1)"
+                );
             }
         }
         Ok(())
@@ -251,6 +266,7 @@ impl ProtocolCodec for Gemini {
             input_tokens: u.prompt_token_count,
             output_tokens: u.candidates_token_count,
             cached_tokens: u.cached_content_token_count,
+            reasoning_tokens: None,
         });
 
         Ok(ResponseIR {
@@ -262,6 +278,9 @@ impl ProtocolCodec for Gemini {
             finish_reason: None,
             usage,
             metadata: Default::default(),
+            thinking: None,
+            reasoning: None,
+            tool_use_blocks: None,
         })
     }
 

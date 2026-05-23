@@ -128,6 +128,21 @@ impl ProtocolCodec for OpenAi {
             StreamEventIR::Usage(_) => {
                 tracing::warn!("openai: StreamEventIR::Usage dropped (no wire equivalent in v1)");
             }
+            StreamEventIR::ThinkingDelta { .. } => {
+                tracing::warn!(
+                    "openai: StreamEventIR::ThinkingDelta dropped (no wire equivalent in v1)"
+                );
+            }
+            StreamEventIR::ToolCallStart { .. } => {
+                tracing::warn!(
+                    "openai: StreamEventIR::ToolCallStart dropped (no wire equivalent in v1)"
+                );
+            }
+            StreamEventIR::ToolCallDelta { .. } => {
+                tracing::warn!(
+                    "openai: StreamEventIR::ToolCallDelta dropped (no wire equivalent in v1)"
+                );
+            }
         }
         Ok(())
     }
@@ -153,6 +168,7 @@ impl ProtocolCodec for OpenAi {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
             cached_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            reasoning_tokens: None,
         });
 
         Ok(ResponseIR {
@@ -162,6 +178,9 @@ impl ProtocolCodec for OpenAi {
             finish_reason: None,
             usage,
             metadata: Default::default(),
+            thinking: None,
+            reasoning: None,
+            tool_use_blocks: None,
         })
     }
 

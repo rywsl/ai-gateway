@@ -168,6 +168,13 @@ fn handle_event(
                     ctx.timing.ttft = Some(std::time::Instant::now());
                 }
             }
+            StreamEventIR::ThinkingDelta { .. }
+            | StreamEventIR::ToolCallStart { .. }
+            | StreamEventIR::ToolCallDelta { .. } => {
+                if ctx.timing.ttft.is_none() {
+                    ctx.timing.ttft = Some(std::time::Instant::now());
+                }
+            }
             StreamEventIR::End { .. } | StreamEventIR::Error(_) => {}
         }
 

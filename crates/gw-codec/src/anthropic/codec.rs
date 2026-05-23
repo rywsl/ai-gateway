@@ -154,6 +154,21 @@ impl ProtocolCodec for Anthropic {
                     "anthropic: StreamEventIR::Usage dropped (no wire equivalent in v1)"
                 );
             }
+            StreamEventIR::ThinkingDelta { .. } => {
+                tracing::warn!(
+                    "anthropic: StreamEventIR::ThinkingDelta dropped (no wire equivalent in v1)"
+                );
+            }
+            StreamEventIR::ToolCallStart { .. } => {
+                tracing::warn!(
+                    "anthropic: StreamEventIR::ToolCallStart dropped (no wire equivalent in v1)"
+                );
+            }
+            StreamEventIR::ToolCallDelta { .. } => {
+                tracing::warn!(
+                    "anthropic: StreamEventIR::ToolCallDelta dropped (no wire equivalent in v1)"
+                );
+            }
         }
         Ok(())
     }
@@ -180,6 +195,7 @@ impl ProtocolCodec for Anthropic {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
             cached_tokens: u.cache_read_input_tokens,
+            reasoning_tokens: None,
         });
 
         Ok(ResponseIR {
@@ -189,6 +205,9 @@ impl ProtocolCodec for Anthropic {
             finish_reason: None,
             usage,
             metadata: Default::default(),
+            thinking: None,
+            reasoning: None,
+            tool_use_blocks: None,
         })
     }
 
