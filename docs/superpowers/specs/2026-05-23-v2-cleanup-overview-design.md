@@ -9,7 +9,7 @@
   - [2026-05-19-routing-r-c-latency-tracker.md](./2026-05-19-routing-r-c-latency-tracker.md)、[r-e-failover.md](./2026-05-19-routing-r-e-failover.md)(latency_first / cost_first / load_balance / retry executor)
   - [2026-05-19-billing-c-delta-stream-dlq.md](./2026-05-19-billing-c-delta-stream-dlq.md)(三层 fallback,本 spec 将其拆为 Rust 半 + Go 半)
   - [2026-05-22-tunnel-t-design.md](./2026-05-22-tunnel-t-design.md)(tunnel 健康探针、`/healthz/tunnel`、`gw_tunnel_transport_alive` 采样器 wave-8 follow-up)
-  - [2026-05-19-llm-gateway-design.md](./2026-05-19-llm-gateway-design.md)(CapabilityResolver 注入 LlmGateway,原 T6-A wave-7 follow-up)
+  - [2026-05-18-llm-gateway-design.md](./2026-05-18-llm-gateway-design.md)(CapabilityResolver 注入 LlmGateway,原 T6-A wave-7 follow-up)
 - **范围**:本文件不展开任何子系统的实现细节,只负责:
   1. 把 v1→v2 语义切换写定;
   2. 将 14 项清理任务按主 crate 切到 6 个 sub-spec,给出依赖与实施顺序;

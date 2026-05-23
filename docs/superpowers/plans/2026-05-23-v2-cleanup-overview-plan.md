@@ -135,7 +135,7 @@ Expected:
 
 ---
 
-## Task 2: Commit overview 三件套
+## Task 2: Commit overview 四件套
 
 **Files:**
 - Add(untracked): `docs/superpowers/specs/2026-05-23-v2-cleanup-overview-design.md`
