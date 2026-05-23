@@ -3,6 +3,7 @@
 //! pipeline, and detailed-log sink trait.
 
 pub mod detailed_stream;
+pub mod encoding;
 pub mod flusher;
 pub mod freeze;
 pub mod log_sink;
