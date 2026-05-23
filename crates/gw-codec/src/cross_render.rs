@@ -32,6 +32,23 @@ impl WireFormat {
         }
     }
 
+    /// Map an `AnyCodec` enum variant to its wire-form identifier.
+    ///
+    /// Each `AnyCodec` variant corresponds 1:1 with a [`WireFormat`]. This is the
+    /// callsite the proxy uses when invoking [`CrossRender`] from the response
+    /// filter — `ProtocolKind` is too coarse because it collapses OpenAI Chat
+    /// and OpenAI Responses into the same family, while cross-render needs
+    /// per-wire capability gates (e.g. `supports_reasoning`).
+    pub fn from_any_codec(c: &crate::any::AnyCodec) -> Self {
+        use crate::any::AnyCodec;
+        match c {
+            AnyCodec::OpenAi(_) => WireFormat::OpenAiChat,
+            AnyCodec::OpenAiResponses(_) => WireFormat::OpenAiResponses,
+            AnyCodec::Anthropic(_) => WireFormat::AnthropicMessages,
+            AnyCodec::Gemini(_) => WireFormat::GeminiGenerate,
+        }
+    }
+
     pub fn capabilities(self) -> WireCapabilities {
         match self {
             WireFormat::OpenAiChat => WireCapabilities {

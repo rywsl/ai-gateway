@@ -193,4 +193,21 @@ impl AnyCodec {
             AnyCodec::Gemini(c) => c.estimate_input_tokens(ir),
         }
     }
+
+    /// Borrow the underlying concrete codec as a `&dyn ProtocolCodec`.
+    ///
+    /// `AnyCodec` does not itself implement [`ProtocolCodec`] (the trait
+    /// requires `Self: Sized` on `detect_request`, which the enum dispatcher
+    /// can't satisfy). This accessor lets callers that need a trait-object
+    /// reference — e.g. [`crate::cross_render::CrossRender::run`] — pull one
+    /// out without re-matching on the variant.
+    #[inline]
+    pub fn as_dyn(&self) -> &dyn ProtocolCodec {
+        match self {
+            AnyCodec::OpenAi(c) => c,
+            AnyCodec::OpenAiResponses(c) => c,
+            AnyCodec::Anthropic(c) => c,
+            AnyCodec::Gemini(c) => c,
+        }
+    }
 }

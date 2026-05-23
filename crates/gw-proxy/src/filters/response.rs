@@ -18,11 +18,23 @@
 //! chunk. Same-protocol traffic stays zero-copy — `pending_client_body` is left
 //! `None` and the upstream bytes are forwarded verbatim.
 //!
+//! Cross-protocol non-stream re-render (S-codec T6): when the request is
+//! non-stream AND the client wire form differs from the upstream wire form
+//! (via `WireFormat::from_any_codec`, which distinguishes OpenAI Chat from
+//! OpenAI Responses where `ProtocolKind` collapses them), the non-stream
+//! branch accumulates the upstream body to EOS, calls
+//! `upstream_codec.parse_response`, runs `CrossRender::run` through the
+//! *client* codec, and substitutes the re-rendered bytes for the outbound
+//! body. The `gw_codec_cross_render_nonstream_total{from,to}` metric is
+//! emitted on success; failures map to `GW_CODEC_PARSE_RESPONSE` /
+//! `GW_CODEC_CROSS_RENDER_FAILED` warn logs and counters.
+//!
 //! TODO(task-4.3): wire a deadline check against ctx.timing.start and
 //! `Timeouts::stream_total`.
 
 use crate::ctx::ReqCtx;
 use bytes::{Bytes, BytesMut};
+use gw_codec::cross_render::{CrossRender, WireFormat};
 use gw_codec::AnyCodec;
 use gw_core::ir::StreamEventIR;
 use gw_core::protocol::ProtocolKind;
@@ -57,9 +69,43 @@ pub fn run(
     // `gw_codec_parse_response_failure_total` and leaves `ctx.usage` at zero;
     // the logging filter already falls back to `UsageSource::Estimated` when
     // `output_tokens == 0`.
+    //
+    // Cross-protocol non-stream (S-codec T6): when the client wire form
+    // differs from the upstream wire form, `handle_non_stream_chunk` also
+    // re-renders the body via `CrossRender::run` and stashes the result on
+    // `ctx.pending_client_body`. We suppress pre-EOS chunks (so the client
+    // doesn't see partial upstream bytes) and substitute the rendered body
+    // at EOS. On parse / cross-render failure, the helper repopulates
+    // `ctx.upstream_body_accum` with the original bytes so the caller can
+    // forward them verbatim — preserving same-protocol parity for vendor
+    // error JSON.
     if !ctx.is_stream {
+        let cross_protocol = is_cross_protocol(ctx);
         handle_non_stream_chunk(body.as_ref(), end_of_stream, ctx);
-        // Archive capture for non-stream path; body is upstream-shape verbatim.
+        if cross_protocol {
+            if end_of_stream {
+                if let Some(buf) = ctx.pending_client_body.take() {
+                    // Happy path: cross-render produced bytes in client wire form.
+                    *body = Some(buf.freeze());
+                } else if let Some(orig) = ctx.upstream_body_accum.take() {
+                    // Fallback (parse_response or cross-render failed): forward
+                    // the original upstream bytes verbatim. Cross-protocol
+                    // clients won't decode them, but vendor error envelopes /
+                    // unknown response shapes are at least preserved instead
+                    // of being silently zeroed out.
+                    *body = Some(orig.freeze());
+                } else {
+                    // No body to substitute (e.g., pingora delivered EOS with no
+                    // chunks). Forward whatever pingora handed us.
+                }
+            } else {
+                // Pre-EOS: swallow the chunk; the full re-rendered body is
+                // emitted once at EOS.
+                *body = None;
+            }
+        }
+        // Archive capture for non-stream path; body reflects whatever bytes
+        // (substituted or upstream-verbatim) reach the client.
         if let Some(b) = body.as_ref() {
             ctx.archive_downstream_response_body.extend_from_slice(b);
         }
@@ -227,6 +273,20 @@ fn handle_event(
     ctx.stream_state = Some(state);
 }
 
+/// True iff the non-stream response needs cross-protocol re-render — i.e.
+/// the client and upstream codecs are both known and their **wire forms**
+/// differ. We compare `WireFormat` (4-way) rather than `ProtocolKind` (3-way)
+/// because the latter collapses OpenAI Chat into OpenAI Responses; both are
+/// `ProtocolKind::OpenAi` but their wire shapes are not interchangeable.
+fn is_cross_protocol(ctx: &ReqCtx) -> bool {
+    match (ctx.client_codec.as_ref(), ctx.upstream_codec.as_ref()) {
+        (Some(client), Some(upstream)) => {
+            WireFormat::from_any_codec(client) != WireFormat::from_any_codec(upstream)
+        }
+        _ => false,
+    }
+}
+
 /// T2-B / ADR-B1-3 — non-stream upstream body accumulator. Pingora delivers
 /// the response body in chunks; we buffer them into `ctx.upstream_body_accum`
 /// and only invoke `codec.parse_response` once `end_of_stream` is set so the
@@ -234,11 +294,21 @@ fn handle_event(
 /// successful parse leaves it `None` (a stray empty follow-up chunk doesn't
 /// re-parse the same body).
 ///
-/// Failure semantics: any error from `parse_response` increments the counter
-/// `gw_codec_parse_response_failure_total{codec, upstream_status}` and leaves
-/// `ctx.usage` at its default zero. The logging filter already maps
-/// `output_tokens == 0` to `UsageSource::Estimated`, so no extra plumbing is
-/// needed downstream.
+/// S-codec T6: when the request is cross-protocol (different client and
+/// upstream wire forms), this helper also runs `CrossRender::run` through
+/// the client codec at EOS and writes the re-rendered bytes into
+/// `ctx.pending_client_body`. The caller (`run`) then substitutes those
+/// bytes for the outbound body. The `gw_codec_cross_render_nonstream_total`
+/// counter is incremented per successful re-render; failures (parse or
+/// render) emit `GW_CODEC_PARSE_RESPONSE` / `GW_CODEC_CROSS_RENDER_FAILED`
+/// warn logs + counters and leave `pending_client_body = None` so the caller
+/// substitutes an empty body.
+///
+/// Failure semantics for usage extraction: any error from `parse_response`
+/// increments the counter `gw_codec_parse_response_failure_total{codec,
+/// upstream_status}` and leaves `ctx.usage` at its default zero. The logging
+/// filter already maps `output_tokens == 0` to `UsageSource::Estimated`, so
+/// no extra plumbing is needed downstream.
 pub(crate) fn handle_non_stream_chunk(
     chunk: Option<&Bytes>,
     end_of_stream: bool,
@@ -259,43 +329,108 @@ pub(crate) fn handle_non_stream_chunk(
         return;
     };
     let Some(codec) = ctx.upstream_codec.as_ref() else {
-        // No codec means we can't parse — silently skip; the logging filter
-        // will fall back to the freeze-time estimate.
+        // No codec means we can't parse — put the bytes back so the caller
+        // can forward them verbatim. The logging filter will fall back to
+        // the freeze-time estimate.
+        ctx.upstream_body_accum = Some(body);
         return;
     };
     let codec_kind = codec.kind();
-    // Bind the result to a local so `body` (declared earlier) stays alive for
-    // the full lifetime of the borrowed `ResponseIR<'_>` / `ErrorIR<'_>`.
-    // Inline `match codec.parse_response(&body) { ... }` would create a
-    // temporary `Result` whose drop is sequenced *after* `body`'s drop and
-    // fails borrowck.
-    let parse_result = codec.parse_response(&body);
-    match parse_result {
-        Ok(ir) => {
-            if let Some(u) = ir.usage {
-                ctx.usage.input_tokens = u.input_tokens;
-                ctx.usage.output_tokens = u.output_tokens;
-                ctx.usage.cached_tokens = u.cached_tokens;
+    // `parse_response` borrows from `body`; both the successful `ResponseIR`
+    // and the error `ErrorIR` hold that borrow, so we cannot move `body`
+    // back into `ctx.upstream_body_accum` while the match arms hold the
+    // result. Collect the decision in a flag and apply it after the match
+    // drops everything that borrows `body`.
+    let mut return_body_to_accum = false;
+    {
+        let parse_result = codec.parse_response(&body);
+        match parse_result {
+            Ok(ir) => {
+                if let Some(u) = ir.usage {
+                    ctx.usage.input_tokens = u.input_tokens;
+                    ctx.usage.output_tokens = u.output_tokens;
+                    ctx.usage.cached_tokens = u.cached_tokens;
+                }
+                // ADR-G5-1: Gemini long-running operations emit a top-level
+                // `name: "operations/<uuid>"` which the codec surfaces as
+                // `ResponseIR.id`. Promote it to `ctx.operation_id` only when the
+                // prefix matches — chat ids like `chatcmpl-...` must NOT pollute
+                // this field. The logging filter writes `ctx.operation_id` into
+                // `UsageRecord.operation_id` (see filters/logging.rs).
+                if ir.id.starts_with("operations/") {
+                    ctx.operation_id = Some(ir.id.clone().into_owned());
+                }
+
+                // S-codec T6: cross-protocol non-stream re-render. Decoupled
+                // from `usage` extraction so usage is still recorded when
+                // re-render fails (mirrors the streaming path's per-event
+                // accumulation). The accumulator stays consumed on success;
+                // on render failure we mark `return_body_to_accum` so the
+                // caller can forward the original upstream bytes verbatim
+                // (matching same-protocol fallback semantics).
+                if let Some(client) = ctx.client_codec.as_ref() {
+                    let from = WireFormat::from_any_codec(codec);
+                    let to = WireFormat::from_any_codec(client);
+                    if from != to {
+                        let mut out = BytesMut::with_capacity(body.len());
+                        let cross = CrossRender {
+                            from,
+                            to,
+                            source: ir,
+                        };
+                        match cross.run(client.as_dyn(), &mut out) {
+                            Ok(()) => {
+                                metrics::counter!(
+                                    "gw_codec_cross_render_nonstream_total",
+                                    "from" => from.label(),
+                                    "to" => to.label(),
+                                )
+                                .increment(1);
+                                ctx.pending_client_body = Some(out);
+                            }
+                            Err(e) => {
+                                metrics::counter!(
+                                    "gw_codec_cross_render_nonstream_failure_total",
+                                    "from" => from.label(),
+                                    "to" => to.label(),
+                                )
+                                .increment(1);
+                                tracing::warn!(
+                                    from = %from,
+                                    to = %to,
+                                    error = ?e.code,
+                                    "{}",
+                                    gw_core::error::codes::GW_CODEC_CROSS_RENDER_FAILED
+                                );
+                                return_body_to_accum = true;
+                            }
+                        }
+                    }
+                }
             }
-            // ADR-G5-1: Gemini long-running operations emit a top-level
-            // `name: "operations/<uuid>"` which the codec surfaces as
-            // `ResponseIR.id`. Promote it to `ctx.operation_id` only when the
-            // prefix matches — chat ids like `chatcmpl-...` must NOT pollute
-            // this field. The logging filter writes `ctx.operation_id` into
-            // `UsageRecord.operation_id` (see filters/logging.rs).
-            if ir.id.starts_with("operations/") {
-                ctx.operation_id = Some(ir.id.into_owned());
+            Err(e) => {
+                metrics::counter!(
+                    "gw_codec_parse_response_failure_total",
+                    "codec" => codec_kind.as_str(),
+                    "upstream_status" => ctx.upstream_status.unwrap_or(0).to_string(),
+                )
+                .increment(1);
+                tracing::warn!(
+                    error = ?e.code,
+                    "{}",
+                    gw_core::error::codes::GW_CODEC_PARSE_RESPONSE
+                );
+                // parse_response failed (e.g., vendor error JSON body, or a
+                // shape this codec can't decode). Forward the original
+                // upstream bytes verbatim — cross-protocol clients see
+                // upstream-shape bytes (best-effort vs an empty 200), and
+                // same-protocol clients see no change from pre-T6 behaviour.
+                return_body_to_accum = true;
             }
         }
-        Err(e) => {
-            metrics::counter!(
-                "gw_codec_parse_response_failure_total",
-                "codec" => codec_kind.as_str(),
-                "upstream_status" => ctx.upstream_status.unwrap_or(0).to_string(),
-            )
-            .increment(1);
-            tracing::warn!(error = ?e.code, "non-stream parse_response failed");
-        }
+    }
+    if return_body_to_accum {
+        ctx.upstream_body_accum = Some(body);
     }
 }
 
@@ -352,8 +487,13 @@ mod non_stream_branch_tests {
         // UsageSource::Estimated when output_tokens == 0.
         assert_eq!(ctx.usage.input_tokens, 0);
         assert_eq!(ctx.usage.output_tokens, 0);
-        // Accumulator was consumed on EOS regardless of decode outcome.
-        assert!(ctx.upstream_body_accum.is_none());
+        // S-codec T6: on parse failure the helper repopulates
+        // `upstream_body_accum` so the response_body_filter can forward the
+        // original upstream bytes verbatim (preserves vendor error JSON
+        // pass-through). The caller drains the accumulator at EOS in the
+        // cross-protocol branch; same-protocol callers ignore it.
+        let accum = ctx.upstream_body_accum.as_ref().expect("body preserved");
+        assert_eq!(accum.as_ref(), b"not json" as &[u8]);
     }
 
     #[test]

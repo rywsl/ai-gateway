@@ -381,6 +381,26 @@ impl ProxyHttp for LlmGateway {
                 .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
                 .collect(),
         });
+
+        // S-codec T6: cross-protocol non-stream re-renders the body in
+        // `response_body_filter` at EOS, so the upstream's `Content-Length`
+        // and `Content-Encoding` no longer match the bytes we'll emit.
+        // Strip them here so pingora applies chunked transfer-encoding to the
+        // (substituted) outbound body. Stream / same-protocol traffic is
+        // unaffected.
+        if !ctx.is_stream {
+            let cross_protocol = match (ctx.client_codec.as_ref(), ctx.upstream_codec.as_ref()) {
+                (Some(client), Some(upstream)) => {
+                    gw_codec::cross_render::WireFormat::from_any_codec(client)
+                        != gw_codec::cross_render::WireFormat::from_any_codec(upstream)
+                }
+                _ => false,
+            };
+            if cross_protocol {
+                let _ = upstream_response.remove_header("content-length");
+                let _ = upstream_response.remove_header("content-encoding");
+            }
+        }
         Ok(())
     }
 

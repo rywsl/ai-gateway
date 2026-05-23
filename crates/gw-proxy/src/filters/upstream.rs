@@ -227,32 +227,6 @@ pub async fn pick_peer(
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?;
     let picked_arc = Arc::clone(picked);
 
-    // ADR-B1-4: cross-protocol non-stream is not yet supported on the response
-    // side (response re-render is deferred to codec-s4 v2). Determine the
-    // upstream codec kind here (mirroring the selection in `rewrite_request`)
-    // and fail fast with 503 when client/upstream kinds differ AND the request
-    // is non-stream, rather than letting it reach an upstream whose body the
-    // client codec can't decode back.
-    let upstream_kind = if picked_arc.accessible_endpoints.contains(&client_codec_kind) {
-        client_codec_kind
-    } else if let Some(k) = picked_arc.accessible_endpoints.first() {
-        *k
-    } else {
-        return Err(Error::new(ErrorType::Custom("gw_no_upstream_codec")));
-    };
-    if !ctx.is_stream && upstream_kind != client_codec_kind {
-        return emit_envelope_and_bail(
-            session,
-            ctx,
-            envelope_for(
-                codes::GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED,
-                "cross-protocol non-stream is not supported",
-                503,
-            ),
-        )
-        .await;
-    }
-
     let vendor = match store.vendor_or_load(&picked_arc.vendor_id).await {
         Some(v) => v,
         None => {
@@ -605,30 +579,6 @@ fn codec_for(k: gw_core::protocol::ProtocolKind) -> AnyCodec {
         ProtocolKind::OpenAi => AnyCodec::OpenAi(gw_codec::openai::OpenAi),
         ProtocolKind::Anthropic => AnyCodec::Anthropic(gw_codec::anthropic::Anthropic),
         ProtocolKind::Gemini => AnyCodec::Gemini(gw_codec::gemini::Gemini),
-    }
-}
-
-#[cfg(test)]
-mod cross_protocol_nonstream_tests {
-    #[test]
-    fn cross_protocol_non_stream_short_circuit_present_in_source() {
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/filters/upstream.rs"
-        ))
-        .expect("read source");
-        // Build the needle at runtime so this test file's own literal doesn't self-match.
-        let needle: String = [
-            "GW_REQUEST_",
-            "CROSS_PROTOCOL_",
-            "NONSTREAM_",
-            "NOT_SUPPORTED",
-        ]
-        .concat();
-        assert!(
-            src.contains(&needle),
-            "cross-protocol non-stream short-circuit must be added in B1-4"
-        );
     }
 }
 
