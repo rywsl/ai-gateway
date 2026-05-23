@@ -13,9 +13,8 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 impl<'a> From<AnthropicRequest<'a>> for RequestIR<'a> {
     #[inline]
     fn from(src: AnthropicRequest<'a>) -> Self {
-        let mut messages: Vec<MessageIR<'a>> = Vec::with_capacity(
-            src.messages.len() + if src.system.is_some() { 1 } else { 0 },
-        );
+        let mut messages: Vec<MessageIR<'a>> =
+            Vec::with_capacity(src.messages.len() + if src.system.is_some() { 1 } else { 0 });
         if let Some(sys) = src.system {
             messages.push(MessageIR::System {
                 content: ContentIR::Text(sys),

@@ -22,8 +22,8 @@
 
 use dashmap::DashMap;
 use gw_core::ids::KeyId;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 pub struct InFlightCounter {
     pub count: AtomicU32,

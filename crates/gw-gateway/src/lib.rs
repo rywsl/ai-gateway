@@ -278,8 +278,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         workers: if cfg.detailed_log.flusher.workers == 0 {
             (std::thread::available_parallelism()
                 .map(|n| n.get())
-                .unwrap_or(1) / 4)
-                .max(1)
+                .unwrap_or(1)
+                / 4)
+            .max(1)
         } else {
             cfg.detailed_log.flusher.workers
         },
@@ -292,12 +293,10 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             zstd_level: cfg.detailed_log.compression.zstd_level,
         },
     };
-    let detailed_archive = Arc::new(
-        gw_ledger::detailed_archive::DetailedArchive::start(
-            (*redis.pool).clone(),
-            archive_cfg,
-        ),
-    );
+    let detailed_archive = Arc::new(gw_ledger::detailed_archive::DetailedArchive::start(
+        (*redis.pool).clone(),
+        archive_cfg,
+    ));
 
     // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
     // The consumer's join handle is intentionally dropped: the task lives for
@@ -350,36 +349,38 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // available. Absent → validator stays None and request_filter falls back
     // to the legacy `verify_jwt` so deployments without AuthConfig keep
     // working with v1 semantics (exp-only, JWKS-by-kid).
-    let jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>> =
-        match store.auth_config_or_load("global").await {
-            Some(cfg_v) => {
-                let vcfg = gw_auth::jwt::JwtValidatorConfig {
-                    static_secret_hs256: cfg_v.value.static_secret_hs256.clone(),
-                    static_pem_rs256: cfg_v.value.static_pem_rs256.clone(),
-                    expected_iss: cfg_v.value.expected_iss.clone(),
-                    expected_aud: cfg_v.value.expected_aud.clone(),
-                    leeway_secs: cfg_v.value.leeway_secs,
-                    require_nbf: cfg_v.value.require_nbf,
-                };
-                let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
-                v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
-                    store: store.clone(),
-                }));
-                tracing::info!(
-                    target: "gw_gateway",
-                    "JwtValidator wired from AuthConfig.global (G6, T1-E)"
-                );
-                Some(Arc::new(v))
-            }
-            None => {
-                tracing::warn!(
-                    target: "gw_gateway",
-                    "auth_configs.global missing; falling back to legacy JWT exp-only validation. \
-                     Populate the `global` row via the management plane to enable iss/aud/nbf checks (0006_auth_configs)."
-                );
-                None
-            }
-        };
+    let jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>> = match store
+        .auth_config_or_load("global")
+        .await
+    {
+        Some(cfg_v) => {
+            let vcfg = gw_auth::jwt::JwtValidatorConfig {
+                static_secret_hs256: cfg_v.value.static_secret_hs256.clone(),
+                static_pem_rs256: cfg_v.value.static_pem_rs256.clone(),
+                expected_iss: cfg_v.value.expected_iss.clone(),
+                expected_aud: cfg_v.value.expected_aud.clone(),
+                leeway_secs: cfg_v.value.leeway_secs,
+                require_nbf: cfg_v.value.require_nbf,
+            };
+            let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
+            v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
+                store: store.clone(),
+            }));
+            tracing::info!(
+                target: "gw_gateway",
+                "JwtValidator wired from AuthConfig.global (G6, T1-E)"
+            );
+            Some(Arc::new(v))
+        }
+        None => {
+            tracing::warn!(
+                target: "gw_gateway",
+                "auth_configs.global missing; falling back to legacy JWT exp-only validation. \
+                 Populate the `global` row via the management plane to enable iss/aud/nbf checks (0006_auth_configs)."
+            );
+            None
+        }
+    };
 
     // G13 (T3-C) — production capability resolver backed by the EntityStore.
     // `Model.capabilities` / `ApiKeyEntry.force_capabilities` /

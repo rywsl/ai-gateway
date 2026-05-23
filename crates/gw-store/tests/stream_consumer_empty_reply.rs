@@ -4,8 +4,8 @@
 use gw_store::redis_client::RedisCtx;
 use gw_store::stream_consumer::StreamConsumer;
 use gw_store::EntityStore;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;

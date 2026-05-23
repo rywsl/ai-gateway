@@ -164,10 +164,17 @@ async fn worker(
 }
 
 async fn handle(surface: CapturedSurface, redis: &RedisPool, cfg: &DetailedArchiveCfg) {
-    let CapturedSurface { ts_ms, request_id, trace_id, kind, payload } = surface;
+    let CapturedSurface {
+        ts_ms,
+        request_id,
+        trace_id,
+        kind,
+        payload,
+    } = surface;
     let kind_label = kind.as_str();
 
-    let json_bytes = match serialize_payload(payload, cfg.single_payload_soft_cap_bytes, kind_label) {
+    let json_bytes = match serialize_payload(payload, cfg.single_payload_soft_cap_bytes, kind_label)
+    {
         Some(b) => b,
         None => return,
     };
@@ -213,15 +220,19 @@ async fn handle(surface: CapturedSurface, redis: &RedisPool, cfg: &DetailedArchi
     // The consumer already expects binary in `encoded`; we keep it as bytes
     // by using the Vec<(K, V)> where V: Into<RedisValue> — fred 9.x accepts
     // Vec<(&str, Vec<u8>)> for the fields argument.
-    let mut fields_with_payload: Vec<(&'static str, fred::types::RedisValue)> = fields
-        .into_iter()
-        .map(|(k, v)| (k, v.into()))
-        .collect();
+    let mut fields_with_payload: Vec<(&'static str, fred::types::RedisValue)> =
+        fields.into_iter().map(|(k, v)| (k, v.into())).collect();
     fields_with_payload.push(("payload", encoded.as_slice().into()));
 
     let client = redis.next();
     let r: Result<String, _> = client
-        .xadd(cfg.stream.as_str(), false, cap(cfg.maxlen), "*", fields_with_payload)
+        .xadd(
+            cfg.stream.as_str(),
+            false,
+            cap(cfg.maxlen),
+            "*",
+            fields_with_payload,
+        )
         .await;
     if let Err(e) = r {
         tracing::warn!(

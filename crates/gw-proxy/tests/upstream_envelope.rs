@@ -6,7 +6,11 @@ use gw_proxy::filters::upstream::envelope_for;
 
 #[test]
 fn no_model_group_maps_to_backend_unavailable_503() {
-    let err = envelope_for(codes::GW_BACKEND_UNAVAILABLE, "no model_group configured", 503);
+    let err = envelope_for(
+        codes::GW_BACKEND_UNAVAILABLE,
+        "no model_group configured",
+        503,
+    );
     assert_eq!(err.code, codes::GW_BACKEND_UNAVAILABLE);
     assert_eq!(err.status, 503);
     assert_eq!(err.category, ErrorCategory::UpstreamError);

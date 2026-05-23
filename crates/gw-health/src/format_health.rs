@@ -17,7 +17,7 @@
 use crate::cooldown::{CircuitState, CooldownDirective, CooldownReason};
 use crate::sliding_window::SlidingWindow;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Threshold parameters lifted verbatim from the retired single-dim
@@ -114,8 +114,7 @@ impl FormatHealth {
             // SlidingWindowTrip reason variant is reserved for explicit
             // K-B apply_cooldown calls in Phase 3.
         } else if ok
-            && CircuitState::from_u8(self.circuit.load(Ordering::Acquire))
-                == CircuitState::HalfOpen
+            && CircuitState::from_u8(self.circuit.load(Ordering::Acquire)) == CircuitState::HalfOpen
         {
             // Probe succeeded → close.
             let _ = self.circuit.compare_exchange(

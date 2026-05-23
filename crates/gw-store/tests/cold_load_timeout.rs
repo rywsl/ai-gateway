@@ -37,22 +37,18 @@ async fn timeout_returns_none_on_stall() {
 
 #[tokio::test]
 async fn timeout_passes_through_ok_value() {
-    let out = with_cold_load_timeout(
-        "test_ns",
-        Duration::from_secs(1),
-        async { Ok::<u32, anyhow::Error>(42) },
-    )
+    let out = with_cold_load_timeout("test_ns", Duration::from_secs(1), async {
+        Ok::<u32, anyhow::Error>(42)
+    })
     .await;
     assert_eq!(out, Some(42));
 }
 
 #[tokio::test]
 async fn timeout_passes_through_err_as_none() {
-    let out = with_cold_load_timeout(
-        "test_ns",
-        Duration::from_secs(1),
-        async { Err::<u32, anyhow::Error>(anyhow!("boom")) },
-    )
+    let out = with_cold_load_timeout("test_ns", Duration::from_secs(1), async {
+        Err::<u32, anyhow::Error>(anyhow!("boom"))
+    })
     .await;
     assert!(out.is_none(), "loader Err must resolve to None");
 }

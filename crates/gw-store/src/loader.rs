@@ -321,10 +321,7 @@ pub async fn load_model(ctx: &LoaderCtx, name: &ModelName) -> anyhow::Result<Ver
 /// Cold-load a [`ProxyNode`] (ADR-T-3) by id. Mirrors [`load_model`]:
 /// Redis L1 → PgSQL `proxy_nodes` L2 → Redis write-back. 1800s TTL matching
 /// `vendor_key`. T5-B's `TunnelStack` reads the per-id cache to resolve nodes.
-pub async fn load_proxy_node(
-    ctx: &LoaderCtx,
-    id: &str,
-) -> anyhow::Result<Versioned<ProxyNode>> {
+pub async fn load_proxy_node(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versioned<ProxyNode>> {
     load_entity(ctx, "proxy_node", id, PROXY_NODE_SQL, |v| {
         serde_json::from_value::<ProxyNode>(v.clone()).map_err(Into::into)
     })
@@ -335,9 +332,7 @@ pub async fn load_proxy_node(
 /// `TunnelStack::reload_nodes` (ADR-T-3). The list is small in practice
 /// (≤ low hundreds) so a single PG round-trip is fine; the ArcSwap inside
 /// TunnelStack is what makes hot-path reads lock-free.
-pub async fn load_proxy_nodes_list(
-    ctx: &LoaderCtx,
-) -> anyhow::Result<Vec<ProxyNode>> {
+pub async fn load_proxy_nodes_list(ctx: &LoaderCtx) -> anyhow::Result<Vec<ProxyNode>> {
     let rows = sqlx::query(PROXY_NODE_LIST_SQL).fetch_all(&ctx.pg).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -374,8 +369,7 @@ mod tunnel_pref_tests {
 
     #[test]
     fn vendor_key_row_decodes_tunnel_pref_when_absent() {
-        let pref: Option<TunnelPreference> =
-            serde_json::from_value(json!(null)).unwrap();
+        let pref: Option<TunnelPreference> = serde_json::from_value(json!(null)).unwrap();
         assert!(pref.is_none());
     }
 
@@ -385,8 +379,12 @@ mod tunnel_pref_tests {
             "preferred_node_ids": ["node-eu", "node-us"],
             "require_tunnel": true,
             "prefer_low_latency": true
-        })).unwrap();
-        assert_eq!(pref.preferred_node_ids.as_slice(), &["node-eu".to_string(), "node-us".to_string()]);
+        }))
+        .unwrap();
+        assert_eq!(
+            pref.preferred_node_ids.as_slice(),
+            &["node-eu".to_string(), "node-us".to_string()]
+        );
         assert!(pref.require_tunnel);
         assert!(pref.prefer_low_latency);
     }

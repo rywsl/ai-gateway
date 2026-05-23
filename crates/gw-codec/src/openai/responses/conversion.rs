@@ -94,7 +94,10 @@ pub fn chat_to_responses(chat: &Value) -> Result<OpenAiResponsesRequest, Convert
     Ok(OpenAiResponsesRequest {
         model,
         input,
-        stream: chat.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+        stream: chat
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         instructions,
         previous_response_id: None,
         extras: serde_json::Map::new(),

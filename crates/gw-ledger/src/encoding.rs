@@ -69,7 +69,9 @@ pub fn encode(payload: Vec<u8>, cfg: &CompressionCfg) -> Result<(Encoding, Vec<u
     let out = match enc {
         Encoding::Raw => payload,
         Encoding::Lz4 => lz4_flex::compress_prepend_size(&payload),
-        Encoding::Zstd => zstd::encode_all(payload.as_slice(), cfg.zstd_level).map_err(EncodeError::Zstd)?,
+        Encoding::Zstd => {
+            zstd::encode_all(payload.as_slice(), cfg.zstd_level).map_err(EncodeError::Zstd)?
+        }
     };
     Ok((enc, out))
 }
@@ -100,4 +102,3 @@ pub fn decode(enc: Encoding, bytes: &[u8]) -> Result<Vec<u8>, DecodeError> {
         Encoding::Zstd => zstd::decode_all(bytes).map_err(DecodeError::Zstd),
     }
 }
-

@@ -166,16 +166,14 @@ impl LlmGateway {
     /// Called from `response_body_filter` when `end_of_stream = true`.
     fn emit_response_surfaces(&self, ctx: &mut ReqCtx) {
         use crate::ctx::ResponseMeta;
-        use gw_ledger::detailed_archive::{
-            CapturedSurface, Kind, ResponsePayload, SurfacePayload,
-        };
+        use gw_ledger::detailed_archive::{CapturedSurface, Kind, ResponsePayload, SurfacePayload};
         let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
 
         // upstream_response — paired with the headers snapshot taken in response_filter
         if let Some(meta) = ctx.archive_upstream_response_meta.take() {
-            let body = std::sync::Arc::new(bytes::Bytes::from(
-                std::mem::take(&mut ctx.archive_upstream_response_body),
-            ));
+            let body = std::sync::Arc::new(bytes::Bytes::from(std::mem::take(
+                &mut ctx.archive_upstream_response_body,
+            )));
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -193,15 +191,16 @@ impl LlmGateway {
         }
 
         // downstream_response — v1 approximates headers from upstream snapshot
-        let downstream_meta = ctx.archive_downstream_response_meta.take().unwrap_or_else(|| {
-            ResponseMeta {
+        let downstream_meta = ctx
+            .archive_downstream_response_meta
+            .take()
+            .unwrap_or_else(|| ResponseMeta {
                 status: ctx.upstream_status.unwrap_or(0),
                 headers: Vec::new(),
-            }
-        });
-        let body = std::sync::Arc::new(bytes::Bytes::from(
-            std::mem::take(&mut ctx.archive_downstream_response_body),
-        ));
+            });
+        let body = std::sync::Arc::new(bytes::Bytes::from(std::mem::take(
+            &mut ctx.archive_downstream_response_body,
+        )));
         self.detailed_archive.try_send(CapturedSurface {
             ts_ms: now_ms,
             request_id: ctx.request_id.clone(),
@@ -258,8 +257,7 @@ impl ProxyHttp for LlmGateway {
                 CapturedSurface, Kind, RequestPayload, SurfacePayload,
             };
             self.detailed_archive.try_send(CapturedSurface {
-                ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64
-                    / 1_000_000,
+                ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
                 kind: Kind::DownstreamRequest,
@@ -314,8 +312,7 @@ impl ProxyHttp for LlmGateway {
                 CapturedSurface, Kind, RequestPayload, SurfacePayload,
             };
             self.detailed_archive.try_send(CapturedSurface {
-                ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64
-                    / 1_000_000,
+                ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
                 kind: Kind::UpstreamRequest,
@@ -489,10 +486,12 @@ impl ProxyHttp for LlmGateway {
             use gw_ledger::detailed_archive::{
                 CapturedSurface, Kind, SummaryPayload, SurfacePayload,
             };
-            let now_ms =
-                time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+            let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
             let latency_ms = match (ctx.timing.start, ctx.timing.end) {
-                (Some(s), Some(e)) => e.saturating_duration_since(s).as_millis().min(u32::MAX as u128) as u32,
+                (Some(s), Some(e)) => e
+                    .saturating_duration_since(s)
+                    .as_millis()
+                    .min(u32::MAX as u128) as u32,
                 _ => 0,
             };
             let ttft_ms = match (ctx.timing.start, ctx.timing.ttft) {

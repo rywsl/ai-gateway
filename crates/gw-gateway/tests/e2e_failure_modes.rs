@@ -123,7 +123,10 @@ fn codec_parse_error_429_maps_to_upstream_overloaded() {
     assert_eq!(err.upstream_status, Some(429));
     assert_eq!(err.code.as_ref(), "GW_UPSTREAM_OVERLOADED");
     assert!(matches!(err.category, ErrorCategory::ClientQuota));
-    assert!(err.retryable, "429 must be retryable per spec §6 retry matrix");
+    assert!(
+        err.retryable,
+        "429 must be retryable per spec §6 retry matrix"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +136,8 @@ fn codec_parse_error_429_maps_to_upstream_overloaded() {
 #[test]
 fn codec_parse_error_400_invalid_request_normalised() {
     // Upstream Anthropic 400 body.
-    let anthropic_body = br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad input"}}"#;
+    let anthropic_body =
+        br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad input"}}"#;
     let anthropic = Anthropic;
     let err = anthropic.parse_error(400, anthropic_body);
     assert_eq!(err.status, 400);
@@ -147,7 +151,10 @@ fn codec_parse_error_400_invalid_request_normalised() {
     let mut buf = bytes::BytesMut::new();
     openai.render_error(&err, &mut buf);
     let v: serde_json::Value = serde_json::from_slice(&buf).expect("render_error JSON");
-    assert!(v.get("error").is_some(), "OpenAI envelope must have `error` field");
+    assert!(
+        v.get("error").is_some(),
+        "OpenAI envelope must have `error` field"
+    );
     assert_eq!(v["error"]["message"], "bad input");
 }
 

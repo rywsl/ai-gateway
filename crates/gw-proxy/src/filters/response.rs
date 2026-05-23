@@ -281,8 +281,8 @@ mod non_stream_branch_tests {
     use super::*;
     use crate::ctx::ReqCtx;
     use bytes::Bytes;
-    use gw_codec::AnyCodec;
     use gw_codec::openai::OpenAi;
+    use gw_codec::AnyCodec;
 
     fn make_ctx_non_stream() -> ReqCtx {
         // `ReqCtx::default()` builds a fully-initialised context with empty

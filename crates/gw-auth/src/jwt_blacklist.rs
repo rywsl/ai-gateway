@@ -33,11 +33,7 @@ pub trait JwtBlacklist: Send + Sync {
 }
 
 /// 高层入口：按 fail mode 折叠 backend error。
-pub async fn check_revoked(
-    bl: &dyn JwtBlacklist,
-    jti: &str,
-    mode: BlacklistFailMode,
-) -> bool {
+pub async fn check_revoked(bl: &dyn JwtBlacklist, jti: &str, mode: BlacklistFailMode) -> bool {
     match bl.is_revoked(jti).await {
         Ok(b) => b,
         Err(_) => matches!(mode, BlacklistFailMode::FailClosed),
@@ -104,13 +100,7 @@ impl JwtBlacklist for RedisJwtBlacklist {
             .unwrap_or(0);
         let ttl = until_unix_s.saturating_sub(now).max(1);
         let _: () = client
-            .set(
-                key,
-                "1",
-                Some(Expiration::EX(ttl as i64)),
-                None,
-                false,
-            )
+            .set(key, "1", Some(Expiration::EX(ttl as i64)), None, false)
             .await
             .map_err(|e| BlacklistError::Backend(e.to_string()))?;
         Ok(())
@@ -125,10 +115,9 @@ mod mgmt_namespace_tests {
     /// (gated by testcontainers).
     #[test]
     fn mgmt_methods_exist_in_source() {
-        let src = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/jwt_blacklist.rs"),
-        )
-        .expect("read source");
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/jwt_blacklist.rs"))
+                .expect("read source");
         let mgmt_prefix: String = ["mgmt_token:", "blacklist:"].concat();
         let jwt_prefix: String = ["jwt:", "blacklist:"].concat();
         assert!(src.contains(&mgmt_prefix), "mgmt prefix missing");

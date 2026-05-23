@@ -57,7 +57,8 @@ pub async fn merge_permissions(
     // ---------------------------------------------------------------------
     // allowed_models intersection (empty = unrestricted at that tier)
     // ---------------------------------------------------------------------
-    let mut allowed_models: HashSet<ModelName> = user.value.allowed_models.iter().cloned().collect();
+    let mut allowed_models: HashSet<ModelName> =
+        user.value.allowed_models.iter().cloned().collect();
     intersect(&mut allowed_models, main.value.allowed_models.iter());
     for g in &groups {
         intersect(&mut allowed_models, g.value.allowed_models.iter());
@@ -82,8 +83,7 @@ pub async fn merge_permissions(
     // ---------------------------------------------------------------------
     // allowed_groups intersection (sub-account inherits from main only via UserEntry.allowed_groups)
     // ---------------------------------------------------------------------
-    let mut allowed_groups: HashSet<Group> =
-        user.value.allowed_groups.iter().cloned().collect();
+    let mut allowed_groups: HashSet<Group> = user.value.allowed_groups.iter().cloned().collect();
     intersect(&mut allowed_groups, main.value.allowed_groups.iter());
 
     // ---------------------------------------------------------------------
@@ -159,7 +159,10 @@ pub async fn merge_permissions(
             user_group_markup: 1.0,
             api_key_markup: 1.0,
             vendor_markup: 1.0,
-            model_markup: pricing.as_ref().map(|p| p.value.model_markup).unwrap_or(1.0),
+            model_markup: pricing
+                .as_ref()
+                .map(|p| p.value.model_markup)
+                .unwrap_or(1.0),
             product: markup,
         },
     })

@@ -91,15 +91,15 @@ async fn accepts_valid_with_leeway() {
 async fn reason_does_not_contain_token() {
     let v = JwtValidator::new(cfg(b"secret", "a", "b", 0, false));
     let secret_token = "not.a.real.jwt";
-    let err = v.validate::<serde_json::Value>(secret_token).await.unwrap_err();
+    let err = v
+        .validate::<serde_json::Value>(secret_token)
+        .await
+        .unwrap_err();
     let dbg = format!("{err:?}");
     let disp = format!("{err}");
     assert!(
         !dbg.contains(secret_token),
         "reason format leaks token: {dbg}"
     );
-    assert!(
-        !disp.contains(secret_token),
-        "display leaks token: {disp}"
-    );
+    assert!(!disp.contains(secret_token), "display leaks token: {disp}");
 }

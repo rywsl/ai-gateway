@@ -104,7 +104,9 @@ impl KekCache {
         self.inner = Arc::new(KekCacheInner {
             keks: new_map,
             active_kid: ArcSwap::from_pointee(new_kid),
-            state: ArcSwap::from_pointee(KekState::DualRead { reencrypting: false }),
+            state: ArcSwap::from_pointee(KekState::DualRead {
+                reencrypting: false,
+            }),
         });
         Ok(())
     }

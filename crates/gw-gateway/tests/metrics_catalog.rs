@@ -35,9 +35,18 @@ fn catalog_includes_required_families() {
 
 #[test]
 fn catalog_kind_distribution_sane() {
-    let counters = METRICS.iter().filter(|m| matches!(m.kind, MetricKind::Counter)).count();
-    let histograms = METRICS.iter().filter(|m| matches!(m.kind, MetricKind::Histogram)).count();
-    let gauges = METRICS.iter().filter(|m| matches!(m.kind, MetricKind::Gauge)).count();
+    let counters = METRICS
+        .iter()
+        .filter(|m| matches!(m.kind, MetricKind::Counter))
+        .count();
+    let histograms = METRICS
+        .iter()
+        .filter(|m| matches!(m.kind, MetricKind::Histogram))
+        .count();
+    let gauges = METRICS
+        .iter()
+        .filter(|m| matches!(m.kind, MetricKind::Gauge))
+        .count();
     assert!(counters >= 10);
     assert!(histograms >= 2);
     assert!(gauges >= 2);

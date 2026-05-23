@@ -35,7 +35,8 @@ fn gemini_combined_chunk_renders_all_events_to_openai_client() {
     // client buffer (regression guard against single-shot overwrite).
     let upstream = Gemini;
     let client = OpenAi;
-    let upstream_chunk = br#"data: {"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}"#;
+    let upstream_chunk =
+        br#"data: {"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}"#;
     let events = upstream.parse_stream_chunk(upstream_chunk).unwrap();
     assert!(
         events.len() >= 2,

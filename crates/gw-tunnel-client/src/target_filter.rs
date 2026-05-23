@@ -25,8 +25,7 @@ pub fn assert_target_allowed(url: &Url) -> Result<(), TargetDenied> {
     if wl.iter().any(|(h, p)| h == host && *p == port) {
         Ok(())
     } else {
-        metrics::counter!("gw_target_filter_denied_total", "host" => host.to_string())
-            .increment(1);
+        metrics::counter!("gw_target_filter_denied_total", "host" => host.to_string()).increment(1);
         Err(TargetDenied(format!("{host}:{port}")))
     }
 }
@@ -50,7 +49,9 @@ impl ResetGuard {
 }
 
 impl Default for ResetGuard {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Drop for ResetGuard {

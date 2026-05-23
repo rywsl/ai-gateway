@@ -1,4 +1,4 @@
-use gw_store::encrypt::{KekCache, KekState, decrypt, encrypt_for_test_only};
+use gw_store::encrypt::{decrypt, encrypt_for_test_only, KekCache, KekState};
 use std::collections::HashMap;
 
 #[test]

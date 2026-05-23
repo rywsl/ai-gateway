@@ -91,8 +91,7 @@ pub async fn pick_peer(
     health: &Arc<KeyHealthStore>,
     in_flight: &Arc<InFlightStore>,
     strategies: &Arc<StrategySet>,
-    #[cfg(feature = "tunnel")]
-    tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
+    #[cfg(feature = "tunnel")] tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
 ) -> Result<Box<HttpPeer>> {
     // The remaining `ErrorType::Custom(...)` short-circuits in this function
     // stay as bare-500 errors (no JSON envelope) on purpose. They signal
@@ -234,10 +233,7 @@ pub async fn pick_peer(
     // and fail fast with 503 when client/upstream kinds differ AND the request
     // is non-stream, rather than letting it reach an upstream whose body the
     // client codec can't decode back.
-    let upstream_kind = if picked_arc
-        .accessible_endpoints
-        .contains(&client_codec_kind)
-    {
+    let upstream_kind = if picked_arc.accessible_endpoints.contains(&client_codec_kind) {
         client_codec_kind
     } else if let Some(k) = picked_arc.accessible_endpoints.first() {
         *k
@@ -294,7 +290,10 @@ pub async fn pick_peer(
         let provider_id = vendor.value.id.as_ref();
         let key_id = picked_arc.key_id.as_ref();
         let default_pref = gw_core::entity::TunnelPreference::default();
-        let pref = picked_arc.tunnel_preference.as_ref().unwrap_or(&default_pref);
+        let pref = picked_arc
+            .tunnel_preference
+            .as_ref()
+            .unwrap_or(&default_pref);
         let resolution = match tunnel {
             Some(t) => t.resolve(provider_id, key_id, pref),
             None => gw_tunnel_client::resolver::TunnelResolution::Direct,
@@ -303,15 +302,12 @@ pub async fn pick_peer(
             gw_tunnel_client::resolver::TunnelResolution::Direct => {
                 if pref.require_tunnel {
                     // ADR-T-4 — never silently fall back when require_tunnel=true.
-                    metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node").increment(1);
+                    metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node")
+                        .increment(1);
                     return emit_envelope_and_bail(
                         session,
                         ctx,
-                        envelope_for(
-                            codes::GW_TUNNEL_NO_NODE,
-                            "no tunnel node available",
-                            502,
-                        ),
+                        envelope_for(codes::GW_TUNNEL_NO_NODE, "no tunnel node available", 502),
                     )
                     .await;
                 }
@@ -323,28 +319,27 @@ pub async fn pick_peer(
                 let t = tunnel.expect("TunnelStack present implied by Use(_)");
                 match t.peer_for_node(&node_id, &host, port).await {
                     Ok(p) => {
-                        metrics::counter!("gw_tunnel_resolve_total", "result" => "tunnel").increment(1);
+                        metrics::counter!("gw_tunnel_resolve_total", "result" => "tunnel")
+                            .increment(1);
                         ctx.tunnel_resolution = Some(node_id);
                         peer = p;
                     }
                     Err(crate::tunnel_stack::TunnelPeerError::NoLive { .. }) => {
-                        metrics::counter!("gw_tunnel_resolve_total", "result" => "no_live").increment(1);
+                        metrics::counter!("gw_tunnel_resolve_total", "result" => "no_live")
+                            .increment(1);
                         // Push the failed key onto the retry blacklist so a
                         // retry on this request lands on a different key.
                         ctx.retry_blacklist.push(picked_arc.key_id.clone());
                         return emit_envelope_and_bail(
                             session,
                             ctx,
-                            envelope_for(
-                                codes::GW_TUNNEL_NO_LIVE,
-                                "tunnel node not live",
-                                502,
-                            ),
+                            envelope_for(codes::GW_TUNNEL_NO_LIVE, "tunnel node not live", 502),
                         )
                         .await;
                     }
                     Err(crate::tunnel_stack::TunnelPeerError::TargetDenied { .. }) => {
-                        metrics::counter!("gw_tunnel_resolve_total", "result" => "denied").increment(1);
+                        metrics::counter!("gw_tunnel_resolve_total", "result" => "denied")
+                            .increment(1);
                         return emit_envelope_and_bail(
                             session,
                             ctx,
@@ -557,7 +552,10 @@ pub async fn rewrite_request(
     } else {
         picked.api_key.expose_secret().to_owned()
     };
-    let auth_value = vendor.value.auth_template.replace("{api_key}", &auth_secret);
+    let auth_value = vendor
+        .value
+        .auth_template
+        .replace("{api_key}", &auth_secret);
     let _ = upstream_request.insert_header("authorization", auth_value);
     if let Some(host) = vendor.value.base_urls.first().and_then(|u| u.host_str()) {
         let _ = upstream_request.insert_header("host", host.to_string());
@@ -591,11 +589,19 @@ fn codec_for(k: gw_core::protocol::ProtocolKind) -> AnyCodec {
 mod cross_protocol_nonstream_tests {
     #[test]
     fn cross_protocol_non_stream_short_circuit_present_in_source() {
-        let src = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/filters/upstream.rs")
-        ).expect("read source");
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filters/upstream.rs"
+        ))
+        .expect("read source");
         // Build the needle at runtime so this test file's own literal doesn't self-match.
-        let needle: String = ["GW_REQUEST_", "CROSS_PROTOCOL_", "NONSTREAM_", "NOT_SUPPORTED"].concat();
+        let needle: String = [
+            "GW_REQUEST_",
+            "CROSS_PROTOCOL_",
+            "NONSTREAM_",
+            "NOT_SUPPORTED",
+        ]
+        .concat();
         assert!(
             src.contains(&needle),
             "cross-protocol non-stream short-circuit must be added in B1-4"
@@ -607,9 +613,10 @@ mod cross_protocol_nonstream_tests {
 mod oauth_injection_tests {
     #[test]
     fn oauth_injection_present_in_source() {
-        let src = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/filters/upstream.rs")
-        )
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filters/upstream.rs"
+        ))
         .expect("read source");
         assert!(
             src.contains("picked.oauth.as_ref()"),

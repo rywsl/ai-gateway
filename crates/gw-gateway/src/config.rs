@@ -138,14 +138,30 @@ pub struct DetailedLimitsCfg {
     pub single_payload_soft_cap_bytes: usize,
 }
 
-fn default_detailed_enabled() -> bool { true }
-fn default_detailed_stream() -> String { "usage:detailed".to_string() }
-fn default_detailed_maxlen() -> u64 { 10_000_000 }
-fn default_small_threshold() -> usize { 1024 }
-fn default_medium_threshold() -> usize { 65_536 }
-fn default_zstd_level() -> i32 { 3 }
-fn default_channel_capacity() -> usize { 65_536 }
-fn default_single_payload_soft_cap() -> usize { 8 * 1024 * 1024 }
+fn default_detailed_enabled() -> bool {
+    true
+}
+fn default_detailed_stream() -> String {
+    "usage:detailed".to_string()
+}
+fn default_detailed_maxlen() -> u64 {
+    10_000_000
+}
+fn default_small_threshold() -> usize {
+    1024
+}
+fn default_medium_threshold() -> usize {
+    65_536
+}
+fn default_zstd_level() -> i32 {
+    3
+}
+fn default_channel_capacity() -> usize {
+    65_536
+}
+fn default_single_payload_soft_cap() -> usize {
+    8 * 1024 * 1024
+}
 
 impl Default for DetailedCompressionCfg {
     fn default() -> Self {
@@ -158,16 +174,24 @@ impl Default for DetailedCompressionCfg {
 }
 
 impl Default for DetailedChannelCfg {
-    fn default() -> Self { Self { capacity: default_channel_capacity() } }
+    fn default() -> Self {
+        Self {
+            capacity: default_channel_capacity(),
+        }
+    }
 }
 
 impl Default for DetailedFlusherCfg {
-    fn default() -> Self { Self { workers: 0 } }
+    fn default() -> Self {
+        Self { workers: 0 }
+    }
 }
 
 impl Default for DetailedLimitsCfg {
     fn default() -> Self {
-        Self { single_payload_soft_cap_bytes: default_single_payload_soft_cap() }
+        Self {
+            single_payload_soft_cap_bytes: default_single_payload_soft_cap(),
+        }
     }
 }
 
@@ -295,13 +319,27 @@ pub struct TunnelCfg {
     pub max_streams_per_conn: u32,
 }
 
-fn default_doh() -> String { "cloudflare".into() }
-fn default_dns_cache_ttl_secs() -> u32 { 600 }
-fn default_heartbeat_secs() -> u32 { 30 }
-fn default_missed_pong() -> u32 { 3 }
-fn default_backoff_min_secs() -> u32 { 1 }
-fn default_backoff_max_secs() -> u32 { 60 }
-fn default_max_streams() -> u32 { 256 }
+fn default_doh() -> String {
+    "cloudflare".into()
+}
+fn default_dns_cache_ttl_secs() -> u32 {
+    600
+}
+fn default_heartbeat_secs() -> u32 {
+    30
+}
+fn default_missed_pong() -> u32 {
+    3
+}
+fn default_backoff_min_secs() -> u32 {
+    1
+}
+fn default_backoff_max_secs() -> u32 {
+    60
+}
+fn default_max_streams() -> u32 {
+    256
+}
 
 impl Default for TunnelCfg {
     fn default() -> Self {
@@ -408,7 +446,10 @@ pub fn load() -> anyhow::Result<Config> {
 #[cfg(test)]
 mod tunnel_cfg_tests {
     use super::*;
-    use figment::{providers::{Format, Toml}, Figment};
+    use figment::{
+        providers::{Format, Toml},
+        Figment,
+    };
 
     fn extract(toml: &str) -> anyhow::Result<Config> {
         Figment::new()
@@ -443,7 +484,11 @@ mod tunnel_cfg_tests {
     fn tunnel_rejects_zero_backoff_min() {
         let defaults = include_str!("../../../config/default.toml");
         let overrides = "[tunnel]\nenabled = true\nbackoff_min_secs = 0\n";
-        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
         assert!(cfg.validate().is_err());
     }
 
@@ -451,7 +496,11 @@ mod tunnel_cfg_tests {
     fn tunnel_rejects_min_greater_than_max() {
         let defaults = include_str!("../../../config/default.toml");
         let overrides = "[tunnel]\nenabled = true\nbackoff_min_secs = 60\nbackoff_max_secs = 1\n";
-        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
         assert!(cfg.validate().is_err());
     }
 
@@ -459,7 +508,11 @@ mod tunnel_cfg_tests {
     fn tunnel_rejects_zero_missed_pong() {
         let defaults = include_str!("../../../config/default.toml");
         let overrides = "[tunnel]\nenabled = true\nmissed_pong_threshold = 0\n";
-        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
         assert!(cfg.validate().is_err());
     }
 
@@ -467,7 +520,11 @@ mod tunnel_cfg_tests {
     fn tunnel_validates_when_enabled_with_defaults() {
         let defaults = include_str!("../../../config/default.toml");
         let overrides = "[tunnel]\nenabled = true\n";
-        let cfg: Config = Figment::new().merge(Toml::string(defaults)).merge(Toml::string(overrides)).extract().unwrap();
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
         assert!(cfg.validate().is_ok());
     }
 }

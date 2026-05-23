@@ -22,9 +22,9 @@
 //!   per C-γ §ADR-Cγ-1.
 
 use gw_core::ids::UserId;
-use gw_store::deduction::{DEDUCT, DeductionState};
-use std::sync::Arc;
+use gw_store::deduction::{DeductionState, DEDUCT};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::Arc;
 
 /// Categorises a freeze for telemetry and (Phase 6) routing in the task
 /// settle path.

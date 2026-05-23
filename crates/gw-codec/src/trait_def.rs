@@ -51,7 +51,11 @@ pub trait ProtocolCodec: Send + Sync + 'static {
     }
 
     fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>>;
-    fn render_request(&self, ir: &RequestIR<'_>, buf: &mut BytesMut) -> Result<(), ErrorIR<'static>>;
+    fn render_request(
+        &self,
+        ir: &RequestIR<'_>,
+        buf: &mut BytesMut,
+    ) -> Result<(), ErrorIR<'static>>;
 
     /// Parse one already-framed SSE event chunk.
     ///

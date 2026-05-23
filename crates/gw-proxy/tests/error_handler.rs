@@ -34,7 +34,9 @@ fn outcome() -> ClassifierOutcome {
             kind: RateLimitKind::Unknown,
             retry_after_secs: None,
         }),
-        oauth_signal: Some(OAuthSignal { kind: OAuthSignalKind::AccountBlocked }),
+        oauth_signal: Some(OAuthSignal {
+            kind: OAuthSignalKind::AccountBlocked,
+        }),
         passthrough_body: None,
     }
 }
@@ -62,7 +64,14 @@ fn fanout_invokes_listeners_in_registered_order() {
     h.fanout(&ctx, &oc);
     assert_eq!(
         *log.lock(),
-        vec!["key_health", "rate_limit", "oauth", "cache", "metrics", "ledger"]
+        vec![
+            "key_health",
+            "rate_limit",
+            "oauth",
+            "cache",
+            "metrics",
+            "ledger"
+        ]
     );
 }
 

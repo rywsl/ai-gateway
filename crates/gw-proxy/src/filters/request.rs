@@ -107,7 +107,10 @@ pub async fn run(
         // 4. Mgmt-token blacklist. FailClosed: a Redis outage rejects the
         //    request rather than serving stale-allow.
         if mgmt_blacklist
-            .check_mgmt(parts.token_id, gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed)
+            .check_mgmt(
+                parts.token_id,
+                gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed,
+            )
             .await
         {
             mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_REVOKED);

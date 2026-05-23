@@ -24,6 +24,9 @@ fn private_v6_blocked() {
 #[test]
 fn public_ips_allowed() {
     for ip in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
-        assert!(!is_ip_blocked(ip.parse().unwrap()), "expected allowed: {ip}");
+        assert!(
+            !is_ip_blocked(ip.parse().unwrap()),
+            "expected allowed: {ip}"
+        );
     }
 }

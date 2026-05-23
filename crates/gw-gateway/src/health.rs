@@ -141,8 +141,7 @@ async fn handle_connection(
             match verify_healthz_request(auth_header, &store, &mgmt_blacklist).await {
                 Ok(_scope) => {
                     let body = build_healthz_body(path, &state);
-                    let _ =
-                        write_json_response(&mut stream, 200, "OK", body.as_bytes()).await;
+                    let _ = write_json_response(&mut stream, 200, "OK", body.as_bytes()).await;
                 }
                 Err(HealthzAuthError::Missing) => {
                     let _ = write_response(
@@ -225,10 +224,10 @@ async fn verify_healthz_request(
     store: &Arc<gw_store::EntityStore>,
     blacklist: &Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
 ) -> Result<gw_core::entity::MgmtScope, HealthzAuthError> {
-    let parsed = gw_auth::mgmt::parse_mgmt_authorization(auth_header)
-        .ok_or(HealthzAuthError::Missing)?;
-    let parts = gw_auth::mgmt::split_mgmt_token_payload(&parsed.token)
-        .ok_or(HealthzAuthError::Invalid)?;
+    let parsed =
+        gw_auth::mgmt::parse_mgmt_authorization(auth_header).ok_or(HealthzAuthError::Missing)?;
+    let parts =
+        gw_auth::mgmt::split_mgmt_token_payload(&parsed.token).ok_or(HealthzAuthError::Invalid)?;
 
     let entry = store
         .mgmt_token_or_load(parts.token_id)

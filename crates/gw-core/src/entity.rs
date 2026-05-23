@@ -128,7 +128,10 @@ impl std::fmt::Debug for ApiKeyEntry {
             .field("key_id", &self.key_id)
             .field("user_id", &self.user_id)
             .field("status", &self.status)
-            .field("hash", &format_args!("[REDACTED; {} bytes]", self.hash.len()))
+            .field(
+                "hash",
+                &format_args!("[REDACTED; {} bytes]", self.hash.len()),
+            )
             .field("allowed_models", &self.allowed_models)
             .field("allowed_channels", &self.allowed_channels)
             .field("rpm_limit", &self.rpm_limit)
@@ -541,7 +544,10 @@ impl std::fmt::Debug for ManagementTokenEntry {
             .field("token_id", &self.token_id)
             .field("user_id", &self.user_id)
             .field("scope", &self.scope)
-            .field("hash", &format_args!("[REDACTED; {} bytes]", self.hash.len()))
+            .field(
+                "hash",
+                &format_args!("[REDACTED; {} bytes]", self.hash.len()),
+            )
             .field("expires_at", &self.expires_at)
             .field("status", &self.status)
             .field("display_name", &self.display_name)
@@ -595,8 +601,7 @@ mod tests {
             kek_kid: "test-kid-1".to_string(),
         };
         let serialised = serde_json::to_string(&original).expect("serialise");
-        let restored: EncryptedBlob =
-            serde_json::from_str(&serialised).expect("deserialise");
+        let restored: EncryptedBlob = serde_json::from_str(&serialised).expect("deserialise");
         assert_eq!(restored.ciphertext, original.ciphertext);
         assert_eq!(restored.nonce, original.nonce);
         assert_eq!(restored.auth_tag, original.auth_tag);

@@ -5,8 +5,7 @@ use std::borrow::Cow;
 #[test]
 fn empty_mutation_returns_borrowed() {
     let codec = OpenAi;
-    let body =
-        br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"# as &[u8];
+    let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"# as &[u8];
     let out = same_protocol_passthrough(&codec, body, &Mutations::NONE).unwrap();
     assert!(matches!(out, Cow::Borrowed(_)));
 }
@@ -14,8 +13,7 @@ fn empty_mutation_returns_borrowed() {
 #[test]
 fn non_empty_mutation_returns_owned() {
     let codec = OpenAi;
-    let body =
-        br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"# as &[u8];
+    let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"# as &[u8];
     let mut m = Mutations::NONE;
     m.set_max_tokens();
     let out = same_protocol_passthrough(&codec, body, &m).unwrap();

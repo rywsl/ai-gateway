@@ -1,7 +1,5 @@
 use bytes::Bytes;
-use gw_codec::compression::{
-    decode, encode, negotiate_outbound, parse_content_encoding, Encoding,
-};
+use gw_codec::compression::{decode, encode, negotiate_outbound, parse_content_encoding, Encoding};
 
 #[test]
 fn gzip_roundtrip() {

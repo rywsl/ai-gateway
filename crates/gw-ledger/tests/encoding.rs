@@ -55,7 +55,10 @@ fn encode_lz4_shrinks_repetitive() {
     let bytes = input.into_bytes();
     let (enc, out) = encode(bytes.clone(), &cfg()).expect("encode");
     assert_eq!(enc, Encoding::Lz4);
-    assert!(out.len() < bytes.len() / 4, "lz4 should shrink repetitive bytes meaningfully");
+    assert!(
+        out.len() < bytes.len() / 4,
+        "lz4 should shrink repetitive bytes meaningfully"
+    );
 }
 
 #[test]
@@ -64,7 +67,10 @@ fn encode_zstd_shrinks_large_repetitive() {
     let bytes = input.into_bytes();
     let (enc, out) = encode(bytes.clone(), &cfg()).expect("encode");
     assert_eq!(enc, Encoding::Zstd);
-    assert!(out.len() < bytes.len() / 10, "zstd should shrink very repetitive bytes hard");
+    assert!(
+        out.len() < bytes.len() / 10,
+        "zstd should shrink very repetitive bytes hard"
+    );
 }
 
 use gw_ledger::encoding::decode;

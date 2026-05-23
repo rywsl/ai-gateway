@@ -14,10 +14,7 @@ async fn override_redirects_to_specified_ip() {
 #[tokio::test]
 async fn override_with_blocked_ip_errors() {
     let _g = OverrideGuard::new();
-    set_override(
-        "api.x.test",
-        vec!["169.254.169.254".parse().unwrap()],
-    );
+    set_override("api.x.test", vec!["169.254.169.254".parse().unwrap()]);
     let r = SafeDnsResolver::cloudflare_default();
     let err = r.resolve("api.x.test").await;
     assert!(err.is_err(), "blocked IP via override should error");

@@ -49,10 +49,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
     let pg_node = Postgres::default().start().await.expect("start postgres");
     let redis_node = Redis::default().start().await.expect("start redis");
 
-    let pg_port = pg_node
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("pg port");
+    let pg_port = pg_node.get_host_port_ipv4(5432).await.expect("pg port");
     let redis_port = redis_node
         .get_host_port_ipv4(6379)
         .await
@@ -121,25 +118,23 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
     );
     let resilience: Arc<gw_proxy::resilience::ResilienceState> =
         Arc::new(gw_proxy::resilience::ResilienceState::default());
-    let detailed_archive = Arc::new(
-        gw_ledger::detailed_archive::DetailedArchive::start(
-            (*redis.pool).clone(),
-            gw_ledger::detailed_archive::DetailedArchiveCfg {
-                stream: "usage:detailed".to_string(),
-                maxlen: 1_000,
-                channel_capacity: 64,
-                workers: 1,
-                single_payload_soft_cap_bytes: 1024 * 1024,
-                compression: gw_ledger::encoding::CompressionCfg {
-                    thresholds: gw_ledger::encoding::TierThresholds {
-                        small_threshold_bytes: 1024,
-                        medium_threshold_bytes: 65_536,
-                    },
-                    zstd_level: 3,
+    let detailed_archive = Arc::new(gw_ledger::detailed_archive::DetailedArchive::start(
+        (*redis.pool).clone(),
+        gw_ledger::detailed_archive::DetailedArchiveCfg {
+            stream: "usage:detailed".to_string(),
+            maxlen: 1_000,
+            channel_capacity: 64,
+            workers: 1,
+            single_payload_soft_cap_bytes: 1024 * 1024,
+            compression: gw_ledger::encoding::CompressionCfg {
+                thresholds: gw_ledger::encoding::TierThresholds {
+                    small_threshold_bytes: 1024,
+                    medium_threshold_bytes: 65_536,
                 },
+                zstd_level: 3,
             },
-        ),
-    );
+        },
+    ));
 
     // -----------------------------------------------------------------
     // 4. Construct LlmGateway. This is the "smoke" assertion: the

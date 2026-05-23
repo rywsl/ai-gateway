@@ -60,7 +60,10 @@ async fn apply_entity_event_deletes_redis_l1() {
 
     // 4. assert exists == 1.
     let exists_before: i64 = client.exists(key).await.unwrap();
-    assert_eq!(exists_before, 1, "precondition: entity:apikey:ak_x must exist");
+    assert_eq!(
+        exists_before, 1,
+        "precondition: entity:apikey:ak_x must exist"
+    );
 
     // 5. apply_entity_event(&store, "apikey", "ak_x").
     apply_inline_for_test_helper(&store, "apikey", "ak_x").await;

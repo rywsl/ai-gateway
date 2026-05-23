@@ -213,9 +213,11 @@ impl EntityStore {
         let deadline = self.cold_load_timeout;
         self.user
             .try_get_with_by_ref(id, async move {
-                with_cold_load_timeout("user", deadline, async move {
-                    load_user(&loader, &id2).await
-                })
+                with_cold_load_timeout(
+                    "user",
+                    deadline,
+                    async move { load_user(&loader, &id2).await },
+                )
                 .await
                 .map(Arc::new)
                 .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
@@ -224,10 +226,7 @@ impl EntityStore {
             .ok()
     }
 
-    pub async fn user_group_or_load(
-        &self,
-        id: &UserGroupId,
-    ) -> Option<Arc<Versioned<UserGroup>>> {
+    pub async fn user_group_or_load(&self, id: &UserGroupId) -> Option<Arc<Versioned<UserGroup>>> {
         if let Some(hit) = self.user_group.get(id).await {
             return Some(hit);
         }
@@ -247,10 +246,7 @@ impl EntityStore {
             .ok()
     }
 
-    pub async fn apikey_or_load(
-        &self,
-        id: &ApiKeyId,
-    ) -> Option<Arc<Versioned<ApiKeyEntry>>> {
+    pub async fn apikey_or_load(&self, id: &ApiKeyId) -> Option<Arc<Versioned<ApiKeyEntry>>> {
         if let Some(hit) = self.apikey.get(id).await {
             return Some(hit);
         }
@@ -290,10 +286,7 @@ impl EntityStore {
             .ok()
     }
 
-    pub async fn vendor_key_or_load(
-        &self,
-        id: &KeyId,
-    ) -> Option<Arc<Versioned<VendorKey>>> {
+    pub async fn vendor_key_or_load(&self, id: &KeyId) -> Option<Arc<Versioned<VendorKey>>> {
         if let Some(hit) = self.vendor_key.get(id).await {
             return Some(hit);
         }
@@ -313,10 +306,7 @@ impl EntityStore {
             .ok()
     }
 
-    pub async fn model_group_or_load(
-        &self,
-        id: &Group,
-    ) -> Option<Arc<Versioned<ModelGroup>>> {
+    pub async fn model_group_or_load(&self, id: &Group) -> Option<Arc<Versioned<ModelGroup>>> {
         if let Some(hit) = self.model_group.get(id).await {
             return Some(hit);
         }
@@ -336,10 +326,7 @@ impl EntityStore {
             .ok()
     }
 
-    pub async fn pricing_or_load(
-        &self,
-        id: &ModelName,
-    ) -> Option<Arc<Versioned<Pricing>>> {
+    pub async fn pricing_or_load(&self, id: &ModelName) -> Option<Arc<Versioned<Pricing>>> {
         if let Some(hit) = self.pricing.get(id).await {
             return Some(hit);
         }
@@ -368,9 +355,11 @@ impl EntityStore {
         let deadline = self.cold_load_timeout;
         self.jwks
             .try_get_with_by_ref(id, async move {
-                with_cold_load_timeout("jwks", deadline, async move {
-                    load_jwks(&loader, &id2).await
-                })
+                with_cold_load_timeout(
+                    "jwks",
+                    deadline,
+                    async move { load_jwks(&loader, &id2).await },
+                )
                 .await
                 .map(Arc::new)
                 .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))

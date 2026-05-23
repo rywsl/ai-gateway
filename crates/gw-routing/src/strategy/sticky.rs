@@ -90,9 +90,7 @@ impl Strategy for Sticky {
         }
         let Some(conv) = ctx.conversation_id else {
             // No conversation context: fall back to first available.
-            return c
-                .iter()
-                .find(|k| h.is_available(&k.key_id, ctx.api_format));
+            return c.iter().find(|k| h.is_available(&k.key_id, ctx.api_format));
         };
 
         // Hit path: look up an existing binding. moka refreshes the TTL on

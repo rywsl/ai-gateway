@@ -26,5 +26,7 @@ fn http_80_denied_unless_in_whitelist() {
 fn http_80_passes_when_explicitly_whitelisted() {
     let _g = ResetGuard::new();
     set_whitelist(vec![("status.example.com".into(), 80)]);
-    assert!(assert_target_allowed(&Url::parse("http://status.example.com/health").unwrap()).is_ok());
+    assert!(
+        assert_target_allowed(&Url::parse("http://status.example.com/health").unwrap()).is_ok()
+    );
 }
