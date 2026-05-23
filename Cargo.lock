@@ -1822,6 +1822,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "flate2",
+ "fred",
  "gw-auth",
  "gw-capability",
  "gw-codec",

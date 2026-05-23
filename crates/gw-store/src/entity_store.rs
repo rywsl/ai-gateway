@@ -488,8 +488,10 @@ impl EntityStore {
 
     /// G6/T1-C: handle to the optional loader's Redis pool, used by the
     /// stream consumer to DEL the Redis L1 key before invalidating Moka.
-    /// `None` for in-process tests built with `EntityStore::new()`.
-    pub(crate) fn loader_redis(&self) -> Option<&crate::redis_client::RedisCtx> {
+    /// Also consumed by the proxy's `OAuthListener` (T2-B) to reverse-XADD
+    /// `events:entity` on `OAuthSignal::RefreshFailed`. `None` for in-process
+    /// tests built with `EntityStore::new()`.
+    pub fn loader_redis(&self) -> Option<&crate::redis_client::RedisCtx> {
         self.loader.as_deref().map(|ctx| &ctx.redis)
     }
 
