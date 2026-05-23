@@ -23,7 +23,7 @@ A Rust LLM gateway on **Pingora 0.8**. It accepts OpenAI- / Anthropic- / Gemini-
 
 Capability surface highlights:
 
-- **Wire formats**: OpenAI Chat + Responses, Anthropic Messages, Gemini Generate. Same-protocol passthrough is zero-copy; cross-protocol request AND response re-render are wired (G8 closed in `50cd9e7`) — both directions emit the `gw_codec_cross_render_total{from,to}` metric.
+- **Wire formats**: OpenAI Chat + Responses, Anthropic Messages, Gemini Generate. Same-protocol passthrough is zero-copy; cross-protocol request AND response re-render are wired (request side by codec-s4 v1; response side both stream and non-stream by S-codec v2, landed 2026-05-24). Cross-render activity is surfaced via `gw_codec_cross_render_total{from,to}` (legacy/stream), `gw_codec_cross_render_nonstream_total{from,to}` (v2 non-stream), and `gw_codec_cross_render_lossy_total{from,to,field}` (vendor-specific drops).
 - **Auth**: `(x-api-key, x-api-key-id)` pair, `Authorization: Bearer <JWT>` (HS256/RS256, `iss`/`aud`/`nbf`/leeway on the management-token surface), optional HMAC signing with ±300 s replay window.
 - **Permissions**: 5-tier merge (global → user-group → user → sub-account → api-key); model-permission regex with a 100 ms per-call ReDoS budget + auto-disable.
 - **Routing**: 8 strategies (`FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky`). Multi-dim per-(key, format) health, sliding-window cooldown, per-key in-flight cap.

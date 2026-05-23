@@ -1,5 +1,7 @@
 # Codec S4 — 响应侧 N² Wire 直转 + UsageSnapshot（v2026-05-19，v2 重写）
 
+> **Superseded by [2026-05-24-v2-codec-cleanup-design.md](./2026-05-24-v2-codec-cleanup-design.md) (S-codec sub-spec, landed 2026-05-24). All ADR-S4-v2-* items in this document are now implemented and tracked under the new spec.**
+
 > **Integration status**: integrated by [2026-05-20-v2-integration-design.md](./2026-05-20-v2-integration-design.md). See §2 表 A / 表 B / 表 D and §3 不变量 for cross-spec resolutions and authoritative type / stream / metric locations.
 
 

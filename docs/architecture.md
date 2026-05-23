@@ -233,7 +233,6 @@ Pending lints (uncomment when target phase lands):
 
 | Behaviour | Reason | Source |
 |-----------|--------|--------|
-| Cross-protocol non-stream returns `503 GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` | Response re-render across protocols is deferred to codec-s4 v2; `pick_peer` rejects rather than letting an unparseable upstream body reach the client codec. Same-protocol non-stream now succeeds — `response_body_filter` accumulates the upstream body and calls `parse_response` at EOS to populate `ctx.usage`. | `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/filters/response.rs` |
 | `(x-api-key, x-api-key-id)` pair required | A BYOK gateway can't route by key prefix; the pair makes tenant routing explicit. Anthropic SDK clients must supply both. Missing either yields `GW_AUTH_INVALID_APIKEY` (deliberately generic). | `crates/gw-proxy/src/filters/request.rs` auth extraction |
 | `trust_xff = false` by default | With it off, the IP blocklist matches the L4 socket peer. Enabling it behind an untrusted L7 hop lets clients forge XFF and bypass the blocklist. Fail-closed. | `config/default.toml [security]`, `crates/gw-proxy/src/filters/early.rs` |
 | Distinct 429 codes | `GW_QUOTA_RPM_EXCEEDED` (gateway tripped per-user RPM) vs `GW_UPSTREAM_OVERLOADED` (upstream returned 429) — clients need to distinguish local vs upstream throttling. | `crates/gw-core/src/error/codes.rs` |
@@ -268,8 +267,7 @@ The 13 gaps G1-G13 catalogued in [`docs/superpowers/specs/2026-05-21-known-gaps-
 
 - **G6**: dedicated `signature_secret` field on `ApiKeyEntry` (currently reuses `hash` as the HMAC secret — v1.5 compromise).
 - **G7**: workspace-global `signature_required` toggle (ADR-G7-2; out of scope for v1.5). Stash the decompressed body so the codec parse step reuses it (the compressed-body parse gap — see §8 Deliberate behaviours).
-- **G8**: direct wire-to-wire codegen (codec-s3 N²) replacing the IR round-trip; multi-event SSE buffering across Pingora chunk boundaries; cross-protocol *non-streaming* response body re-render.
-- **G9**: stateful cross-chunk accumulators (thinking signature continuation, tool_call delta coalescing) → codec-s3 v2.
+- **G8**: direct wire-to-wire codegen (codec-s3 N²) replacing the IR round-trip; multi-event SSE buffering across Pingora chunk boundaries. *(Cross-protocol non-streaming response body re-render landed in S-codec v2, 2026-05-24; entry trimmed accordingly.)*
 - **G10**: response-side (5xx/429) retry executor → `FailoverExecutor v2` (routing-r-e); same-key retry with backoff; per-`ModelGroup` retry config.
 - **G11**: three-layer fallback (in-memory + on-disk file + periodic drainer + startup recovery) → billing-c-delta.
 - **G3**: per-tenant timezone for the daily-quota day window (v1.5 is UTC-only).

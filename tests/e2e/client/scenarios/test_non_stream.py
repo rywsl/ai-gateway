@@ -1,4 +1,4 @@
-"""T4-A (B1) docker e2e: same-protocol non-stream + cross-protocol 503.
+"""T4-A (B1) + S-codec v2 docker e2e: same-protocol non-stream + cross-protocol round-trip.
 
 Validates the full B1 deliverable end-to-end through the docker stack:
 
@@ -12,10 +12,14 @@ Validates the full B1 deliverable end-to-end through the docker stack:
 - The ledger emits a `usage:records` entry with `is_stream=false` and
   `usage_source="upstream"` (the freeze-time `Estimated` fallback only
   kicks in when `output_tokens == 0`).
-- Cross-protocol + non-stream short-circuits with `503` + the
-  `GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` envelope at the
-  tail of `pick_peer` (ADR-B1-4 — `crates/gw-proxy/src/filters/upstream.rs`
-  lines ~230-254).
+- **Cross-protocol + non-stream now round-trips end-to-end** (S-codec v2,
+  2026-05-24). The pre-T6 `503
+  GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` short-circuit was
+  removed by T6; the response body is parsed by the upstream codec and
+  re-rendered by the client codec via `CrossRender` (see
+  `crates/gw-proxy/src/filters/response.rs` non-stream branch +
+  `crates/gw-codec/src/cross_render.rs`). Activity is observable via the
+  `gw_codec_cross_render_nonstream_total{from,to}` metric.
 
 ----------------------------------------------------------------------------
 Harness notes — deviations from the original T4-A plan snippet
@@ -45,17 +49,17 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from conftest import (
     BALANCE_LARGE,
     MODEL,
     PROTO_OPENAI,
     FakeUpstreamClient,
     FakeWebClient,
+    label_delta,
     make_anthropic_client,
     make_gemini_client,
     make_openai_client,
+    metrics_snapshot,
     seed_model_group,
     seed_passthrough,
     seed_pricing,
@@ -316,24 +320,51 @@ def test_gemini_non_stream_returns_usage(
 
 
 # ---------------------------------------------------------------------------
-# Cross-protocol + non-stream → 503 fast-fail (ADR-B1-4).
+# Cross-protocol + non-stream → round-trips end-to-end (S-codec v2, 2026-05-24).
 #
 # Seed an openai client on top of an anthropic-only vendor key
 # (`accessible_endpoints=["anthropic"]`, `protocol_conversion=True`), then
-# fire a non-stream request. The candidate filter accepts the key (protocol
-# conversion makes it selectable), `pick_peer` then notices
-# `upstream_kind=anthropic != client_kind=openai` AND `!ctx.is_stream`,
-# emits the `GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` envelope
-# with status 503, and returns. No upstream traffic flows. The OpenAI SDK
-# raises an APIStatusError on 503.
+# fire a non-stream request. The S-codec v2 path:
+#
+# 1. `request_filter` parses with openai codec, `rewrite_request` re-renders
+#    request body with anthropic codec (cross-protocol request side — landed
+#    in codec-s4 v1, G8).
+# 2. fake_upstream returns an Anthropic-shaped non-stream JSON body.
+# 3. `response_body_filter` accumulates the upstream body, calls the
+#    upstream codec's `parse_response` to produce a `ResponseIR`, then
+#    runs `CrossRender` to emit the body in the client (OpenAI Chat) shape
+#    into `ctx.pending_client_body`. The `body_filter` swaps it in on EOS.
+# 4. The OpenAI SDK on the client side decodes a valid `ChatCompletion`.
+#
+# Assertions:
+# - HTTP 200 (no `GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` 503 —
+#   that short-circuit was removed by T6, the error code by T10).
+# - Response body shape matches OpenAI Chat schema
+#   (`body["choices"][0]["message"]` exists).
+# - `gw_codec_cross_render_nonstream_total{from="anthropic_messages",
+#   to="openai_chat"}` ticks (>= 1).
+# - A `usage:records` ledger entry is written (request reached
+#   `logging_filter`).
 # ---------------------------------------------------------------------------
 
 
-def test_cross_protocol_non_stream_returns_503(
+def test_cross_protocol_non_stream_round_trips(
     gateway_url: str,
     fake_web: FakeWebClient,
     fake_upstream: FakeUpstreamClient,
+    metrics_url: str,
 ) -> None:
+    """S-codec v2: openai client → anthropic upstream → non-stream round-trip.
+
+    Replaces the pre-T6 `test_cross_protocol_non_stream_returns_503` which
+    asserted the now-removed
+    `GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` 503 short-circuit
+    in `crates/gw-proxy/src/filters/upstream.rs::pick_peer`. Post-T6 the
+    short-circuit is gone (T6 commit `ca2af19`); post-T10 the error code
+    constant itself is gone too. Round-trip semantics are wired in
+    `crates/gw-proxy/src/filters/response.rs` non-stream branch via
+    `CrossRender` (`crates/gw-codec/src/cross_render.rs`).
+    """
     user_id = "u-ns-cross"
     api_key_id = "ak-ns-cross"
     api_key_plaintext = "sk-ns-cross"
@@ -370,50 +401,56 @@ def test_cross_protocol_non_stream_returns_503(
     )
     seed_pricing(fake_web, model=model)
 
-    # Install a scenario that 500s if accidentally hit, so a regression
-    # (request reaching the upstream) is caught loudly instead of silently
-    # exercising the cross-protocol non-stream branch.
-    fake_upstream.set_scenario(
-        {
-            "routes": [
-                {
-                    "match": {"method": "POST"},
-                    "response": {
-                        "kind": "static",
-                        "status": 500,
-                        "headers": {"content-type": "application/json"},
-                        "body": '{"error":"should not have been called"}',
-                        "delay_ms": 0,
-                    },
-                }
-            ]
-        }
-    )
+    # Anthropic-shaped non-stream body — `parse_response` will produce a
+    # `ResponseIR`, then `CrossRender` emits OpenAI Chat JSON.
+    fake_upstream.set_scenario(_static_json_scenario(_ANTHROPIC_NON_STREAM_BODY))
+
+    pre = metrics_snapshot("gw_codec_cross_render_nonstream_total", metrics_url)
 
     # Import lazily so test collection works without the SDK installed.
     import openai
 
     client = make_openai_client(gateway_url, api_key_plaintext, api_key_id)
-    with pytest.raises(openai.APIStatusError) as exc_info:
-        client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": "hi"}],
-            stream=False,
-        )
-    assert exc_info.value.status_code == 503, (
-        f"expected 503, got {exc_info.value.status_code}: {exc_info.value!r}"
-    )
-    # OpenAI-style error envelope (rendered by gw-codec/openai render_error).
-    # Body shape: `{"error":{"type":..., "message":..., "code":"GW_..."}}`.
-    body = exc_info.value.response.json() if exc_info.value.response else {}
-    err = body.get("error") if isinstance(body, dict) else None
-    code = err.get("code") if isinstance(err, dict) else None
-    assert code == "GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED", (
-        f"expected GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED, got {code!r} "
-        f"(body={body!r})"
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        # Anthropic upstream requires max_tokens; the cross-protocol
+        # request renderer relies on this being set (or on a defaulted
+        # ceiling). Matches the streaming cross-protocol scenarios.
+        max_tokens=64,
     )
 
-    # And no `usage:records` should be written — the request never made it
-    # to logging_filter (the envelope was emitted by `pick_peer` itself).
-    xlen = fake_web.usage_stats().get("records_xlen", 0)
-    assert xlen == 0, f"expected no usage:records on 503, got {xlen}"
+    # 200 OK (not 503). Body shape: OpenAI Chat schema.
+    # `client.chat.completions.create(stream=False)` returns the OpenAI
+    # SDK `ChatCompletion` Pydantic model — its successful construction
+    # already implies the body parsed under the OpenAI schema. Assert the
+    # `choices[0].message` slot survived the cross-render.
+    assert resp.choices, f"expected choices in response, got {resp!r}"
+    assert resp.choices[0].message is not None, (
+        f"expected choices[0].message, got {resp.choices[0]!r}"
+    )
+    # Anthropic upstream had a text-block with "hi"; cross-render maps it
+    # into the OpenAI message content slot. Empty string would mean the
+    # content adapter dropped the text — that's a regression in CrossRender.
+    assert resp.choices[0].message.content == "hi", (
+        f"expected 'hi' content, got {resp.choices[0].message.content!r}"
+    )
+
+    # Cross-render metric ticked. Labels follow WireFormat::label() — see
+    # `crates/gw-codec/src/cross_render.rs::WireFormat::label`. NOT the
+    # ProtocolKind::as_str shorthand used by the legacy
+    # `gw_codec_cross_render_total` stream metric.
+    post = metrics_snapshot("gw_codec_cross_render_nonstream_total", metrics_url)
+    delta = label_delta(
+        pre, post, 'from="anthropic_messages",to="openai_chat"'
+    )
+    assert delta >= 1, (
+        "expected gw_codec_cross_render_nonstream_total"
+        '{from="anthropic_messages",to="openai_chat"} to increment; '
+        f"pre={pre}, post={post}"
+    )
+
+    # The request reached `logging_filter` and emitted a ledger entry.
+    xlen = wait_for_records(fake_web, min_xlen=1)
+    assert xlen >= 1, f"expected >=1 usage:records entry, got {xlen}"

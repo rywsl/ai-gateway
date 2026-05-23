@@ -53,7 +53,7 @@ v1 阶段允许在 codec、routing、ledger、proxy 等关键路径上保留"先
 
 每个 sub-spec 独立走 brainstorming → spec → plan → impl 流程。当前 6 个 sub-spec 状态均为 *未启动 brainstorming*。
 
-### S-codec — `2026-05-23-v2-codec-cleanup-design.md`
+### S-codec — `2026-05-24-v2-codec-cleanup-design.md`
 
 - **主 crate**:`gw-codec`
 - **收口项**:
@@ -291,7 +291,7 @@ L-1 的 sub-spec 必须含一个故意"Redis 下线 → usage:detailed 投递失
 
 | sub-spec | 文件 | 创建时机 |
 |---|---|---|
-| S-codec | `docs/superpowers/specs/2026-05-23-v2-codec-cleanup-design.md` | 进入 S-codec brainstorming 时 |
+| S-codec | `docs/superpowers/specs/2026-05-24-v2-codec-cleanup-design.md` | 进入 S-codec brainstorming 时 |
 | S-routing | `docs/superpowers/specs/2026-05-23-v2-routing-cleanup-design.md` | 同上 |
 | S-ledger | `docs/superpowers/specs/2026-05-23-v2-ledger-cleanup-design.md` | 同上 |
 | S-proxy-core | `docs/superpowers/specs/2026-05-23-v2-proxy-core-cleanup-design.md` | 第一波合入后 |
@@ -331,7 +331,7 @@ L-1 的 sub-spec 必须含一个故意"Redis 下线 → usage:detailed 投递失
 ## §11 状态追踪
 
 - [ ] 本 overview 合入 + CLAUDE.md `§v2 cleanup status` 一节落地 + `scripts/check-invariants.sh` 新增 v1 marker gate 开关(初始关闭,见 §6.3 注)
-- [ ] S-codec brainstorming → spec → plan → impl → 合入(同 PR 清 §Known gaps G-x 与 v1 字样)
+- [x] S-codec brainstorming → spec → plan → impl → 合入(2026-05-24)
 - [ ] S-routing 同上
 - [ ] S-ledger 同上
 - [ ] S-proxy-core 同上
