@@ -254,12 +254,14 @@ Run:
 ```bash
 GW_V2_GATE_MODE=error bash scripts/check-invariants.sh > /tmp/v2-gate-error.log 2>&1
 echo "exit=$?"
-grep -c 'FAIL v1 placeholder markers' /tmp/v2-gate-error.log
+grep -c 'v1 placeholder markers remain (gate mode: error)' /tmp/v2-gate-error.log
 ```
 
 Expected:
 - `exit=1`
 - `grep -c ...` 输出 `1`(精确一次 FAIL 来自本 lint)
+
+> **Note:** 不能用 `grep -c 'FAIL v1 placeholder markers'` 字面匹配 —— 脚本对 `FAIL` 用 ANSI 红色染色(`\x1b[31mFAIL\x1b[0m`),字面 grep 会零命中。改用 lint 自身的无色尾部短语 `'v1 placeholder markers remain (gate mode: error)'` 作锚点。
 
 - [ ] **Step 3: 不 commit(本 task 只验证,不改文件)**
 
