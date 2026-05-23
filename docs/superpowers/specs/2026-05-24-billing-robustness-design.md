@@ -98,13 +98,14 @@ struct BillingTransaction {
         ▼
     Streaming
        │ │
-       │ └─── client close / 网关 deadline / 上游 RST / 上游 5xx
-       │                          │
-       │                          ▼
-       │                     Cancelling
-       │                          │ grace `cancel_grace_ms`(默认 200)继续读 upstream body
-       │                          ▼
-       │                     Terminated
+       │ └─── cancel trigger (client close / 网关 deadline / 上游 RST / 上游 5xx)
+       │                              │
+       │                              ▼
+       │  [UpstreamCancellationCoordinator 内部: 关上游 + grace 抓 final usage,
+       │   grace 期 = `cancel_grace_ms`(默认 200, 可配)— 详见 §5.3]
+       │                              │
+       │                              ▼
+       │                          Terminated
        │
        └─── final usage event / non-stream EOS ─────► Settled
                                                        │
@@ -116,13 +117,13 @@ struct BillingTransaction {
 
 转移**不可逆**。每个 attempt 持有独立状态机,重试⇒新 `attempt_index`⇒新 `BillingTransaction`。
 
-**状态层级**:in-RAM `VendorExposure` 6 状态(`Idle / Sent / Streaming / Cancelling / Settled / Terminated`)是 lifecycle 内部使用;持久化进 `UsageRecord.vendor_exposure_state` 的只有 3 个终态值(`Settled / Terminated / CrashFallback`,见 §6)— in-flight 状态永不 emit,因 emit 只在到达终态后发生。
+**状态层级**:in-RAM `VendorExposure` 5 状态(`Idle / Sent / Streaming / Settled / Terminated`)是 lifecycle 内部使用;持久化进 `UsageRecord.vendor_exposure_state` 的只有 3 个终态值(`Settled / Terminated / CrashFallback`,见 §6)— in-flight 状态永不 emit,因 emit 只在到达终态后发生。**cancel 期间的 grace 处理是 `UpstreamCancellationCoordinator` 的内部行为**,不出现在 `VendorExposure` 枚举里 — 状态机对调用方只暴露 `Streaming → Terminated` 的直接转移。
 
 **ReqCtx 字段映射**:
-- `Idle / Sent / Streaming / Cancelling / Settled / Terminated`:`ReqCtx.vendor_exposure: VendorExposure` (新增)
+- 状态:`ReqCtx.vendor_exposure: VendorExposure` (新增, 5 状态枚举)
 - `ts_sent_ms`:`ReqCtx.timing.sent_ms` (新增)
 - `ts_settled_ms`:`ReqCtx.timing.settled_ms` (新增)
-- `attempt_index`:`ReqCtx.attempt_index: u32` (新增,替代 `retry_count` 的语义,或并存看 W4 schema 决定)
+- `attempt_index`:`ReqCtx.attempt_index: u32` (新增,替代 `retry_count` 的语义)
 
 ### 4.2 ClientDelivery(独立子系统,与计费解耦)
 
@@ -130,11 +131,12 @@ struct BillingTransaction {
   Connected ── client TCP close / HTTP-2 RST ──► Disconnected
                                                        │
                                                        ▼
-                                    [仅触发 VendorExposure 的 Cancelling]
+                                    [仅作为 UpstreamCancellationCoordinator
+                                     的 cancel trigger 之一]
                                     [不影响 UsageRecord 最终落地]
 ```
 
-`ClientDelivery::Disconnected` **只**作为 `VendorExposure::Streaming → Cancelling` 转移的 trigger 之一,不直接参与计费决策。
+`ClientDelivery::Disconnected` **只**作为 cancel trigger 之一(与 deadline、upstream RST 并列),不直接参与计费决策。
 
 ---
 
@@ -149,7 +151,7 @@ struct BillingTransaction {
 | `upstream_request_filter` 末尾 | `Idle → Sent` + `InflightLedger.register()` | `crates/gw-proxy/src/filters/upstream.rs` |
 | `response_filter` 第一个 body byte 到达 | `Sent → Streaming` | `crates/gw-proxy/src/filters/response.rs` |
 | `response_body_filter` 解析到 final usage event / non-stream EOS | `Streaming → Settled` + `ReqCtx.timing.settled_ms = now` | `crates/gw-proxy/src/filters/response.rs` |
-| `logging` 入口检测当前 exposure ∈ {`Sent`, `Streaming`, `Cancelling`}(即未达终态) | `* → Terminated` + `ReqCtx.timing.settled_ms = now` | `crates/gw-proxy/src/filters/logging.rs` |
+| `logging` 入口检测当前 exposure ∈ {`Sent`, `Streaming`}(即未达终态) | `* → Terminated` + `ReqCtx.timing.settled_ms = now` | `crates/gw-proxy/src/filters/logging.rs` |
 
 转移函数集中在 `crates/gw-proxy/src/billing_lifecycle.rs`(新增),所有 filter 通过 `lifecycle::transition_to(...)` 调用,不允许散点写状态。
 
@@ -197,12 +199,20 @@ pub struct ExtractedUsage {
 | 上游主动 RST / 5xx 中途 | Pingora 给出的 `pingora::Error` | `response_filter` / `response_body_filter` |
 
 任一触发后:
-1. `VendorExposureTracker.transition_to(Cancelling)`
+1. `VendorExposureTracker.observe_cancel_trigger(cause)`(记录原因到指标,不改 `VendorExposure` 枚举值 — 状态仍是 `Streaming`)
 2. 主动关上游 stream(`session.set_keepalive(None)` + 上游 stream RST,具体 API 在 implementation plan 确定)
-3. 启动 `cancel_grace_ms`(默认 200,可配置)继续读上游 body — 有些厂商在 cancel 后仍发一个 final usage frame,必须截下来
-4. grace 到 / 上游 EOF → `transition_to(Terminated)` → 进 `logging` emit
+3. 进入内部 grace 阶段:`tokio::time::timeout(cancel_grace_ms)` 包住上游 body 继续读 — 有些厂商在 cancel 后仍发一个 final usage frame,必须截下来。grace 期内若 EOS / usage event 到达,正常累积到 `ReqCtx.usage`
+4. grace 到 / 上游 EOF → `VendorExposureTracker.transition_to(Terminated)` → 进 `logging` emit
 
-**配置**:`config/default.toml` 新增 `[billing] cancel_grace_ms = 200`、`[billing] response_deadline_ms = 300_000`(5 min,与 Anthropic / Gemini 上游 timeout 上限对齐)。
+**`cancel_grace_ms` 是关键可调参数**,值过小会漏掉 final usage frame(命中率低),过大会拖慢 cancel 路径。`gw_billing_grace_yielded_final_usage_total{yielded}`(见 §11)是调参信号 — `yielded=true` 占比偏低提示 grace 不够,可据此上调。
+
+**配置**:`config/default.toml` 新增:
+```toml
+[billing]
+cancel_grace_ms = 200             # 上游 cancel 后等待 final usage frame 的窗口 (ms)
+response_deadline_ms = 300_000    # 上游响应总超时, 默认 5min, 与 Anthropic / Gemini 上游 timeout 上限对齐
+```
+均可被 `local.toml` / `GW_BILLING__CANCEL_GRACE_MS` env 覆盖。
 
 ### 5.4 InflightLedger(解决 L4 / L5)
 
@@ -219,7 +229,31 @@ billing:inflight:<instance_id>:<request_id>:<attempt_index>   HASH
 EXPIRE 86400  # 24h, 仅安全网, 不参与计费决策
 ```
 
-`instance_id` = 启动时生成 UUID v4,写入 `static ONCE_INSTANCE_ID: OnceLock<String>`。
+#### 5.4.1 instance_id — Redis 持久化的稳定身份(L0 / L1 / L2 三级)
+
+`instance_id` 必须**跨进程重启稳定**,以便重启后的本进程识别上一次崩溃残留的 key。三级解析:
+
+| 级别 | 来源 | 适用 |
+|---|---|---|
+| L0 | env `GW_INSTANCE_ID` | 运维强绑定 / 容器编排(推荐生产) |
+| L1 | in-process `static OnceLock<String>` | 当前进程缓存,启动后第一次解析后写入 |
+| L2 | Redis 持久化 `gateway:instance:<hostname>`(无 TTL) | 默认路径:重启后自动 load 同 instance_id |
+
+**启动期解析逻辑**:
+```
+1. 读 env GW_INSTANCE_ID; 命中即用, 同步覆写 L2 (`SET gateway:instance:<hostname>` 不带 TTL)
+2. 否则读 L2 (`GET gateway:instance:<hostname>`); 命中即用
+3. 否则生成 UUID v4, `SET gateway:instance:<hostname>` 写入 L2 (无 TTL), 使用
+4. 写 L1 OnceLock
+5. 同启动一个 heartbeat 周期 task: `SET gateway:instance:<id>:heartbeat <ts_ms> EX 600`, 周期 60s 续期 — 供 Go-side global reaper 判断 dead instance
+```
+
+`<hostname>` 来源:Linux `hostname(1)` 系统调用(`HOSTNAME` env 覆盖),k8s StatefulSet 下 pod name 天然稳定;非 StatefulSet 部署需配 L0(`GW_INSTANCE_ID`)避免重调度后 instance_id 漂移。
+
+**效果**:
+- 同 replica 重启 ⇒ 同 instance_id(L2 load)— 重启后 reconciler 能识别自己上一次的残留
+- 不同 replica 部署 ⇒ 不同 instance_id(不同 hostname → 不同 L2 key)— 互不踩
+- 运维强绑定 ⇒ 配 L0,L2 仅作 cache 同步
 
 **生命周期接口**:
 ```rust
@@ -230,9 +264,7 @@ impl InflightLedger {
 }
 ```
 
-**两个独立 trigger**:
-
-#### Trigger 1 — 在线 watchdog(T0 emit-lag 探测,不自愈)
+#### 5.4.2 Trigger 1 — 在线 watchdog(T0 emit-lag 探测,不自愈)
 
 `crates/gw-ledger/src/inflight_reaper.rs` 新增周期 task:
 - 周期 `reaper_interval_secs`(默认 30s)
@@ -244,11 +276,11 @@ impl InflightLedger {
 
 **关键点**:60s 计时从 `ts_settled_ms` 起算,**不**从 `ts_sent_ms` 起算。一个 o1 思考 300s 是合法长流式,不触发;一个 emit 卡 60s 是病态,触发。两件事彻底解耦。
 
-#### Trigger 2 — 启动期 reconciler(崩溃恢复,唯一 emit fallback 的地方)
+#### 5.4.3 Trigger 2 — 启动期 reconciler(崩溃恢复,唯一 emit fallback 的地方)
 
-`crates/gw-ledger/src/inflight_reconciler.rs` 新增,启动时执行一次:
-1. `SCAN MATCH billing:inflight:*`
-2. 过滤出 `instance_id != self`(只动其他实例的残留)
+`crates/gw-ledger/src/inflight_reconciler.rs` 新增,启动时执行一次(在 L2 instance_id 解析完成后):
+1. 加载本进程 `self_instance_id`(§5.4.1)
+2. `SCAN MATCH billing:inflight:<self_instance_id>:*`(**只**扫自己 instance_id 的 key)
 3. 对每条 emit 一条 `CrashFallback` UsageRecord:
    - `input_tokens = prompt_estimate_tokens`,其他 5 维全 0
    - `vendor_exposure_state = CrashFallback`
@@ -257,7 +289,16 @@ impl InflightLedger {
 4. emit 成功后 DEL key
 5. 增 `gw_billing_inflight_recovered_total{exposure_state}` counter
 
-**多 replica 安全**:不同 instance 不互踩 key。在线 watchdog 只动自己的 key,启动 reconciler 只动其他 instance 的 key,边界清晰。
+**为什么扫自己 instance_id 而非其他**:
+- L2 持久化保证重启后 `self_instance_id` 不变 → 旧残留 key 必然在自己 instance_id 下
+- 其他 replica 的 key 由其各自启动 reconciler 处理,本进程不动
+- 多 replica 边界清晰,无跨 replica 协调
+
+**Orphan instance handling**(dead / decommissioned replica):
+- heartbeat key `gateway:instance:<id>:heartbeat` EX 600s 未续 → instance 视作 dead
+- Rust 侧**不**扫 orphan(避免跨 replica 协调复杂度)
+- 24h `EXPIRE` 是兜底 — 长寿命 inflight key 通常表示 instance 已死或卡死
+- 推荐 Go-side global reaper 周期扫 `billing:inflight:<id>:*`,对 heartbeat 已过期的 `<id>` 做 fallback emit;**Go-side global reaper 不属本 spec 范围**,在 `docs/go-contracts/parts/02-go-as-consumer.md` §2.x 列为 "推荐 Go 侧能力"
 
 ### 5.5 UsageRecordEmitter(must-deliver, 与 detailed-log drop-on-outage 严格区分)
 
@@ -440,9 +481,9 @@ pub struct UsageProvenance {
 | Wave | 内容 | 破坏性 | 单独可发布 |
 |---|---|---|---|
 | **W1**(止血) | UsageExtractor 6 维填全(§5.2,L1 修复)+ UsageSource 临时修正(L2 用现 enum 表达 `Upstream` when input > 0 even if output == 0)+ 新增 metrics | 否 | 是,**当天上** |
-| **W2**(lifecycle 骨架) | VendorExposureTracker(§5.1)+ ReqCtx 新字段 + InflightLedger register/clear(§5.4 Trigger 仅 register, 不开 reaper)+ UsageRecordEmitter must-deliver(§5.5) | 否 | 是 |
-| **W3**(取消传播) | UpstreamCancellationCoordinator(§5.3)+ grace timer + response deadline 集成(吸纳 S-proxy-core 项) | 否 | 是 |
-| **W4**(崩溃恢复 + schema) | InflightLedger Trigger 1 (T0 watchdog) + Trigger 2 (启动 reconciler)+ UsageRecord schema 升级(§6,破坏性)+ AttemptManifest(§5.6)+ go-contracts/parts/02 同 PR 改 | **是**(Go PR 同步) | 是 |
+| **W2**(lifecycle 骨架) | VendorExposureTracker(§5.1)+ ReqCtx 新字段 + InflightLedger register/clear + **instance_id L0/L1/L2 三级解析 + heartbeat task**(§5.4.1)+ UsageRecordEmitter must-deliver(§5.5)(此波 reaper / reconciler 尚未启用) | 否 | 是 |
+| **W3**(取消传播) | UpstreamCancellationCoordinator(§5.3,grace 内部化)+ response deadline 集成(吸纳 S-proxy-core 项) | 否 | 是 |
+| **W4**(崩溃恢复 + schema) | InflightLedger Trigger 1 (T0 watchdog,§5.4.2) + Trigger 2 (启动 reconciler,§5.4.3)+ UsageRecord schema 升级(§6,破坏性)+ AttemptManifest(§5.6)+ go-contracts/parts/02 同 PR 改 | **是**(Go PR 同步) | 是 |
 
 每波结束都可单独发布、监控、回滚。**W1 是当天止血**,L1+L2 漏点立刻闭合。
 
@@ -453,8 +494,9 @@ pub struct UsageProvenance {
 新增 `gw_billing_*` 命名空间:
 
 - `gw_billing_emit_total{exposure_state, provenance_output}` — counter,每条 UsageRecord emit 时增
-- `gw_billing_emit_lag_t0_total{request_id, attempt_index}` — counter,**任何非 0 都是 on-call**(§5.4 Trigger 1)
+- `gw_billing_emit_lag_t0_total{request_id, attempt_index}` — counter,**任何非 0 都是 on-call**(§5.4.2)
 - `gw_billing_inflight_recovered_total{exposure_state}` — counter,启动 reconciler 兜底 emit 计数
+- `gw_billing_instance_heartbeat_renewals_total` — counter,heartbeat 续期成功次数(§5.4.1);停滞表示 Redis 写不进
 - `gw_billing_upstream_cancellation_total{cause}` — counter,cause ∈ `{client_close, deadline, upstream_err, route_abort}`
 - `gw_billing_attempts_per_request` — histogram,验证多 key 重试的实际触发分布
 - `gw_billing_grace_yielded_final_usage_total{yielded}` — counter,验证 `cancel_grace_ms` 默认 200 是否合理(`yielded=true` 表示 grace 期内截到了 final usage frame)
@@ -483,6 +525,8 @@ pub struct UsageProvenance {
 - **Tokenizer 准确度**:`prompt_estimate_tokens` 当前可能与厂商真实计数有 ±5% 偏差(各家 tokenizer 实现差异)。崩溃恢复 fallback 的准确度受此限制。改进方向:每个 vendor 维护各自 tokenizer 实现,但工程量大,本 spec 不展开。
 - **partial usage 持久化**:崩溃前流中已 parse 的 partial usage 没写 Redis,崩溃后丢失。可选优化:Settled/Terminated 转移时把 `ReqCtx.usage` snapshot 写进 InflightLedger HASH,reconciler 优先用 snapshot 而非 estimate。代价是每请求多一次 HSET,本 spec 不引入,作为后续优化。
 - **Go settler 去重表 TTL**:24h 与 InflightLedger EXPIRE 对齐,但若 Go settler 重启,dedup 表丢失,极端情况下崩溃恢复的 CrashFallback 可能被当成首次 settle。改进:Go settler 持久化 dedup 表(自决,本 spec 不规约)。
+- **hostname 冲突场景**:非 k8s / 无 StatefulSet 部署时,多 replica 可能拥有相同 hostname(如直接跑在多台 VM 上的 `localhost` 默认主机名)。此时 L2 解析会让多 replica 共享 instance_id,inflight key 互踩。**缓解**:生产部署强制设 `GW_INSTANCE_ID`(L0),启动期检测到 hostname 在 L2 已存活且 heartbeat 仍新鲜 → fail-fast 报错并要求显式 instance_id 配置(implementation 阶段确定具体检测策略)。
+- **Orphan instance 兜底**:Rust 不扫其他 instance_id 的残留 key,长期 dead replica 的 24h EXPIRE 之内的 inflight key 不会被自动恢复;依赖 Go-side global reaper(`docs/go-contracts/parts/02` 列为推荐能力)。该 reaper 不属本 spec 范围。
 - **HTTP/3**:当前 Pingora 0.8 仅 HTTP/1.1 + HTTP/2,cancel 探测在 H/3 上是否同样工作未验证。
 - **WebSocket tunnel**:tunnel 路径下 cancel 传播的具体语义(WS frame cancel vs HTTP cancel)需在 tunnel 子系统 spec 中单独处理。
 
