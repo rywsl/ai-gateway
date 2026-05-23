@@ -47,11 +47,6 @@ pub async fn run(
     capability_resolver: Option<&Arc<gw_capability::CapabilityResolver>>,
     mgmt_blacklist: &Arc<RedisJwtBlacklist>,
 ) -> Result<bool> {
-    // T3-Pre: `mgmt_blacklist` is threaded through so T3-B can call
-    // `mgmt_blacklist.check_mgmt(...)` inside the management-plane branch.
-    // The verify chain itself is still owed by T3-B — for now the handle
-    // is held to keep the signature stable across the wave.
-    let _ = mgmt_blacklist;
     ctx.phase_start("request_filter");
     ctx.timing.start = Some(Instant::now());
 
@@ -74,31 +69,89 @@ pub async fn run(
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if gw_auth::mgmt::parse_mgmt_authorization(mgmt_auth_hdr).is_none() {
-            let err = ErrorIR {
-                category: ErrorCategory::ClientAuth,
-                status: 401,
-                upstream_status: None,
-                code: Cow::Borrowed(codes::GW_AUTH_INVALID_JWT),
-                message: Cow::Borrowed("mgmt token required"),
-                retryable: false,
-                upstream_raw: None,
-                request_id: "",
-                retry_after_secs: None,
-            };
-            emit_and_bail(session, ctx, &err, &req_id_for_mgmt).await?;
-            unreachable!()
+
+        macro_rules! mgmt_bail {
+            ($status:expr, $code:expr) => {{
+                let err = ErrorIR {
+                    category: ErrorCategory::ClientAuth,
+                    status: $status,
+                    upstream_status: None,
+                    code: Cow::Borrowed($code),
+                    message: Cow::Borrowed(""),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                emit_and_bail(session, ctx, &err, &req_id_for_mgmt).await?;
+                unreachable!()
+            }};
         }
-        // Mgmt header present and well-formed. The actual mgmt routing /
-        // token validation is a follow-up task; for v1 we short-circuit
-        // here so the request does not flow into business-path auth.
-        // TODO(G-α.9 follow-up): dispatch into mgmt handler instead of 501.
+
+        // 1. Authorization: Mgmt <token>
+        let Some(parsed_auth) = gw_auth::mgmt::parse_mgmt_authorization(mgmt_auth_hdr) else {
+            mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_MISSING);
+        };
+
+        // 2. Split mt_<id>.<secret>
+        let Some(parts) = gw_auth::mgmt::split_mgmt_token_payload(&parsed_auth.token) else {
+            mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_INVALID);
+        };
+
+        // 3. Load entry via Moka L1 → cold load. Miss → INVALID (same code as
+        //    hash mismatch, by design — see spec §1.3 step 4).
+        let Some(entry) = store.mgmt_token_or_load(parts.token_id).await else {
+            mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_INVALID);
+        };
+
+        // 4. Mgmt-token blacklist. FailClosed: a Redis outage rejects the
+        //    request rather than serving stale-allow.
+        if mgmt_blacklist
+            .check_mgmt(parts.token_id, gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed)
+            .await
+        {
+            mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_REVOKED);
+        }
+
+        // 5. Constant-time secret compare + status / expiry / scope.
+        //    Gateway requires AdminRead at minimum; fine-grained admin-full vs
+        //    admin-read splits are enforced by the Go control plane.
+        match gw_auth::mgmt::verify_mgmt_token_secret(
+            &entry,
+            parts.secret,
+            gw_core::entity::MgmtScope::AdminRead,
+        ) {
+            gw_auth::mgmt::MgmtVerifyOutcome::Ok => {
+                ctx.mgmt_user_id = Some(entry.value.user_id.clone());
+                ctx.mgmt_scope = Some(entry.value.scope);
+            }
+            gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat
+            | gw_auth::mgmt::MgmtVerifyOutcome::Invalid => {
+                mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_INVALID);
+            }
+            gw_auth::mgmt::MgmtVerifyOutcome::Expired => {
+                mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_EXPIRED);
+            }
+            gw_auth::mgmt::MgmtVerifyOutcome::Disabled => {
+                mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_DISABLED);
+            }
+            gw_auth::mgmt::MgmtVerifyOutcome::ScopeDenied => {
+                mgmt_bail!(403, codes::GW_AUTH_MGMT_TOKEN_SCOPE_DENIED);
+            }
+        }
+
+        // Token verified; ctx.mgmt_user_id / mgmt_scope are populated.
+        // The Rust gateway does not host a mgmt-routing upstream in v1 —
+        // /admin/* business handlers live in the Go control plane. Until
+        // the proxy-to-Go mgmt route lands we terminate here with 501 so
+        // the request does not fall through to the LLM business path
+        // below. Observability traces still see the verified user.
         let err = ErrorIR {
             category: ErrorCategory::GatewayInternal,
             status: 501,
             upstream_status: None,
             code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
-            message: Cow::Borrowed("mgmt path not yet implemented"),
+            message: Cow::Borrowed("mgmt routing not yet wired"),
             retryable: false,
             upstream_raw: None,
             request_id: "",
@@ -888,6 +941,42 @@ mod non_stream_unit {
         assert!(
             !src.contains(&needle),
             "non-stream short-circuit must be removed in B1-2"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mgmt_path_branch_tests {
+    /// B2-2 (T3-B) source-grep regression. Pingora Session is non-mockable
+    /// here; end-to-end coverage is in T4-B docker e2e. We at least guard
+    /// against the verify chain being silently deleted.
+    #[test]
+    fn mgmt_branch_calls_verify_helper() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filters/request.rs"
+        ))
+        .expect("read source");
+        // Runtime-built needles so this test file's literal doesn't self-match.
+        let fn_needle: String = ["verify_mgmt_token", "_secret"].concat();
+        let ok_needle: String = ["MgmtVerifyOutcome", "::", "Ok"].concat();
+        let check_mgmt: String = ["check_", "mgmt"].concat();
+        let load: String = ["mgmt_token_or", "_load"].concat();
+        assert!(
+            src.contains(&fn_needle),
+            "T3-B helper integration missing — verify_mgmt_token_secret not called"
+        );
+        assert!(
+            src.contains(&ok_needle),
+            "T3-B outcome handling missing — MgmtVerifyOutcome::Ok arm absent"
+        );
+        assert!(
+            src.contains(&check_mgmt),
+            "T3-B blacklist integration missing — check_mgmt not called"
+        );
+        assert!(
+            src.contains(&load),
+            "T3-B store integration missing — mgmt_token_or_load not called"
         );
     }
 }
