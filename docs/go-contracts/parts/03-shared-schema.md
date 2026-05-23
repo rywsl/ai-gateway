@@ -14,7 +14,8 @@ Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开�
 | `0002_gemini_file_mapping.sql` | `gemini_file_mapping`（非 entity，文件去重） |
 | `0003_model_mapping.sql` | `model_mapping`（非 entity，alias 路由） |
 | `0004_capabilities.sql` | `models`（新表）+ `vendor_keys.forced_capabilities` JSONB 列 + `vendor_keys.exclusive_capability_match` BOOLEAN 列 |
-| **待加** `0005_auth_configs.sql` | `auth_configs`（T1-E follow-up，详见 [`loader.rs:158-165`](../../crates/gw-store/src/loader.rs)） |
+| `0005_proxy_nodes.sql` | `proxy_nodes`（tunnel-t T1，已 merged） |
+| `0006_auth_configs.sql` | `auth_configs`（T1-E 落地） |
 | `0007_management_tokens.sql` | `management_tokens`（B2，T1-D 落地） |
 
 ### 3.1.1 公共控制列（所有 entity 表）
@@ -35,7 +36,7 @@ deleted_at  TIMESTAMPTZ NULL
 
 ### 3.1.2 非 entity 辅助表
 
-- **`gemini_file_mapping`**（0002）：Gemini 文件去重映射。Writer：Rust `gw-codec::gemini`（多模态请求时写）。Reader：Rust 自身。Go **不**接触此表。
+- **`gemini_file_mapping`**（0002）：Gemini 文件去重映射。Writer：**Go**（`/api/admin/gemini-files/*` 端点接收上传 → 推送 Gemini File API → 写入）。Reader：Rust（多模态请求时按 `(sha256_hex, user_id)` PK 校验 `file_uri` 归属）。无 `events:entity` ns（非 entity 表）；Rust 直接查 PgSQL，命中即用。
 - **`model_mapping`**（0003）：用户 alias → 上游真实 model 名映射。Writer：Go（管理面 UI）。Reader：Rust `gw-codec` model alias 解析。详见 §3.2.11。
 
 ## 3.2 Entity payload JSONB schemas
@@ -147,11 +148,38 @@ deleted_at  TIMESTAMPTZ NULL
   "status": "active",            // active | disabled | expired | depleted | rate_limited | rotated | deleted
   "tags": [],
   "forced_capabilities": [],     // Vec<String>，channel-side advertised capability
-  "exclusive_capability_match": false
+  "exclusive_capability_match": false,
+  "oauth": null                   // 可选;null = 非 OAuth 型 key,走 api_key_enc 注入
 }
 ```
 
 > **0004 列冗余说明**：migration 0004 在 `vendor_keys` 表上**同时**加了 top-level 列 `forced_capabilities JSONB` 与 `exclusive_capability_match BOOLEAN`，但 Rust 实际通过 `payload.forced_capabilities` / `payload.exclusive_capability_match` 反序列化（见 `loader.rs:101-141`）。top-level 列**仅供 Go 端建索引或查询**，不是 Rust 数据来源。Go 写入时**必须**同时写两处，否则 Rust 看不到。
+
+### 3.2.5.1 OAuth 子结构(可选)
+
+当 vendor_key 是 OAuth 型(如 Claude Code OAuth / Gemini OAuth client),`payload.oauth` 填充:
+
+```json
+{
+  "access_token_enc": { /* AES-256-GCM 四元组,见 §3.4 */ },
+  "refresh_token_enc": { /* AES-256-GCM 四元组 */ },
+  "access_expires_at": "2026-05-22T12:00:00Z",
+  "token_endpoint": "https://oauth.anthropic.com/token",
+  "scope": ["chat.completions"]
+}
+```
+
+**Writer 责任(Go)**:
+
+- 加密字段由 Go OAuth task-worker 完成;明文绝不入库 / 日志 / 缓存;
+- refresh 完成后**整体替换** `payload.oauth` 子对象 + `version + 1` + XADD `events:entity` op=upsert;
+- `token_endpoint` 仅供 Go refresh 使用,Rust 端不读。
+
+**Rust 行为**:
+
+- `upstream_request_filter` 注入 auth header 时若 `oauth.is_some()`,用 `access_token`(解密后)代替 `api_key`(参 gaps spec ADR-G3-2);
+- 临过期判定:`now >= access_expires_at - 60s` 仍使用现有 token,不主动 refresh,仅 emit metric `gw_oauth_token_near_expiry_total{vendor_key_id}`;
+- 上游 401 → `OAuthListener` 触发反向 `events:entity`(参 [parts/02 §2.4.3](../parts/02-go-as-consumer.md#243-vendor_keyoauth_failedoauth-失败通知))。
 
 ### 3.2.6 `model_groups.payload` — `ModelGroup`
 
@@ -453,6 +481,7 @@ Healthy(K_new)
 | model_mapping | `"<alias>\|<protocol>"`（在 stream 事件中） | — |
 | auth_config | `"global"`（v1 单值） | — |
 | management_token | `mt_` | Go 生成 |
+| proxy_node | `pn_` | Go 生成 |
 
 ### 3.6.1 不变量
 
@@ -484,7 +513,6 @@ Rust 端对应指标 `gateway_entity_*` / `gateway_vendor_key_decrypt_failures_t
 
 ## 3.9 未决问题
 
-1. `auth_configs` 表的 migration（T1-E 待加）；当前 `loader.rs:158-165` 已写 SQL，但表不存在 → 冷加载 always 失败 → T1-E 走宽松默认值。
-2. `vendor_keys` 的 `forced_capabilities` / `exclusive_capability_match` top-level 列是否要 Rust 端用上（建索引查询）：当前未用，留 follow-up。
-3. PgSQL `deleted_at` 后多久可硬清理：本契约不规定；建议 ≥ 30 天 + 审计追溯。
-4. `gemini_file_mapping` 是否要进 Go 报表：当前仅 Rust 内部使用，Go 不接触；如需对外暴露需新增契约 part。
+1. `vendor_keys` 的 `forced_capabilities` / `exclusive_capability_match` top-level 列是否要 Rust 端用上（建索引查询）：当前未用，留 follow-up。
+2. PgSQL `deleted_at` 后多久可硬清理：本契约不规定；建议 ≥ 30 天 + 审计追溯。
+3. `gemini_file_mapping` 是否要进 Go 报表：当前仅 Rust 内部使用，Go 不接触；如需对外暴露需新增契约 part。
