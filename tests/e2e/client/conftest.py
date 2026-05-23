@@ -485,6 +485,98 @@ def fake_upstream(fake_upstream_admin_url: str) -> FakeUpstreamClient:
 
 
 # ---------------------------------------------------------------------------
+# Redis access — T4-A (B1 non-stream) needs to ASSERT on the actual JSON
+# payload of `usage:records` entries (not just the XLEN that
+# `fake_web.usage_stats()` exposes). The fake-web admin API has no
+# record-body read endpoint and we deliberately don't extend it from
+# T4-A; instead we expose Redis on the host (`6379:6379` in
+# `tests/e2e/docker-compose.yml`) and have the host pytest process read
+# `usage:records` directly via the `redis` Python package.
+#
+# Fixtures are function-scoped so a connection failure surfaces per-test.
+# The autouse `isolate_state` DELs the stream before each test, so the
+# consumer starts each test reading from an empty stream.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def redis_url() -> str:
+    """Base URL of the Redis instance shared with the gateway. Defaults to
+    the host-port mapping in `tests/e2e/docker-compose.yml` (`6379:6379`)."""
+    return os.environ.get("REDIS_URL", "redis://localhost:6379")
+
+
+@pytest.fixture
+def redis_client(redis_url: str):
+    """Plain `redis.Redis` client. Decodes responses to str so the
+    `XRANGE`/`XREAD` field maps are dict[str, str] rather than dict[bytes,
+    bytes] — keeps the consumer code branch-free."""
+    import redis  # local import: test collection survives if package missing
+
+    client = redis.Redis.from_url(redis_url, decode_responses=True)
+    try:
+        yield client
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+class UsageRecordsConsumer:
+    """Tail-only consumer for the `usage:records` stream.
+
+    On construction, anchors `last_id="0"` so we read forward from the
+    start of a (just-DEL'd-by-`isolate_state`) stream. Each
+    `next_record(timeout)` does `XREAD BLOCK <ms> COUNT 1`, decodes the
+    `payload` field as JSON (the gateway XADD's `payload=<json>` —
+    see `crates/gw-ledger/src/flusher.rs::flush`), and advances `last_id`.
+
+    Raises `TimeoutError` if no record lands within `timeout`.
+    """
+
+    STREAM = "usage:records"
+
+    def __init__(self, client) -> None:
+        self.client = client
+        # Anchor at 0 so we observe records written after `isolate_state`
+        # cleared the stream. `XREAD BLOCK $` would only return records
+        # newer than the call site — `isolate_state` already ran before
+        # the consumer was materialised, so 0 is race-free.
+        self.last_id = "0"
+
+    def next_record(self, timeout: float = 5.0) -> dict:
+        import json as _json
+
+        block_ms = max(1, int(timeout * 1000))
+        resp = self.client.xread({self.STREAM: self.last_id}, block=block_ms, count=1)
+        if not resp:
+            raise TimeoutError(
+                f"no `{self.STREAM}` entry within {timeout}s (last_id={self.last_id})"
+            )
+        # resp shape: [(stream_name, [(entry_id, {field: value}), ...])]
+        _, entries = resp[0]
+        entry_id, fields = entries[0]
+        self.last_id = entry_id
+        payload = fields.get("payload")
+        if payload is None:
+            raise AssertionError(
+                f"`{self.STREAM}` entry {entry_id} missing `payload` field: {fields!r}"
+            )
+        try:
+            return _json.loads(payload)
+        except ValueError as e:
+            raise AssertionError(
+                f"`{self.STREAM}` entry {entry_id} payload is not JSON: {payload!r}"
+            ) from e
+
+
+@pytest.fixture
+def usage_records_consumer(redis_client) -> UsageRecordsConsumer:
+    return UsageRecordsConsumer(redis_client)
+
+
+# ---------------------------------------------------------------------------
 # _check_fakes_alive — session-scoped autouse probe that fails fast if either
 # fake is unreachable, with a clearer message than the per-test reset would
 # produce. Session-scoped fixtures sort before function-scoped ones, so this
