@@ -25,6 +25,7 @@ pub struct Config {
     pub ratelimit: RateLimitCfg,
     pub ledger: LedgerCfg,
     pub kms: KmsCfg,
+    #[serde(default)]
     pub debug: DebugCfg,
     #[serde(default)]
     pub security: SecurityCfg,
