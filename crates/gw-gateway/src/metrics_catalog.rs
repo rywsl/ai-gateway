@@ -186,6 +186,22 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "SafeDnsResolver outcome; label=result (ok/blocked/nx)",
     },
+    // --- OAuth (G3 / go-onboarding-gaps T0) ---
+    MetricSpec {
+        name: "gw_oauth_token_near_expiry_total",
+        kind: MetricKind::Counter,
+        help: "upstream requests dispatched with access_token within 60s of expires_at",
+    },
+    MetricSpec {
+        name: "gw_oauth_token_expired_total",
+        kind: MetricKind::Counter,
+        help: "upstream requests dispatched with already-expired access_token",
+    },
+    MetricSpec {
+        name: "gw_oauth_refresh_failed_xadd_total",
+        kind: MetricKind::Counter,
+        help: "OAuthListener reverse XADDs to events:entity (op=status_change field=oauth_failed)",
+    },
 ];
 
 pub fn describe_all() {

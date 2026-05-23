@@ -167,6 +167,26 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         id = %id,
         "invalidating entity"
     );
+
+    // G6 / ADR-G6-1: drop the Redis L1 entry before Moka invalidate so
+    // multi-pod deployments don't retain stale entries up to the L1 TTL.
+    // Failure is non-fatal — Moka invalidate still runs below.
+    if let Some(redis) = store.loader_redis() {
+        let redis_key = format!("entity:{ns}:{id}");
+        let client = redis.pool.next();
+        use fred::interfaces::KeysInterface;
+        if let Err(err) = client.del::<i64, _>(&redis_key).await {
+            tracing::warn!(
+                target: "gw_store::stream_consumer",
+                ns = %ns,
+                id = %id,
+                key = %redis_key,
+                error = ?err,
+                "events:entity invalidate: redis DEL failed; falling back to Moka invalidate only"
+            );
+        }
+    }
+
     match ns {
         "user" => store.user.invalidate(&UserId::from(id)).await,
         "user_group" => store.user_group.invalidate(&UserGroupId::from(id)).await,

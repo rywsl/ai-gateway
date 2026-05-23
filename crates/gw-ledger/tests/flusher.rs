@@ -51,6 +51,7 @@ async fn batch_flush_writes_usage_stream_no_balance_decr() {
         freeze_amount_micro: 1500,
         estimate_pricing_version: 0,
         markup_chain_snapshot: MarkupChainSnapshot::placeholder(),
+        operation_id: None,
     };
     ledger.try_send(rec.clone()).unwrap();
     ledger.try_send(rec).unwrap();

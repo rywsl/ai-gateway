@@ -239,6 +239,15 @@ pub(crate) fn handle_non_stream_chunk(
                 ctx.usage.output_tokens = u.output_tokens;
                 ctx.usage.cached_tokens = u.cached_tokens;
             }
+            // ADR-G5-1: Gemini long-running operations emit a top-level
+            // `name: "operations/<uuid>"` which the codec surfaces as
+            // `ResponseIR.id`. Promote it to `ctx.operation_id` only when the
+            // prefix matches — chat ids like `chatcmpl-...` must NOT pollute
+            // this field. The logging filter writes `ctx.operation_id` into
+            // `UsageRecord.operation_id` (see filters/logging.rs).
+            if ir.id.starts_with("operations/") {
+                ctx.operation_id = Some(ir.id.into_owned());
+            }
         }
         Err(e) => {
             metrics::counter!(

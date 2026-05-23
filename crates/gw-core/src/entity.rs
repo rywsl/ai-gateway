@@ -194,6 +194,11 @@ pub struct VendorKey {
     /// Always `None` in seed data; existing rows do not require backfill
     /// per the spec's "non-breaking on rollout" guarantee.
     pub tunnel_preference: Option<TunnelPreference>,
+    /// G3 / go-onboarding-gaps T0: OAuth credentials for this vendor key.
+    /// `None` when the key uses a static API key (the common case).
+    /// Populated by `load_vendor_key` after decrypting the `oauth` sub-object
+    /// from the JSONB payload. `None` for all existing rows until backfilled.
+    pub oauth: Option<OAuthCredentials>,
 }
 
 impl std::fmt::Debug for VendorKey {
@@ -203,6 +208,10 @@ impl std::fmt::Debug for VendorKey {
             .field("vendor_id", &self.vendor_id)
             .field("api_key", &"[REDACTED]")
             .field("status", &self.status)
+            .field(
+                "oauth",
+                &self.oauth.as_ref().map(|_| "<OAuthCredentials: REDACTED>"),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -371,6 +380,33 @@ pub enum ModelAvailability {
     Enabled,
     Disabled,
     ShadowOnly,
+}
+
+/// OAuth credentials for a vendor key — decrypted form held in-process.
+///
+/// The encrypted wire shape (`OAuthCredentialsRow`) lives in
+/// `gw-store::loader` so the back-edge `gw-core → gw-store` is avoided.
+/// Populated by `load_vendor_key` when the JSONB payload contains an `oauth`
+/// sub-object (G3 / go-onboarding-gaps T0).
+#[derive(Clone)]
+pub struct OAuthCredentials {
+    pub access_token: SecretString,
+    pub refresh_token: SecretString,
+    pub access_expires_at: OffsetDateTime,
+    pub token_endpoint: String,
+    pub scope: Vec<String>,
+}
+
+impl std::fmt::Debug for OAuthCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCredentials")
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("access_expires_at", &self.access_expires_at)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// Per-vendor-key tunnel routing preference (ADR-T-4).

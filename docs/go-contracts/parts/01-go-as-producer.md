@@ -11,7 +11,7 @@ Go 是所有 entity 表的唯一 writer（Rust 不写 PgSQL，仅 sqlx `SELECT`�
 写入义务（事务内串联三步）：
 
 1. **`UPDATE <table> SET payload = $1, version = version + 1, updated_at = now() WHERE id = $2 RETURNING version`**（或对应 `INSERT ... ON CONFLICT (id) DO UPDATE`）。`version` 必须**严格单调递增**，由数据库 trigger 或 Go 应用层保证。
-2. **写回 Redis `cache:{ns}:{id}` HASH**（可选 write-through，加速 Rust 命中；不做也行——Rust miss 时会自己写回带 TTL 的副本）。Go 写时**禁止**附 `EXPIRE`（永久 key 表示"Go 接管"）。
+2. **写回 Redis `entity:{ns}:{id}` HASH**（可选 write-through，加速 Rust 命中；不做也行——Rust miss 时会自己写回带 TTL 的副本）。Go 写时**禁止**附 `EXPIRE`（永久 key 表示"Go 接管"）。
 3. **`XADD events:entity * ns <ns> id <id> v <new_version> op <upsert|delete>`**。失败时**不**回滚 PgSQL，由后续 ALTER + 重试或下次更新覆盖。
 
 Rust 端通过 `version` 单调性兜底：即使 XADD 漏发，下一次 Rust 冷加载读到的就是新 version。
@@ -62,6 +62,7 @@ XADD 字段（key-value 列表）：
 | `model_mapping` | `model_mapping`（0003 migration） | `EntityStore.model_mapping` | `ModelMapping` | 30 min TTL；ID 格式 `"<user_alias>|<protocol>"`，protocol ∈ `openai \| anthropic \| gemini` |
 | `auth_config` | `auth_configs`（待 migration） | `EntityStore.auth_config` | `AuthConfig` | 1 h TTL；well-known ID `"global"` |
 | `management_token` | `management_tokens`（0007 migration） | `EntityStore.mgmt_token` | `ManagementTokenEntry` | 5 min TTL；ID 前缀 `mt_` |
+| `proxy_node` | `proxy_nodes`（0005 migration,已 merged）| `EntityStore.proxy_node` | `ProxyNodeEntry` | 30 min TTL;支撑 tunnel client 节点视图;详见 [parts/04](04-proxy-nodes.md) |
 | `estimate_pricing` | （Go 自定表） | （待加） | `EstimatePricing`（见 §1.5） | 30 min TTL |
 
 未知 ns Rust 端 warn 后丢弃。新增 ns **必须**同步：本表 + `crates/gw-store/src/stream_consumer.rs::apply_entity_event` + `crates/gw-store/src/entity_store.rs::EntityStore`。
@@ -71,6 +72,20 @@ XADD 字段（key-value 列表）：
 - **顺序**：PgSQL UPDATE 完成 → XADD。**禁止**先 XADD 后 UPDATE。
 - **重复 XADD 安全**：Rust invalidate 幂等。
 - **漏发 XADD**：Rust 等待 Moka TTL 到期自然 miss → 冷加载 → 拿到 PgSQL 新值。最坏陈旧 = TTL（30 min for vendor_key/pricing/model_group）。
+
+**Redis L1 invalidate(Rust 端补口)**:
+
+Rust StreamConsumer 收到 `events:entity` 后,**在 invalidate Moka 之前**额外执行:
+
+```
+DEL entity:{ns}:{id}
+```
+
+这是为了多 pod 部署时 Redis L1 不残留陈旧值(详见 [`docs/architecture.md`](../../architecture.md) §10.5 已知问题)。Go 端**写顺序无变更**;Rust DEL 失败仅 `tracing::warn!`,不阻塞 Moka invalidate。
+
+幂等性:任意 pod 收到 `events:entity` → DEL Redis L1 → Moka invalidate;多 pod 同时收同一事件即多次 DEL,无害。
+
+启动期 Redis L1 陈旧不在本补口范围:Rust 启动锚点是 `$`,启动前的事件不消费;Redis L1 中陈旧 entity 在 TTL 内仍可能命中(最长 30 min for vendor_key / pricing / model_group)。如要彻底解决,需要 Go 主动 DEL 或 Rust 全量预热(留 follow-up,不在本契约范围)。
 
 ### 1.2.5 删除语义
 

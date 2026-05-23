@@ -193,6 +193,8 @@ After parsing, the loop decides how to forward the chunk to the client. If `ctx.
 
 `crates/gw-store/src/stream_consumer.rs` XREADGROUPs `events:entity` (block 200 ms, count 64) on a consumer group anchored at `$` so a fresh pod ignores backfill — the cold-load chain covers the gap. Each event carries `{ns, id}`; `apply()` dispatches to the right `EntityStore::invalidate_*`:
 
+Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 key `entity:{ns}:{id}` (G6) so multi-pod deployments do not retain stale entries up to the L1 TTL. The DEL failure path only warns (`tracing::warn!`), it does not block the Moka invalidate.
+
 - `user`, `apikey`, `user_group`, `vendor`, `vendor_key`, `model_group`, `pricing`, `jwks`, `ipblock` → the corresponding Moka cache eviction.
 - `gemini_file_mapping`, `model_mapping` → file-mapping / model-alias cache eviction (entity loaders pending — T6-E + A-T2).
 

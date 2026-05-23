@@ -96,6 +96,7 @@ pub async fn get_candidate_keys(
             forced_capabilities: key.forced_capabilities.clone(),
             exclusive_capability_match: key.exclusive_capability_match,
             tunnel_preference: key.tunnel_preference.clone(),
+            oauth: key.oauth.clone(),
         }));
     }
     out

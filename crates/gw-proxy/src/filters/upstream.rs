@@ -515,8 +515,31 @@ pub async fn rewrite_request(
     let _ = upstream_request.remove_header("x-api-key");
     let _ = upstream_request.remove_header("x-api-key-id");
 
-    let api_key = picked.api_key.expose_secret().to_owned();
-    let auth_value = vendor.value.auth_template.replace("{api_key}", &api_key);
+    // G3 / ADR-G3-2: when the vendor key carries OAuth credentials, inject the
+    // (already-decrypted) access_token instead of the static api_key. Token
+    // refresh is handled out-of-band by the Go task-worker: on upstream 401,
+    // the OAuthListener reverse-XADDs an events:entity to trigger refresh
+    // (T2-B). The expired token still flows here — Go refreshes asynchronously.
+    let auth_secret = if let Some(oauth) = picked.oauth.as_ref() {
+        let now = time::OffsetDateTime::now_utc();
+        if now >= oauth.access_expires_at {
+            metrics::counter!(
+                "gw_oauth_token_expired_total",
+                "vendor_key_id" => picked.key_id.as_ref().to_string(),
+            )
+            .increment(1);
+        } else if now >= oauth.access_expires_at - time::Duration::seconds(60) {
+            metrics::counter!(
+                "gw_oauth_token_near_expiry_total",
+                "vendor_key_id" => picked.key_id.as_ref().to_string(),
+            )
+            .increment(1);
+        }
+        oauth.access_token.expose_secret().to_owned()
+    } else {
+        picked.api_key.expose_secret().to_owned()
+    };
+    let auth_value = vendor.value.auth_template.replace("{api_key}", &auth_secret);
     let _ = upstream_request.insert_header("authorization", auth_value);
     if let Some(host) = vendor.value.base_urls.first().and_then(|u| u.host_str()) {
         let _ = upstream_request.insert_header("host", host.to_string());
@@ -558,6 +581,30 @@ mod cross_protocol_nonstream_tests {
         assert!(
             src.contains(&needle),
             "cross-protocol non-stream short-circuit must be added in B1-4"
+        );
+    }
+}
+
+#[cfg(test)]
+mod oauth_injection_tests {
+    #[test]
+    fn oauth_injection_present_in_source() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/filters/upstream.rs")
+        )
+        .expect("read source");
+        assert!(
+            src.contains("picked.oauth.as_ref()"),
+            "G3 oauth branch missing in upstream_request_filter"
+        );
+        assert!(
+            src.contains("oauth.access_token"),
+            "G3 access_token usage missing"
+        );
+        assert!(
+            src.contains("gw_oauth_token_near_expiry_total")
+                && src.contains("gw_oauth_token_expired_total"),
+            "G3 expiry metrics missing"
         );
     }
 }

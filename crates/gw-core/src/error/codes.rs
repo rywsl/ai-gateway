@@ -59,6 +59,10 @@ pub const GW_TUNNEL_NO_LIVE: &str = "GW_TUNNEL_NO_LIVE";
 pub const GW_TUNNEL_TARGET_DENIED: &str = "GW_TUNNEL_TARGET_DENIED";
 pub const GW_TUNNEL_DNS_BLOCKED: &str = "GW_TUNNEL_DNS_BLOCKED";
 
+// --- OAuth codes (G3 / go-onboarding-gaps T0) ---
+pub const GW_AUTH_OAUTH_TOKEN_EXPIRED: &str = "GW_AUTH_OAUTH_TOKEN_EXPIRED";
+pub const GW_AUTH_OAUTH_REFRESH_FAILED: &str = "GW_AUTH_OAUTH_REFRESH_FAILED";
+
 // --- Go-onboarding-blockers codes (B1 cross-protocol non-stream, B2 mgmt-token) ---
 // B1: cross-protocol non-streaming requests cannot be re-rendered because
 // `parse_response` is implemented only on the same-protocol pass-through path

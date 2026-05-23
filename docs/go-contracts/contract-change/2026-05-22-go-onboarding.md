@@ -142,7 +142,7 @@ CREATE INDEX management_tokens_user_id_idx ON management_tokens ((payload->>'use
 | 接触点 | Writer | Reader | 说明 |
 |---|---|---|---|
 | PgSQL `proxy_nodes` | Go(Hub heartbeat ingestion + 管理 UI)| Rust(EntityStore 冷加载)| 节点元数据权威 |
-| Redis `cache:proxy_node:<id>` | Go(write-through 可选)| Rust(冷加载写回)| L1 cache |
+| Redis `entity:proxy_node:<id>` | Go(write-through 可选)| Rust(冷加载写回)| L1 cache |
 | `events:entity` ns=`proxy_node` | Go | Rust StreamConsumer | 节点变更通知 |
 | `/api/internal/hub/heartbeat` | (远端节点 → Go)| Go | Rust **不**接收 |
 | `/api/internal/hub/node-status` | Go 暴露 | 前端 / 运维 | Rust **不**接收 |
@@ -448,7 +448,7 @@ CREATE TABLE auth_configs (
 Rust StreamConsumer 收到 `events:entity` 后,**在 invalidate Moka 之前**额外执行:
 
 ```
-DEL cache:{ns}:{id}
+DEL entity:{ns}:{id}
 ```
 
 这是为了多 pod 部署时 Redis L1 不残留陈旧值(详见 [`docs/architecture.md`](../../architecture.md) §10.5 已知问题)。Go 端**写顺序无变更**;Rust DEL 失败仅 `tracing::warn!`,不阻塞 Moka invalidate。
@@ -465,7 +465,7 @@ DEL cache:{ns}:{id}
 ````
 ## 2.11 Redis L1 失效一致性责任
 
-Rust 端在消费 `events:entity` 时会 `DEL cache:{ns}:{id}`(详见 [parts/01 §1.2.4](../parts/01-go-as-producer.md#124-写顺序与重试) 补口段)。Go 端**无需**主动 DEL `cache:{ns}:{id}` 来配合;Go 写 entity 的三步流程(PgSQL UPDATE → 可选 Redis HSET write-through → XADD `events:entity`)不变。
+Rust 端在消费 `events:entity` 时会 `DEL entity:{ns}:{id}`(详见 [parts/01 §1.2.4](../parts/01-go-as-producer.md#124-写顺序与重试) 补口段)。Go 端**无需**主动 DEL `entity:{ns}:{id}` 来配合;Go 写 entity 的三步流程(PgSQL UPDATE → 可选 Redis HSET write-through → XADD `events:entity`)不变。
 
 **不变量**:
 
@@ -478,7 +478,7 @@ Rust 端在消费 `events:entity` 时会 `DEL cache:{ns}:{id}`(详见 [parts/01 
 
 ### 7.3 Rust 落点
 
-`crates/gw-store/src/stream_consumer.rs::apply_entity_event`:在调用 `EntityStore::invalidate_*` 之前 `redis.del(format!("cache:{}:{}", ns, id)).await`,错误仅 warn。
+`crates/gw-store/src/stream_consumer.rs::apply_entity_event`:在调用 `EntityStore::invalidate_*` 之前 `redis.del(format!("entity:{}:{}", ns, id)).await`,错误仅 warn。
 
 ---
 

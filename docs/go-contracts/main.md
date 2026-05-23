@@ -16,7 +16,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
    Go (权威 writer / settle 端)                   Rust (高频读 / 路由 / 冻结)
    ──────────────────────────────                ──────────────────────────────
    PgSQL                  ────────────────►       sqlx 直连读
-   Redis cache:{ns}:{id}   ◄──────write-back──── Rust 冷加载写回（带 TTL）
+   Redis entity:{ns}:{id}  ◄──────write-back──── Rust 冷加载写回（带 TTL）
    events:entity (XADD)   ────────────────►       StreamConsumer XREADGROUP
    events:counter (XADD)  ────────────────►       StreamConsumer XREADGROUP
    counter:user:*:base_micro / deducted_micro    （Go INCRBY；Rust 读快照）
@@ -38,6 +38,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
 | [parts/01-go-as-producer.md](parts/01-go-as-producer.md) | **Go → Rust** | Go 主动写、Rust 消费。涵盖：PgSQL 实体写、`events:entity`、`events:counter`、`counter:*` 余额、`entity:estimate_pricing`、`jwt:blacklist:*`、KEK 轮换 producer 责任 |
 | [parts/02-go-as-consumer.md](parts/02-go-as-consumer.md) | **Rust → Go** | Rust 主动写、Go 消费。涵盖：`usage:records`（吸收原 C-ε §2）、`usage:records:dlq`、`usage:detailed`、Rust 反向 `events:entity`（`vendor_key.rate_limited` / `ipblock` 自动封禁）、`counter:*:frozen_micro` / `daily_tokens` 读路径 |
 | [parts/03-shared-schema.md](parts/03-shared-schema.md) | **共享 schema** | 双方都接触的 PgSQL 表清单、entity payload JSONB shape、`version BIGINT` 协议、AES-256-GCM 加密 payload、KEK 轮换 |
+| [parts/04-proxy-nodes.md](parts/04-proxy-nodes.md) | **Proxy Nodes** | Rust tunnel client ↔ Go Hub 契约;节点 entity / 心跳分工 / status 状态机 |
 
 ## 3. 通用约定（所有 part 共享）
 
@@ -76,7 +77,7 @@ PgSQL 同步表则携带 `version BIGINT`（详见 Part 03）。
 
 ### 3.4 写顺序原则
 
-- **Go 写实体**：先 `UPDATE pgsql SET version=version+1`，再 `HSET cache:{ns}:{id}`（可选 write-through），最后 `XADD events:entity`。三步全失败导致 Rust 缓存陈旧，由 `version` 单调性 + Rust 启动期冷加载兜底。
+- **Go 写实体**：先 `UPDATE pgsql SET version=version+1`，再 `HSET entity:{ns}:{id}`（可选 write-through），最后 `XADD events:entity`。三步全失败导致 Rust 缓存陈旧，由 `version` 单调性 + Rust 启动期冷加载兜底。
 - **Go 写 counter**：先 `INCRBY counter:user:<uid>:<field>`，再 `XADD events:counter` 携带 `value_after`。Rust 用 `value_after` 覆盖本地缓存，**不**做 delta 累加。
 - **Rust 反向写 entity**：仅限白名单（`vendor_key.status_change`、`ipblock.upsert`），见 Part 02。`v` 字段 Rust 不能伪造单调，**必须**通过 Go 中转或使用 Go 预留的"反向写入 op"枚举。
 

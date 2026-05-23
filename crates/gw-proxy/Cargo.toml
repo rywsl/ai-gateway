@@ -37,6 +37,7 @@ url.workspace = true
 thiserror.workspace = true
 dashmap.workspace = true
 arc-swap.workspace = true
+fred.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

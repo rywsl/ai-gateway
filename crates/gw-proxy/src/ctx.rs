@@ -145,6 +145,12 @@ pub struct ReqCtx {
     /// Read by `logging` for the detailed-log field and by metrics labels.
     pub tunnel_resolution: Option<String>,
 
+    // --- Long-running operation (G5 / go-onboarding-gaps T0) ---
+    /// G5: Gemini `:predictLongRunning` / OpenAI `/v1/videos` top-level
+    /// `name: "operations/..."` extracted by `codec.parse_response`.
+    /// `None` for all ordinary (non-LRO) requests.
+    pub operation_id: Option<String>,
+
     // --- Go-onboarding-blockers (B1 non-stream + B2 mgmt token) ---
     /// B1: non-stream upstream body accumulator (EOS triggers codec::parse_response).
     /// `None` on the streaming happy path; allocated lazily by the
@@ -216,6 +222,7 @@ impl ReqCtx {
             mgmt: false,
             required_caps: None,
             tunnel_resolution: None,
+            operation_id: None,
             upstream_body_accum: None,
             mgmt_user_id: None,
             mgmt_scope: None,
