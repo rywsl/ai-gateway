@@ -253,4 +253,100 @@ mod tests {
         );
         assert!(matches!(mapped, FinishReasonIR::ContentFilter));
     }
+
+    #[test]
+    fn adapt_lossy_matrix_thinking_drop_decisions() {
+        use WireFormat::*;
+        // (from, to, should_drop_thinking)
+        // Pairs match spec §4.2: thinking is lossy when target lacks supports_thinking.
+        let cases = [
+            (AnthropicMessages, OpenAiChat, true),
+            (AnthropicMessages, OpenAiResponses, false),
+            (AnthropicMessages, GeminiGenerate, true),
+            (OpenAiResponses, OpenAiChat, true),
+            (OpenAiResponses, AnthropicMessages, false),
+            (OpenAiResponses, GeminiGenerate, true),
+        ];
+        for (from, to, should_drop) in cases {
+            let cr = CrossRender {
+                from,
+                to,
+                source: ir_with_thinking(),
+            };
+            let adapted = cr.adapt_lossy();
+            assert_eq!(
+                adapted.thinking.is_none(),
+                should_drop,
+                "from={from} to={to} should_drop={should_drop}"
+            );
+        }
+    }
+
+    #[test]
+    fn adapt_lossy_matrix_reasoning_drop_decisions() {
+        use gw_core::ir::ReasoningBlockIR;
+        use std::borrow::Cow;
+        use WireFormat::*;
+        // Only target that supports reasoning is OpenAI Responses itself.
+        let cases = [
+            (OpenAiResponses, OpenAiChat, true),
+            (OpenAiResponses, AnthropicMessages, true),
+            (OpenAiResponses, GeminiGenerate, true),
+        ];
+        for (from, to, should_drop) in cases {
+            let ir = gw_core::ir::ResponseIR {
+                reasoning: Some(ReasoningBlockIR {
+                    summary: Cow::Borrowed("test summary"),
+                }),
+                ..gw_core::ir::ResponseIR::default()
+            };
+            let cr = CrossRender {
+                from,
+                to,
+                source: ir,
+            };
+            let adapted = cr.adapt_lossy();
+            assert_eq!(
+                adapted.reasoning.is_none(),
+                should_drop,
+                "from={from} to={to} should_drop={should_drop}"
+            );
+        }
+    }
+
+    #[test]
+    fn adapt_lossy_matrix_reasoning_tokens_drop_decisions() {
+        use WireFormat::*;
+        let cases = [
+            (OpenAiResponses, OpenAiChat, true),
+            (OpenAiResponses, AnthropicMessages, true),
+            (OpenAiResponses, GeminiGenerate, true),
+        ];
+        for (from, to, should_drop) in cases {
+            let ir = gw_core::ir::ResponseIR {
+                usage: Some(gw_core::ir::UsageIR {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    cached_tokens: None,
+                    reasoning_tokens: Some(20),
+                }),
+                ..gw_core::ir::ResponseIR::default()
+            };
+            let cr = CrossRender {
+                from,
+                to,
+                source: ir,
+            };
+            let adapted = cr.adapt_lossy();
+            let dropped = adapted
+                .usage
+                .as_ref()
+                .and_then(|u| u.reasoning_tokens)
+                .is_none();
+            assert_eq!(
+                dropped, should_drop,
+                "from={from} to={to} should_drop={should_drop}"
+            );
+        }
+    }
 }
