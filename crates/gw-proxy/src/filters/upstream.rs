@@ -509,6 +509,24 @@ pub async fn rewrite_request(
     ctx.cached_body = Some(outbound.clone());
     ctx.upstream_codec = Some(upstream_codec);
 
+    // Archive: snapshot the upstream-bound request now that `outbound` is the
+    // wire form. `upstream_request` headers have already been mutated by this
+    // point (Authorization injected etc.) so the archive sees what vendor sees.
+    ctx.upstream_request_body = Some(std::sync::Arc::new(outbound.clone()));
+    {
+        use crate::ctx::UpstreamRequestMeta;
+        ctx.upstream_request_meta = Some(UpstreamRequestMeta {
+            method: upstream_request.method.as_str().to_owned(),
+            url: upstream_request.uri.to_string(),
+            http_version: format!("{:?}", upstream_request.version),
+            headers: upstream_request
+                .headers
+                .iter()
+                .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+                .collect(),
+        });
+    }
+
     // Headers: rewrite Authorization per the vendor's auth_template, drop
     // the inbound auth headers, set Host, propagate traceparent.
     let _ = upstream_request.remove_header("authorization");
