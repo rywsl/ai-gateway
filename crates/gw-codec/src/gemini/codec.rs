@@ -219,6 +219,13 @@ impl ProtocolCodec for Gemini {
 
         #[derive(serde::Deserialize)]
         struct GeminiResponseBody {
+            // ADR-G5-1: long-running operations (e.g. `:predictLongRunning`)
+            // emit a top-level `name: "operations/<uuid>"`; non-LRO chat
+            // responses have no `name` field and this stays empty. The
+            // response filter promotes ids that start with `operations/` into
+            // `ctx.operation_id` for downstream billing/correlation.
+            #[serde(default)]
+            name: String,
             #[serde(default, rename = "modelVersion")]
             model_version: String,
             #[serde(default, rename = "usageMetadata")]
@@ -247,8 +254,9 @@ impl ProtocolCodec for Gemini {
         });
 
         Ok(ResponseIR {
-            // Gemini's GenerateContentResponse carries no id field.
-            id: Cow::Borrowed(""),
+            // Gemini's GenerateContentResponse carries no `id` field; only
+            // long-running operation responses set a top-level `name`.
+            id: Cow::Owned(parsed.name),
             model: Cow::Owned(parsed.model_version),
             messages: Vec::new(),
             finish_reason: None,
@@ -362,5 +370,26 @@ mod tests {
             err.code.as_ref(),
             gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR
         );
+    }
+
+    #[test]
+    fn parse_response_extracts_operation_id_when_present() {
+        let body = br#"{
+            "name":"operations/foo-bar-12345",
+            "metadata":{},
+            "done":false
+        }"#;
+        let codec = Gemini;
+        let ir = codec.parse_response(body).unwrap();
+        assert_eq!(ir.id.as_ref(), "operations/foo-bar-12345");
+    }
+
+    #[test]
+    fn parse_response_normal_chat_id_unchanged() {
+        let body = br#"{"candidates":[],"modelVersion":"m",
+            "usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}"#;
+        let codec = Gemini;
+        let ir = codec.parse_response(body).unwrap();
+        assert_eq!(ir.id.as_ref(), "");
     }
 }
