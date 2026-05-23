@@ -46,6 +46,7 @@ impl AppState {
 /// - `POST /entity/{table}/{id}`, `DELETE /entity/{table}/{id}`
 /// - `POST /counter/{scope}/{id}/{field}`, `POST /counter-raw`
 /// - `POST /balance/{user_id}`
+/// - `POST /mgmt-blacklist/{token_id}` (T4-B)
 /// - `POST /jwks/rotate`
 /// - `POST /usage/drain`, `GET /usage/stats`
 /// - `POST /admin/reset`
@@ -59,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/counter/:scope/:id/:field", post(api::set_counter))
         .route("/counter-raw", post(api::set_counter_raw))
         .route("/balance/:user_id", post(api::set_balance))
+        .route("/mgmt-blacklist/:token_id", post(api::set_mgmt_blacklist))
         .route("/jwks/rotate", post(jwks::rotate))
         .route("/usage/drain", post(usage_drain::force_drain))
         .route("/usage/stats", get(usage_drain::stats))

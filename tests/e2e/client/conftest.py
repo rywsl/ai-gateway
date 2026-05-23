@@ -1055,3 +1055,146 @@ def seed_passthrough(
         "group": group,
         "model": model,
     }
+
+
+# -----------------------------------------------------------------------------
+# T4-B fixtures: management-token / blacklist helpers for /healthz e2e.
+# -----------------------------------------------------------------------------
+# This section is appended (not merged) to avoid conflicting with T4-A which
+# touches the same file in parallel. All new fixtures are scoped to the
+# `test_mgmt_token` scenario file but live here so any future B2 scenario
+# can pick them up.
+#
+# Wire-format invariants (deliberately encoded inline, not abstracted):
+# - `ManagementTokenEntry.hash` is `Vec<u8>` and serde-json deserializes it
+#   from a JSON array of integers (NOT base64, NOT hex). Same shape as
+#   `ApiKeyEntry.hash` — we reuse the existing `sha256_bytes` helper.
+# - `expires_at` is `Option<time::OffsetDateTime>` with the `time` crate's
+#   default-serde tuple layout (9 ints: year, ordinal, h, m, s, ns, off_h,
+#   off_m, off_s). An ISO8601 string would 500 the cold-load. Mirrors the
+#   `PAST_EXPIRES_AT` constant in test_auth_failures.py.
+# - `scope` is the snake_case `MgmtScope` enum tag ("user_self" / "admin_read"
+#   / "admin_full"). `status` is the `KeyStatus` tag ("active" / "disabled" ...).
+# - Blacklist key: `mgmt_token:blacklist:{token_id}`, value `"1"`, TTL > 0.
+#   The gateway's `check_mgmt` uses `FailClosed` so even a Redis miss after
+#   the key expires returns "not revoked".
+#
+# Fake-web upgrades that landed alongside (crates/e2e-fake-web):
+# - `management_tokens` added to `ENTITY_TABLES` + `TRUNCATE_TABLES`.
+# - `ns_for_table("management_tokens") = Some("management_token")` so
+#   `put_entity` XADDs the right invalidation event.
+# - `reset()` now also DELs `mgmt_token:blacklist:*` so blacklist state
+#   doesn't leak between tests.
+# - New `POST /mgmt-blacklist/:token_id` route used by `mgmt_blacklist_set`.
+
+
+def _expires_at_tuple(seconds_from_now: int) -> list[int]:
+    """Build the 9-int `time::OffsetDateTime` tuple `seconds_from_now` from
+    now-utc. Layout: (year, ordinal, hour, minute, second, nanosecond,
+    offset_h, offset_m, offset_s). UTC offset is 0/0/0.
+
+    A negative `seconds_from_now` yields a tuple in the past, which the
+    gateway's `verify_mgmt_token_secret` rejects with `Expired`.
+
+    NB: the `time` crate's default-serde format is the only path that
+    works for `Option<OffsetDateTime>` in this workspace — the `time`
+    dep is pulled with `features = ["serde", "macros"]` (NOT
+    `serde-human-readable`), so an ISO8601 string would deserialize-fail
+    and surface as `INVALID_APIKEY`-style cold-load miss.
+    """
+    import datetime as _dt
+
+    t = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=seconds_from_now)
+    ordinal = t.timetuple().tm_yday  # 1-based day-of-year
+    return [
+        t.year,
+        ordinal,
+        t.hour,
+        t.minute,
+        t.second,
+        t.microsecond * 1000,  # nanoseconds
+        0,
+        0,
+        0,
+    ]
+
+
+@pytest.fixture
+def gateway_health_url() -> str:
+    """Base URL of the gateway's admin `/healthz/*` + unauth `/livez|/readyz`
+    surface (`GW_SERVER__HEALTH_PORT`, default 8080 in docker-compose).
+
+    Resolved from env so a dev pointing at a non-default deployment can
+    override without touching the suite. Distinct from `metrics_url` (9090)
+    and `gateway_url` (business 8000).
+    """
+    return os.environ.get("GATEWAY_HEALTH_URL", "http://localhost:8080")
+
+
+@pytest.fixture
+def seed_mgmt_token(fake_web: "FakeWebClient"):
+    """Seed a `ManagementTokenEntry` row into PgSQL via fake_web's
+    `/entity/management_tokens/:id` admin route.
+
+    The fake_web upsert also XADDs `events:entity`
+    `{ns=management_token, id=<token_id>}` so the gateway's
+    `EntityStore::mgmt_token` Moka cache invalidates a prior copy of the
+    same id. The next `/healthz/*` request cold-loads the new row from PG.
+
+    Args:
+        token_id: full id including the `mt_` prefix (e.g. `mt_r1`).
+        secret:   the secret half presented in the `Authorization: Mgmt
+                  <token_id>.<secret>` header.
+        scope:    one of `"user_self"`, `"admin_read"`, `"admin_full"`
+                  (matches the snake_case `MgmtScope` serde tag).
+        expires_in_secs: seconds-from-now until expiry. A negative value
+                  emits a tuple in the past, yielding
+                  `MgmtVerifyOutcome::Expired`.
+        status:   `KeyStatus` tag — default `"active"`. Set to `"disabled"`
+                  to exercise the Disabled branch.
+
+    Returns the same `token_id` for chaining.
+    """
+
+    def _seed(
+        token_id: str,
+        secret: str,
+        scope: str = "admin_read",
+        expires_in_secs: int = 3600,
+        status: str = "active",
+    ) -> str:
+        payload = {
+            "token_id": token_id,
+            "user_id": "u_mgmt_test",
+            "scope": scope,
+            "hash": sha256_bytes(secret),
+            "expires_at": _expires_at_tuple(expires_in_secs),
+            "status": status,
+            "display_name": f"test {token_id}",
+        }
+        fake_web.put_entity("management_tokens", token_id, payload)
+        return token_id
+
+    return _seed
+
+
+@pytest.fixture
+def mgmt_blacklist_set(fake_web_url: str):
+    """SET `mgmt_token:blacklist:{token_id}` "1" EX `ttl_secs` via fake_web.
+
+    Simulates the Go-side revoke surface so the e2e suite can verify
+    `check_mgmt` fail-closed behaviour. Independent of the EntityStore
+    Moka cache — the blacklist probe is per-request, so revocation takes
+    effect immediately after the SET (no cache-TTL grace).
+    """
+    sess = requests.Session()
+
+    def _set(token_id: str, ttl_secs: int = 60) -> None:
+        r = sess.post(
+            f"{fake_web_url.rstrip('/')}/mgmt-blacklist/{token_id}",
+            json={"ttl_secs": ttl_secs},
+            timeout=10,
+        )
+        r.raise_for_status()
+
+    return _set

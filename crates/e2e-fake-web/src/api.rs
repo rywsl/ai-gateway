@@ -112,6 +112,32 @@ pub async fn set_balance(
     }
 }
 
+#[derive(Deserialize)]
+pub struct MgmtBlacklistBody {
+    /// TTL in seconds — uses `i64` so the wire format matches `CounterBody`.
+    /// Values <= 0 are clamped to 1 by `Store::set_mgmt_blacklist`.
+    pub ttl_secs: i64,
+}
+
+/// T4-B: `POST /mgmt-blacklist/:token_id` — SET `mgmt_token:blacklist:{token_id}`
+/// with TTL. Simulates the Go-side revoke surface so the e2e scenario for
+/// mgmt-token blacklist takeover can exercise the gateway's fail-closed
+/// `check_mgmt` path without reaching for `redis-cli`.
+pub async fn set_mgmt_blacklist(
+    State(state): State<AppState>,
+    Path(token_id): Path<String>,
+    Json(body): Json<MgmtBlacklistBody>,
+) -> impl IntoResponse {
+    match state
+        .store
+        .set_mgmt_blacklist(&token_id, body.ttl_secs)
+        .await
+    {
+        Ok(()) => (StatusCode::OK, "ok").into_response(),
+        Err(e) => err_to_400(e).into_response(),
+    }
+}
+
 #[derive(Serialize)]
 pub struct ResetResponse {
     pub ok: bool,
