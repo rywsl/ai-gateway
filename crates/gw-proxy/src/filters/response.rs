@@ -140,7 +140,8 @@ fn handle_event(
     // codec-internal cross-chunk accumulation. We `take()` the state out of
     // ctx to satisfy the borrow checker for the rest of the function, then
     // put it back at the end. `stream_state` is initialized in
-    // `request_filter` when `is_stream` is true; if for any reason it is
+    // `upstream_request_filter` (after `rewrite_request` resolves the
+    // upstream codec) when `is_stream` is true; if for any reason it is
     // missing on a stream response (codec mismatch / mis-init), lazily
     // synthesise one from the upstream codec so streaming doesn't break.
     let mut state = ctx

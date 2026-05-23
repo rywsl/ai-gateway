@@ -110,7 +110,8 @@ pub struct ReqCtx {
     /// `\n\n` boundary.
     pub sse_leftover: Vec<u8>,
 
-    /// Codec-internal SSE accumulator. Set in `request_filter` when the
+    /// Codec-internal SSE accumulator. Set in `upstream_request_filter`
+    /// (after the upstream codec is resolved in `rewrite_request`) when the
     /// request is a streaming one; threaded into `parse_stream_chunk` for
     /// every framed event so the codec can buffer partial events (tool-call
     /// argument deltas, thinking signatures, …) across chunk boundaries.

@@ -62,8 +62,10 @@ pub trait ProtocolCodec: Send + Sync + 'static {
     /// The filter holds the `Box<dyn StreamState>` for the lifetime of the
     /// response but does not inspect its fields. Each codec's State carries
     /// codec-internal accumulation (e.g. tool_call argument deltas,
-    /// thinking signatures). Called once per response in `request_filter`
-    /// when `RequestIR.stream` is true.
+    /// thinking signatures). Called once per response in
+    /// `upstream_request_filter` when `RequestIR.stream` is true (upstream
+    /// codec is resolved in `rewrite_request`, so initialization cannot
+    /// happen any earlier).
     fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState>;
 
     /// Parse one already-framed SSE event chunk.
