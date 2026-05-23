@@ -370,7 +370,7 @@ Go 端运维如要硬删除（超长归档），应当先确认无 Rust 在飞�
 
 - 仅在 `gw-store::loader::load_vendor_key` 内冷加载时解密（详见 `loader.rs:200-225`）；
 - 解密后 `api_key` 包在 `SecretString` 内，Moka 缓存持有；
-- Redis 写回 `cache:vendor_key:<id>` 仍是密文形态；
+- Redis 写回 `entity:vendor_key:<id>` 仍是密文形态；
 - Drop 时清零内存（`secrecy` crate 保证）。
 
 ### 3.4.5 失败模式

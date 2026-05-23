@@ -16,7 +16,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
    Go (权威 writer / settle 端)                   Rust (高频读 / 路由 / 冻结)
    ──────────────────────────────                ──────────────────────────────
    PgSQL                  ────────────────►       sqlx 直连读
-   Redis cache:{ns}:{id}   ◄──────write-back──── Rust 冷加载写回（带 TTL）
+   Redis entity:{ns}:{id}  ◄──────write-back──── Rust 冷加载写回（带 TTL）
    events:entity (XADD)   ────────────────►       StreamConsumer XREADGROUP
    events:counter (XADD)  ────────────────►       StreamConsumer XREADGROUP
    counter:user:*:base_micro / deducted_micro    （Go INCRBY；Rust 读快照）
@@ -76,7 +76,7 @@ PgSQL 同步表则携带 `version BIGINT`（详见 Part 03）。
 
 ### 3.4 写顺序原则
 
-- **Go 写实体**：先 `UPDATE pgsql SET version=version+1`，再 `HSET cache:{ns}:{id}`（可选 write-through），最后 `XADD events:entity`。三步全失败导致 Rust 缓存陈旧，由 `version` 单调性 + Rust 启动期冷加载兜底。
+- **Go 写实体**：先 `UPDATE pgsql SET version=version+1`，再 `HSET entity:{ns}:{id}`（可选 write-through），最后 `XADD events:entity`。三步全失败导致 Rust 缓存陈旧，由 `version` 单调性 + Rust 启动期冷加载兜底。
 - **Go 写 counter**：先 `INCRBY counter:user:<uid>:<field>`，再 `XADD events:counter` 携带 `value_after`。Rust 用 `value_after` 覆盖本地缓存，**不**做 delta 累加。
 - **Rust 反向写 entity**：仅限白名单（`vendor_key.status_change`、`ipblock.upsert`），见 Part 02。`v` 字段 Rust 不能伪造单调，**必须**通过 Go 中转或使用 Go 预留的"反向写入 op"枚举。
 

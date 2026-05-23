@@ -11,7 +11,7 @@ Go 是所有 entity 表的唯一 writer（Rust 不写 PgSQL，仅 sqlx `SELECT`�
 写入义务（事务内串联三步）：
 
 1. **`UPDATE <table> SET payload = $1, version = version + 1, updated_at = now() WHERE id = $2 RETURNING version`**（或对应 `INSERT ... ON CONFLICT (id) DO UPDATE`）。`version` 必须**严格单调递增**，由数据库 trigger 或 Go 应用层保证。
-2. **写回 Redis `cache:{ns}:{id}` HASH**（可选 write-through，加速 Rust 命中；不做也行——Rust miss 时会自己写回带 TTL 的副本）。Go 写时**禁止**附 `EXPIRE`（永久 key 表示"Go 接管"）。
+2. **写回 Redis `entity:{ns}:{id}` HASH**（可选 write-through，加速 Rust 命中；不做也行——Rust miss 时会自己写回带 TTL 的副本）。Go 写时**禁止**附 `EXPIRE`（永久 key 表示"Go 接管"）。
 3. **`XADD events:entity * ns <ns> id <id> v <new_version> op <upsert|delete>`**。失败时**不**回滚 PgSQL，由后续 ALTER + 重试或下次更新覆盖。
 
 Rust 端通过 `version` 单调性兜底：即使 XADD 漏发，下一次 Rust 冷加载读到的就是新 version。
