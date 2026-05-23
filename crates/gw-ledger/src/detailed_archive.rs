@@ -85,3 +85,203 @@ pub enum SurfacePayload {
     Response(ResponsePayload, Arc<Bytes>),
     Summary(SummaryPayload),
 }
+
+// ── Flusher pool ─────────────────────────────────────────────────────────────
+
+use crate::encoding::{encode, CompressionCfg};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use fred::clients::RedisPool;
+use fred::interfaces::StreamsInterface;
+use fred::types::{XCap, XCapKind, XCapTrim};
+use tokio::sync::mpsc;
+
+/// Boot-time config; mirrors the `[detailed_log]` table in `config/default.toml`.
+#[derive(Debug, Clone)]
+pub struct DetailedArchiveCfg {
+    pub stream: String,
+    pub maxlen: u64,
+    pub channel_capacity: usize,
+    pub workers: usize,
+    pub single_payload_soft_cap_bytes: usize,
+    pub compression: CompressionCfg,
+}
+
+/// Sender handle held by `LlmGateway`; cheaply cloneable.
+#[derive(Clone)]
+pub struct DetailedArchive {
+    tx: mpsc::Sender<CapturedSurface>,
+}
+
+impl DetailedArchive {
+    pub fn start(redis: RedisPool, cfg: DetailedArchiveCfg) -> Self {
+        let (tx, rx) = mpsc::channel::<CapturedSurface>(cfg.channel_capacity);
+        let workers = cfg.workers.max(1);
+        let shared_rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+        for _ in 0..workers {
+            let rx = shared_rx.clone();
+            let cfg = cfg.clone();
+            let redis = redis.clone();
+            tokio::spawn(worker(rx, redis, cfg));
+        }
+        Self { tx }
+    }
+
+    /// Best-effort enqueue. On a full channel we drop + metric. Never blocks.
+    pub fn try_send(&self, surface: CapturedSurface) {
+        let kind_label = surface.kind.as_str();
+        if self.tx.try_send(surface).is_err() {
+            metrics::counter!(
+                "gw_detailed_log_drop_total",
+                "reason" => "channel_full",
+                "kind" => kind_label,
+            )
+            .increment(1);
+        }
+    }
+}
+
+fn cap(maxlen: u64) -> XCap {
+    XCap::try_from((XCapKind::MaxLen, XCapTrim::AlmostExact, maxlen))
+        .expect("XCap::try_from infallible for (MaxLen, AlmostExact, u64)")
+}
+
+async fn worker(
+    rx: std::sync::Arc<tokio::sync::Mutex<mpsc::Receiver<CapturedSurface>>>,
+    redis: RedisPool,
+    cfg: DetailedArchiveCfg,
+) {
+    loop {
+        let surface = {
+            let mut guard = rx.lock().await;
+            match guard.recv().await {
+                Some(s) => s,
+                None => return,
+            }
+        };
+        handle(surface, &redis, &cfg).await;
+    }
+}
+
+async fn handle(surface: CapturedSurface, redis: &RedisPool, cfg: &DetailedArchiveCfg) {
+    let CapturedSurface { ts_ms, request_id, trace_id, kind, payload } = surface;
+    let kind_label = kind.as_str();
+
+    let json_bytes = match serialize_payload(payload, cfg.single_payload_soft_cap_bytes, kind_label) {
+        Some(b) => b,
+        None => return,
+    };
+
+    let pre_compress_len = json_bytes.len();
+    metrics::histogram!("gw_detailed_log_pre_compress_bytes", "kind" => kind_label)
+        .record(pre_compress_len as f64);
+
+    let start = std::time::Instant::now();
+    let (encoding, encoded) = match encode(json_bytes, &cfg.compression) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(target: "gw_ledger", error = %e, "detailed archive encode failed; dropping");
+            metrics::counter!(
+                "gw_detailed_log_drop_total",
+                "reason" => "compress_failed",
+                "kind" => kind_label,
+            )
+            .increment(1);
+            return;
+        }
+    };
+    let elapsed = start.elapsed().as_secs_f64();
+    metrics::histogram!("gw_detailed_log_compress_seconds", "encoding" => encoding.as_str())
+        .record(elapsed);
+    metrics::histogram!(
+        "gw_detailed_log_payload_bytes",
+        "kind" => kind_label,
+        "encoding" => encoding.as_str(),
+    )
+    .record(encoded.len() as f64);
+
+    let ts_ms_str = ts_ms.to_string();
+    let fields: Vec<(&'static str, String)> = vec![
+        ("ts_ms", ts_ms_str),
+        ("request_id", request_id.as_ref().to_string()),
+        ("trace_id", trace_id.as_ref().to_string()),
+        ("kind", kind_label.to_string()),
+        ("encoding", encoding.as_str().to_string()),
+    ];
+    // Payload is binary; use a separate xadd call shape if needed, but
+    // for now encode as base64 string so all fields stay string-typed.
+    // The consumer already expects binary in `encoded`; we keep it as bytes
+    // by using the Vec<(K, V)> where V: Into<RedisValue> — fred 9.x accepts
+    // Vec<(&str, Vec<u8>)> for the fields argument.
+    let mut fields_with_payload: Vec<(&'static str, fred::types::RedisValue)> = fields
+        .into_iter()
+        .map(|(k, v)| (k, v.into()))
+        .collect();
+    fields_with_payload.push(("payload", encoded.as_slice().into()));
+
+    let client = redis.next();
+    let r: Result<String, _> = client
+        .xadd(cfg.stream.as_str(), false, cap(cfg.maxlen), "*", fields_with_payload)
+        .await;
+    if let Err(e) = r {
+        tracing::warn!(
+            target: "gw_ledger",
+            error = %e,
+            stream = %cfg.stream,
+            "detailed archive XADD failed; dropping"
+        );
+        metrics::counter!(
+            "gw_detailed_log_drop_total",
+            "reason" => "xadd_failed",
+            "kind" => kind_label,
+        )
+        .increment(1);
+    } else {
+        metrics::counter!(
+            "gw_detailed_log_emit_total",
+            "kind" => kind_label,
+            "encoding" => encoding.as_str(),
+        )
+        .increment(1);
+    }
+}
+
+fn serialize_payload(
+    payload: SurfacePayload,
+    soft_cap: usize,
+    kind_label: &'static str,
+) -> Option<Vec<u8>> {
+    let result = match payload {
+        SurfacePayload::Request(mut req, body) => {
+            req.body_b64 = B64.encode(body.as_ref());
+            serde_json::to_vec(&req)
+        }
+        SurfacePayload::Response(mut resp, body) => {
+            resp.body_b64 = B64.encode(body.as_ref());
+            serde_json::to_vec(&resp)
+        }
+        SurfacePayload::Summary(s) => serde_json::to_vec(&s),
+    };
+    match result {
+        Ok(v) if v.len() > soft_cap => {
+            metrics::counter!(
+                "gw_detailed_log_drop_total",
+                "reason" => "oversize",
+                "kind" => kind_label,
+            )
+            .increment(1);
+            None
+        }
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(target: "gw_ledger", error = %e, "detailed archive serialize failed");
+            metrics::counter!(
+                "gw_detailed_log_drop_total",
+                "reason" => "serialize_failed",
+                "kind" => kind_label,
+            )
+            .increment(1);
+            None
+        }
+    }
+}
