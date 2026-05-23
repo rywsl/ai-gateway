@@ -1,4 +1,5 @@
-//! `AnyCodec` — enum dispatcher across the three supported protocols.
+//! `AnyCodec` — enum dispatcher across the four supported wire shapes
+//! (OpenAI Chat, OpenAI Responses, Anthropic Messages, Gemini Generate).
 
 use bytes::BytesMut;
 use gw_core::error::ErrorIR;
@@ -7,11 +8,13 @@ use gw_core::protocol::ProtocolKind;
 
 use crate::anthropic::Anthropic;
 use crate::gemini::Gemini;
+use crate::openai::responses::OpenAiResponsesCodec;
 use crate::openai::OpenAi;
 use crate::trait_def::{Headers, ProtocolCodec};
 
 pub enum AnyCodec {
     OpenAi(OpenAi),
+    OpenAiResponses(OpenAiResponsesCodec),
     Anthropic(Anthropic),
     Gemini(Gemini),
 }
@@ -21,13 +24,23 @@ impl AnyCodec {
     pub fn kind(&self) -> ProtocolKind {
         match self {
             AnyCodec::OpenAi(_) => ProtocolKind::OpenAi,
+            // OpenAI Responses is the same vendor family as Chat; the finer
+            // shape distinction lives on `ApiShape` (see `gw-core::protocol`),
+            // not `ProtocolKind`.
+            AnyCodec::OpenAiResponses(_) => ProtocolKind::OpenAi,
             AnyCodec::Anthropic(_) => ProtocolKind::Anthropic,
             AnyCodec::Gemini(_) => ProtocolKind::Gemini,
         }
     }
 
-    /// Try each protocol's `detect_request` in declaration order.
+    /// Try each protocol's `detect_request` in declaration order. The OpenAI
+    /// Responses path (`/v1/responses`) is checked before the Chat path so
+    /// they don't collide on `/v1/chat/completions` (Chat) versus
+    /// `/v1/responses` (Responses).
     pub fn detect(path: &str, h: &Headers, body_head: &[u8]) -> Option<Self> {
+        if let Some(c) = OpenAiResponsesCodec::detect_request(path, h, body_head) {
+            return Some(AnyCodec::OpenAiResponses(c));
+        }
         if let Some(c) = OpenAi::detect_request(path, h, body_head) {
             return Some(AnyCodec::OpenAi(c));
         }
@@ -41,12 +54,13 @@ impl AnyCodec {
     }
 
     /// ADR-S1: dispatch `path_implies_stream` to the concrete codec. Only
-    /// Gemini currently overrides the default (`false`); OpenAI and
+    /// Gemini currently overrides the default (`false`); OpenAI / Responses /
     /// Anthropic inherit it.
     #[inline]
     pub fn path_implies_stream(&self, path: &str) -> bool {
         match self {
             AnyCodec::OpenAi(_) => OpenAi::path_implies_stream(path),
+            AnyCodec::OpenAiResponses(_) => OpenAiResponsesCodec::path_implies_stream(path),
             AnyCodec::Anthropic(_) => Anthropic::path_implies_stream(path),
             AnyCodec::Gemini(_) => Gemini::path_implies_stream(path),
         }
@@ -58,6 +72,7 @@ impl AnyCodec {
     pub fn extract_path_model<'a>(&self, path: &'a str) -> Option<&'a str> {
         match self {
             AnyCodec::OpenAi(_) => OpenAi::extract_path_model(path),
+            AnyCodec::OpenAiResponses(_) => OpenAiResponsesCodec::extract_path_model(path),
             AnyCodec::Anthropic(_) => Anthropic::extract_path_model(path),
             AnyCodec::Gemini(_) => Gemini::extract_path_model(path),
         }
@@ -67,6 +82,7 @@ impl AnyCodec {
     pub fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
         match self {
             AnyCodec::OpenAi(c) => c.parse_request(body),
+            AnyCodec::OpenAiResponses(c) => c.parse_request(body),
             AnyCodec::Anthropic(c) => c.parse_request(body),
             AnyCodec::Gemini(c) => c.parse_request(body),
         }
@@ -80,6 +96,7 @@ impl AnyCodec {
     ) -> Result<(), ErrorIR<'static>> {
         match self {
             AnyCodec::OpenAi(c) => c.render_request(ir, buf),
+            AnyCodec::OpenAiResponses(c) => c.render_request(ir, buf),
             AnyCodec::Anthropic(c) => c.render_request(ir, buf),
             AnyCodec::Gemini(c) => c.render_request(ir, buf),
         }
@@ -89,6 +106,7 @@ impl AnyCodec {
     pub fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState> {
         match self {
             AnyCodec::OpenAi(c) => c.new_stream_state(),
+            AnyCodec::OpenAiResponses(c) => c.new_stream_state(),
             AnyCodec::Anthropic(c) => c.new_stream_state(),
             AnyCodec::Gemini(c) => c.new_stream_state(),
         }
@@ -102,6 +120,7 @@ impl AnyCodec {
     ) -> Result<Vec<StreamEventIR<'a>>, ErrorIR<'static>> {
         match self {
             AnyCodec::OpenAi(c) => c.parse_stream_chunk(state, chunk),
+            AnyCodec::OpenAiResponses(c) => c.parse_stream_chunk(state, chunk),
             AnyCodec::Anthropic(c) => c.parse_stream_chunk(state, chunk),
             AnyCodec::Gemini(c) => c.parse_stream_chunk(state, chunk),
         }
@@ -115,6 +134,7 @@ impl AnyCodec {
     ) -> Result<(), ErrorIR<'static>> {
         match self {
             AnyCodec::OpenAi(c) => c.render_stream_chunk(ir, buf),
+            AnyCodec::OpenAiResponses(c) => c.render_stream_chunk(ir, buf),
             AnyCodec::Anthropic(c) => c.render_stream_chunk(ir, buf),
             AnyCodec::Gemini(c) => c.render_stream_chunk(ir, buf),
         }
@@ -124,6 +144,7 @@ impl AnyCodec {
     pub fn parse_response<'a>(&self, body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
         match self {
             AnyCodec::OpenAi(c) => c.parse_response(body),
+            AnyCodec::OpenAiResponses(c) => c.parse_response(body),
             AnyCodec::Anthropic(c) => c.parse_response(body),
             AnyCodec::Gemini(c) => c.parse_response(body),
         }
@@ -137,6 +158,7 @@ impl AnyCodec {
     ) -> Result<(), ErrorIR<'static>> {
         match self {
             AnyCodec::OpenAi(c) => c.render_response(ir, buf),
+            AnyCodec::OpenAiResponses(c) => c.render_response(ir, buf),
             AnyCodec::Anthropic(c) => c.render_response(ir, buf),
             AnyCodec::Gemini(c) => c.render_response(ir, buf),
         }
@@ -146,6 +168,7 @@ impl AnyCodec {
     pub fn parse_error<'a>(&self, status: u16, body: &'a [u8]) -> ErrorIR<'a> {
         match self {
             AnyCodec::OpenAi(c) => c.parse_error(status, body),
+            AnyCodec::OpenAiResponses(c) => c.parse_error(status, body),
             AnyCodec::Anthropic(c) => c.parse_error(status, body),
             AnyCodec::Gemini(c) => c.parse_error(status, body),
         }
@@ -155,6 +178,7 @@ impl AnyCodec {
     pub fn render_error(&self, err: &ErrorIR<'_>, buf: &mut BytesMut) {
         match self {
             AnyCodec::OpenAi(c) => c.render_error(err, buf),
+            AnyCodec::OpenAiResponses(c) => c.render_error(err, buf),
             AnyCodec::Anthropic(c) => c.render_error(err, buf),
             AnyCodec::Gemini(c) => c.render_error(err, buf),
         }
@@ -164,6 +188,7 @@ impl AnyCodec {
     pub fn estimate_input_tokens(&self, ir: &RequestIR<'_>) -> u32 {
         match self {
             AnyCodec::OpenAi(c) => c.estimate_input_tokens(ir),
+            AnyCodec::OpenAiResponses(c) => c.estimate_input_tokens(ir),
             AnyCodec::Anthropic(c) => c.estimate_input_tokens(ir),
             AnyCodec::Gemini(c) => c.estimate_input_tokens(ir),
         }

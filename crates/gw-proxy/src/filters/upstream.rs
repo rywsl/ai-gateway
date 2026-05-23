@@ -481,6 +481,18 @@ pub async fn rewrite_request(
                 Ok(cow) => bytes::Bytes::from(cow.into_owned()),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
+            // OpenAI Responses shares the vendor family with Chat and currently
+            // re-renders through the Chat wire form (its `render_request` is
+            // wired to OpenAiRequest); same-protocol passthrough delegates to
+            // the Chat codec via a temporary `OpenAi` adapter. T6 closes the
+            // proper shape-preserving path.
+            AnyCodec::OpenAiResponses(_) => {
+                match same_protocol_passthrough(&gw_codec::openai::OpenAi, cached_body, &mutations)
+                {
+                    Ok(cow) => bytes::Bytes::from(cow.into_owned()),
+                    Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
+                }
+            }
             AnyCodec::Anthropic(c) => match same_protocol_passthrough(c, cached_body, &mutations) {
                 Ok(cow) => bytes::Bytes::from(cow.into_owned()),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
