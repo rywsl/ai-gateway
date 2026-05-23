@@ -21,6 +21,7 @@
 //!   token plumbing lands.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -37,10 +38,35 @@ const NOT_READY_BODY: &[u8] = b"not ready";
 /// should not let occupy a task indefinitely.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub async fn run_health_server(port: u16) -> anyhow::Result<()> {
+/// Long-lived observability handles consumed by the admin `/healthz/*`
+/// endpoints. Built once in `bootstrap` and shared with the proxy
+/// `LlmGateway` so the snapshot the operator sees matches the state the
+/// request path observes.
+///
+/// T3-Pre constructs and threads this through `run_health_server`; T3-C
+/// will replace the current blanket-401 routing block with a verify-then-
+/// snapshot chain that consumes both `key_health` / `resilience` here
+/// and the `store` + `mgmt_blacklist` passed alongside.
+pub struct HealthState {
+    pub key_health: Arc<gw_health::KeyHealthStore>,
+    pub resilience: Arc<gw_proxy::resilience::ResilienceState>,
+}
+
+pub async fn run_health_server(
+    port: u16,
+    state: HealthState,
+    store: Arc<gw_store::EntityStore>,
+    mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(target: "gw_gateway::health", port, "health server listening");
 
+    // T3-Pre: `state`, `store`, and `mgmt_blacklist` are accepted so T3-C
+    // can wire the verify chain on the `/healthz/*` admin surface. v1
+    // keeps the blanket-401 behaviour below; the handles are explicitly
+    // held in the accept loop so subsequent commits add the verify
+    // branch without changing the signature again.
+    let state = Arc::new(state);
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(v) => v,
@@ -50,11 +76,19 @@ pub async fn run_health_server(port: u16) -> anyhow::Result<()> {
             }
         };
 
-        tokio::spawn(handle_connection(stream));
+        let state = state.clone();
+        let store = store.clone();
+        let mgmt_blacklist = mgmt_blacklist.clone();
+        tokio::spawn(handle_connection(stream, state, store, mgmt_blacklist));
     }
 }
 
-async fn handle_connection(mut stream: TcpStream) {
+async fn handle_connection(
+    mut stream: TcpStream,
+    _state: Arc<HealthState>,
+    _store: Arc<gw_store::EntityStore>,
+    _mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
+) {
     // Read up to the first request line + (very minimal) headers. A
     // healthcheck client sends < 256 bytes; we cap the read at 1 KiB to keep
     // the parser allocation-free. A 5s timeout protects the task from slow

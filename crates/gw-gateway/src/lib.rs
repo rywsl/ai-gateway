@@ -44,9 +44,11 @@ pub mod observability;
 pub use gw_tunnel_client;
 
 use anyhow::Context;
+use gw_auth::jwt_blacklist::RedisJwtBlacklist;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
+use gw_proxy::resilience::ResilienceState;
 use gw_proxy::LlmGateway;
 use gw_routing::in_flight::InFlightStore;
 use gw_store::{CounterStore, EntityStore};
@@ -76,6 +78,14 @@ struct Wired {
     /// TunnelStack (T5-B). `Some` iff `cfg.tunnel.enabled = true`.
     #[cfg(feature = "tunnel")]
     tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
+    /// Management-token blacklist + JWT blacklist (T3-Pre wiring). Threaded
+    /// through `LlmGateway`'s request filter and the admin `/healthz/*`
+    /// surface so T3-B / T3-C can implement the verify chain.
+    mgmt_blacklist: Arc<RedisJwtBlacklist>,
+    /// Resilience state (T3-A error-handler listeners; T3-Pre wiring).
+    /// Constructed once in bootstrap so the `/healthz/resilience` snapshot
+    /// (T3-C) and the proxy error fanout (T3-A) share a single instance.
+    resilience: Arc<ResilienceState>,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -170,6 +180,8 @@ pub fn run() -> anyhow::Result<()> {
         wired.jwt_validator,
         wired.strategies,
         wired.capability_resolver,
+        wired.mgmt_blacklist,
+        wired.resilience,
         #[cfg(feature = "tunnel")]
         wired.tunnel,
     );
@@ -232,6 +244,20 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         redis: redis.clone(),
     });
 
+    // T3-Pre — build the mgmt-token / JWT blacklist on the same Redis pool
+    // used by CounterStore and Ledger. Threaded onto Wired so both the
+    // proxy request filter (T3-B) and the admin /healthz/* surface (T3-C)
+    // observe a single instance. fred's RedisPool is Clone (Arc internally),
+    // so unwrapping the Arc with `(*pool).clone()` hands the blacklist its
+    // own pool handle without an extra refcount layer.
+    let mgmt_blacklist = Arc::new(RedisJwtBlacklist::new((*redis.pool).clone()));
+
+    // T3-Pre — single shared ResilienceState. The proxy error fanout
+    // (T3-A) and the /healthz/resilience snapshot (T3-C) must observe the
+    // same counters, so construction happens once here and the Arc is
+    // threaded through LlmGateway + HealthState.
+    let resilience = Arc::new(ResilienceState::default());
+
     // 4. Ledger flusher.
     let ledger = Arc::new(Ledger::start(
         redis.clone(),
@@ -268,8 +294,17 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
 
     // 6. Health server.
     let health_port = cfg.server.health_port;
+    let health_state = health::HealthState {
+        key_health: health.clone(),
+        resilience: resilience.clone(),
+    };
+    let health_store = store.clone();
+    let health_blacklist = mgmt_blacklist.clone();
     tokio::spawn(async move {
-        if let Err(e) = health::run_health_server(health_port).await {
+        if let Err(e) =
+            health::run_health_server(health_port, health_state, health_store, health_blacklist)
+                .await
+        {
             tracing::error!(
                 target: "gw_gateway::health",
                 error = %e,
@@ -336,14 +371,12 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             // IPv6 hosts must be bracketed: "[::1]:443" parses correctly because
             // rsplit_once finds the last ':'. Bare "::1:443" would parse to host
             // "::1" — not supported in v1.
-            let (h, p) = entry
-                .rsplit_once(':')
-                .ok_or_else(|| anyhow::anyhow!(
-                    "tunnel.target_whitelist entry missing ':' — {entry}"
-                ))?;
-            let port: u16 = p.parse().map_err(|_| anyhow::anyhow!(
-                "tunnel.target_whitelist entry has non-numeric port — {entry}"
-            ))?;
+            let (h, p) = entry.rsplit_once(':').ok_or_else(|| {
+                anyhow::anyhow!("tunnel.target_whitelist entry missing ':' — {entry}")
+            })?;
+            let port: u16 = p.parse().map_err(|_| {
+                anyhow::anyhow!("tunnel.target_whitelist entry has non-numeric port — {entry}")
+            })?;
             wl.push((h.to_string(), port));
         }
         target_filter::set_whitelist(wl);
@@ -363,7 +396,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         };
         let dns = Arc::new(SafeDnsResolver::cloudflare_default());
 
-        fn node_to_view(n: gw_core::entity::ProxyNode) -> gw_tunnel_client::resolver::ProxyNodeView {
+        fn node_to_view(
+            n: gw_core::entity::ProxyNode,
+        ) -> gw_tunnel_client::resolver::ProxyNodeView {
             gw_tunnel_client::resolver::ProxyNodeView {
                 id: n.id,
                 ws_url: n.ws_url,
@@ -417,10 +452,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
                     });
                     if sig != last_signature {
                         last_signature = sig;
-                        let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> = nodes
-                            .into_iter()
-                            .map(node_to_view)
-                            .collect();
+                        let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> =
+                            nodes.into_iter().map(node_to_view).collect();
                         stack_clone.reload_nodes(view);
                     }
                 }
@@ -451,5 +484,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         capability_resolver,
         #[cfg(feature = "tunnel")]
         tunnel,
+        mgmt_blacklist,
+        resilience,
     })
 }

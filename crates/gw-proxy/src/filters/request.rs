@@ -16,6 +16,7 @@ use crate::filters::early::{
 use gw_auth::apikey::verify_apikey;
 use gw_auth::ip_filter::check_blocklist;
 use gw_auth::jwt::{verify_jwt, JwtError, JwtValidator};
+use gw_auth::jwt_blacklist::RedisJwtBlacklist;
 use gw_auth::merge_permissions;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_auth::AuthCtx;
@@ -44,7 +45,13 @@ pub async fn run(
     trust_xff: bool,
     jwt_validator: Option<&Arc<JwtValidator>>,
     capability_resolver: Option<&Arc<gw_capability::CapabilityResolver>>,
+    mgmt_blacklist: &Arc<RedisJwtBlacklist>,
 ) -> Result<bool> {
+    // T3-Pre: `mgmt_blacklist` is threaded through so T3-B can call
+    // `mgmt_blacklist.check_mgmt(...)` inside the management-plane branch.
+    // The verify chain itself is still owed by T3-B — for now the handle
+    // is held to keep the signature stable across the wave.
+    let _ = mgmt_blacklist;
     ctx.phase_start("request_filter");
     ctx.timing.start = Some(Instant::now());
 
@@ -870,9 +877,11 @@ mod non_stream_unit {
     /// in T4-A docker e2e (test_non_stream.py).
     #[test]
     fn non_stream_guard_removed_from_source() {
-        let src = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/filters/request.rs")
-        ).expect("read source");
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filters/request.rs"
+        ))
+        .expect("read source");
         // Build the needle at runtime so the literal in this test does not
         // self-match when the source file is read.
         let needle: String = ["GW_REQUEST_", "NONSTREAM_", "NOT_SUPPORTED"].concat();
