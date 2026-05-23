@@ -10,8 +10,8 @@
 //! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
 use crate::loader::{
-    load_apikey, load_auth_config, load_jwks, load_model, load_model_group, load_pricing,
-    load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
+    load_apikey, load_auth_config, load_jwks, load_mgmt_token, load_model, load_model_group,
+    load_pricing, load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
     load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
@@ -98,6 +98,11 @@ pub struct EntityStore {
     /// Populated by [`EntityStore::proxy_node_or_load`]; invalidated by the
     /// stream consumer on `proxy_node` namespace events (T1 / T5-B).
     pub proxy_node: Cache<String, Arc<Versioned<ProxyNode>>>,
+    /// Management-token entity cache (B2 / ADR-B2-1). 300s TTL, matching
+    /// `apikey` (auth-surface cache bucket). Populated by
+    /// [`EntityStore::mgmt_token_or_load`]; invalidated by the stream consumer
+    /// on `management_token` namespace events (T1-D).
+    pub mgmt_token: Cache<String, Arc<Versioned<ManagementTokenEntry>>>,
     /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
     /// `None` for unit tests that pre-populate caches by hand.
     loader: Option<Arc<LoaderCtx>>,
@@ -179,6 +184,10 @@ impl EntityStore {
             proxy_node: Cache::builder()
                 .max_capacity(1_000)
                 .time_to_live(Duration::from_secs(1800))
+                .build(),
+            mgmt_token: Cache::builder()
+                .max_capacity(100_000)
+                .time_to_live(Duration::from_secs(300))
                 .build(),
             loader,
             cold_load_timeout,
@@ -441,6 +450,40 @@ impl EntityStore {
             })
             .await
             .ok()
+    }
+
+    /// Resolve a [`ManagementTokenEntry`] (B2 / ADR-B2-1) by `token_id`. L1
+    /// Moka → cold load via `load_mgmt_token`. 300s TTL matching `apikey`
+    /// (auth-surface bucket). Returns `None` on miss/timeout; callers
+    /// (T3-A/B/C request_filter) treat that as "unknown token → 401".
+    pub async fn mgmt_token_or_load(
+        &self,
+        token_id: &str,
+    ) -> Option<Arc<Versioned<ManagementTokenEntry>>> {
+        if let Some(hit) = self.mgmt_token.get(token_id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = token_id.to_owned();
+        let deadline = self.cold_load_timeout;
+        self.mgmt_token
+            .try_get_with_by_ref(token_id, async move {
+                with_cold_load_timeout("management_token", deadline, async move {
+                    load_mgmt_token(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    /// Drop the cached entry for `token_id`. Called by the stream consumer
+    /// when an `events:entity` `{ns=management_token,id=…}` event arrives
+    /// (T1-D). Next `mgmt_token_or_load` will cold-load the new version.
+    pub async fn invalidate_mgmt_token(&self, token_id: &str) {
+        self.mgmt_token.invalidate(token_id).await;
     }
 
     /// Fetch the full live list of [`ProxyNode`]s from PG (bypasses the

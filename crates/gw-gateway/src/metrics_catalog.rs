@@ -42,6 +42,11 @@ pub static METRICS: &[MetricSpec] = &[
         help: "cross-protocol stream events re-rendered via IR round-trip (G8); labels=from,to",
     },
     MetricSpec {
+        name: "gw_codec_parse_response_failure_total",
+        kind: MetricKind::Counter,
+        help: "codec.parse_response returned an error on non-stream upstream body; labels=codec,upstream_status",
+    },
+    MetricSpec {
         name: "gw_codec_passthrough_total",
         kind: MetricKind::Counter,
         help: "same-protocol stream events forwarded verbatim (zero-copy); label=kind",

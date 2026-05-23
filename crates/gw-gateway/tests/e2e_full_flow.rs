@@ -116,6 +116,11 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
     let counters: Arc<CounterStore> = Arc::new(CounterStore {
         redis: redis.clone(),
     });
+    let mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist> = Arc::new(
+        gw_auth::jwt_blacklist::RedisJwtBlacklist::new((*redis.pool).clone()),
+    );
+    let resilience: Arc<gw_proxy::resilience::ResilienceState> =
+        Arc::new(gw_proxy::resilience::ResilienceState::default());
 
     // -----------------------------------------------------------------
     // 4. Construct LlmGateway. This is the "smoke" assertion: the
@@ -133,6 +138,8 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         None,
         Arc::new(gw_routing::strategy::set::StrategySet::new_default()),
         None,
+        mgmt_blacklist,
+        resilience,
         #[cfg(feature = "tunnel")]
         None,
     );

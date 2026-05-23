@@ -3,7 +3,7 @@
 
 use bytes::BytesMut;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
-use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR};
+use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR, UsageIR};
 use smallvec::{smallvec, SmallVec};
 use std::borrow::Cow;
 
@@ -133,10 +133,38 @@ impl ProtocolCodec for OpenAi {
         Ok(())
     }
 
-    fn parse_response<'a>(&self, _body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
-        // TODO(v2): non-streaming 2xx response handling. v1 routes 2xx
-        // through `parse_stream_chunk`; `parse_error` covers error bodies.
-        unimplemented!("v1: openai non-stream response not implemented; 2xx flows through stream")
+    fn parse_response<'a>(&self, body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
+        // v1: extract just `id`, `model`, and `usage` from the upstream
+        // ChatCompletion body. `choices` is intentionally not parsed — v2
+        // cross-protocol non-stream response render (B1-4) will need it but
+        // currently short-circuits 503 until then.
+        let parsed: OpenAiResponseBody =
+            serde_json::from_slice(body).map_err(|e| ErrorIR {
+                category: ErrorCategory::UpstreamError,
+                status: 502,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
+                message: Cow::Owned(format!("openai parse_response: {e}")),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            })?;
+
+        let usage = parsed.usage.map(|u| UsageIR {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+            cached_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+        });
+
+        Ok(ResponseIR {
+            id: Cow::Owned(parsed.id),
+            model: Cow::Owned(parsed.model),
+            messages: Vec::new(),
+            finish_reason: None,
+            usage,
+            metadata: Default::default(),
+        })
     }
 
     fn render_response(
@@ -215,3 +243,86 @@ fn category_str(c: ErrorCategory) -> &'static str {
 // (e.g. response rendering) need them.
 #[allow(dead_code)]
 const _ASSERT_CODE: &str = codes::GW_UPSTREAM_4XX;
+
+// ── OpenAI ChatCompletion non-stream response wire structs ────────────────
+//
+// Kept private to this module: v1 only needs `id`, `model`, and `usage`
+// (incl. `prompt_tokens_details.cached_tokens`). `choices` is intentionally
+// dropped — v2 cross-protocol render (B1-4) will widen this.
+
+#[derive(serde::Deserialize)]
+struct OpenAiResponseUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptDetails>,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAiPromptDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAiResponseBody {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    usage: Option<OpenAiResponseUsage>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_response_extracts_usage() {
+        let body = br#"{
+            "id":"chatcmpl-abc",
+            "object":"chat.completion",
+            "created":1700000000,
+            "model":"gpt-4-turbo",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{
+                "prompt_tokens":12,
+                "completion_tokens":3,
+                "total_tokens":15,
+                "prompt_tokens_details":{"cached_tokens":7}
+            }
+        }"#;
+        let codec = OpenAi;
+        let ir = codec.parse_response(body).expect("parse_response ok");
+        let usage = ir.usage.expect("usage present");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.cached_tokens, Some(7));
+        assert_eq!(ir.model.as_ref(), "gpt-4-turbo");
+    }
+
+    #[test]
+    fn parse_response_without_cached_tokens_field() {
+        let body = br#"{"id":"x","object":"chat.completion","created":0,"model":"m",
+            "choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#;
+        let codec = OpenAi;
+        let ir = codec.parse_response(body).expect("parse_response ok");
+        let usage = ir.usage.expect("usage present");
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.cached_tokens, None);
+    }
+
+    #[test]
+    fn parse_response_returns_protocol_decode_error_on_garbage() {
+        let body = b"not json";
+        let codec = OpenAi;
+        let err = codec.parse_response(body).expect_err("must fail");
+        assert_eq!(err.status, 502);
+        assert_eq!(
+            err.code.as_ref(),
+            gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR
+        );
+    }
+}

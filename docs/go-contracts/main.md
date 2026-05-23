@@ -26,7 +26,9 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
                           ◄──────XADD──────────  usage:detailed（可选）
                           ◄──────XADD──────────  events:entity（status_change / 自动封禁）
    entity:estimate_pricing ────────────────►     EntityStore 懒加载
+   entity:management_token ────────────────►     EntityStore.mgmt_token（mgmt verify chain）
    jwt:blacklist:<jti>     ────────────────►     JwtBlacklist 命中查询
+   mgmt_token:blacklist:<token_id> ────────►     RedisJwtBlacklist::check_mgmt 命中查询
 ```
 
 ## 2. 契约文件组织
@@ -158,6 +160,7 @@ Rust 端对应指标（前缀 `gateway_*`）在 [`docs/architecture.md`](../arch
 | 加密 payload 列结构 | parts/03 §3.4 + architecture.md §4.3 |
 | KEK 轮换状态机 | parts/03 §3.5 + architecture.md §4.3 |
 | 新增 counter:* key | parts/01 §1.4 或 parts/02 §2.5 |
+| 新增 Redis 黑名单 namespace（`jwt:blacklist` / `mgmt_token:blacklist` 等） | parts/01 §1.6 或 parts/02 §2.9 |
 | 任何新跨进程接触点 | 新加 part 或扩展现有 part；同步本文件 §2 |
 
 CLAUDE.md `§Sync rule` 应在本文件上线同 PR 内追加一行 `go-contracts/` 触发器（详见 §收尾 / 实施）。

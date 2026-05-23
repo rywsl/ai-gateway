@@ -117,10 +117,8 @@ async fn handle_conn(stream: TcpStream) {
     }
 }
 
-type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<TcpStream>,
-    Message,
->;
+type WsSink =
+    futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>;
 
 async fn forward(
     stream_id: u32,

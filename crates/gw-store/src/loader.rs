@@ -12,8 +12,8 @@ use secrecy::SecretString;
 use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
-    ApiKeyEntry, AuthConfig, JwksEntry, Model, ModelGroup, OAuthCredentials, Pricing, ProxyNode,
-    UserEntry, UserGroup, Vendor, VendorKey,
+    ApiKeyEntry, AuthConfig, JwksEntry, ManagementTokenEntry, Model, ModelGroup, OAuthCredentials,
+    Pricing, ProxyNode, UserEntry, UserGroup, Vendor, VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -87,7 +87,7 @@ where
 
 fn ttl_for(ns: &str) -> u64 {
     match ns {
-        "user" | "user_group" | "apikey" | "ipblock" => 300,
+        "user" | "user_group" | "apikey" | "ipblock" | "management_token" => 300,
         "vendor" | "vendor_key" | "model_group" | "pricing" | "model" | "proxy_node" => 1800,
         "jwks" | "auth_config" => 3600,
         _ => 300,
@@ -182,6 +182,8 @@ const PROXY_NODE_SQL: &str =
     "SELECT payload, version FROM proxy_nodes WHERE id = $1 AND deleted_at IS NULL";
 const PROXY_NODE_LIST_SQL: &str =
     "SELECT payload, version FROM proxy_nodes WHERE deleted_at IS NULL ORDER BY id";
+const MGMT_TOKEN_SQL: &str =
+    "SELECT payload, version FROM management_tokens WHERE id = $1 AND deleted_at IS NULL";
 // `auth_configs` is created by `migrations/0006_auth_configs.sql` (G2,
 // go-onboarding-gaps T1-A). When the `global` row is absent the SQL returns
 // no rows; `with_cold_load_timeout` collapses other errors into `None`; the
@@ -344,6 +346,21 @@ pub async fn load_proxy_nodes_list(
         out.push(node);
     }
     Ok(out)
+}
+
+/// Cold-load a [`ManagementTokenEntry`] (B2 / ADR-B2-1) by `token_id`. Mirrors
+/// [`load_apikey`]: Redis L1 → PgSQL `management_tokens` L2 → Redis write-back
+/// with the 300s TTL bucket (`ttl_for("management_token")`). The presented
+/// bearer's SHA-256 is then constant-time compared against `entry.hash` by
+/// request_filter (T3-A/B/C); this loader does not perform that compare.
+pub async fn load_mgmt_token(
+    ctx: &LoaderCtx,
+    token_id: &str,
+) -> anyhow::Result<Versioned<ManagementTokenEntry>> {
+    load_entity(ctx, "management_token", token_id, MGMT_TOKEN_SQL, |v| {
+        serde_json::from_value::<ManagementTokenEntry>(v.clone()).map_err(Into::into)
+    })
+    .await
 }
 
 // Note: IpBlockEntry has no cold-loader-by-id; its consumer iterates the

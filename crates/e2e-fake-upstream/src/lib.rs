@@ -5,6 +5,7 @@
 //! ephemeral ports and drive the server directly without the fixed
 //! 9000/9001 ports used by the bin.
 
+pub mod chaos;
 pub mod inject;
 pub mod routes;
 pub mod scenario;

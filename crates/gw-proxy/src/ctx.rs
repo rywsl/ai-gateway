@@ -151,6 +151,19 @@ pub struct ReqCtx {
     /// `None` for all ordinary (non-LRO) requests.
     pub operation_id: Option<String>,
 
+    // --- Go-onboarding-blockers (B1 non-stream + B2 mgmt token) ---
+    /// B1: non-stream upstream body accumulator (EOS triggers codec::parse_response).
+    /// `None` on the streaming happy path; allocated lazily by the
+    /// `response_body_filter` non-stream branch (T2-B).
+    pub upstream_body_accum: Option<bytes::BytesMut>,
+
+    /// B2: management-path verified user (set by the mgmt branch of
+    /// `request_filter` after `verify_mgmt_token` succeeds; T3-A/B).
+    pub mgmt_user_id: Option<gw_core::ids::UserId>,
+
+    /// B2: management-path verified scope (set alongside `mgmt_user_id`).
+    pub mgmt_scope: Option<gw_core::entity::MgmtScope>,
+
     // --- Debug ---
     pub trace: TraceBuffer,
     pub debug: DebugMode,
@@ -210,6 +223,9 @@ impl ReqCtx {
             required_caps: None,
             tunnel_resolution: None,
             operation_id: None,
+            upstream_body_accum: None,
+            mgmt_user_id: None,
+            mgmt_scope: None,
             trace: TraceBuffer::new(),
             debug: DebugMode::DISABLED,
         }

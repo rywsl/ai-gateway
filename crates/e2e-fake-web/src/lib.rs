@@ -8,6 +8,7 @@ pub mod api;
 pub mod drain;
 pub mod events;
 pub mod jwks;
+pub mod soak;
 pub mod store;
 pub mod usage_drain;
 
@@ -28,6 +29,7 @@ use tokio::sync::Mutex;
 pub struct AppState {
     pub store: Arc<Store>,
     pub drain_cursor: Arc<Mutex<String>>,
+    pub soak: Arc<soak::SoakTable>,
 }
 
 impl AppState {
@@ -35,6 +37,7 @@ impl AppState {
         Self {
             store,
             drain_cursor: Arc::new(Mutex::new(String::from("0-0"))),
+            soak: Arc::new(soak::SoakTable::new()),
         }
     }
 }
@@ -46,9 +49,12 @@ impl AppState {
 /// - `POST /entity/{table}/{id}`, `DELETE /entity/{table}/{id}`
 /// - `POST /counter/{scope}/{id}/{field}`, `POST /counter-raw`
 /// - `POST /balance/{user_id}`
+/// - `POST /mgmt-blacklist/{token_id}` (T4-B)
 /// - `POST /jwks/rotate`
 /// - `POST /usage/drain`, `GET /usage/stats`
 /// - `POST /admin/reset`
+/// - `POST /soak/window/start`
+/// - `GET  /soak/window/report`
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -59,9 +65,12 @@ pub fn router(state: AppState) -> Router {
         .route("/counter/:scope/:id/:field", post(api::set_counter))
         .route("/counter-raw", post(api::set_counter_raw))
         .route("/balance/:user_id", post(api::set_balance))
+        .route("/mgmt-blacklist/:token_id", post(api::set_mgmt_blacklist))
         .route("/jwks/rotate", post(jwks::rotate))
         .route("/usage/drain", post(usage_drain::force_drain))
         .route("/usage/stats", get(usage_drain::stats))
         .route("/admin/reset", post(api::admin_reset))
+        .route("/soak/window/start", post(soak::start))
+        .route("/soak/window/report", get(soak::report))
         .with_state(state)
 }

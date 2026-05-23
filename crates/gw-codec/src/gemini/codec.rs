@@ -201,9 +201,60 @@ impl ProtocolCodec for Gemini {
         Ok(())
     }
 
-    fn parse_response<'a>(&self, _body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
-        // TODO(v2): non-streaming 2xx response handling.
-        unimplemented!("v1: gemini non-stream response not implemented; 2xx flows through stream")
+    fn parse_response<'a>(&self, body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
+        // Local serde shape — Gemini's `GenerateContentResponse`. We only
+        // pull out the fields the gateway needs for billing (`usageMetadata`)
+        // and observability (`modelVersion`). Candidate parts are intentionally
+        // ignored: v1 does not surface the assistant text to downstream
+        // re-rendering through this path (streaming covers that case).
+        #[derive(serde::Deserialize)]
+        struct GeminiUsageMetadata {
+            #[serde(default, rename = "promptTokenCount")]
+            prompt_token_count: u32,
+            #[serde(default, rename = "candidatesTokenCount")]
+            candidates_token_count: u32,
+            #[serde(default, rename = "cachedContentTokenCount")]
+            cached_content_token_count: Option<u32>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct GeminiResponseBody {
+            #[serde(default, rename = "modelVersion")]
+            model_version: String,
+            #[serde(default, rename = "usageMetadata")]
+            usage_metadata: Option<GeminiUsageMetadata>,
+        }
+
+        let parsed: GeminiResponseBody = serde_json::from_slice(body).map_err(|e| ErrorIR {
+            // ADR-B1-1: protocol decode failure on a 2xx upstream body is an
+            // upstream-side defect from the gateway's perspective — surface as
+            // 502 with the dedicated GW_UPSTREAM_PROTOCOL_DECODE_ERROR code.
+            category: gw_core::error::ErrorCategory::UpstreamError,
+            status: 502,
+            upstream_status: None,
+            code: Cow::Borrowed(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
+            message: Cow::Owned(format!("gemini parse_response: {e}")),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        })?;
+
+        let usage = parsed.usage_metadata.map(|u| gw_core::ir::UsageIR {
+            input_tokens: u.prompt_token_count,
+            output_tokens: u.candidates_token_count,
+            cached_tokens: u.cached_content_token_count,
+        });
+
+        Ok(ResponseIR {
+            // Gemini's GenerateContentResponse carries no id field.
+            id: Cow::Borrowed(""),
+            model: Cow::Owned(parsed.model_version),
+            messages: Vec::new(),
+            finish_reason: None,
+            usage,
+            metadata: Default::default(),
+        })
     }
 
     fn render_response(
@@ -261,5 +312,55 @@ impl ProtocolCodec for Gemini {
                 | MessageIR::Assistant { content, .. } => approx_tokens(content),
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trait_def::ProtocolCodec;
+
+    #[test]
+    fn parse_response_extracts_usage_metadata() {
+        let body = br#"{
+            "candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],
+            "modelVersion":"gemini-1.5-pro",
+            "usageMetadata":{
+                "promptTokenCount":15,
+                "candidatesTokenCount":4,
+                "totalTokenCount":19,
+                "cachedContentTokenCount":8
+            }
+        }"#;
+        let codec = Gemini;
+        let ir = codec.parse_response(body).expect("parse_response ok");
+        let usage = ir.usage.expect("usage present");
+        assert_eq!(usage.input_tokens, 15);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.cached_tokens, Some(8));
+        assert_eq!(ir.model.as_ref(), "gemini-1.5-pro");
+    }
+
+    #[test]
+    fn parse_response_without_cached_field() {
+        let body = br#"{"candidates":[],"modelVersion":"m",
+            "usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1,"totalTokenCount":3}}"#;
+        let codec = Gemini;
+        let usage = codec.parse_response(body).unwrap().usage.unwrap();
+        assert_eq!(usage.input_tokens, 2);
+        assert_eq!(usage.output_tokens, 1);
+        assert_eq!(usage.cached_tokens, None);
+    }
+
+    #[test]
+    fn parse_response_returns_protocol_decode_error_on_garbage() {
+        let body = b"not json";
+        let codec = Gemini;
+        let err = codec.parse_response(body).expect_err("must fail");
+        assert_eq!(err.status, 502);
+        assert_eq!(
+            err.code.as_ref(),
+            gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR
+        );
     }
 }

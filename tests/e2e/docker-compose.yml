@@ -19,6 +19,13 @@ services:
 
   redis:
     image: redis:7-alpine
+    # T4-A: host-publish 6379 so the pytest harness (running on the host,
+    # outside the compose network) can XREAD `usage:records` directly to
+    # assert on the payload JSON. The gateway + fake-web reach Redis via
+    # the compose-network hostname `redis:6379` — the host-publish is
+    # additive and does not change the in-network wiring.
+    ports:
+      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s
@@ -29,6 +36,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile.e2e-fake-upstream
+    environment:
+      FAKE_UPSTREAM_CHAOS: "${FAKE_UPSTREAM_CHAOS:-off}"
     ports:
       - "9000:9000"
       - "9001:9001"

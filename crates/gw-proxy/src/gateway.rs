@@ -8,8 +8,10 @@
 
 use crate::ctx::ReqCtx;
 use crate::filters;
+use crate::resilience::ResilienceState;
 use async_trait::async_trait;
 use bytes::Bytes;
+use gw_auth::jwt_blacklist::RedisJwtBlacklist;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::error::codes;
 use gw_core::ids::{RequestId, TraceId};
@@ -93,6 +95,15 @@ pub struct LlmGateway {
     /// Capability resolver (T3-C). `None` until wired; `filters::request`
     /// then leaves `ctx.required_caps` empty (v1 behaviour).
     pub capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
+    /// Management-token / JWT blacklist (T3-Pre wiring). Threaded into
+    /// `filters::request::run` so T3-B can hook the mgmt verify chain.
+    /// v1 holds the handle but does not consult it on the business path
+    /// — that flips on once T3-B lands the verify call.
+    pub mgmt_blacklist: Arc<RedisJwtBlacklist>,
+    /// Resilience state (T3-A error-handler listeners; T3-Pre wiring).
+    /// The proxy fanout updates this and the `/healthz/resilience` admin
+    /// surface (T3-C) renders it via `ResilienceState::snapshot_json`.
+    pub resilience: Arc<ResilienceState>,
     /// Tunnel decision stack (ADR-T-2). `None` ⇒ pick_peer always picks Direct,
     /// behaviour byte-identical to pre-tunnel builds. Built under
     /// `feature = "tunnel"` by `gw-gateway::bootstrap` only when
@@ -115,8 +126,9 @@ impl LlmGateway {
         jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
         strategies: Arc<gw_routing::strategy::set::StrategySet>,
         capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
-        #[cfg(feature = "tunnel")]
-        tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+        mgmt_blacklist: Arc<RedisJwtBlacklist>,
+        resilience: Arc<ResilienceState>,
+        #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
     ) -> Self {
         Self {
             store,
@@ -130,9 +142,19 @@ impl LlmGateway {
             jwt_validator,
             strategies,
             capability_resolver,
+            mgmt_blacklist,
+            resilience,
             #[cfg(feature = "tunnel")]
             tunnel,
         }
+    }
+
+    /// Accessor for the shared `ResilienceState`. Used by `gw-gateway` /
+    /// integration tests that need to observe the same counters the proxy
+    /// fanout writes. The field is already `pub` so direct access works,
+    /// but this returns the borrow without cloning the `Arc`.
+    pub fn resilience(&self) -> &Arc<ResilienceState> {
+        &self.resilience
     }
 }
 
@@ -162,6 +184,7 @@ impl ProxyHttp for LlmGateway {
             self.trust_xff,
             self.jwt_validator.as_ref(),
             self.capability_resolver.as_ref(),
+            &self.mgmt_blacklist,
         )
         .await
     }

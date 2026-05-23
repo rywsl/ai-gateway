@@ -11,7 +11,7 @@
 //! HTTP request to match a route. See [`RefuseCounter`].
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,32 +26,43 @@ use crate::sse;
 /// scenario containing that variant becomes active, and decremented (with a
 /// floor of 0) for each incoming socket that gets immediately dropped.
 #[derive(Debug, Default, Clone)]
-pub struct RefuseCounter(pub Arc<AtomicU32>);
+pub struct RefuseCounter {
+    remaining: Arc<AtomicU32>,
+    refused_total: Arc<AtomicU64>,
+}
 
 impl RefuseCounter {
     pub fn new() -> Self {
-        Self(Arc::new(AtomicU32::new(0)))
+        Self {
+            remaining: Arc::new(AtomicU32::new(0)),
+            refused_total: Arc::new(AtomicU64::new(0)),
+        }
     }
     pub fn set(&self, n: u32) {
-        self.0.store(n, Ordering::SeqCst);
+        self.remaining.store(n, Ordering::SeqCst);
     }
-    /// Returns true if we should refuse this connection (and decrements the
-    /// counter atomically). False otherwise.
+    /// Returns true if we should refuse this connection.
+    ///
+    /// Increments the cumulative `refused_total` on a successful take so the
+    /// admin endpoint can report the count even after `remaining` is drained.
     pub fn take_one(&self) -> bool {
-        // CAS loop to decrement only if > 0.
         loop {
-            let cur = self.0.load(Ordering::SeqCst);
+            let cur = self.remaining.load(Ordering::SeqCst);
             if cur == 0 {
                 return false;
             }
             if self
-                .0
+                .remaining
                 .compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                self.refused_total.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
         }
+    }
+    pub fn refused_total(&self) -> u64 {
+        self.refused_total.load(Ordering::Relaxed)
     }
 }
 

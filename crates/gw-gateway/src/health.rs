@@ -21,6 +21,7 @@
 //!   token plumbing lands.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -37,10 +38,35 @@ const NOT_READY_BODY: &[u8] = b"not ready";
 /// should not let occupy a task indefinitely.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub async fn run_health_server(port: u16) -> anyhow::Result<()> {
+/// Long-lived observability handles consumed by the admin `/healthz/*`
+/// endpoints. Built once in `bootstrap` and shared with the proxy
+/// `LlmGateway` so the snapshot the operator sees matches the state the
+/// request path observes.
+///
+/// T3-Pre constructs and threads this through `run_health_server`; T3-C
+/// will replace the current blanket-401 routing block with a verify-then-
+/// snapshot chain that consumes both `key_health` / `resilience` here
+/// and the `store` + `mgmt_blacklist` passed alongside.
+pub struct HealthState {
+    pub key_health: Arc<gw_health::KeyHealthStore>,
+    pub resilience: Arc<gw_proxy::resilience::ResilienceState>,
+}
+
+pub async fn run_health_server(
+    port: u16,
+    state: HealthState,
+    store: Arc<gw_store::EntityStore>,
+    mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(target: "gw_gateway::health", port, "health server listening");
 
+    // T3-Pre: `state`, `store`, and `mgmt_blacklist` are accepted so T3-C
+    // can wire the verify chain on the `/healthz/*` admin surface. v1
+    // keeps the blanket-401 behaviour below; the handles are explicitly
+    // held in the accept loop so subsequent commits add the verify
+    // branch without changing the signature again.
+    let state = Arc::new(state);
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(v) => v,
@@ -50,11 +76,19 @@ pub async fn run_health_server(port: u16) -> anyhow::Result<()> {
             }
         };
 
-        tokio::spawn(handle_connection(stream));
+        let state = state.clone();
+        let store = store.clone();
+        let mgmt_blacklist = mgmt_blacklist.clone();
+        tokio::spawn(handle_connection(stream, state, store, mgmt_blacklist));
     }
 }
 
-async fn handle_connection(mut stream: TcpStream) {
+async fn handle_connection(
+    mut stream: TcpStream,
+    state: Arc<HealthState>,
+    store: Arc<gw_store::EntityStore>,
+    mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
+) {
     // Read up to the first request line + (very minimal) headers. A
     // healthcheck client sends < 256 bytes; we cap the read at 1 KiB to keep
     // the parser allocation-free. A 5s timeout protects the task from slow
@@ -98,11 +132,73 @@ async fn handle_connection(mut stream: TcpStream) {
             || path.starts_with("/healthz/key/")
             || path == "/healthz/resilience" =>
         {
-            // v1: gated behind management-token authorization (parsed by
-            // gw-auth::mgmt). The real mgmt token validation lands in T6-A
-            // wiring; for now we always reject so production deployments that
-            // expose 8080 do not leak circuit / health internals.
-            let _ = write_response(&mut stream, 401, "Unauthorized", b"mgmt token required").await;
+            // ADR-B2-3 + B2-5: mgmt-token gated admin endpoints. Verify
+            // chain mirrors the proxy's request_filter mgmt branch
+            // (T3-B); the same RedisJwtBlacklist instance is consulted
+            // so revocations applied via the management plane take
+            // effect on both surfaces simultaneously.
+            let auth_header = parse_authorization(req).unwrap_or("");
+            match verify_healthz_request(auth_header, &store, &mgmt_blacklist).await {
+                Ok(_scope) => {
+                    let body = build_healthz_body(path, &state);
+                    let _ =
+                        write_json_response(&mut stream, 200, "OK", body.as_bytes()).await;
+                }
+                Err(HealthzAuthError::Missing) => {
+                    let _ = write_response(
+                        &mut stream,
+                        401,
+                        "Unauthorized",
+                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_MISSING.as_bytes(),
+                    )
+                    .await;
+                }
+                Err(HealthzAuthError::Invalid) => {
+                    let _ = write_response(
+                        &mut stream,
+                        401,
+                        "Unauthorized",
+                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_INVALID.as_bytes(),
+                    )
+                    .await;
+                }
+                Err(HealthzAuthError::Expired) => {
+                    let _ = write_response(
+                        &mut stream,
+                        401,
+                        "Unauthorized",
+                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_EXPIRED.as_bytes(),
+                    )
+                    .await;
+                }
+                Err(HealthzAuthError::Disabled) => {
+                    let _ = write_response(
+                        &mut stream,
+                        401,
+                        "Unauthorized",
+                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_DISABLED.as_bytes(),
+                    )
+                    .await;
+                }
+                Err(HealthzAuthError::Revoked) => {
+                    let _ = write_response(
+                        &mut stream,
+                        401,
+                        "Unauthorized",
+                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_REVOKED.as_bytes(),
+                    )
+                    .await;
+                }
+                Err(HealthzAuthError::ScopeDenied) => {
+                    let _ = write_response(
+                        &mut stream,
+                        403,
+                        "Forbidden",
+                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_SCOPE_DENIED.as_bytes(),
+                    )
+                    .await;
+                }
+            }
         }
         _ => {
             let _ = write_response(&mut stream, 404, "Not Found", b"").await;
@@ -110,6 +206,71 @@ async fn handle_connection(mut stream: TcpStream) {
     }
 
     let _ = stream.shutdown().await;
+}
+
+/// Internal mgmt-verify outcome for `/healthz/*`. Mirrors the proxy
+/// `request_filter` mgmt branch (T3-B) so the same revocation /
+/// expiry semantics apply on both surfaces.
+enum HealthzAuthError {
+    Missing,
+    Invalid,
+    Expired,
+    Disabled,
+    Revoked,
+    ScopeDenied,
+}
+
+async fn verify_healthz_request(
+    auth_header: &str,
+    store: &Arc<gw_store::EntityStore>,
+    blacklist: &Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
+) -> Result<gw_core::entity::MgmtScope, HealthzAuthError> {
+    let parsed = gw_auth::mgmt::parse_mgmt_authorization(auth_header)
+        .ok_or(HealthzAuthError::Missing)?;
+    let parts = gw_auth::mgmt::split_mgmt_token_payload(&parsed.token)
+        .ok_or(HealthzAuthError::Invalid)?;
+
+    let entry = store
+        .mgmt_token_or_load(parts.token_id)
+        .await
+        .ok_or(HealthzAuthError::Invalid)?;
+
+    if blacklist
+        .check_mgmt(
+            parts.token_id,
+            gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed,
+        )
+        .await
+    {
+        return Err(HealthzAuthError::Revoked);
+    }
+
+    use gw_auth::mgmt::MgmtVerifyOutcome;
+    match gw_auth::mgmt::verify_mgmt_token_secret(
+        &entry,
+        parts.secret,
+        gw_core::entity::MgmtScope::AdminRead,
+    ) {
+        MgmtVerifyOutcome::Ok => Ok(entry.value.scope),
+        MgmtVerifyOutcome::Expired => Err(HealthzAuthError::Expired),
+        MgmtVerifyOutcome::Disabled => Err(HealthzAuthError::Disabled),
+        MgmtVerifyOutcome::ScopeDenied => Err(HealthzAuthError::ScopeDenied),
+        MgmtVerifyOutcome::Invalid | MgmtVerifyOutcome::InvalidFormat => {
+            Err(HealthzAuthError::Invalid)
+        }
+    }
+}
+
+fn build_healthz_body(path: &str, state: &HealthState) -> String {
+    if path.starts_with("/healthz/circuits") {
+        state.key_health.snapshot_json()
+    } else if let Some(key_id) = path.strip_prefix("/healthz/key/") {
+        state.key_health.key_snapshot_json(key_id)
+    } else if path == "/healthz/resilience" {
+        state.resilience.snapshot_json()
+    } else {
+        String::from("{}")
+    }
 }
 
 /// Parse the request path from the first line of an HTTP/1.1 request.
@@ -131,6 +292,24 @@ fn parse_path(req: &[u8]) -> Option<&str> {
     Some(path)
 }
 
+/// Locate the value of an `Authorization:` header in a raw HTTP/1.1 request
+/// buffer. Case-insensitive on the field name; preserves the value
+/// verbatim (trimmed of leading whitespace and any trailing `\r`). Returns
+/// `None` if the header is absent.
+fn parse_authorization(req: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(req).ok()?;
+    for line in text.split('\n').skip(1) {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let colon = line.find(':')?;
+        let (name, value) = line.split_at(colon);
+        if name.eq_ignore_ascii_case("authorization") {
+            // value still starts with ':' — strip it and any leading space.
+            return Some(value.trim_start_matches(':').trim_start());
+        }
+    }
+    None
+}
+
 /// Write a minimal HTTP/1.1 response with the given status code, reason
 /// phrase, and body. Headers and body are written sequentially so the body
 /// bytes never have to be cloned into the same buffer as the header.
@@ -143,6 +322,30 @@ async fn write_response(
     let header = format!(
         "HTTP/1.1 {code} {reason}\r\n\
          Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {len}\r\n\
+         Connection: close\r\n\r\n",
+        code = code,
+        reason = reason,
+        len = body.len(),
+    );
+    stream.write_all(header.as_bytes()).await?;
+    if !body.is_empty() {
+        stream.write_all(body).await?;
+    }
+    Ok(())
+}
+
+/// JSON-typed variant of [`write_response`] used by the `/healthz/*` admin
+/// surface. Identical wire format except for the `Content-Type` header.
+async fn write_json_response(
+    stream: &mut TcpStream,
+    code: u16,
+    reason: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {code} {reason}\r\n\
+         Content-Type: application/json; charset=utf-8\r\n\
          Content-Length: {len}\r\n\
          Connection: close\r\n\r\n",
         code = code,

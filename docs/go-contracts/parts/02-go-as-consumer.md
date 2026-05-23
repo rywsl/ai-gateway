@@ -334,7 +334,29 @@ Go 端必须暴露：
 | `markup_chain` 是数组，不是单一 scalar `markup_product` | `no_markup_product_scalar` invariant |
 | `FreezeGuard::release` 唯一释放方式 | `no_freezeguard_settle` invariant |
 
-## 2.9 未决问题
+## 2.9 `mgmt_token:blacklist:<token_id>` Redis Key
+
+| Key 格式 | `mgmt_token:blacklist:<token_id>` |
+|---|---|
+| Type | STRING |
+| Writer | Go（用户主动撤销 / 管理员强制 revoke） |
+| Reader | Rust（`/healthz/*` 与 management-path `request_filter` 在 `verify_mgmt_token_secret` 之前查 `EXISTS`） |
+| TTL | Go 设为 token 的剩余有效期 |
+
+写入语义与 [`jwt:blacklist:<jti>`](01-go-as-producer.md#16-jwtblacklistjti-redis-key) 一致。Rust 端 `RedisJwtBlacklist::check_mgmt`（`crates/gw-auth/src/jwt_blacklist.rs`）做一次 `EXISTS`：
+
+- 命中 → 401 `GW_AUTH_MGMT_TOKEN_REVOKED`；
+- Redis 不可达 → 默认 `BlacklistFailMode::FailClosed`（仍 401），与 JWT 黑名单共用 `AuthConfig.blacklist_fail_mode` 开关。
+
+Go 写入示例：
+
+```
+SET mgmt_token:blacklist:<token_id> "1" EX <remaining_seconds>
+```
+
+`token_id` 即 `ManagementTokenEntry.token_id`（前缀 `mt_`，详见 [parts/03 §3.2.13](03-shared-schema.md#3213-management_tokenspayload--managementtokenentrymigration-0007)）。
+
+## 2.10 未决问题
 
 1. **`settled_billing` 是否要 Rust 强制要求 Go 保留**：本契约不强制（Rust 不读）。Go 自决保留与否。
 2. **`usage:records:dlq` 在 v2 三层兜底（C-δ）后的 payload 是否扩展**：v2 加 `dlq_layer` 字段（mem / disk / redis），Go drainer 必须兼容。

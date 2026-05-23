@@ -74,4 +74,74 @@ impl ResilienceState {
     pub fn cooldown_fallback_used(&self) -> u64 {
         self.cooldown_fallback_used.load(Ordering::Acquire)
     }
+
+    /// JSON snapshot of the resilience state, intended for the admin
+    /// `/healthz/resilience` endpoint (T3-C consumer). Shape:
+    ///
+    /// ```json
+    /// {
+    ///   "redis_state": "healthy" | "degraded" | "unavailable",
+    ///   "last_redis_error_ms": 0,
+    ///   "freeze_fallback_used": 0,
+    ///   "cooldown_fallback_used": 0
+    /// }
+    /// ```
+    ///
+    /// Observability JSON only — not a wire contract. Field names may
+    /// evolve.
+    pub fn snapshot_json(&self) -> String {
+        let v = serde_json::json!({
+            "redis_state": redis_state_label(self.redis_state()),
+            "last_redis_error_ms": self.last_redis_error_ms(),
+            "freeze_fallback_used": self.freeze_fallback_used(),
+            "cooldown_fallback_used": self.cooldown_fallback_used(),
+        });
+        serde_json::to_string(&v).unwrap_or_else(|_| String::from("{}"))
+    }
+}
+
+fn redis_state_label(s: RedisHealthState) -> &'static str {
+    match s {
+        RedisHealthState::Healthy => "healthy",
+        RedisHealthState::Degraded => "degraded",
+        RedisHealthState::Unavailable => "unavailable",
+    }
+}
+
+#[cfg(test)]
+mod resilience_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_json_emits_required_fields() {
+        let state = ResilienceState::default();
+        let json = state.snapshot_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_object());
+        assert!(parsed.get("redis_state").is_some(), "redis_state missing");
+        assert!(
+            parsed.get("last_redis_error_ms").is_some(),
+            "last_redis_error_ms missing"
+        );
+        assert!(
+            parsed.get("freeze_fallback_used").is_some(),
+            "freeze_fallback_used missing"
+        );
+        assert!(
+            parsed.get("cooldown_fallback_used").is_some(),
+            "cooldown_fallback_used missing"
+        );
+        // Default state is healthy.
+        assert_eq!(parsed["redis_state"], "healthy");
+    }
+
+    #[test]
+    fn snapshot_reflects_recorded_redis_error() {
+        let state = ResilienceState::default();
+        state.record_redis_error("get", "timeout");
+        let json = state.snapshot_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["redis_state"], "degraded");
+        assert!(parsed["last_redis_error_ms"].as_u64().unwrap_or(0) > 0);
+    }
 }
