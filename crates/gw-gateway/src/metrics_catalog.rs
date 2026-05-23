@@ -42,6 +42,17 @@ pub static METRICS: &[MetricSpec] = &[
         help: "cross-protocol stream events re-rendered via IR round-trip (G8); labels=from,to",
     },
     MetricSpec {
+        name: "gw_codec_cross_render_nonstream_total",
+        kind: MetricKind::Counter,
+        help: "Cross-protocol non-stream response re-renders performed (per from/to wire form).",
+    },
+    MetricSpec {
+        name: "gw_codec_cross_render_lossy_total",
+        kind: MetricKind::Counter,
+        help: "Vendor-specific fields dropped during cross-protocol re-render (per from/to/field). \
+               Each increment also emits a tracing::error! event.",
+    },
+    MetricSpec {
         name: "gw_codec_parse_response_failure_total",
         kind: MetricKind::Counter,
         help: "codec.parse_response returned an error on non-stream upstream body; labels=codec,upstream_status",

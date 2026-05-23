@@ -13,6 +13,7 @@ pub mod anthropic;
 pub mod any;
 pub(crate) mod common;
 pub mod compression;
+pub mod cross_render;
 pub mod error_passthrough;
 pub mod gemini;
 pub mod openai;
