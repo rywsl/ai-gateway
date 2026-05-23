@@ -71,8 +71,9 @@ fn same_protocol_openai_round_trips_unchanged() {
     // reproduces a well-formed delta frame.
     let codec = OpenAi;
     let upstream_chunk = br#"data: {"choices":[{"index":0,"delta":{"content":"x"}}]}"#;
+    let mut state = codec.new_stream_state();
     let events = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, upstream_chunk)
+        .parse_stream_chunk(state.as_mut(), upstream_chunk)
         .unwrap();
     assert_eq!(events.len(), 1);
     let mut buf = BytesMut::new();

@@ -38,9 +38,8 @@ fn gemini_combined_final_event_splits_into_two() {
 fn openai_single_delta_does_not_spill() {
     let codec = OpenAi;
     let chunk = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n";
-    let evs = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, chunk)
-        .unwrap();
+    let mut state = codec.new_stream_state();
+    let evs = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
     assert_eq!(evs.len(), 1);
     assert!(matches!(evs[0], StreamEventIR::Delta { .. }));
 }

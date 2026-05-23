@@ -40,9 +40,8 @@ fn render_roundtrip_preserves_fields() {
 fn parse_stream_chunk_delta() {
     let codec = OpenAi;
     let chunk = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n";
-    let evs = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, chunk)
-        .unwrap();
+    let mut state = codec.new_stream_state();
+    let evs = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
     assert_eq!(evs.len(), 1);
     match &evs[0] {
         StreamEventIR::Delta { text, .. } => assert_eq!(text.as_deref().unwrap(), "hi"),
@@ -53,11 +52,9 @@ fn parse_stream_chunk_delta() {
 #[test]
 fn parse_stream_done() {
     let codec = OpenAi;
+    let mut state = codec.new_stream_state();
     let evs = codec
-        .parse_stream_chunk(
-            &mut gw_codec::trait_def::EmptyStreamState,
-            b"data: [DONE]\n\n",
-        )
+        .parse_stream_chunk(state.as_mut(), b"data: [DONE]\n\n")
         .unwrap();
     assert_eq!(evs.len(), 1);
     assert!(matches!(evs[0], StreamEventIR::End { .. }));

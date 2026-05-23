@@ -1,71 +1,18 @@
 //! OpenAI `ProtocolCodec` impl. Streaming uses OpenAI's SSE format:
 //! `data: {json}\n\n` per chunk, terminated by `data: [DONE]\n\n`.
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR, UsageIR};
-use smallvec::{smallvec, SmallVec};
 use std::borrow::Cow;
 
 use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
 use crate::trait_def::{Headers, ProtocolCodec};
 
-use super::wire::OpenAiRequest;
+use super::state::OpenAiStreamState;
+use super::wire::{OpenAiRequest, OpenAiResponse, OpenAiStreamPayload};
 
 pub struct OpenAi;
-
-impl OpenAi {
-    /// v1 stateless body for parsing one SSE chunk. Preserved verbatim
-    /// across T2 so streaming continues to function in the intermediate
-    /// state; T4-A replaces the `parse_stream_chunk` trait method with
-    /// a stateful implementation and removes this helper.
-    fn legacy_parse_stream_chunk_v1<'a>(
-        &self,
-        chunk: &'a [u8],
-    ) -> Result<SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
-        let s = std::str::from_utf8(chunk).map_err(|_| internal_err("invalid utf8 in chunk"))?;
-        for line in s.split('\n') {
-            let line = line.trim_start();
-            let Some(payload) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let payload = payload.trim_start();
-            if payload.trim() == "[DONE]" {
-                return Ok(smallvec![StreamEventIR::End {
-                    finish_reason: FinishReasonIR::Stop,
-                }]);
-            }
-            if payload.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<serde_json::Value>(payload) {
-                Ok(val) => {
-                    let txt = val
-                        .get("choices")
-                        .and_then(|c| c.get(0))
-                        .and_then(|c| c.get("delta"))
-                        .and_then(|d| d.get("content"))
-                        .and_then(|c| c.as_str())
-                        .map(|s| Cow::Owned(s.to_owned()));
-                    return Ok(smallvec![StreamEventIR::Delta {
-                        text: txt,
-                        tool_call: None,
-                        thinking: None,
-                    }]);
-                }
-                Err(_) => {
-                    // CONTRACT: a malformed `data:` payload should NOT
-                    // short-circuit the entire stream — surface a warn and
-                    // return an empty SmallVec so the framer can continue
-                    // with the next chunk.
-                    tracing::warn!("malformed SSE data on openai");
-                    return Ok(SmallVec::new());
-                }
-            }
-        }
-        Ok(SmallVec::new())
-    }
-}
 
 impl ProtocolCodec for OpenAi {
     #[inline]
@@ -98,18 +45,126 @@ impl ProtocolCodec for OpenAi {
     }
 
     fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState> {
-        Box::new(crate::trait_def::EmptyStreamState)
+        Box::new(OpenAiStreamState::default())
     }
 
     fn parse_stream_chunk<'a>(
         &self,
-        _state: &mut dyn gw_core::ir::StreamState,
+        state: &mut dyn gw_core::ir::StreamState,
         chunk: &'a [u8],
     ) -> Result<Vec<StreamEventIR<'a>>, ErrorIR<'static>> {
-        // T2: forward to the v1 stateless body. T4-A replaces this with a
-        // real stateful implementation backed by the codec-specific
-        // `StreamState`.
-        Ok(self.legacy_parse_stream_chunk_v1(chunk)?.into_vec())
+        let st = state
+            .as_any_mut()
+            .downcast_mut::<OpenAiStreamState>()
+            .ok_or_else(stream_state_mismatch)?;
+
+        let mut events: Vec<StreamEventIR<'a>> = Vec::new();
+
+        // The trait contract pre-frames chunks on `\n\n`; iterate lines so we
+        // handle multi-line `data:` events tolerantly (including any
+        // intermixed comment lines).
+        for line in chunk.split(|b| *b == b'\n') {
+            // Trim trailing CR — SSE typically uses `\r\n`.
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() {
+                continue;
+            }
+            let Some(payload) = line.strip_prefix(b"data:") else {
+                continue;
+            };
+            // Trim leading whitespace (the SSE spec mandates a single space
+            // but real producers vary).
+            let payload = trim_ascii_start(payload);
+            if payload.is_empty() {
+                continue;
+            }
+            if payload == b"[DONE]" {
+                // Closing marker. OpenAI typically sends a finish_reason chunk
+                // immediately before [DONE], but downstream consumers (and
+                // existing tests) rely on the codec surfacing an End regardless
+                // — emit it idempotently here.
+                events.push(StreamEventIR::End {
+                    finish_reason: FinishReasonIR::Stop,
+                });
+                continue;
+            }
+            let json: OpenAiStreamPayload<'a> = match serde_json::from_slice(payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    // CONTRACT: do not short-circuit the stream on a single
+                    // malformed payload. Surface a warn and continue.
+                    tracing::warn!(error = %e, "openai stream: malformed data payload");
+                    continue;
+                }
+            };
+
+            if let Some(choice) = json.choices.into_iter().next() {
+                if let Some(text) = choice.delta.content.as_deref().filter(|s| !s.is_empty()) {
+                    events.push(StreamEventIR::Delta {
+                        text: Some(Cow::Owned(text.to_owned())),
+                        tool_call: None,
+                        thinking: None,
+                    });
+                }
+
+                if let Some(tcs) = choice.delta.tool_calls {
+                    for tc in tcs {
+                        let builder = st.pending_tool_calls.entry(tc.index).or_default();
+                        if !builder.started_emitted {
+                            // First appearance: we need both id and name to
+                            // emit ToolCallStart. OpenAI streams these in the
+                            // first chunk for the call together with index.
+                            if let (Some(id), Some(func)) = (tc.id.as_deref(), tc.function.as_ref())
+                            {
+                                if let Some(name) = func.name.as_deref() {
+                                    builder.id = id.to_owned();
+                                    builder.name = name.to_owned();
+                                    builder.started_emitted = true;
+                                    events.push(StreamEventIR::ToolCallStart {
+                                        index: tc.index,
+                                        id: Cow::Owned(builder.id.clone()),
+                                        name: Cow::Owned(builder.name.clone()),
+                                    });
+                                }
+                            }
+                        }
+                        if let Some(func) = tc.function {
+                            if let Some(args_chunk) =
+                                func.arguments.as_deref().filter(|s| !s.is_empty())
+                            {
+                                builder.arguments.push_str(args_chunk);
+                                events.push(StreamEventIR::ToolCallDelta {
+                                    index: tc.index,
+                                    arguments_chunk: Cow::Owned(args_chunk.to_owned()),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                if let Some(reason) = choice.finish_reason.as_deref() {
+                    let fr = match reason {
+                        "stop" => FinishReasonIR::Stop,
+                        "length" => FinishReasonIR::Length,
+                        "tool_calls" => FinishReasonIR::ToolCalls,
+                        "content_filter" => FinishReasonIR::ContentFilter,
+                        other => FinishReasonIR::Other(Cow::Owned(other.to_owned())),
+                    };
+                    events.push(StreamEventIR::End { finish_reason: fr });
+                }
+            }
+
+            if let Some(usage) = json.usage {
+                events.push(StreamEventIR::Usage(UsageIR {
+                    input_tokens: usage.prompt_tokens,
+                    output_tokens: usage.completion_tokens,
+                    cached_tokens: usage.prompt_tokens_details.map(|d| d.cached_tokens),
+                    reasoning_tokens: None,
+                }));
+            }
+        }
+
+        Ok(events)
     }
 
     fn render_stream_chunk(
@@ -135,8 +190,6 @@ impl ProtocolCodec for OpenAi {
                 buf.extend_from_slice(b"data: [DONE]\n\n");
             }
             StreamEventIR::Error(err) => {
-                // Surface the gateway error on the wire as a final `data:`
-                // frame so the client observes it even mid-stream.
                 let mut tmp = BytesMut::new();
                 self.render_error(err, &mut tmp);
                 buf.extend_from_slice(b"data: ");
@@ -144,36 +197,26 @@ impl ProtocolCodec for OpenAi {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::Start { .. } => {
-                tracing::warn!("openai: StreamEventIR::Start dropped (no wire equivalent in v1)");
+                tracing::warn!("openai: StreamEventIR::Start dropped (no wire equivalent)");
             }
             StreamEventIR::Usage(_) => {
-                tracing::warn!("openai: StreamEventIR::Usage dropped (no wire equivalent in v1)");
+                tracing::warn!("openai: StreamEventIR::Usage dropped (no wire equivalent)");
             }
             StreamEventIR::ThinkingDelta { .. } => {
-                tracing::warn!(
-                    "openai: StreamEventIR::ThinkingDelta dropped (no wire equivalent in v1)"
-                );
+                tracing::warn!("openai: StreamEventIR::ThinkingDelta dropped (no wire equivalent)");
             }
             StreamEventIR::ToolCallStart { .. } => {
-                tracing::warn!(
-                    "openai: StreamEventIR::ToolCallStart dropped (no wire equivalent in v1)"
-                );
+                tracing::warn!("openai: StreamEventIR::ToolCallStart dropped (no wire equivalent)");
             }
             StreamEventIR::ToolCallDelta { .. } => {
-                tracing::warn!(
-                    "openai: StreamEventIR::ToolCallDelta dropped (no wire equivalent in v1)"
-                );
+                tracing::warn!("openai: StreamEventIR::ToolCallDelta dropped (no wire equivalent)");
             }
         }
         Ok(())
     }
 
     fn parse_response<'a>(&self, body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
-        // v1: extract just `id`, `model`, and `usage` from the upstream
-        // ChatCompletion body. `choices` is intentionally not parsed — v2
-        // cross-protocol non-stream response render (B1-4) will need it but
-        // currently short-circuits 503 until then.
-        let parsed: OpenAiResponseBody = serde_json::from_slice(body).map_err(|e| ErrorIR {
+        let wire: OpenAiResponse<'a> = serde_json::from_slice(body).map_err(|e| ErrorIR {
             category: ErrorCategory::UpstreamError,
             status: 502,
             upstream_status: None,
@@ -184,33 +227,28 @@ impl ProtocolCodec for OpenAi {
             request_id: "",
             retry_after_secs: None,
         })?;
-
-        let usage = parsed.usage.map(|u| UsageIR {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cached_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
-            reasoning_tokens: None,
-        });
-
-        Ok(ResponseIR {
-            id: Cow::Owned(parsed.id),
-            model: Cow::Owned(parsed.model),
-            messages: Vec::new(),
-            finish_reason: None,
-            usage,
-            metadata: Default::default(),
-            thinking: None,
-            reasoning: None,
-            tool_use_blocks: None,
-        })
+        Ok(wire.into())
     }
 
     fn render_response(
         &self,
-        _ir: &ResponseIR<'_>,
-        _buf: &mut BytesMut,
+        ir: &ResponseIR<'_>,
+        buf: &mut BytesMut,
     ) -> Result<(), ErrorIR<'static>> {
-        unimplemented!("v1: openai non-stream response not implemented")
+        let wire: OpenAiResponse<'_> = ir.try_into()?;
+        let mut writer = buf.writer();
+        serde_json::to_writer(&mut writer, &wire).map_err(|e| ErrorIR {
+            category: ErrorCategory::GatewayInternal,
+            status: 500,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_CODEC_RENDER_RESPONSE),
+            message: Cow::Owned(format!("openai chat render: {e}")),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        })?;
+        Ok(())
     }
 
     fn parse_error<'a>(&self, status: u16, body: &'a [u8]) -> ErrorIR<'a> {
@@ -264,6 +302,21 @@ impl ProtocolCodec for OpenAi {
 }
 
 #[inline]
+fn stream_state_mismatch() -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::GatewayInternal,
+        status: 500,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_CODEC_PARSE_STREAM_CHUNK),
+        message: Cow::Borrowed("expected OpenAiStreamState"),
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    }
+}
+
+#[inline]
 fn category_str(c: ErrorCategory) -> &'static str {
     match c {
         ErrorCategory::ClientBadRequest => "client_bad_request",
@@ -277,44 +330,34 @@ fn category_str(c: ErrorCategory) -> &'static str {
     }
 }
 
-// Reference unused imports to keep the helper available if future code paths
-// (e.g. response rendering) need them.
+/// `<[u8]>::trim_ascii_start` is stabilised in 1.80; this repo pins 1.86 so
+/// using it directly is fine, but inlining a tiny helper keeps this file
+/// free of nightly-feature ambiguity should the toolchain ever drift back.
+#[inline]
+fn trim_ascii_start(mut s: &[u8]) -> &[u8] {
+    while let Some((&first, rest)) = s.split_first() {
+        if first.is_ascii_whitespace() {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
 #[allow(dead_code)]
 const _ASSERT_CODE: &str = codes::GW_UPSTREAM_4XX;
-
-// ── OpenAI ChatCompletion non-stream response wire structs ────────────────
-//
-// Kept private to this module: v1 only needs `id`, `model`, and `usage`
-// (incl. `prompt_tokens_details.cached_tokens`). `choices` is intentionally
-// dropped — v2 cross-protocol render (B1-4) will widen this.
-
-#[derive(serde::Deserialize)]
-struct OpenAiResponseUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    #[serde(default)]
-    prompt_tokens_details: Option<OpenAiPromptDetails>,
-}
-
-#[derive(serde::Deserialize)]
-struct OpenAiPromptDetails {
-    #[serde(default)]
-    cached_tokens: Option<u32>,
-}
-
-#[derive(serde::Deserialize)]
-struct OpenAiResponseBody {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    usage: Option<OpenAiResponseUsage>,
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
+    use gw_core::ir::{
+        ContentIR, FinishReasonIR, MessageIR, ResponseIR, StreamEventIR, StreamState, ToolCallIR,
+        UsageIR,
+    };
+    use serde_json::value::RawValue;
+    use std::borrow::Cow;
 
     #[test]
     fn parse_response_extracts_usage() {
@@ -362,5 +405,118 @@ mod tests {
             err.code.as_ref(),
             gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR
         );
+    }
+
+    #[test]
+    fn render_response_text_only_round_trip() {
+        let ir = ResponseIR {
+            id: Cow::Borrowed("chatcmpl-abc"),
+            model: Cow::Borrowed("gpt-4o"),
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Text(Cow::Borrowed("Hello, world!")),
+                tool_calls: None,
+            }],
+            finish_reason: Some(FinishReasonIR::Stop),
+            usage: Some(UsageIR {
+                input_tokens: 5,
+                output_tokens: 3,
+                cached_tokens: None,
+                reasoning_tokens: None,
+            }),
+            ..ResponseIR::default()
+        };
+
+        let mut buf = BytesMut::new();
+        OpenAi.render_response(&ir, &mut buf).unwrap();
+        let parsed: ResponseIR = OpenAi.parse_response(&buf).unwrap();
+        assert_eq!(parsed.id, "chatcmpl-abc");
+        assert!(matches!(parsed.finish_reason, Some(FinishReasonIR::Stop)));
+        let usage = parsed.usage.expect("usage round-tripped");
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 3);
+
+        // Assistant text round-trips through OpenAI chat.completion message.
+        match &parsed.messages[0] {
+            MessageIR::Assistant { content, .. } => match content {
+                ContentIR::Text(t) => assert_eq!(t.as_ref(), "Hello, world!"),
+                _ => panic!("expected ContentIR::Text"),
+            },
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn render_response_with_tool_calls_round_trip() {
+        let args_raw = RawValue::from_string(r#"{"city":"SF"}"#.to_owned()).expect("valid JSON");
+        let ir = ResponseIR {
+            id: Cow::Borrowed("chatcmpl-tool"),
+            model: Cow::Borrowed("gpt-4o"),
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Text(Cow::Borrowed("")),
+                tool_calls: Some(vec![ToolCallIR {
+                    id: Cow::Borrowed("call_1"),
+                    name: Cow::Borrowed("get_weather"),
+                    arguments_json: Cow::Owned(args_raw),
+                }]),
+            }],
+            finish_reason: Some(FinishReasonIR::ToolCalls),
+            ..ResponseIR::default()
+        };
+
+        let mut buf = BytesMut::new();
+        OpenAi.render_response(&ir, &mut buf).unwrap();
+        let parsed: ResponseIR = OpenAi.parse_response(&buf).unwrap();
+        let calls = match &parsed.messages[0] {
+            MessageIR::Assistant {
+                tool_calls: Some(c),
+                ..
+            } => c.clone(),
+            _ => panic!("expected tool_calls"),
+        };
+        assert_eq!(calls[0].name, "get_weather");
+        assert!(calls[0].arguments_json.get().contains("SF"));
+        assert!(matches!(
+            parsed.finish_reason,
+            Some(FinishReasonIR::ToolCalls)
+        ));
+    }
+
+    #[test]
+    fn parse_stream_chunk_accumulates_tool_call_arguments() {
+        let codec = OpenAi;
+        let mut state: Box<dyn StreamState> = Box::new(OpenAiStreamState::default());
+
+        let c1 = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\"}}]}}]}\n\n";
+        let events1 = codec.parse_stream_chunk(state.as_mut(), c1).unwrap();
+        assert!(matches!(
+            events1[0],
+            StreamEventIR::ToolCallStart { index: 0, .. }
+        ));
+
+        let c2 = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n";
+        let events2 = codec.parse_stream_chunk(state.as_mut(), c2).unwrap();
+        let delta_count = events2
+            .iter()
+            .filter(|e| matches!(e, StreamEventIR::ToolCallDelta { .. }))
+            .count();
+        assert_eq!(delta_count, 1);
+
+        let c3 = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"SF\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let events3 = codec.parse_stream_chunk(state.as_mut(), c3).unwrap();
+        let final_delta = events3
+            .iter()
+            .filter(|e| matches!(e, StreamEventIR::ToolCallDelta { .. }))
+            .count();
+        assert!(final_delta >= 1);
+        assert!(matches!(events3.last().unwrap(), StreamEventIR::End { .. }));
+
+        // After all chunks the builder's accumulated arguments should be the
+        // concatenated JSON the upstream sent.
+        let st = state
+            .as_any_mut()
+            .downcast_mut::<OpenAiStreamState>()
+            .unwrap();
+        let acc = &st.pending_tool_calls.get(&0).unwrap().arguments;
+        assert_eq!(acc, r#"{"city":"SF"}"#);
     }
 }
