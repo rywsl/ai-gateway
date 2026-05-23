@@ -47,10 +47,9 @@ fn openai_single_delta_does_not_spill() {
 #[test]
 fn anthropic_single_delta_does_not_spill() {
     let codec = Anthropic;
-    let chunk = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
-    let evs = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, chunk)
-        .unwrap();
+    let chunk = b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
+    let mut state = codec.new_stream_state();
+    let evs = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
     assert_eq!(evs.len(), 1);
     assert!(matches!(evs[0], StreamEventIR::Delta { .. }));
 }

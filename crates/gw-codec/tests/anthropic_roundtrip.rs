@@ -39,10 +39,9 @@ fn render_roundtrip_preserves_fields() {
 #[test]
 fn parse_stream_chunk_delta() {
     let codec = Anthropic;
-    let chunk = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
-    let evs = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, chunk)
-        .unwrap();
+    let chunk = b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n";
+    let mut state = codec.new_stream_state();
+    let evs = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
     assert_eq!(evs.len(), 1);
     match &evs[0] {
         StreamEventIR::Delta { text, .. } => assert_eq!(text.as_deref().unwrap(), "Hi"),
@@ -53,12 +52,10 @@ fn parse_stream_chunk_delta() {
 #[test]
 fn parse_stream_message_stop() {
     let codec = Anthropic;
-    let chunk = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
-    let evs = codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, chunk)
-        .unwrap();
-    assert_eq!(evs.len(), 1);
-    assert!(matches!(evs[0], StreamEventIR::End { .. }));
+    let chunk = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    let mut state = codec.new_stream_state();
+    let evs = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+    assert!(evs.iter().any(|e| matches!(e, StreamEventIR::End { .. })));
 }
 
 #[test]

@@ -1,94 +1,27 @@
-//! Anthropic `ProtocolCodec` impl. Streaming uses Anthropic's SSE format:
-//! each event is an `event: <kind>\ndata: {json}\n\n` pair. v1 understands
-//! `content_block_delta` and `message_stop`.
+//! Anthropic `ProtocolCodec` impl. Streaming uses Anthropic's event-typed
+//! SSE: each frame is an `event: <type>\ndata: <json>\n\n` pair carrying
+//! one of `message_start`, `content_block_start`, `content_block_delta`,
+//! `content_block_stop`, `message_delta`, `message_stop`, `ping`, or
+//! `error`. The codec accumulates per-block builders inside
+//! `AnthropicStreamState` and emits IR events at the natural flush points
+//! (block stop / message_delta).
 
-use bytes::BytesMut;
-use gw_core::error::ErrorIR;
-use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR};
-use smallvec::{smallvec, SmallVec};
+use bytes::{BufMut, BytesMut};
+use gw_core::error::{codes, ErrorCategory, ErrorIR};
+use gw_core::ir::{MessageIR, RequestIR, ResponseIR, StreamEventIR, UsageIR};
 use std::borrow::Cow;
 
 use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
 use crate::trait_def::{Headers, ProtocolCodec};
 
-use super::wire::AnthropicRequest;
+use super::state::{AnthropicStreamState, OpenBlock};
+use super::via::{map_finish_to_stop_reason, map_stop_reason_to_finish};
+use super::wire::{
+    AnthropicContent, AnthropicRequest, AnthropicResponse, AnthropicStreamDelta,
+    AnthropicStreamEvent,
+};
 
 pub struct Anthropic;
-
-/// Subset of the Anthropic Messages non-stream response body needed for
-/// `parse_response`. Field names match Anthropic's wire shape.
-///
-/// `cache_creation_input_tokens` is intentionally not deserialised because v1
-/// `UsageIR` has no field for it; it will be wired when codec-s4 v2 extends
-/// `UsageIR`.
-#[derive(serde::Deserialize)]
-struct AnthropicResponseUsage {
-    input_tokens: u32,
-    output_tokens: u32,
-    #[serde(default)]
-    cache_read_input_tokens: Option<u32>,
-}
-
-#[derive(serde::Deserialize)]
-struct AnthropicResponseBody {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    usage: Option<AnthropicResponseUsage>,
-}
-
-impl Anthropic {
-    /// v1 stateless body for parsing one SSE chunk. Preserved verbatim
-    /// across T2 so streaming continues to function in the intermediate
-    /// state; T4-C replaces the `parse_stream_chunk` trait method with
-    /// a stateful implementation and removes this helper.
-    fn legacy_parse_stream_chunk_v1<'a>(
-        &self,
-        chunk: &'a [u8],
-    ) -> Result<SmallVec<[StreamEventIR<'a>; 1]>, ErrorIR<'static>> {
-        let s = std::str::from_utf8(chunk).map_err(|_| internal_err("invalid utf8 in chunk"))?;
-        let mut event_name: Option<&str> = None;
-        let mut data_line: Option<&str> = None;
-        for line in s.split('\n') {
-            let line = line.trim_end_matches('\r');
-            if let Some(rest) = line.strip_prefix("event:") {
-                event_name = Some(rest.trim());
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                data_line = Some(rest.trim());
-            }
-        }
-        match (event_name, data_line) {
-            (Some("message_stop"), _) => Ok(smallvec![StreamEventIR::End {
-                finish_reason: FinishReasonIR::Stop,
-            }]),
-            (Some("content_block_delta"), Some(payload)) if !payload.is_empty() => {
-                let val: serde_json::Value = match serde_json::from_str(payload) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        // CONTRACT: malformed payloads must not short-circuit
-                        // the stream — surface a warn and return an empty
-                        // SmallVec so the framer continues to the next chunk.
-                        tracing::warn!("malformed SSE data on anthropic");
-                        return Ok(SmallVec::new());
-                    }
-                };
-                let txt = val
-                    .get("delta")
-                    .and_then(|d| d.get("text"))
-                    .and_then(|t| t.as_str())
-                    .map(|s| Cow::Owned(s.to_owned()));
-                Ok(smallvec![StreamEventIR::Delta {
-                    text: txt,
-                    tool_call: None,
-                    thinking: None,
-                }])
-            }
-            _ => Ok(SmallVec::new()),
-        }
-    }
-}
 
 impl ProtocolCodec for Anthropic {
     #[inline]
@@ -120,18 +53,49 @@ impl ProtocolCodec for Anthropic {
     }
 
     fn new_stream_state(&self) -> Box<dyn gw_core::ir::StreamState> {
-        Box::new(crate::trait_def::EmptyStreamState)
+        Box::new(AnthropicStreamState::default())
     }
 
     fn parse_stream_chunk<'a>(
         &self,
-        _state: &mut dyn gw_core::ir::StreamState,
+        state: &mut dyn gw_core::ir::StreamState,
         chunk: &'a [u8],
     ) -> Result<Vec<StreamEventIR<'a>>, ErrorIR<'static>> {
-        // T2: forward to the v1 stateless body. T4-C replaces this with a
-        // real stateful implementation backed by the codec-specific
-        // `StreamState`.
-        Ok(self.legacy_parse_stream_chunk_v1(chunk)?.into_vec())
+        let st = state
+            .as_any_mut()
+            .downcast_mut::<AnthropicStreamState>()
+            .ok_or_else(stream_state_mismatch)?;
+
+        let mut events: Vec<StreamEventIR<'a>> = Vec::new();
+
+        // The trait contract pre-frames chunks on blank-line boundaries. Walk
+        // each line collecting `event:` (informational; the payload's `type`
+        // field is authoritative) and `data:` so a single SSE event reaches
+        // the JSON parser as a single payload.
+        let mut pending_data: Option<&[u8]> = None;
+        for line in chunk.split(|b| *b == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() {
+                if let Some(payload) = pending_data.take() {
+                    dispatch_payload(st, payload, &mut events);
+                }
+                continue;
+            }
+            // Skip `event:` headers — payload's `type` discriminant is the
+            // authoritative dispatch key.
+            if line.starts_with(b"event:") {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix(b"data:") {
+                let rest = trim_ascii_start(rest);
+                pending_data = Some(rest);
+            }
+        }
+        if let Some(payload) = pending_data.take() {
+            dispatch_payload(st, payload, &mut events);
+        }
+
+        Ok(events)
     }
 
     fn render_stream_chunk(
@@ -152,7 +116,93 @@ impl ProtocolCodec for Anthropic {
                 buf.extend_from_slice(&bytes);
                 buf.extend_from_slice(b"\n\n");
             }
-            StreamEventIR::End { .. } => {
+            StreamEventIR::ThinkingDelta {
+                text,
+                signature_chunk,
+            } => {
+                let payload = serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "thinking_delta", "thinking": text }
+                });
+                buf.extend_from_slice(b"event: content_block_delta\ndata: ");
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|_| internal_err("serialize thinking delta"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
+                if let Some(sig) = signature_chunk.as_deref().filter(|s| !s.is_empty()) {
+                    let sig_payload = serde_json::json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": { "type": "signature_delta", "signature": sig }
+                    });
+                    buf.extend_from_slice(b"event: content_block_delta\ndata: ");
+                    let bytes = serde_json::to_vec(&sig_payload)
+                        .map_err(|_| internal_err("serialize signature delta"))?;
+                    buf.extend_from_slice(&bytes);
+                    buf.extend_from_slice(b"\n\n");
+                }
+            }
+            StreamEventIR::ToolCallStart { index, id, name } => {
+                let payload = serde_json::json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": {},
+                    }
+                });
+                buf.extend_from_slice(b"event: content_block_start\ndata: ");
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|_| internal_err("serialize tool_call start"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::ToolCallDelta {
+                index,
+                arguments_chunk,
+            } => {
+                let payload = serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": { "type": "input_json_delta", "partial_json": arguments_chunk }
+                });
+                buf.extend_from_slice(b"event: content_block_delta\ndata: ");
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|_| internal_err("serialize tool_call delta"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::Usage(u) => {
+                let payload = serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {},
+                    "usage": {
+                        "input_tokens": u.input_tokens,
+                        "output_tokens": u.output_tokens,
+                    }
+                });
+                buf.extend_from_slice(b"event: message_delta\ndata: ");
+                let bytes =
+                    serde_json::to_vec(&payload).map_err(|_| internal_err("serialize usage"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::End { finish_reason } => {
+                // Emit a `message_delta` with the stop_reason, then the
+                // canonical `message_stop` terminator.
+                let stop_reason = map_finish_to_stop_reason(finish_reason);
+                let payload = serde_json::json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": stop_reason }
+                });
+                buf.extend_from_slice(b"event: message_delta\ndata: ");
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|_| internal_err("serialize message_delta"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
                 buf.extend_from_slice(
                     b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
                 );
@@ -167,27 +217,7 @@ impl ProtocolCodec for Anthropic {
             }
             StreamEventIR::Start { .. } => {
                 tracing::warn!(
-                    "anthropic: StreamEventIR::Start dropped (no wire equivalent in v1)"
-                );
-            }
-            StreamEventIR::Usage(_) => {
-                tracing::warn!(
-                    "anthropic: StreamEventIR::Usage dropped (no wire equivalent in v1)"
-                );
-            }
-            StreamEventIR::ThinkingDelta { .. } => {
-                tracing::warn!(
-                    "anthropic: StreamEventIR::ThinkingDelta dropped (no wire equivalent in v1)"
-                );
-            }
-            StreamEventIR::ToolCallStart { .. } => {
-                tracing::warn!(
-                    "anthropic: StreamEventIR::ToolCallStart dropped (no wire equivalent in v1)"
-                );
-            }
-            StreamEventIR::ToolCallDelta { .. } => {
-                tracing::warn!(
-                    "anthropic: StreamEventIR::ToolCallDelta dropped (no wire equivalent in v1)"
+                    "anthropic: StreamEventIR::Start dropped (no wire equivalent in this codec)"
                 );
             }
         }
@@ -195,49 +225,39 @@ impl ProtocolCodec for Anthropic {
     }
 
     fn parse_response<'a>(&self, body: &'a [u8]) -> Result<ResponseIR<'a>, ErrorIR<'static>> {
-        // v1.x: extract usage + model/id from Anthropic Messages non-stream
-        // response. `messages` / `finish_reason` are not yet reconstructed
-        // because same-protocol passthrough does not need them — the bytes
-        // are forwarded verbatim by the proxy layer. Will be revisited when
-        // codec-s4 v2 wires cross-protocol non-stream re-render.
-        let parsed: AnthropicResponseBody = serde_json::from_slice(body).map_err(|e| ErrorIR {
-            category: gw_core::error::ErrorCategory::UpstreamError,
+        let wire: AnthropicResponse<'a> = serde_json::from_slice(body).map_err(|e| ErrorIR {
+            category: ErrorCategory::UpstreamError,
             status: 502,
             upstream_status: None,
-            code: Cow::Borrowed(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
+            code: Cow::Borrowed(codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
             message: Cow::Owned(format!("anthropic parse_response: {e}")),
             retryable: false,
             upstream_raw: None,
             request_id: "",
             retry_after_secs: None,
         })?;
-
-        let usage = parsed.usage.map(|u| gw_core::ir::UsageIR {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-            cached_tokens: u.cache_read_input_tokens,
-            reasoning_tokens: None,
-        });
-
-        Ok(ResponseIR {
-            id: Cow::Owned(parsed.id),
-            model: Cow::Owned(parsed.model),
-            messages: Vec::new(),
-            finish_reason: None,
-            usage,
-            metadata: Default::default(),
-            thinking: None,
-            reasoning: None,
-            tool_use_blocks: None,
-        })
+        Ok(wire.into())
     }
 
     fn render_response(
         &self,
-        _ir: &ResponseIR<'_>,
-        _buf: &mut BytesMut,
+        ir: &ResponseIR<'_>,
+        buf: &mut BytesMut,
     ) -> Result<(), ErrorIR<'static>> {
-        unimplemented!("v1: anthropic non-stream response not implemented")
+        let wire: AnthropicResponse<'_> = ir.try_into()?;
+        let mut writer = buf.writer();
+        serde_json::to_writer(&mut writer, &wire).map_err(|e| ErrorIR {
+            category: ErrorCategory::GatewayInternal,
+            status: 500,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_CODEC_RENDER_RESPONSE),
+            message: Cow::Owned(format!("anthropic render: {e}")),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        })?;
+        Ok(())
     }
 
     fn parse_error<'a>(&self, status: u16, body: &'a [u8]) -> ErrorIR<'a> {
@@ -290,10 +310,247 @@ impl ProtocolCodec for Anthropic {
     }
 }
 
+// ─── streaming dispatch ───────────────────────────────────────────────────
+
+fn dispatch_payload<'a>(
+    st: &mut AnthropicStreamState,
+    payload: &'a [u8],
+    events: &mut Vec<StreamEventIR<'a>>,
+) {
+    if payload.is_empty() {
+        return;
+    }
+    let event: AnthropicStreamEvent<'a> = match serde_json::from_slice(payload) {
+        Ok(e) => e,
+        Err(e) => {
+            // CONTRACT: malformed payloads must not short-circuit the stream.
+            tracing::warn!(error = %e, "anthropic stream: malformed data payload");
+            return;
+        }
+    };
+    match event {
+        AnthropicStreamEvent::MessageStart { message } => {
+            st.seen_message_id = Some(message.id.into_owned());
+            // Anthropic provides `input_tokens` on message_start so downstream
+            // can surface a partial usage early; the final cumulative usage
+            // arrives on `message_delta`.
+            if let Some(u) = message.usage {
+                events.push(StreamEventIR::Usage(UsageIR {
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cached_tokens: u.cache_read_input_tokens,
+                    reasoning_tokens: None,
+                }));
+            }
+        }
+        AnthropicStreamEvent::ContentBlockStart {
+            index,
+            content_block,
+        } => {
+            match content_block {
+                AnthropicContent::Text { .. } => {
+                    st.open_blocks.insert(index, OpenBlock::Text(String::new()));
+                }
+                AnthropicContent::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    st.open_blocks.insert(
+                        index,
+                        OpenBlock::Thinking {
+                            text: thinking.into_owned(),
+                            signature: signature.map(|s| s.into_owned()).unwrap_or_default(),
+                        },
+                    );
+                }
+                AnthropicContent::ToolUse { id, name, input } => {
+                    let ir_index = st.next_tool_call_index;
+                    st.next_tool_call_index = st.next_tool_call_index.saturating_add(1);
+                    // Anthropic sends the empty `input: {}` on the block_start
+                    // event; subsequent fragments arrive as `input_json_delta`.
+                    let starting_input = match &input {
+                        serde_json::Value::Object(m) if m.is_empty() => String::new(),
+                        serde_json::Value::Null => String::new(),
+                        other => serde_json::to_string(other).unwrap_or_default(),
+                    };
+                    st.open_blocks.insert(
+                        index,
+                        OpenBlock::ToolUse {
+                            input_json: starting_input,
+                            ir_index,
+                        },
+                    );
+                    // Emit ToolCallStart immediately — id/name are available
+                    // up-front in Anthropic's stream, unlike OpenAI which
+                    // dribbles them out per-chunk.
+                    events.push(StreamEventIR::ToolCallStart {
+                        index: ir_index,
+                        id: Cow::Owned(id.into_owned()),
+                        name: Cow::Owned(name.into_owned()),
+                    });
+                }
+                // Image / ToolResult are not assistant-output blocks.
+                AnthropicContent::Image { .. } | AnthropicContent::ToolResult { .. } => {}
+            }
+        }
+        AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
+            let Some(builder) = st.open_blocks.get_mut(&index) else {
+                tracing::warn!(
+                    index,
+                    "anthropic stream: content_block_delta for unopened block"
+                );
+                return;
+            };
+            match (builder, delta) {
+                (OpenBlock::Text(buf), AnthropicStreamDelta::TextDelta { text }) => {
+                    buf.push_str(text.as_ref());
+                    if !text.is_empty() {
+                        events.push(StreamEventIR::Delta {
+                            text: Some(Cow::Owned(text.into_owned())),
+                            tool_call: None,
+                            thinking: None,
+                        });
+                    }
+                }
+                (
+                    OpenBlock::Thinking { text: buf, .. },
+                    AnthropicStreamDelta::ThinkingDelta { thinking },
+                ) => {
+                    buf.push_str(thinking.as_ref());
+                }
+                (
+                    OpenBlock::Thinking { signature, .. },
+                    AnthropicStreamDelta::SignatureDelta { signature: sig },
+                ) => {
+                    signature.push_str(sig.as_ref());
+                }
+                (
+                    OpenBlock::ToolUse {
+                        input_json,
+                        ir_index,
+                        ..
+                    },
+                    AnthropicStreamDelta::InputJsonDelta { partial_json },
+                ) => {
+                    let frag = partial_json.into_owned();
+                    input_json.push_str(&frag);
+                    if !frag.is_empty() {
+                        events.push(StreamEventIR::ToolCallDelta {
+                            index: *ir_index,
+                            arguments_chunk: Cow::Owned(frag),
+                        });
+                    }
+                }
+                // Mismatched delta kind for the open block — silently ignore;
+                // Anthropic does not promise strict pairing.
+                _ => {}
+            }
+        }
+        AnthropicStreamEvent::ContentBlockStop { index } => {
+            let Some(builder) = st.open_blocks.remove(&index) else {
+                return;
+            };
+            match builder {
+                OpenBlock::Text(_) => {
+                    // Text deltas already streamed event-by-event — nothing
+                    // to emit at stop.
+                }
+                OpenBlock::Thinking { text, signature } => {
+                    events.push(StreamEventIR::ThinkingDelta {
+                        text: Cow::Owned(text),
+                        signature_chunk: if signature.is_empty() {
+                            None
+                        } else {
+                            Some(Cow::Owned(signature))
+                        },
+                    });
+                }
+                OpenBlock::ToolUse { .. } => {
+                    // ToolCallStart was emitted on block_start; per-fragment
+                    // ToolCallDelta events have already been emitted; nothing
+                    // remains to flush here.
+                }
+            }
+        }
+        AnthropicStreamEvent::MessageDelta { delta, usage } => {
+            if let Some(u) = usage {
+                events.push(StreamEventIR::Usage(UsageIR {
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cached_tokens: u.cache_read_input_tokens,
+                    reasoning_tokens: None,
+                }));
+            }
+            if let Some(reason) = delta.stop_reason.as_deref() {
+                events.push(StreamEventIR::End {
+                    finish_reason: map_stop_reason_to_finish(reason),
+                });
+            }
+        }
+        AnthropicStreamEvent::MessageStop => {
+            // No-op flush — the canonical End event is emitted on
+            // message_delta where the stop_reason carries the IR-mappable
+            // signal.
+        }
+        AnthropicStreamEvent::Ping => {
+            // Keepalive.
+        }
+        AnthropicStreamEvent::Error { error } => {
+            events.push(StreamEventIR::Error(ErrorIR {
+                category: ErrorCategory::UpstreamError,
+                status: 502,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR),
+                message: Cow::Owned(error.message.into_owned()),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            }));
+        }
+    }
+}
+
+#[inline]
+fn stream_state_mismatch() -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::GatewayInternal,
+        status: 500,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_CODEC_PARSE_STREAM_CHUNK),
+        message: Cow::Borrowed("expected AnthropicStreamState"),
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    }
+}
+
+#[inline]
+fn trim_ascii_start(mut s: &[u8]) -> &[u8] {
+    while let Some((&first, rest)) = s.split_first() {
+        if first.is_ascii_whitespace() {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+#[allow(dead_code)]
+const _ASSERT_CODE: &str = codes::GW_UPSTREAM_4XX;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trait_def::ProtocolCodec;
+    use bytes::BytesMut;
+    use gw_core::ir::{
+        ContentIR, FinishReasonIR, MessageIR, ResponseIR, ResponseThinkingIR, StreamEventIR,
+        StreamState, ThinkingBlockIR, ToolUseBlockIR, UsageIR,
+    };
+    use serde_json::value::RawValue;
+    use std::borrow::Cow;
 
     #[test]
     fn parse_response_extracts_usage() {
@@ -342,5 +599,144 @@ mod tests {
             err.code.as_ref(),
             gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR
         );
+    }
+
+    #[test]
+    fn render_response_text_only_round_trip() {
+        let ir = ResponseIR {
+            id: Cow::Borrowed("msg_text"),
+            model: Cow::Borrowed("claude-3-5-sonnet"),
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Text(Cow::Borrowed("Hello, world!")),
+                tool_calls: None,
+            }],
+            finish_reason: Some(FinishReasonIR::Stop),
+            usage: Some(UsageIR {
+                input_tokens: 5,
+                output_tokens: 3,
+                cached_tokens: None,
+                reasoning_tokens: None,
+            }),
+            ..ResponseIR::default()
+        };
+
+        let mut buf = BytesMut::new();
+        Anthropic.render_response(&ir, &mut buf).unwrap();
+        let parsed: ResponseIR = Anthropic.parse_response(&buf).unwrap();
+        assert_eq!(parsed.id, "msg_text");
+        assert_eq!(parsed.model, "claude-3-5-sonnet");
+        assert!(matches!(parsed.finish_reason, Some(FinishReasonIR::Stop)));
+        let usage = parsed.usage.expect("usage round-tripped");
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 3);
+        match &parsed.messages[0] {
+            MessageIR::Assistant { content, .. } => match content {
+                ContentIR::Text(t) => assert_eq!(t.as_ref(), "Hello, world!"),
+                _ => panic!("expected ContentIR::Text"),
+            },
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn render_response_with_thinking_and_tool_use() {
+        let args = RawValue::from_string(r#"{"city":"SF"}"#.to_owned()).expect("valid JSON");
+        let ir = ResponseIR {
+            id: Cow::Borrowed("msg_tc"),
+            model: Cow::Borrowed("claude-3-5-sonnet"),
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Text(Cow::Borrowed("")),
+                tool_calls: None,
+            }],
+            finish_reason: Some(FinishReasonIR::ToolCalls),
+            thinking: Some(ResponseThinkingIR {
+                blocks: vec![ThinkingBlockIR {
+                    text: Cow::Borrowed("step 1; step 2"),
+                    signature: Some(Cow::Borrowed("sig-xyz")),
+                }],
+            }),
+            tool_use_blocks: Some(vec![ToolUseBlockIR {
+                id: Cow::Borrowed("tu_1"),
+                name: Cow::Borrowed("get_weather"),
+                input: Cow::Owned(args),
+            }]),
+            ..ResponseIR::default()
+        };
+
+        let mut buf = BytesMut::new();
+        Anthropic.render_response(&ir, &mut buf).unwrap();
+        let parsed: ResponseIR = Anthropic.parse_response(&buf).unwrap();
+
+        // thinking text + signature round-trip
+        let thinking = parsed.thinking.expect("thinking round-tripped");
+        assert_eq!(thinking.blocks.len(), 1);
+        assert_eq!(thinking.blocks[0].text.as_ref(), "step 1; step 2");
+        assert_eq!(thinking.blocks[0].signature.as_deref(), Some("sig-xyz"));
+
+        // tool_use_blocks carries the function name
+        let tubs = parsed
+            .tool_use_blocks
+            .expect("tool_use_blocks round-tripped");
+        assert_eq!(tubs.len(), 1);
+        assert_eq!(tubs[0].name.as_ref(), "get_weather");
+        assert_eq!(tubs[0].id.as_ref(), "tu_1");
+        assert!(tubs[0].input.get().contains("SF"));
+
+        // finish_reason maps back from "tool_use" → ToolCalls
+        assert!(matches!(
+            parsed.finish_reason,
+            Some(FinishReasonIR::ToolCalls)
+        ));
+    }
+
+    #[test]
+    fn parse_stream_chunk_thinking_block_accumulates_signature() {
+        let codec = Anthropic;
+        let mut state: Box<dyn StreamState> = codec.new_stream_state();
+
+        let c1 = br#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+"#;
+        let e1 = codec.parse_stream_chunk(state.as_mut(), c1).unwrap();
+        assert!(
+            e1.is_empty(),
+            "no events on thinking content_block_start; got {e1:?}"
+        );
+
+        let c2 = br#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"step 1"}}
+
+"#;
+        let e2 = codec.parse_stream_chunk(state.as_mut(), c2).unwrap();
+        assert!(
+            e2.is_empty(),
+            "no events emitted yet — buffer until block stop; got {e2:?}"
+        );
+
+        let c3 = br#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig123"}}
+
+"#;
+        let e3 = codec.parse_stream_chunk(state.as_mut(), c3).unwrap();
+        assert!(e3.is_empty());
+
+        let c4 = br#"event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+"#;
+        let e4 = codec.parse_stream_chunk(state.as_mut(), c4).unwrap();
+        let (text, sig) = e4
+            .iter()
+            .find_map(|e| match e {
+                StreamEventIR::ThinkingDelta {
+                    text,
+                    signature_chunk,
+                } => Some((text.clone().into_owned(), signature_chunk.clone())),
+                _ => None,
+            })
+            .expect("ThinkingDelta emitted at content_block_stop");
+        assert_eq!(text, "step 1");
+        assert_eq!(sig.as_deref(), Some("sig123"));
     }
 }

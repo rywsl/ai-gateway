@@ -9,14 +9,18 @@ use gw_codec::{anthropic::Anthropic, gemini::Gemini, openai::OpenAi, ProtocolCod
 
 #[test]
 fn anthropic_chunk_rendered_as_openai_for_client() {
-    let upstream_chunk = br#"event: content_block_delta
-data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}
+    let upstream_chunk = br#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
 
 "#;
     let upstream_codec = Anthropic;
     let client_codec = OpenAi;
+    let mut state = upstream_codec.new_stream_state();
     let events = upstream_codec
-        .parse_stream_chunk(&mut gw_codec::trait_def::EmptyStreamState, upstream_chunk)
+        .parse_stream_chunk(state.as_mut(), upstream_chunk)
         .unwrap();
     assert!(!events.is_empty());
     let mut buf = BytesMut::new();
