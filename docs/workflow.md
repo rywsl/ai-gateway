@@ -162,7 +162,7 @@ After parsing, the loop decides how to forward the chunk to the client. If `ctx.
 2. **Release freeze** — `ctx.freeze_guard.release()`. The guard's `Drop` is the safety net for cancellation paths; the explicit release ensures idempotency and surfaces the canonical metric.
 3. **Key-health record** — `KeyHealthStore::record(key_id, api_format, OutcomeKind)`. Drives cooldown / circuit state in `gw-health`.
 4. **Build `UsageRecord`** — needs all four of `auth_user_id`, `effective_user_id`, `model`, `picked_vendor_key`. Carries timestamps, request/trace IDs, `client_protocol`, `upstream_protocol`, `status` (`Ok` / `Error`), `usage` (from the accumulator), `usage_source` (`Upstream` if `output_tokens > 0` else `Estimated`), `freeze_amount_micro`, and the `markup_chain_snapshot`. `ledger.try_send(rec)` is sync, non-blocking — drops on full queue and increments a drop metric.
-5. **DetailedLog** — `crates/gw-ledger::log_sink::RedisStreamSink` XADDs to `usage:detailed` with `MAXLEN` trim. Body preview inclusion is gated by `ctx.debug` flags and the config sampling rate. Three-level `LogVerbosity` redaction sits in `crates/gw-ledger/src/detailed_stream.rs`.
+5. **DetailedArchive** — `crates/gw-ledger::detailed_archive::DetailedArchive` flusher pool consumes a bounded mpsc; each filter that completes a surface (downstream request body read / upstream rewrite / upstream response EOS / downstream response EOS / `logging`) calls `archive.try_send(CapturedSurface{...})` with the raw bytes. Workers pick an encoding (raw / lz4 / zstd) by uncompressed payload size and XADD to `usage:detailed`. No body redaction, no header denylist, no preview truncation, no sampling — wire-fidelity per [`detailed-log-complete-design`](superpowers/specs/2026-05-23-detailed-log-complete-design.md). Drop-on-outage (channel full / oversize / serialize fail / XADD fail) only emit metrics; the request path is never blocked. Go drainer is the long-term archive sink (180 days).
 6. **TPM metric** — `gateway_tpm_consumed_total{user_id}` += `input + output`.
 7. **ErrorHandler fanout** — if `ctx.error_outcome` is set (populated when a filter classified an error), construct `ErrorHandler` and `fanout(&HandlerCtx, &ClassifierOutcome)` to its 6 listeners (in fixed order, no I/O):
    1. `KeyHealthListener` — apply `CooldownDirective`, increment consecutive-failure counter.
@@ -214,7 +214,7 @@ Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 ke
 | Surface | Sink | Source |
 |---------|------|--------|
 | `usage:records` Redis stream | `gw-ledger::flusher` (XADD batched, configurable batch / interval) | `filters::logging` builds `UsageRecord`, calls `ledger.try_send` |
-| `usage:detailed` Redis stream | `gw-ledger::log_sink::RedisStreamSink` (XADD MAXLEN) | `filters::logging` builds `DetailedLogRecord` subject to debug sampling + `LogVerbosity` |
+| `usage:detailed` Redis stream | `gw-ledger::detailed_archive::DetailedArchive` (workers XADD per-surface encoding) | `filters::*` and `filters::logging` call `archive.try_send(CapturedSurface)` |
 | Prometheus `/metrics` | `metrics-exporter-prometheus` | `gw-gateway::metrics_catalog` defines 19 metric families (e.g. `gw_codec_convert_total`, `gw_freeze_acquire/release_total`, `gw_redos_timeout_total`, `gw_kms_state`, `gw_oauth_refresh_total`, `gw_capability_resolve_total`, `gw_resilience_*`, `gw_detailed_log_oversized_total`) |
 | Health `/livez` | always 200 | — |
 | Health `/readyz` | 200 once `READY=true` (flipped after `Wired` handoff) | `gw-gateway::health` |
