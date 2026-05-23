@@ -74,3 +74,30 @@ pub fn encode(payload: Vec<u8>, cfg: &CompressionCfg) -> Result<(Encoding, Vec<u
     Ok((enc, out))
 }
 
+#[derive(Debug)]
+pub enum DecodeError {
+    Lz4(lz4_flex::block::DecompressError),
+    Zstd(std::io::Error),
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Lz4(e) => write!(f, "lz4 decode failed: {e}"),
+            DecodeError::Zstd(e) => write!(f, "zstd decode failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Test-side helper that inverts `encode`. Production code in this crate
+/// never decodes; only the Redis-backed integration test does.
+pub fn decode(enc: Encoding, bytes: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    match enc {
+        Encoding::Raw => Ok(bytes.to_vec()),
+        Encoding::Lz4 => lz4_flex::decompress_size_prepended(bytes).map_err(DecodeError::Lz4),
+        Encoding::Zstd => zstd::decode_all(bytes).map_err(DecodeError::Zstd),
+    }
+}
+

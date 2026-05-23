@@ -66,3 +66,32 @@ fn encode_zstd_shrinks_large_repetitive() {
     assert_eq!(enc, Encoding::Zstd);
     assert!(out.len() < bytes.len() / 10, "zstd should shrink very repetitive bytes hard");
 }
+
+use gw_ledger::encoding::decode;
+
+#[test]
+fn round_trip_raw() {
+    let input = b"under-one-kib".to_vec();
+    let (enc, encoded) = encode(input.clone(), &cfg()).unwrap();
+    assert_eq!(enc, Encoding::Raw);
+    let decoded = decode(enc, &encoded).unwrap();
+    assert_eq!(decoded, input);
+}
+
+#[test]
+fn round_trip_lz4() {
+    let input = "lz4-tier-".repeat(200).into_bytes(); // ~ 1.8 KiB
+    let (enc, encoded) = encode(input.clone(), &cfg()).unwrap();
+    assert_eq!(enc, Encoding::Lz4);
+    let decoded = decode(enc, &encoded).unwrap();
+    assert_eq!(decoded, input);
+}
+
+#[test]
+fn round_trip_zstd() {
+    let input = "zstd-tier-".repeat(20_000).into_bytes(); // ~ 200 KiB
+    let (enc, encoded) = encode(input.clone(), &cfg()).unwrap();
+    assert_eq!(enc, Encoding::Zstd);
+    let decoded = decode(enc, &encoded).unwrap();
+    assert_eq!(decoded, input);
+}
