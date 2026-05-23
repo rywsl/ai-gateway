@@ -34,6 +34,8 @@ pub struct Config {
     pub routing: RoutingCfg,
     #[serde(default)]
     pub tunnel: TunnelCfg,
+    #[serde(default)]
+    pub detailed_log: DetailedLogCfg,
     // TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
     // `HardCapCfg` defaults. Once it accepts caller-supplied caps, reintroduce
     // an `[auth]` section here and thread `hard_cap_max_input_tokens` /
@@ -90,12 +92,106 @@ pub struct KmsCfg {
     pub key_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DebugCfg {
-    pub sampling_rate: f64,
-    pub include_request_body: bool,
-    pub include_response_body: bool,
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetailedLogCfg {
+    #[serde(default = "default_detailed_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_detailed_stream")]
+    pub stream: String,
+    #[serde(default = "default_detailed_maxlen")]
+    pub maxlen: u64,
+    #[serde(default)]
+    pub compression: DetailedCompressionCfg,
+    #[serde(default)]
+    pub channel: DetailedChannelCfg,
+    #[serde(default)]
+    pub flusher: DetailedFlusherCfg,
+    #[serde(default)]
+    pub limits: DetailedLimitsCfg,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetailedCompressionCfg {
+    #[serde(default = "default_small_threshold")]
+    pub small_threshold_bytes: usize,
+    #[serde(default = "default_medium_threshold")]
+    pub medium_threshold_bytes: usize,
+    #[serde(default = "default_zstd_level")]
+    pub zstd_level: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetailedChannelCfg {
+    #[serde(default = "default_channel_capacity")]
+    pub capacity: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetailedFlusherCfg {
+    #[serde(default)]
+    pub workers: usize, // 0 = auto
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetailedLimitsCfg {
+    #[serde(default = "default_single_payload_soft_cap")]
+    pub single_payload_soft_cap_bytes: usize,
+}
+
+fn default_detailed_enabled() -> bool { true }
+fn default_detailed_stream() -> String { "usage:detailed".to_string() }
+fn default_detailed_maxlen() -> u64 { 10_000_000 }
+fn default_small_threshold() -> usize { 1024 }
+fn default_medium_threshold() -> usize { 65_536 }
+fn default_zstd_level() -> i32 { 3 }
+fn default_channel_capacity() -> usize { 65_536 }
+fn default_single_payload_soft_cap() -> usize { 8 * 1024 * 1024 }
+
+impl Default for DetailedCompressionCfg {
+    fn default() -> Self {
+        Self {
+            small_threshold_bytes: default_small_threshold(),
+            medium_threshold_bytes: default_medium_threshold(),
+            zstd_level: default_zstd_level(),
+        }
+    }
+}
+
+impl Default for DetailedChannelCfg {
+    fn default() -> Self { Self { capacity: default_channel_capacity() } }
+}
+
+impl Default for DetailedFlusherCfg {
+    fn default() -> Self { Self { workers: 0 } }
+}
+
+impl Default for DetailedLimitsCfg {
+    fn default() -> Self {
+        Self { single_payload_soft_cap_bytes: default_single_payload_soft_cap() }
+    }
+}
+
+impl Default for DetailedLogCfg {
+    fn default() -> Self {
+        Self {
+            enabled: default_detailed_enabled(),
+            stream: default_detailed_stream(),
+            maxlen: default_detailed_maxlen(),
+            compression: DetailedCompressionCfg::default(),
+            channel: DetailedChannelCfg::default(),
+            flusher: DetailedFlusherCfg::default(),
+            limits: DetailedLimitsCfg::default(),
+        }
+    }
+}
+
+/// Reserved table; historical `sampling_rate` / `include_*_body` knobs are
+/// gone — detailed-log behaviour now lives under `[detailed_log]`. Kept as
+/// an empty struct to keep figment happy when a stale `local.toml` still
+/// contains a `[debug]` header.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DebugCfg {}
 
 /// Transport-layer security settings.
 ///
@@ -275,13 +371,6 @@ impl Config {
         }
         if self.ledger.flush_interval_ms == 0 {
             anyhow::bail!("invalid config: ledger.flush_interval_ms must be > 0");
-        }
-
-        if !(0.0..=1.0).contains(&self.debug.sampling_rate) {
-            anyhow::bail!(
-                "invalid config: debug.sampling_rate must be in [0.0, 1.0], got {}",
-                self.debug.sampling_rate
-            );
         }
 
         if self.tunnel.enabled {
