@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use hyper::header::HeaderMap;
 use regex::Regex;
@@ -14,6 +14,26 @@ pub type HitCounters = Vec<AtomicU32>;
 pub fn make_counters(scenario: &Scenario) -> HitCounters {
     (0..scenario.routes.len())
         .map(|_| AtomicU32::new(0))
+        .collect()
+}
+
+/// Per-(route, weighted-variant) hit counters.
+///
+/// Parallel to [`HitCounters`] but sized only for routes whose response is
+/// `ResponseSpec::Weighted`. Indexed by `(route_idx, variant_idx)`.
+/// Reset whenever the scenario is replaced via /admin/scenario.
+pub type WeightedHits = Vec<Vec<AtomicU64>>;
+
+pub fn make_weighted_counters(scenario: &crate::scenario::Scenario) -> WeightedHits {
+    scenario
+        .routes
+        .iter()
+        .map(|r| match &r.response {
+            crate::scenario::ResponseSpec::Weighted { variants } => {
+                variants.iter().map(|_| AtomicU64::new(0)).collect()
+            }
+            _ => Vec::new(),
+        })
         .collect()
 }
 

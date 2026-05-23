@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use e2e_fake_upstream::inject::RefuseCounter;
-use e2e_fake_upstream::routes::make_counters;
+use e2e_fake_upstream::routes::{make_counters, make_weighted_counters};
 use e2e_fake_upstream::scenario::{MatchSpec, ResponseSpec, Route, Scenario};
 use e2e_fake_upstream::server::{prime_refuse_counter, serve_business};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,11 +35,15 @@ async fn spawn_server(scenario: Scenario) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let counters = make_counters(&scenario);
+    let weighted_hits = make_weighted_counters(&scenario);
     let refuse = RefuseCounter::new();
     prime_refuse_counter(&scenario, &refuse);
     let scenario = Arc::new(RwLock::new(scenario));
     let counters = Arc::new(RwLock::new(counters));
-    tokio::spawn(async move { serve_business(listener, scenario, counters, refuse).await });
+    let weighted_hits = Arc::new(RwLock::new(weighted_hits));
+    tokio::spawn(async move {
+        serve_business(listener, scenario, counters, weighted_hits, refuse).await
+    });
     addr
 }
 

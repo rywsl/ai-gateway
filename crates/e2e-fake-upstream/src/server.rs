@@ -43,6 +43,7 @@ use crate::scenario::{ResponseSpec, Scenario};
 
 pub type SharedScenario = Arc<RwLock<Scenario>>;
 pub type SharedCounters = Arc<RwLock<HitCounters>>;
+pub type SharedWeightedHits = Arc<RwLock<crate::routes::WeightedHits>>;
 
 // ── Business server (manual, raw TcpStream) ──────────────────────────────────
 
@@ -56,6 +57,7 @@ pub async fn serve_business(
     listener: TcpListener,
     scenario: SharedScenario,
     counters: SharedCounters,
+    weighted_hits: SharedWeightedHits,
     refuse: RefuseCounter,
 ) {
     loop {
@@ -82,8 +84,9 @@ pub async fn serve_business(
 
         let sc = Arc::clone(&scenario);
         let ctr = Arc::clone(&counters);
+        let wh = Arc::clone(&weighted_hits);
         tokio::spawn(async move {
-            if let Err(e) = handle_business_conn(stream, sc, ctr).await {
+            if let Err(e) = handle_business_conn(stream, sc, ctr, wh).await {
                 eprintln!("[fake-upstream] business conn error: {e}");
             }
         });
@@ -96,6 +99,7 @@ async fn handle_business_conn(
     mut stream: TcpStream,
     scenario: SharedScenario,
     counters: SharedCounters,
+    weighted_hits: SharedWeightedHits,
 ) -> std::io::Result<()> {
     // 1) Read until end-of-headers (\r\n\r\n) or a sanity cap.
     let (method, path, headers) = match read_head(&mut stream).await? {
@@ -114,7 +118,7 @@ async fn handle_business_conn(
         let matched = match_route(&sc, &method, &path, &headers, &ctr);
         match matched {
             None => Outcome::NotFound,
-            Some((_idx, route)) => {
+            Some((idx, route)) => {
                 if let Some(ref ac) = route.auth_check {
                     let header_name = ac.header.to_lowercase();
                     let value = headers
@@ -125,10 +129,10 @@ async fn handle_business_conn(
                     if !value.starts_with(ac.must_start_with.as_str()) {
                         Outcome::Unauthorized
                     } else {
-                        Outcome::Spec(route.response.clone())
+                        Outcome::Spec(idx, route.response.clone())
                     }
                 } else {
-                    Outcome::Spec(route.response.clone())
+                    Outcome::Spec(idx, route.response.clone())
                 }
             }
         }
@@ -162,7 +166,9 @@ async fn handle_business_conn(
             )
             .await?;
         }
-        Outcome::Spec(spec) => dispatch_spec(stream, spec).await?,
+        Outcome::Spec(route_idx, spec) => {
+            dispatch_spec(stream, spec, route_idx, weighted_hits).await?
+        }
     }
     Ok(())
 }
@@ -170,10 +176,36 @@ async fn handle_business_conn(
 enum Outcome {
     NotFound,
     Unauthorized,
-    Spec(ResponseSpec),
+    Spec(usize, ResponseSpec),
 }
 
-async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result<()> {
+async fn dispatch_spec(
+    stream: TcpStream,
+    spec: ResponseSpec,
+    route_idx: usize,
+    weighted_hits: SharedWeightedHits,
+) -> std::io::Result<()> {
+    // §4.3: unwrap exactly one Weighted layer. Validator rejects nested
+    // Weighted and empty variants, so this branch is total.
+    let spec = match spec {
+        ResponseSpec::Weighted { variants } => {
+            let (vidx, resolved) = if crate::chaos::enabled() {
+                crate::chaos::pick_weighted_indexed(&variants)
+            } else {
+                (0usize, (*variants[0].spec).clone())
+            };
+            // Increment the per-(route, variant) counter under read-lock
+            // (the inner vec is AtomicU64, fetch_add is wait-free).
+            let wh = weighted_hits.read().await;
+            if let Some(per_route) = wh.get(route_idx) {
+                if let Some(slot) = per_route.get(vidx) {
+                    slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            resolved
+        }
+        other => other,
+    };
     match spec {
         ResponseSpec::Static {
             status,
@@ -219,6 +251,13 @@ async fn dispatch_spec(stream: TcpStream, spec: ResponseSpec) -> std::io::Result
             body_base64,
             delay_ms,
         } => inject::write_gzip_static(stream, status, headers, body_base64, delay_ms).await,
+        ResponseSpec::Weighted { .. } => {
+            // Validator forbids nested Weighted (§4.3); reaching this arm
+            // is a bug. Log loudly and close the connection so the test
+            // notices instead of silently hanging.
+            eprintln!("[fake-upstream] BUG: nested Weighted slipped past validator");
+            Ok(())
+        }
     }
 }
 
@@ -323,6 +362,7 @@ pub async fn serve_admin(
     listener: TcpListener,
     scenario: SharedScenario,
     counters: SharedCounters,
+    weighted_hits: SharedWeightedHits,
     refuse: RefuseCounter,
 ) {
     loop {
@@ -336,13 +376,20 @@ pub async fn serve_admin(
         let io = TokioIo::new(stream);
         let sc = Arc::clone(&scenario);
         let ctr = Arc::clone(&counters);
+        let wh = Arc::clone(&weighted_hits);
         let refuse = refuse.clone();
         tokio::spawn(async move {
             if let Err(e) = http1::Builder::new()
                 .serve_connection(
                     io,
                     service_fn(move |req| {
-                        handle_admin(req, Arc::clone(&sc), Arc::clone(&ctr), refuse.clone())
+                        handle_admin(
+                            req,
+                            Arc::clone(&sc),
+                            Arc::clone(&ctr),
+                            Arc::clone(&wh),
+                            refuse.clone(),
+                        )
                     }),
                 )
                 .await
@@ -357,6 +404,7 @@ async fn handle_admin(
     req: Request<Incoming>,
     scenario: SharedScenario,
     counters: SharedCounters,
+    weighted_hits: SharedWeightedHits,
     refuse: RefuseCounter,
 ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
     let method = req.method().clone();
@@ -379,7 +427,14 @@ async fn handle_admin(
 
             match serde_json::from_slice::<Scenario>(&body_bytes) {
                 Ok(new_scenario) => {
+                    if let Err(e) = crate::scenario::validate_scenario(&new_scenario) {
+                        return Ok(json_response(
+                            StatusCode::BAD_REQUEST,
+                            &serde_json::json!({"error": e}).to_string(),
+                        ));
+                    }
                     let new_counters = make_counters(&new_scenario);
+                    let new_weighted = crate::routes::make_weighted_counters(&new_scenario);
 
                     // Prime the refuse counter from the NEW scenario before
                     // we publish it, so the next accepted connection sees a
@@ -389,8 +444,10 @@ async fn handle_admin(
                     {
                         let mut sc = scenario.write().await;
                         let mut ctr = counters.write().await;
+                        let mut wh = weighted_hits.write().await;
                         *sc = new_scenario;
                         *ctr = new_counters;
+                        *wh = new_weighted;
                     }
 
                     Ok(json_response(StatusCode::OK, r#"{"ok":true}"#))
@@ -403,9 +460,70 @@ async fn handle_admin(
             }
         }
 
+        ("GET", "/admin/chaos-stats") => {
+            let sc = scenario.read().await;
+            let wh = weighted_hits.read().await;
+            let mut variants_out: Vec<serde_json::Value> = Vec::new();
+            for (ri, route) in sc.routes.iter().enumerate() {
+                if let ResponseSpec::Weighted { variants } = &route.response {
+                    for (vi, v) in variants.iter().enumerate() {
+                        let hits = wh
+                            .get(ri)
+                            .and_then(|r| r.get(vi))
+                            .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(0);
+                        variants_out.push(serde_json::json!({
+                            "route_index": ri,
+                            "variant_index": vi,
+                            "kind": variant_kind(&v.spec),
+                            "weight": v.weight,
+                            "hits": hits,
+                        }));
+                    }
+                }
+            }
+            let body = serde_json::json!({
+                "enabled": crate::chaos::enabled(),
+                "variants": variants_out,
+            })
+            .to_string();
+            Ok(json_response(StatusCode::OK, &body))
+        }
+
+        ("GET", "/admin/hits-total") => {
+            let ctr = counters.read().await;
+            let routes_hit_sum: u64 = ctr
+                .iter()
+                .map(|a| a.load(std::sync::atomic::Ordering::Relaxed) as u64)
+                .sum();
+            let refused = refuse.refused_total();
+            let body = serde_json::json!({
+                "routes_hit_sum": routes_hit_sum,
+                "refused_hit_sum": refused,
+                "total": routes_hit_sum + refused,
+            })
+            .to_string();
+            Ok(json_response(StatusCode::OK, &body))
+        }
+
         _ => Ok(json_response(
             StatusCode::NOT_FOUND,
             r#"{"error":"unknown admin endpoint"}"#,
         )),
+    }
+}
+
+fn variant_kind(spec: &ResponseSpec) -> &'static str {
+    match spec {
+        ResponseSpec::Static { .. } => "static",
+        ResponseSpec::Sse { .. } => "sse",
+        ResponseSpec::TcpResetAfterHeaders => "tcp_reset_after_headers",
+        ResponseSpec::TcpResetMidBody { .. } => "tcp_reset_mid_body",
+        ResponseSpec::ConnectionRefusedFirstN { .. } => "connection_refused_first_n",
+        ResponseSpec::SlowBodyBytePerSecond { .. } => "slow_body_byte_per_second",
+        ResponseSpec::PartialSseEvent { .. } => "partial_sse_event",
+        ResponseSpec::StatusWithRetryAfter { .. } => "status_with_retry_after",
+        ResponseSpec::GzipStatic { .. } => "gzip_static",
+        ResponseSpec::Weighted { .. } => "weighted",
     }
 }

@@ -1190,6 +1190,7 @@ dependencies = [
  "httparse",
  "hyper",
  "hyper-util",
+ "rand 0.8.6",
  "rcgen",
  "regex",
  "rustls",
@@ -1199,6 +1200,7 @@ dependencies = [
  "socket2 0.5.10",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
 ]
 
 [[package]]
