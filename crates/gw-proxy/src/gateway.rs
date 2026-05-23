@@ -161,6 +161,62 @@ impl LlmGateway {
     pub fn resilience(&self) -> &Arc<ResilienceState> {
         &self.resilience
     }
+
+    /// Emit upstream + downstream response surfaces at end-of-stream.
+    /// Called from `response_body_filter` when `end_of_stream = true`.
+    fn emit_response_surfaces(&self, ctx: &mut ReqCtx) {
+        use crate::ctx::ResponseMeta;
+        use gw_ledger::detailed_archive::{
+            CapturedSurface, Kind, ResponsePayload, SurfacePayload,
+        };
+        let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+
+        // upstream_response — paired with the headers snapshot taken in response_filter
+        if let Some(meta) = ctx.archive_upstream_response_meta.take() {
+            let body = std::sync::Arc::new(bytes::Bytes::from(
+                std::mem::take(&mut ctx.archive_upstream_response_body),
+            ));
+            self.detailed_archive.try_send(CapturedSurface {
+                ts_ms: now_ms,
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                kind: Kind::UpstreamResponse,
+                payload: SurfacePayload::Response(
+                    ResponsePayload {
+                        status: meta.status,
+                        headers: meta.headers,
+                        body_b64: String::new(),
+                    },
+                    body,
+                ),
+            });
+        }
+
+        // downstream_response — v1 approximates headers from upstream snapshot
+        let downstream_meta = ctx.archive_downstream_response_meta.take().unwrap_or_else(|| {
+            ResponseMeta {
+                status: ctx.upstream_status.unwrap_or(0),
+                headers: Vec::new(),
+            }
+        });
+        let body = std::sync::Arc::new(bytes::Bytes::from(
+            std::mem::take(&mut ctx.archive_downstream_response_body),
+        ));
+        self.detailed_archive.try_send(CapturedSurface {
+            ts_ms: now_ms,
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            kind: Kind::DownstreamResponse,
+            payload: SurfacePayload::Response(
+                ResponsePayload {
+                    status: downstream_meta.status,
+                    headers: downstream_meta.headers,
+                    body_b64: String::new(),
+                },
+                body,
+            ),
+        });
+    }
 }
 
 #[async_trait]
@@ -179,7 +235,7 @@ impl ProxyHttp for LlmGateway {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        filters::request::run(
+        let short_circuit = filters::request::run(
             session,
             ctx,
             &self.store,
@@ -191,7 +247,35 @@ impl ProxyHttp for LlmGateway {
             self.capability_resolver.as_ref(),
             &self.mgmt_blacklist,
         )
-        .await
+        .await?;
+        // Emit downstream_request surface (only when process() actually read the
+        // body; short-circuit paths may bail before the snapshot is taken).
+        if let (Some(body), Some(meta)) = (
+            ctx.downstream_request_body.clone(),
+            ctx.downstream_request_meta.clone(),
+        ) {
+            use gw_ledger::detailed_archive::{
+                CapturedSurface, Kind, RequestPayload, SurfacePayload,
+            };
+            self.detailed_archive.try_send(CapturedSurface {
+                ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64
+                    / 1_000_000,
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                kind: Kind::DownstreamRequest,
+                payload: SurfacePayload::Request(
+                    RequestPayload {
+                        method: meta.method,
+                        url: meta.url,
+                        http_version: meta.http_version,
+                        headers: meta.headers,
+                        body_b64: String::new(),
+                    },
+                    body,
+                ),
+            });
+        }
+        Ok(short_circuit)
     }
 
     async fn upstream_peer(
@@ -221,7 +305,33 @@ impl ProxyHttp for LlmGateway {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        filters::upstream::rewrite_request(session, upstream_request, ctx).await
+        filters::upstream::rewrite_request(session, upstream_request, ctx).await?;
+        if let (Some(body), Some(meta)) = (
+            ctx.upstream_request_body.clone(),
+            ctx.upstream_request_meta.clone(),
+        ) {
+            use gw_ledger::detailed_archive::{
+                CapturedSurface, Kind, RequestPayload, SurfacePayload,
+            };
+            self.detailed_archive.try_send(CapturedSurface {
+                ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64
+                    / 1_000_000,
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                kind: Kind::UpstreamRequest,
+                payload: SurfacePayload::Request(
+                    RequestPayload {
+                        method: meta.method,
+                        url: meta.url,
+                        http_version: meta.http_version,
+                        headers: meta.headers,
+                        body_b64: String::new(),
+                    },
+                    body,
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Replace the upstream-bound body with the codec-rewritten payload (if any).
@@ -265,6 +375,15 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         ctx.upstream_status = Some(upstream_response.status.as_u16());
+        use crate::ctx::ResponseMeta;
+        ctx.archive_upstream_response_meta = Some(ResponseMeta {
+            status: upstream_response.status.as_u16(),
+            headers: upstream_response
+                .headers
+                .iter()
+                .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+                .collect(),
+        });
         Ok(())
     }
 
@@ -275,7 +394,11 @@ impl ProxyHttp for LlmGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        filters::response::run(session, body, end_of_stream, ctx)
+        let res = filters::response::run(session, body, end_of_stream, ctx);
+        if end_of_stream {
+            self.emit_response_surfaces(ctx);
+        }
+        res
     }
 
     /// G10 — cross-key retry on upstream connect failure.
@@ -358,6 +481,57 @@ impl ProxyHttp for LlmGateway {
             &self.counters,
         )
         .await;
+
+        // Emit summary surface (always, including error paths). Bodies were
+        // emitted at their respective trigger points; this entry carries the
+        // tabular fields previously stored on DetailedLogRecord.
+        {
+            use gw_ledger::detailed_archive::{
+                CapturedSurface, Kind, SummaryPayload, SurfacePayload,
+            };
+            let now_ms =
+                time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+            let latency_ms = match (ctx.timing.start, ctx.timing.end) {
+                (Some(s), Some(e)) => e.saturating_duration_since(s).as_millis().min(u32::MAX as u128) as u32,
+                _ => 0,
+            };
+            let ttft_ms = match (ctx.timing.start, ctx.timing.ttft) {
+                (Some(s), Some(t)) => Some(
+                    t.saturating_duration_since(s)
+                        .as_millis()
+                        .min(u32::MAX as u128) as u32,
+                ),
+                _ => None,
+            };
+            let summary = SummaryPayload {
+                user_id: ctx.effective_user_id().cloned(),
+                api_key_id: ctx.api_key_id.clone(),
+                model: ctx.model.clone(),
+                client_protocol: ctx
+                    .client_codec
+                    .as_ref()
+                    .map(|c| c.kind().as_str().to_owned()),
+                upstream_protocol: ctx
+                    .upstream_codec
+                    .as_ref()
+                    .map(|c| c.kind().as_str().to_owned()),
+                http_status: ctx.upstream_status.unwrap_or(0),
+                error_code: err.map(|e| format!("{:?}", e.etype)),
+                is_stream: ctx.is_stream,
+                input_tokens: ctx.usage.input_tokens,
+                output_tokens: ctx.usage.output_tokens,
+                latency_ms,
+                ttft_ms,
+                tunnel_resolution: ctx.tunnel_resolution.clone(),
+            };
+            self.detailed_archive.try_send(CapturedSurface {
+                ts_ms: now_ms,
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                kind: Kind::Summary,
+                payload: SurfacePayload::Summary(summary),
+            });
+        }
     }
 
     /// Silence pingora's own ERROR-level log for the gateway's intentional

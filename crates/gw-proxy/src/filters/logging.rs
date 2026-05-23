@@ -2,9 +2,7 @@
 //! UsageRecord + DetailedLog, optionally emit debug trace.
 
 use crate::ctx::ReqCtx;
-use crate::detailed_log::{redacted_preview, DetailedLogRecord};
 use gw_core::permissions::MarkupChainSnapshot;
-use gw_core::traits::Redactor;
 use gw_core::usage::UsageSnapshot;
 use gw_health::{KeyHealthStore, OutcomeKind};
 use gw_ledger::usage::{UsageRecord, UsageSource, UsageStatus};
@@ -51,14 +49,6 @@ fn bucket(s: u16) -> &'static str {
         5 => "5xx",
         _ => "other",
     }
-}
-
-/// Placeholder redactor used until a config-driven implementation lands.
-/// Performs no redaction; the preview is truncated to `PREVIEW_MAX_BYTES` by
-/// [`redacted_preview`].
-struct NoopRedactor;
-impl Redactor for NoopRedactor {
-    fn redact(&self, _s: &mut String) {}
 }
 
 pub async fn run(
@@ -273,64 +263,6 @@ pub async fn run(
             });
         }
 
-
-        // -----------------------------------------------------------------
-        // DetailedLogRecord — emitted via tracing for v1. A dedicated sink
-        // in gw-ledger will replace this once the wiring lands.
-        // Body previews are gated on debug.include_*_body so we don't pay
-        // the redactor cost or leak content on the normal path.
-        // -----------------------------------------------------------------
-        let redactor = NoopRedactor;
-        let request_body_preview = if ctx.debug.include_request_body {
-            // ctx.cached_body holds the body we sent to upstream (same as the
-            // original downstream body for same-protocol passthrough).
-            ctx.cached_body
-                .as_ref()
-                .and_then(|b| redacted_preview(b, &redactor))
-                .map(|s| truncate_to(s, 512))
-        } else {
-            None
-        };
-        // v1: response body preview is not currently captured on ctx; the
-        // SSE/unary response-body filter would need to buffer it. Leave None
-        // until that wiring lands.
-        let response_body_preview: Option<String> = None;
-        let _ = ctx.debug.include_response_body; // suppress dead-field warning
-
-        let detailed = DetailedLogRecord {
-            ts_ms: now_ms,
-            trace_id: ctx.trace_id.clone(),
-            request_id: ctx.request_id.clone(),
-            user_id: Some(effective.clone()),
-            api_key_id: ctx.api_key_id.clone(),
-            model: Some(model),
-            client_protocol: ctx
-                .client_codec
-                .as_ref()
-                .map(|c| c.kind().as_str().to_owned()),
-            upstream_protocol: ctx
-                .upstream_codec
-                .as_ref()
-                .map(|c| c.kind().as_str().to_owned()),
-            http_status: ctx.upstream_status.unwrap_or(0),
-            error_code: err.map(|e| format!("{:?}", e.etype)),
-            is_stream: ctx.is_stream,
-            input_tokens: ctx.usage.input_tokens,
-            output_tokens: ctx.usage.output_tokens,
-            latency_ms,
-            ttft_ms,
-            request_body_preview,
-            response_body_preview,
-            tunnel_resolution: ctx.tunnel_resolution.clone(),
-        };
-        tracing::info!(
-            target: "gw_detailed_log",
-            trace_id = %ctx.trace_id,
-            request_id = %ctx.request_id,
-            record = ?detailed,
-            "detailed log"
-        );
-
         // -----------------------------------------------------------------
         // TPM consumption metric. Spec step 3 expects this to feed back into
         // a RateLimitGuard TPM tracker; gw-auth doesn't expose that API yet
@@ -385,20 +317,4 @@ pub async fn run(
         let hctx = HandlerCtx::stub();
         handler.fanout(&hctx, oc);
     }
-}
-
-/// Truncate `s` to at most `max_chars` characters, respecting UTF-8 boundaries.
-/// Appends a short marker when truncation occurs.
-fn truncate_to(mut s: String, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s;
-    }
-    let cut = s
-        .char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
-    s.truncate(cut);
-    s.push_str("…(truncated)");
-    s
 }
