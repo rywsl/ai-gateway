@@ -285,3 +285,20 @@ fn serialize_payload(
         }
     }
 }
+
+impl DetailedArchive {
+    /// Test-only: spawn workers that immediately drain the channel slowly
+    /// (no Redis call). Lets us cover the drop-on-full path without Docker.
+    #[doc(hidden)]
+    pub fn for_test_with_dummy_workers(cfg: DetailedArchiveCfg) -> Self {
+        let (tx, mut rx) = mpsc::channel::<CapturedSurface>(cfg.channel_capacity);
+        // Drain the channel slowly so the second `try_send` lands on a full
+        // queue.
+        tokio::spawn(async move {
+            while let Some(_s) = rx.recv().await {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        Self { tx }
+    }
+}
