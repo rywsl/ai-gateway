@@ -126,7 +126,7 @@ pub struct DetailedChannelCfg {
     pub capacity: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct DetailedFlusherCfg {
     #[serde(default)]
     pub workers: usize, // 0 = auto
@@ -178,12 +178,6 @@ impl Default for DetailedChannelCfg {
         Self {
             capacity: default_channel_capacity(),
         }
-    }
-}
-
-impl Default for DetailedFlusherCfg {
-    fn default() -> Self {
-        Self { workers: 0 }
     }
 }
 
