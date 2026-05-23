@@ -60,6 +60,7 @@
   "latency_ms": 1820,
   "ttft_ms": 380,
   "is_stream": true,
+  "operation_id": null,            // 可选;Gemini :predictLongRunning / OpenAI /v1/videos 返回的 operation name
 
   "freeze_amount_micro": 12340,
   "estimate_pricing_version": 7,
@@ -75,6 +76,16 @@
 ```
 
 **禁字段**：`cost_micro` —— 由 [`no_cost_micro` invariant](../../architecture.md#7-invariants-scriptscheck-invariantssh) 保证 Rust 永远不写。Go 自己算。
+
+**`operation_id`** 含义:
+
+- 来源:Rust `response_body_filter` 在解析上游响应 body 时,若发现顶层 `name: "operations/..."` 字段(Gemini long-running operation / OpenAI video 等),抽取并填入;
+- 普通 chat / completions 请求该字段为 `null`;
+- Go task-worker 用 `operation_id` 关联 `video_tasks` / `async_tasks` 表与 usage records;
+- 后续轮询 `/v1beta/operations/{operation_id}` 等由 Go task-worker 直接打上游,**Rust gateway 不再介入**;
+- 同一 `operation_id` 可能产生**多条** `UsageRecord`(初始 POST + 轮询完成的 finalize 写入),Go settler 自行 dedup / aggregate。
+
+`serde(default)` / Go 端 omitempty 兼容:不存在 / 缺失视为 `null`。
 
 ### 2.1.3 Go consumer 义务
 
@@ -221,17 +232,28 @@ Go 端实现归档建议：直接 XREADGROUP 串到对象存储（gzip 压缩，
 | Go 接收行为 | 写 `ip_blocks.payload`，包含 `cidr / scope=global / reason=abnormal_traffic / expires_at`；自增 version |
 | Rust 后续 | Rust 通过 events:entity 自然消费此条 → 失效 `ipblock` cache → 下次请求拒服 |
 
-### 2.4.3 不变量
+### 2.4.3 `vendor_key.oauth_failed`(OAuth 失败通知)
+
+| 触发 | 上游返回 401 且 `vendor_key.oauth.is_some()`,经 `OAuthListener` 判定为 `AccountBlocked(OAuthRefreshFailed)` |
+|---|---|
+| Payload | `ns=vendor_key id=<key_id> op=status_change field=oauth_failed reason=upstream_401 ts_ms=<now>` |
+| Go 接收行为 | task-worker 检查 `refresh_token` 有效性 → 尝试 refresh:<br/>① 成功:加密新 access_token + 整体替换 `payload.oauth` 子对象 + `version + 1` + XADD `events:entity ns=vendor_key op=upsert`;<br/>② 失败:`status = disabled` + XADD `events:entity ns=vendor_key op=upsert` |
+| Rust 后续 | **不**主动 refresh;等 Go 写新 vendor_key payload 后自然冷加载到新 token |
+
+不变量:与 §2.4.1(`rate_limited`)、§2.4.2(`ipblock`)并列,均属"Rust 反向写,Go 接收"的白名单 op。
+
+### 2.4.4 不变量
 
 - Rust 反向写**仅限**上述两类 op；其他实体（user / apikey / vendor / model_group / pricing / jwks / model / auth_config）的写权 Rust 一律没有。
 - Rust 写时 `v` 字段**不**自行分配（Rust 不知道 Go 的下一个 version），传 `0` 或省略。Go 收到后应当：
   1. PgSQL `UPDATE ... SET version = version + 1 RETURNING version`；
   2. 把 `version` 写回 events:entity 的 `v` 字段（再 XADD 一次"权威 upsert"）；
   3. 这避免了 Rust 反向写 `v=0` 让其他 Rust 副本的 versioned upsert 误判。
+- §2.4.3 oauth_failed:Rust 反向写,Go task-worker 端必须实现 refresh 处理;未实现的代价 = 该 vendor_key 失效后无法自愈,等同 §2.4.4 表中"Go 未实现接收 → vendor_key 状态不会同步到 PgSQL"。
 
 > v1 实现：Rust 端可以省略 `v`，Go 端按收到的 `op=status_change` / `reason=abnormal_traffic` 字段识别"Rust 反向写"。Go 端实施完成后，可将此约定显式化为 stream 字段 `source=rust`。
 
-### 2.4.4 失败模式
+### 2.4.5 失败模式
 
 | 故障 | 结果 |
 |---|---|
@@ -356,7 +378,19 @@ SET mgmt_token:blacklist:<token_id> "1" EX <remaining_seconds>
 
 `token_id` 即 `ManagementTokenEntry.token_id`（前缀 `mt_`，详见 [parts/03 §3.2.13](03-shared-schema.md#3213-management_tokenspayload--managementtokenentrymigration-0007)）。
 
-## 2.10 未决问题
+## 2.10 Redis L1 失效一致性责任
+
+Rust 端在消费 `events:entity` 时会 `DEL entity:{ns}:{id}`(详见 [parts/01 §1.2.4](../parts/01-go-as-producer.md#124-写顺序与重试) 补口段)。Go 端**无需**主动 DEL `entity:{ns}:{id}` 来配合;Go 写 entity 的三步流程(PgSQL UPDATE → 可选 Redis HSET write-through → XADD `events:entity`)不变。
+
+**不变量**:
+
+- 任意 Rust pod 收到 `events:entity` → DEL Redis L1 是幂等的;
+- 多 pod 同时收同一事件多次 DEL 无害;
+- Rust DEL 失败 → 仅 warn;下次该 entity 被读时,Moka miss → Redis L1 命中陈旧值(若 Go 未 write-through 则不存在)→ 写回。Go 写顺序保证 PgSQL 已经更新,所以即便 Redis L1 命中陈旧,后续 Moka TTL 到期后冷加载仍能拿到 PgSQL 新值。
+
+**例外**:启动期 Redis L1 陈旧(Rust 启动用 `$` 锚点,启动前事件不消费)不在本节范围,见 [parts/01 §1.2.4 补口段](../parts/01-go-as-producer.md#124-写顺序与重试) 末段。
+
+## 2.11 未决问题
 
 1. **`settled_billing` 是否要 Rust 强制要求 Go 保留**：本契约不强制（Rust 不读）。Go 自决保留与否。
 2. **`usage:records:dlq` 在 v2 三层兜底（C-δ）后的 payload 是否扩展**：v2 加 `dlq_layer` 字段（mem / disk / redis），Go drainer 必须兼容。
