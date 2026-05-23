@@ -75,6 +75,9 @@ ipnet = "2.10"
 hex = "0.4"
 brotli = "7"
 flate2 = "1"
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode", "std"] }
+zstd = { version = "0.13", default-features = false }
+base64 = "0.22"
 regex = "1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
