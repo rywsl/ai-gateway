@@ -43,6 +43,12 @@ pub fn run(
             .fetch_add(b.len() as u64, Ordering::Relaxed);
     }
 
+    // Archive: capture raw upstream chunk before any codec rewrite. Empty
+    // EOS chunks are fine; the accumulator simply doesn't grow.
+    if let Some(b) = body.as_ref() {
+        ctx.archive_upstream_response_body.extend_from_slice(b);
+    }
+
     // Non-stream path: accumulate the upstream body into
     // `ctx.upstream_body_accum`; on EOS, hand the buffer to
     // `upstream_codec.parse_response` so `ctx.usage` is populated from the
@@ -53,6 +59,10 @@ pub fn run(
     // `output_tokens == 0`.
     if !ctx.is_stream {
         handle_non_stream_chunk(body.as_ref(), end_of_stream, ctx);
+        // Archive capture for non-stream path; body is upstream-shape verbatim.
+        if let Some(b) = body.as_ref() {
+            ctx.archive_downstream_response_body.extend_from_slice(b);
+        }
         return Ok(None);
     }
 
@@ -97,6 +107,11 @@ pub fn run(
     // traffic leaves `pending_client_body` `None` and forwards verbatim.
     if let Some(buf) = ctx.pending_client_body.take() {
         *body = Some(buf.freeze());
+    }
+
+    // Archive: capture downstream-bound bytes after all in-function mutation.
+    if let Some(b) = body.as_ref() {
+        ctx.archive_downstream_response_body.extend_from_slice(b);
     }
 
     Ok(None)
