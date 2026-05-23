@@ -52,7 +52,7 @@ pub struct OpenAiRequest<'a> {
     pub extra: HashMap<Cow<'a, str>, Box<RawValue>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum OpenAiMessage<'a> {
     System {
@@ -77,7 +77,7 @@ pub enum OpenAiMessage<'a> {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OpenAiToolCall<'a> {
     #[serde(borrow)]
     pub id: Cow<'a, str>,
@@ -87,7 +87,7 @@ pub struct OpenAiToolCall<'a> {
     pub function: OpenAiFunctionCall<'a>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OpenAiFunctionCall<'a> {
     #[serde(borrow)]
     pub name: Cow<'a, str>,
@@ -121,7 +121,7 @@ pub struct OpenAiToolFunction<'a> {
 
 // ─── Non-streaming response wire ──────────────────────────────────────────
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OpenAiResponse<'a> {
     #[serde(borrow)]
     pub id: Cow<'a, str>,
@@ -141,7 +141,7 @@ pub struct OpenAiResponse<'a> {
     pub extra: HashMap<Cow<'a, str>, Box<RawValue>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OpenAiChoice<'a> {
     pub index: u32,
     #[serde(borrow)]

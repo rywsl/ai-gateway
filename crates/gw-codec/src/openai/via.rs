@@ -421,3 +421,64 @@ impl<'a> From<OpenAiResponse<'a>> for ResponseIR<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tool_choice_tests {
+    //! Round-trip coverage for `parse_tool_choice` / `render_tool_choice`.
+    //!
+    //! T4-A introduced these as the single hand-rolled bit of the request-side
+    //! `From<OpenAiRequest> -> RequestIR` mapping (everything else is mechanical
+    //! Cow/RawValue plumbing). The helpers accept both the string-shorthand and
+    //! the `{"type":"function","function":{"name":"..."}}` object form; these
+    //! tests guard against silent regressions in either branch.
+    use super::*;
+    use serde_json::value::to_raw_value;
+
+    fn raw(v: serde_json::Value) -> Box<RawValue> {
+        to_raw_value(&v).expect("test JSON is valid")
+    }
+
+    #[test]
+    fn tool_choice_auto_round_trip() {
+        let wire_in = raw(serde_json::json!("auto"));
+        let ir = parse_tool_choice(&wire_in).expect("parses Auto");
+        assert!(matches!(ir, ToolChoiceIR::Auto));
+        let wire_out = render_tool_choice(&ir);
+        assert_eq!(wire_out.get(), "\"auto\"");
+    }
+
+    #[test]
+    fn tool_choice_none_round_trip() {
+        let wire_in = raw(serde_json::json!("none"));
+        let ir = parse_tool_choice(&wire_in).expect("parses None");
+        assert!(matches!(ir, ToolChoiceIR::None));
+        let wire_out = render_tool_choice(&ir);
+        assert_eq!(wire_out.get(), "\"none\"");
+    }
+
+    #[test]
+    fn tool_choice_required_round_trip() {
+        let wire_in = raw(serde_json::json!("required"));
+        let ir = parse_tool_choice(&wire_in).expect("parses Required");
+        assert!(matches!(ir, ToolChoiceIR::Required));
+        let wire_out = render_tool_choice(&ir);
+        assert_eq!(wire_out.get(), "\"required\"");
+    }
+
+    #[test]
+    fn tool_choice_function_object_round_trip() {
+        let wire_in = raw(serde_json::json!({
+            "type": "function",
+            "function": { "name": "get_weather" }
+        }));
+        let ir = parse_tool_choice(&wire_in).expect("parses Function");
+        match &ir {
+            ToolChoiceIR::Function { name } => assert_eq!(name.as_ref(), "get_weather"),
+            other => panic!("expected ToolChoiceIR::Function, got {other:?}"),
+        }
+        let wire_out = render_tool_choice(&ir);
+        let s = wire_out.get();
+        assert!(s.contains("\"type\":\"function\""), "rendered: {s}");
+        assert!(s.contains("\"name\":\"get_weather\""), "rendered: {s}");
+    }
+}
