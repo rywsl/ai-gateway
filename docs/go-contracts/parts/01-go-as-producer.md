@@ -61,6 +61,7 @@ XADD 字段（key-value 列表）：
 | `model` | `models`（0004 migration） | `EntityStore.model` | `Model` | 30 min TTL；G13 capability metadata |
 | `model_mapping` | `model_mapping`（0003 migration） | `EntityStore.model_mapping` | `ModelMapping` | 30 min TTL；ID 格式 `"<user_alias>|<protocol>"`，protocol ∈ `openai \| anthropic \| gemini` |
 | `auth_config` | `auth_configs`（待 migration） | `EntityStore.auth_config` | `AuthConfig` | 1 h TTL；well-known ID `"global"` |
+| `management_token` | `management_tokens`（0007 migration） | `EntityStore.mgmt_token` | `ManagementTokenEntry` | 5 min TTL；ID 前缀 `mt_` |
 | `estimate_pricing` | （Go 自定表） | （待加） | `EstimatePricing`（见 §1.5） | 30 min TTL |
 
 未知 ns Rust 端 warn 后丢弃。新增 ns **必须**同步：本表 + `crates/gw-store/src/stream_consumer.rs::apply_entity_event` + `crates/gw-store/src/entity_store.rs::EntityStore`。

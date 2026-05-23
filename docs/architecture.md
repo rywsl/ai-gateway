@@ -186,7 +186,14 @@ server.run_forever()    // never returns
 | 9090 | Prometheus `/metrics` | `gw-gateway::metrics_catalog` |
 | 8080 | Health HTTP — `/livez`, `/readyz`, `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience` | `gw-gateway::health` |
 
-The `/healthz/*` admin routes return `401` until management-token validation lands (T6-A).
+The `/healthz/{circuits,key/<id>,resilience}` admin routes verify
+`Authorization: Mgmt mt_<id>.<secret>` against the same
+`RedisJwtBlacklist::check_mgmt` and `EntityStore::mgmt_token_or_load`
+chain the proxy `request_filter` uses (FailClosed). The required scope
+is `MgmtScope::AdminRead`; finer AdminFull/AdminRead splits are enforced
+by the Go control plane. On success the route returns the matching
+`snapshot_json` body (`application/json`). `/livez` and `/readyz`
+remain unauthenticated.
 
 ## 7. Invariants (`scripts/check-invariants.sh`)
 
@@ -224,7 +231,7 @@ Pending lints (uncomment when target phase lands):
 
 | Behaviour | Reason | Source |
 |-----------|--------|--------|
-| Non-stream completions rejected with `GW_REQUEST_NONSTREAM_NOT_SUPPORTED` 400 | `parse_response` is `unimplemented!()` in every v1 codec; without it Rust would silently bill `cost_micro = 0`. Lifts in v1.1. | `crates/gw-proxy/src/filters/request.rs` non-stream guard |
+| Cross-protocol non-stream returns `503 GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` | Response re-render across protocols is deferred to codec-s4 v2; `pick_peer` rejects rather than letting an unparseable upstream body reach the client codec. Same-protocol non-stream now succeeds — `response_body_filter` accumulates the upstream body and calls `parse_response` at EOS to populate `ctx.usage`. | `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/filters/response.rs` |
 | `(x-api-key, x-api-key-id)` pair required | A BYOK gateway can't route by key prefix; the pair makes tenant routing explicit. Anthropic SDK clients must supply both. Missing either yields `GW_AUTH_INVALID_APIKEY` (deliberately generic). | `crates/gw-proxy/src/filters/request.rs` auth extraction |
 | `trust_xff = false` by default | With it off, the IP blocklist matches the L4 socket peer. Enabling it behind an untrusted L7 hop lets clients forge XFF and bypass the blocklist. Fail-closed. | `config/default.toml [security]`, `crates/gw-proxy/src/filters/early.rs` |
 | Distinct 429 codes | `GW_QUOTA_RPM_EXCEEDED` (gateway tripped per-user RPM) vs `GW_UPSTREAM_OVERLOADED` (upstream returned 429) — clients need to distinguish local vs upstream throttling. | `crates/gw-core/src/error/codes.rs` |
