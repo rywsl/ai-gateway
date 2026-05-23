@@ -121,6 +121,25 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
     );
     let resilience: Arc<gw_proxy::resilience::ResilienceState> =
         Arc::new(gw_proxy::resilience::ResilienceState::default());
+    let detailed_archive = Arc::new(
+        gw_ledger::detailed_archive::DetailedArchive::start(
+            (*redis.pool).clone(),
+            gw_ledger::detailed_archive::DetailedArchiveCfg {
+                stream: "usage:detailed".to_string(),
+                maxlen: 1_000,
+                channel_capacity: 64,
+                workers: 1,
+                single_payload_soft_cap_bytes: 1024 * 1024,
+                compression: gw_ledger::encoding::CompressionCfg {
+                    thresholds: gw_ledger::encoding::TierThresholds {
+                        small_threshold_bytes: 1024,
+                        medium_threshold_bytes: 65_536,
+                    },
+                    zstd_level: 3,
+                },
+            },
+        ),
+    );
 
     // -----------------------------------------------------------------
     // 4. Construct LlmGateway. This is the "smoke" assertion: the
@@ -142,6 +161,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         resilience,
         #[cfg(feature = "tunnel")]
         None,
+        detailed_archive,
     );
 
     // -----------------------------------------------------------------

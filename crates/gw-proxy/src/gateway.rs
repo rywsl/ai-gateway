@@ -110,6 +110,9 @@ pub struct LlmGateway {
     /// `cfg.tunnel.enabled = true`.
     #[cfg(feature = "tunnel")]
     pub tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+    /// Detailed-log archive (T10). Sender handle for per-surface wire-fidelity
+    /// capture. `try_send` is fire-and-forget; a full channel drops + metrics.
+    pub(crate) detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
 }
 
 impl LlmGateway {
@@ -129,6 +132,7 @@ impl LlmGateway {
         mgmt_blacklist: Arc<RedisJwtBlacklist>,
         resilience: Arc<ResilienceState>,
         #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+        detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
     ) -> Self {
         Self {
             store,
@@ -146,6 +150,7 @@ impl LlmGateway {
             resilience,
             #[cfg(feature = "tunnel")]
             tunnel,
+            detailed_archive,
         }
     }
 
