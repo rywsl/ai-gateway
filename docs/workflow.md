@@ -51,7 +51,7 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 | 5 | `request_body_filter` | `gateway.rs` | Swap `cached_body` in at EOS; drop pre-EOS chunks. |
 | 6 | `response_filter` | `gateway.rs` | Capture upstream status. |
 | 7 | `response_body_filter` | `filters::response` | Incremental SSE parse, usage accumulate, TTFT capture. |
-| 8 | `logging` | `filters::logging` | Release freeze (C-γ §ADR-Cγ-2), record key-health outcome, emit `UsageRecord` + `DetailedLog`, fanout to `ErrorHandler`. |
+| 8 | `logging` | `filters::logging` | Release freeze (C-γ §ADR-Cγ-2), record key-health outcome, emit `UsageRecord` + `DetailedArchive`, fanout to `ErrorHandler`. |
 | — | `fail_to_connect` | `gateway.rs` | G10 retry hook (between `upstream_peer` and `upstream_request_filter`). Non-TLS connect failure → push failed `KeyId` onto `ctx.retry_blacklist`, drop in-flight guard, bump `ctx.retry_count`, `e.set_retry(true)` until `MAX_CONNECT_RETRIES` (=2); Pingora then re-enters `upstream_peer` which filters the blacklist via `get_candidate_keys`. TLS errors stamp `GW_UPSTREAM_TLS_ERROR` on `ctx.upstream_error_code` and propagate (config defect, not transient); exhausted non-TLS retries stamp `GW_UPSTREAM_CONNECT_FAILED`. Metric `gw_retry_attempt_total{outcome=recovered\|exhausted\|tls_blocked}`. |
 | — | `suppress_error_log` | `gateway.rs` | Mute Pingora's ERROR line for `gw_short_circuit` rejects. |
 
