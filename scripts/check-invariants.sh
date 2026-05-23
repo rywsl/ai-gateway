@@ -328,6 +328,45 @@ else
   note "rustls not in Cargo.lock; skipping"
 fi
 
+# ---------------------------------------------------------------------------
+# no_v1_markers_in_prod (v2-cleanup overview §6.3) — production crates must not
+# carry v1 placeholder markers. Two-mode toggle (GW_V2_GATE_MODE):
+#   warn   (default)   — print hits, do NOT fail (current state during
+#                        v2-cleanup; the harness still ends in `all active
+#                        invariants hold` unless another lint fails).
+#   error              — print hits + bad FAIL; fail counter increments.
+# Any other value falls through to warn (so a typo in CI never breaks the gate).
+# Spec §6.3 also describes a *phased* operational rollout — overview lands in
+# warn, each sub-spec lands its tokens, the final sub-spec flips to error.
+# That phasing is driven by changing the env var, not the script.
+# Tracked tokens: unimplemented!(...), todo!(...), TODO(v2), wave-7, wave-8,
+# "for v1:", "placeholder for v1".
+# Excludes: anything under a tests/ directory (overview §1.2 carve-out for
+# test fixtures named *Stub / Dummy* / placeholder_e2e_*).
+# ---------------------------------------------------------------------------
+v1_mode="${GW_V2_GATE_MODE:-warn}"
+echo "[no_v1_markers_in_prod] no v1 placeholder markers in crates/ (mode: $v1_mode)"
+v1_hits=$(grep -rnE \
+    -e 'unimplemented!\(' \
+    -e 'todo!\(' \
+    -e 'TODO\(v2\)' \
+    -e 'wave-7' -e 'wave-8' \
+    -e 'placeholder for v1' \
+    -e 'for v1:' \
+    --include='*.rs' \
+    --exclude-dir=tests \
+    crates/ 2>/dev/null || true)
+if [ -n "$v1_hits" ]; then
+  printf '%s\n' "$v1_hits" | sed 's/^/  /'
+  if [ "$v1_mode" = "error" ]; then
+    bad "v1 placeholder markers remain (gate mode: error)"
+  else
+    note "v1 placeholder markers remain (gate mode: warn — not failing)"
+  fi
+else
+  ok "no v1 placeholder markers in crates/"
+fi
+
 # ===========================================================================
 # PENDING lints — target code has not landed yet. Uncomment in the named phase.
 # ===========================================================================
