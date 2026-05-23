@@ -486,6 +486,13 @@ impl EntityStore {
         self.mgmt_token.invalidate(token_id).await;
     }
 
+    /// G6/T1-C: handle to the optional loader's Redis pool, used by the
+    /// stream consumer to DEL the Redis L1 key before invalidating Moka.
+    /// `None` for in-process tests built with `EntityStore::new()`.
+    pub(crate) fn loader_redis(&self) -> Option<&crate::redis_client::RedisCtx> {
+        self.loader.as_deref().map(|ctx| &ctx.redis)
+    }
+
     /// Fetch the full live list of [`ProxyNode`]s from PG (bypasses the
     /// per-id cache). Used by `TunnelStack::reload_nodes` (ADR-T-3, T5-B)
     /// after a `proxy_node` invalidation event arrives on the entity stream.
