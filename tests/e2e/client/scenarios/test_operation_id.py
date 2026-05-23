@@ -40,6 +40,7 @@ Harness notes — deviations from the original T4-B plan snippet
 from __future__ import annotations
 
 import json
+import time
 
 from conftest import (
     BALANCE_LARGE,
@@ -47,8 +48,40 @@ from conftest import (
     FakeWebClient,
     make_gemini_client,
     seed_passthrough,
-    wait_for_records,
 )
+
+
+def _next_record_for_api_key(
+    consumer,
+    api_key_id: str,
+    *,
+    timeout: float = 5.0,
+) -> dict:
+    """Drain `usage_records_consumer` forward until a record whose
+    `api_key_id` matches `api_key_id` is found, or `timeout` elapses.
+
+    The `usage:records` stream is shared across all tests in the run,
+    and the gateway's logging filter flushes records asynchronously
+    after stream completion. A streaming test that wraps up just before
+    `isolate_state` FLUSHALLs Redis can still land its tail entry in
+    the post-flush stream. Filtering by `api_key_id` makes each test
+    immune to that carry-over without coordinating cross-test state.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = max(0.1, deadline - time.monotonic())
+        try:
+            rec = consumer.next_record(timeout=remaining)
+        except TimeoutError:
+            break
+        if rec.get("api_key_id") == api_key_id:
+            return rec
+        # Else: stale carry-over from a previous test's tail flush;
+        # advance past it and keep looking.
+    raise TimeoutError(
+        f"no usage:records entry with api_key_id={api_key_id!r} "
+        f"within {timeout}s"
+    )
 
 
 PROTO_GEMINI = "gemini"
@@ -179,9 +212,9 @@ def test_predict_long_running_extracts_operation_id(
     # request succeeded. The real assertion is on the usage record.
     assert resp is not None
 
-    xlen = wait_for_records(fake_web, min_xlen=1)
-    assert xlen >= 1, f"expected >=1 usage:records entry, got {xlen}"
-    record = usage_records_consumer.next_record(timeout=5.0)
+    record = _next_record_for_api_key(
+        usage_records_consumer, "ak-gemini-lro", timeout=5.0
+    )
     assert record.get("operation_id") == "operations/test-op-12345", (
         f"expected operation_id='operations/test-op-12345', got {record!r}"
     )
@@ -222,9 +255,9 @@ def test_normal_chat_has_null_operation_id(
     )
     assert resp.text and "hi" in resp.text, f"unexpected resp.text={resp.text!r}"
 
-    xlen = wait_for_records(fake_web, min_xlen=1)
-    assert xlen >= 1, f"expected >=1 usage:records entry, got {xlen}"
-    record = usage_records_consumer.next_record(timeout=5.0)
+    record = _next_record_for_api_key(
+        usage_records_consumer, "ak-gemini-normal", timeout=5.0
+    )
     # Both shapes are acceptable: missing key (skip_serializing_if) OR
     # explicit JSON null (defensive). The presence of a non-null value
     # is the only failure.
