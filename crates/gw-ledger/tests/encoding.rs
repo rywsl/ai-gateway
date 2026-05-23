@@ -31,3 +31,38 @@ fn encoding_str_matches_spec() {
     assert_eq!(Encoding::Lz4.as_str(), "lz4+json");
     assert_eq!(Encoding::Zstd.as_str(), "zstd+json");
 }
+
+use gw_ledger::encoding::{encode, CompressionCfg};
+
+fn cfg() -> CompressionCfg {
+    CompressionCfg {
+        thresholds: T,
+        zstd_level: 3,
+    }
+}
+
+#[test]
+fn encode_raw_passthrough() {
+    let input = b"hello".to_vec();
+    let (enc, out) = encode(input.clone(), &cfg()).expect("encode");
+    assert_eq!(enc, Encoding::Raw);
+    assert_eq!(out, input);
+}
+
+#[test]
+fn encode_lz4_shrinks_repetitive() {
+    let input = "abc".repeat(2_000); // 6 KiB, falls in lz4 tier; highly compressible
+    let bytes = input.into_bytes();
+    let (enc, out) = encode(bytes.clone(), &cfg()).expect("encode");
+    assert_eq!(enc, Encoding::Lz4);
+    assert!(out.len() < bytes.len() / 4, "lz4 should shrink repetitive bytes meaningfully");
+}
+
+#[test]
+fn encode_zstd_shrinks_large_repetitive() {
+    let input = "xyz".repeat(50_000); // 150 KiB, zstd tier
+    let bytes = input.into_bytes();
+    let (enc, out) = encode(bytes.clone(), &cfg()).expect("encode");
+    assert_eq!(enc, Encoding::Zstd);
+    assert!(out.len() < bytes.len() / 10, "zstd should shrink very repetitive bytes hard");
+}

@@ -39,3 +39,38 @@ pub fn pick_encoding(len: usize, t: &TierThresholds) -> Encoding {
         Encoding::Zstd
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompressionCfg {
+    pub thresholds: TierThresholds,
+    pub zstd_level: i32,
+}
+
+#[derive(Debug)]
+pub enum EncodeError {
+    /// `zstd` returned an error. `lz4_flex` infallibly encodes; `Raw` never errors.
+    Zstd(std::io::Error),
+}
+
+impl std::fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EncodeError::Zstd(e) => write!(f, "zstd encode failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+/// Encode a JSON-serialized payload. The caller owns input; we return the
+/// (possibly identical) compressed bytes. `Raw` returns the input unchanged.
+pub fn encode(payload: Vec<u8>, cfg: &CompressionCfg) -> Result<(Encoding, Vec<u8>), EncodeError> {
+    let enc = pick_encoding(payload.len(), &cfg.thresholds);
+    let out = match enc {
+        Encoding::Raw => payload,
+        Encoding::Lz4 => lz4_flex::compress_prepend_size(&payload),
+        Encoding::Zstd => zstd::encode_all(payload.as_slice(), cfg.zstd_level).map_err(EncodeError::Zstd)?,
+    };
+    Ok((enc, out))
+}
+
