@@ -29,6 +29,10 @@ const ENTITY_TABLES: &[&str] = &[
     "jwks",
     "ip_blocks",
     "models",
+    // T4-B: B2 ManagementTokenEntry persistence (migration 0007). Consumed
+    // by the gateway via `EntityStore::mgmt_token_or_load`. ns = "management_token"
+    // (see `ns_for_table`).
+    "management_tokens",
     // `auth_configs` is owned by the fake control-plane (gateway TODO
     // table not yet in migrations). No consumer ns — same treatment as
     // `models` — so we skip emitting invalidation for it. It IS a real
@@ -63,6 +67,10 @@ const TRUNCATE_TABLES: &[&str] = &[
     "jwks",
     "ip_blocks",
     "models",
+    // T4-B: management tokens are per-test fixtures, same lifecycle as
+    // api_keys — truncate on reset so a previous test's mt_* ids don't
+    // bleed into the next.
+    "management_tokens",
 ];
 
 /// Map an entity table name to the `ns` field emitted on `events:entity`.
@@ -82,6 +90,9 @@ pub(crate) fn ns_for_table(table: &str) -> Option<&'static str> {
         "pricings" => Some("pricing"),
         "jwks" => Some("jwks"),
         "ip_blocks" => Some("ipblock"),
+        // T4-B: ns the gateway's stream_consumer dispatches to
+        // `EntityStore::invalidate_mgmt_token`.
+        "management_tokens" => Some("management_token"),
         // `models` has no consumer ns — skip emit.
         "models" => None,
         // The gateway reads `auth_configs` row "global" once at boot;
@@ -218,6 +229,27 @@ impl Store {
         Ok(())
     }
 
+    /// T4-B: SET `mgmt_token:blacklist:{token_id}` with TTL, simulating the
+    /// Go-side revoke surface. The gateway's `RedisJwtBlacklist::check_mgmt`
+    /// probes exactly this key, fail-closed; SET-then-request makes a
+    /// post-cache revocation take effect immediately (entity Moka cache is
+    /// bypassed for the blacklist check).
+    pub async fn set_mgmt_blacklist(&self, token_id: &str, ttl_secs: i64) -> anyhow::Result<()> {
+        let key = format!("mgmt_token:blacklist:{token_id}");
+        let _: () = self
+            .redis
+            .next()
+            .set(
+                key,
+                "1",
+                Some(fred::types::Expiration::EX(ttl_secs.max(1))),
+                None,
+                false,
+            )
+            .await?;
+        Ok(())
+    }
+
     /// XLEN over an arbitrary stream. Returns 0 for an empty/missing stream.
     pub async fn xlen(&self, stream: &str) -> anyhow::Result<i64> {
         let v: i64 = self.redis.next().xlen(stream).await?;
@@ -294,7 +326,7 @@ impl Store {
         //      Redis is small (one process, one DB) so buffering all
         //      matching keys is fine.
         let client = self.redis.next();
-        for pattern in ["counter:*", "entity:*"] {
+        for pattern in ["counter:*", "entity:*", "mgmt_token:blacklist:*"] {
             let mut keys: Vec<fred::types::RedisKey> = Vec::new();
             let mut stream = client.scan_buffered(pattern, Some(200), None);
             while let Some(k) = stream.next().await {

@@ -1791,6 +1791,7 @@ dependencies = [
  "gw-core",
  "metrics",
  "parking_lot",
+ "serde_json",
  "tokio",
 ]
 

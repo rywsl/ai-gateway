@@ -73,6 +73,8 @@ fn llm_gateway_constructor_signature_smoke() {
         jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
         strategies: Arc<gw_routing::strategy::set::StrategySet>,
         capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
+        mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
+        resilience: Arc<gw_proxy::resilience::ResilienceState>,
     ) -> LlmGateway {
         LlmGateway::new(
             store,
@@ -86,6 +88,8 @@ fn llm_gateway_constructor_signature_smoke() {
             jwt_validator,
             strategies,
             capability_resolver,
+            mgmt_blacklist,
+            resilience,
             #[cfg(feature = "tunnel")]
             None,
         )

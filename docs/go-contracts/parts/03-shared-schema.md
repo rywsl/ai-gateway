@@ -15,6 +15,7 @@ Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开�
 | `0003_model_mapping.sql` | `model_mapping`（非 entity，alias 路由） |
 | `0004_capabilities.sql` | `models`（新表）+ `vendor_keys.forced_capabilities` JSONB 列 + `vendor_keys.exclusive_capability_match` BOOLEAN 列 |
 | **待加** `0005_auth_configs.sql` | `auth_configs`（T1-E follow-up，详见 [`loader.rs:158-165`](../../crates/gw-store/src/loader.rs)） |
+| `0007_management_tokens.sql` | `management_tokens`（B2，T1-D 落地） |
 
 ### 3.1.1 公共控制列（所有 entity 表）
 
@@ -255,6 +256,30 @@ PK = `(user_alias, protocol)`。Rust 端通过 `events:entity` ns=`model_mapping
 
 ID = `"global"`（well-known，T1-E 假定单一全局 AuthConfig）。
 
+### 3.2.13 `management_tokens.payload` — `ManagementTokenEntry`（migration 0007）
+
+```json
+{
+  "token_id": "mt_xxx",
+  "user_id": "u_abc",
+  "scope": "admin_full",         // admin_full | admin_read | user_self
+  "hash": "<bytes base64>",      // SHA-256(secret)，与 ApiKeyEntry.hash 同范式
+  "expires_at": null,            // Option<OffsetDateTime>；null = 永不过期
+  "status": "active",            // active | disabled
+  "display_name": "personal CI token"
+}
+```
+
+ID = `token_id`（前缀 `mt_`）。Rust 行为：
+
+- 客户端在 `Authorization: Mgmt mt_<id>.<secret>` 中携带；
+- Rust（`crates/gw-auth/src/mgmt.rs`）用 `mt_<id>` 作为 entity key 经 `EntityStore::mgmt_token_or_load` 拉取；将 `<secret>` SHA-256 后与 `payload.hash` constant-time 比对；
+- `scope` 用 `MgmtScope::covers(required)` 判定（`admin_full ⊇ admin_read ⊇ user_self`）；
+- 撤销走 [`mgmt_token:blacklist:<token_id>`](02-go-as-consumer.md#29-mgmt_tokenblacklisttoken_id-redis-key)（FailClosed `EXISTS` 查询）；
+- 失败码：`GW_AUTH_MGMT_TOKEN_{MISSING, INVALID, EXPIRED, DISABLED, REVOKED, SCOPE_DENIED}`（参 [docs/architecture.md](../architecture.md) §6 health endpoints 与 [docs/workflow.md](../workflow.md) §2.2 step 1）。
+
+权威 Rust 类型定义见 `crates/gw-core/src/entity.rs::{MgmtScope, ManagementTokenEntry}`。
+
 ## 3.3 `version BIGINT` 协议
 
 ### 3.3.1 写入语义
@@ -427,6 +452,7 @@ Healthy(K_new)
 | model | （model name） | — |
 | model_mapping | `"<alias>\|<protocol>"`（在 stream 事件中） | — |
 | auth_config | `"global"`（v1 单值） | — |
+| management_token | `mt_` | Go 生成 |
 
 ### 3.6.1 不变量
 

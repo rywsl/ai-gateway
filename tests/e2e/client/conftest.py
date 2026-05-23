@@ -486,6 +486,98 @@ def fake_upstream(fake_upstream_admin_url: str) -> FakeUpstreamClient:
 
 
 # ---------------------------------------------------------------------------
+# Redis access — T4-A (B1 non-stream) needs to ASSERT on the actual JSON
+# payload of `usage:records` entries (not just the XLEN that
+# `fake_web.usage_stats()` exposes). The fake-web admin API has no
+# record-body read endpoint and we deliberately don't extend it from
+# T4-A; instead we expose Redis on the host (`6379:6379` in
+# `tests/e2e/docker-compose.yml`) and have the host pytest process read
+# `usage:records` directly via the `redis` Python package.
+#
+# Fixtures are function-scoped so a connection failure surfaces per-test.
+# The autouse `isolate_state` DELs the stream before each test, so the
+# consumer starts each test reading from an empty stream.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def redis_url() -> str:
+    """Base URL of the Redis instance shared with the gateway. Defaults to
+    the host-port mapping in `tests/e2e/docker-compose.yml` (`6379:6379`)."""
+    return os.environ.get("REDIS_URL", "redis://localhost:6379")
+
+
+@pytest.fixture
+def redis_client(redis_url: str):
+    """Plain `redis.Redis` client. Decodes responses to str so the
+    `XRANGE`/`XREAD` field maps are dict[str, str] rather than dict[bytes,
+    bytes] — keeps the consumer code branch-free."""
+    import redis  # local import: test collection survives if package missing
+
+    client = redis.Redis.from_url(redis_url, decode_responses=True)
+    try:
+        yield client
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+class UsageRecordsConsumer:
+    """Tail-only consumer for the `usage:records` stream.
+
+    On construction, anchors `last_id="0"` so we read forward from the
+    start of a (just-DEL'd-by-`isolate_state`) stream. Each
+    `next_record(timeout)` does `XREAD BLOCK <ms> COUNT 1`, decodes the
+    `payload` field as JSON (the gateway XADD's `payload=<json>` —
+    see `crates/gw-ledger/src/flusher.rs::flush`), and advances `last_id`.
+
+    Raises `TimeoutError` if no record lands within `timeout`.
+    """
+
+    STREAM = "usage:records"
+
+    def __init__(self, client) -> None:
+        self.client = client
+        # Anchor at 0 so we observe records written after `isolate_state`
+        # cleared the stream. `XREAD BLOCK $` would only return records
+        # newer than the call site — `isolate_state` already ran before
+        # the consumer was materialised, so 0 is race-free.
+        self.last_id = "0"
+
+    def next_record(self, timeout: float = 5.0) -> dict:
+        import json as _json
+
+        block_ms = max(1, int(timeout * 1000))
+        resp = self.client.xread({self.STREAM: self.last_id}, block=block_ms, count=1)
+        if not resp:
+            raise TimeoutError(
+                f"no `{self.STREAM}` entry within {timeout}s (last_id={self.last_id})"
+            )
+        # resp shape: [(stream_name, [(entry_id, {field: value}), ...])]
+        _, entries = resp[0]
+        entry_id, fields = entries[0]
+        self.last_id = entry_id
+        payload = fields.get("payload")
+        if payload is None:
+            raise AssertionError(
+                f"`{self.STREAM}` entry {entry_id} missing `payload` field: {fields!r}"
+            )
+        try:
+            return _json.loads(payload)
+        except ValueError as e:
+            raise AssertionError(
+                f"`{self.STREAM}` entry {entry_id} payload is not JSON: {payload!r}"
+            ) from e
+
+
+@pytest.fixture
+def usage_records_consumer(redis_client) -> UsageRecordsConsumer:
+    return UsageRecordsConsumer(redis_client)
+
+
+# ---------------------------------------------------------------------------
 # _check_fakes_alive — session-scoped autouse probe that fails fast if either
 # fake is unreachable, with a clearer message than the per-test reset would
 # produce. Session-scoped fixtures sort before function-scoped ones, so this
@@ -1035,3 +1127,139 @@ def gateway_rss_bytes() -> int | None:
             except ValueError:
                 return None
     return None
+# -----------------------------------------------------------------------------
+# T4-B fixtures: management-token / blacklist helpers for /healthz e2e.
+# -----------------------------------------------------------------------------
+# Wire-format invariants (deliberately encoded inline, not abstracted):
+# - `ManagementTokenEntry.hash` is `Vec<u8>` and serde-json deserializes it
+#   from a JSON array of integers (NOT base64, NOT hex). Same shape as
+#   `ApiKeyEntry.hash` — we reuse the existing `sha256_bytes` helper.
+# - `expires_at` is `Option<time::OffsetDateTime>` with the `time` crate's
+#   default-serde tuple layout (9 ints: year, ordinal, h, m, s, ns, off_h,
+#   off_m, off_s). An ISO8601 string would 500 the cold-load. Mirrors the
+#   `PAST_EXPIRES_AT` constant in test_auth_failures.py.
+# - `scope` is the snake_case `MgmtScope` enum tag ("user_self" / "admin_read"
+#   / "admin_full"). `status` is the `KeyStatus` tag ("active" / "disabled" ...).
+# - Blacklist key: `mgmt_token:blacklist:{token_id}`, value `"1"`, TTL > 0.
+#   The gateway's `check_mgmt` uses `FailClosed` so even a Redis miss after
+#   the key expires returns "not revoked".
+#
+# Fake-web upgrades that landed alongside (crates/e2e-fake-web):
+# - `management_tokens` added to `ENTITY_TABLES` + `TRUNCATE_TABLES`.
+# - `ns_for_table("management_tokens") = Some("management_token")` so
+#   `put_entity` XADDs the right invalidation event.
+# - `reset()` now also DELs `mgmt_token:blacklist:*` so blacklist state
+#   doesn't leak between tests.
+# - New `POST /mgmt-blacklist/:token_id` route used by `mgmt_blacklist_set`.
+
+
+def _expires_at_tuple(seconds_from_now: int) -> list[int]:
+    """Build the 9-int `time::OffsetDateTime` tuple `seconds_from_now` from
+    now-utc. Layout: (year, ordinal, hour, minute, second, nanosecond,
+    offset_h, offset_m, offset_s). UTC offset is 0/0/0.
+
+    A negative `seconds_from_now` yields a tuple in the past, which the
+    gateway's `verify_mgmt_token_secret` rejects with `Expired`.
+
+    NB: the `time` crate's default-serde format is the only path that
+    works for `Option<OffsetDateTime>` in this workspace — the `time`
+    dep is pulled with `features = ["serde", "macros"]` (NOT
+    `serde-human-readable`), so an ISO8601 string would deserialize-fail
+    and surface as `INVALID_APIKEY`-style cold-load miss.
+    """
+    import datetime as _dt
+
+    t = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=seconds_from_now)
+    ordinal = t.timetuple().tm_yday  # 1-based day-of-year
+    return [
+        t.year,
+        ordinal,
+        t.hour,
+        t.minute,
+        t.second,
+        t.microsecond * 1000,  # nanoseconds
+        0,
+        0,
+        0,
+    ]
+
+
+@pytest.fixture
+def gateway_health_url() -> str:
+    """Base URL of the gateway's admin `/healthz/*` + unauth `/livez|/readyz`
+    surface (`GW_SERVER__HEALTH_PORT`, default 8080 in docker-compose).
+
+    Resolved from env so a dev pointing at a non-default deployment can
+    override without touching the suite. Distinct from `metrics_url` (9090)
+    and `gateway_url` (business 8000).
+    """
+    return os.environ.get("GATEWAY_HEALTH_URL", "http://localhost:8080")
+
+
+@pytest.fixture
+def seed_mgmt_token(fake_web: "FakeWebClient"):
+    """Seed a `ManagementTokenEntry` row into PgSQL via fake_web's
+    `/entity/management_tokens/:id` admin route.
+
+    The fake_web upsert also XADDs `events:entity`
+    `{ns=management_token, id=<token_id>}` so the gateway's
+    `EntityStore::mgmt_token` Moka cache invalidates a prior copy of the
+    same id. The next `/healthz/*` request cold-loads the new row from PG.
+
+    Args:
+        token_id: full id including the `mt_` prefix (e.g. `mt_r1`).
+        secret:   the secret half presented in the `Authorization: Mgmt
+                  <token_id>.<secret>` header.
+        scope:    one of `"user_self"`, `"admin_read"`, `"admin_full"`
+                  (matches the snake_case `MgmtScope` serde tag).
+        expires_in_secs: seconds-from-now until expiry. A negative value
+                  emits a tuple in the past, yielding
+                  `MgmtVerifyOutcome::Expired`.
+        status:   `KeyStatus` tag — default `"active"`. Set to `"disabled"`
+                  to exercise the Disabled branch.
+
+    Returns the same `token_id` for chaining.
+    """
+
+    def _seed(
+        token_id: str,
+        secret: str,
+        scope: str = "admin_read",
+        expires_in_secs: int = 3600,
+        status: str = "active",
+    ) -> str:
+        payload = {
+            "token_id": token_id,
+            "user_id": "u_mgmt_test",
+            "scope": scope,
+            "hash": sha256_bytes(secret),
+            "expires_at": _expires_at_tuple(expires_in_secs),
+            "status": status,
+            "display_name": f"test {token_id}",
+        }
+        fake_web.put_entity("management_tokens", token_id, payload)
+        return token_id
+
+    return _seed
+
+
+@pytest.fixture
+def mgmt_blacklist_set(fake_web_url: str):
+    """SET `mgmt_token:blacklist:{token_id}` "1" EX `ttl_secs` via fake_web.
+
+    Simulates the Go-side revoke surface so the e2e suite can verify
+    `check_mgmt` fail-closed behaviour. Independent of the EntityStore
+    Moka cache — the blacklist probe is per-request, so revocation takes
+    effect immediately after the SET (no cache-TTL grace).
+    """
+    sess = requests.Session()
+
+    def _set(token_id: str, ttl_secs: int = 60) -> None:
+        r = sess.post(
+            f"{fake_web_url.rstrip('/')}/mgmt-blacklist/{token_id}",
+            json={"ttl_secs": ttl_secs},
+            timeout=10,
+        )
+        r.raise_for_status()
+
+    return _set

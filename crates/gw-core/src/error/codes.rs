@@ -50,9 +50,26 @@ pub const GW_ROUTING_NO_CAPABILITY_MATCH: &str = "GW_ROUTING_NO_CAPABILITY_MATCH
 // Upstream: connect / TLS failures surfaced via fail_to_connect retry (G10).
 pub const GW_UPSTREAM_CONNECT_FAILED: &str = "GW_UPSTREAM_CONNECT_FAILED";
 pub const GW_UPSTREAM_TLS_ERROR: &str = "GW_UPSTREAM_TLS_ERROR";
+// Upstream: codec `parse_response` decode failure on non-streaming path (T1-A/B/C).
+pub const GW_UPSTREAM_PROTOCOL_DECODE_ERROR: &str = "GW_UPSTREAM_PROTOCOL_DECODE_ERROR";
 
 // --- Tunnel codes (ADR-T-1 / spec §4) ---
 pub const GW_TUNNEL_NO_NODE: &str = "GW_TUNNEL_NO_NODE";
 pub const GW_TUNNEL_NO_LIVE: &str = "GW_TUNNEL_NO_LIVE";
 pub const GW_TUNNEL_TARGET_DENIED: &str = "GW_TUNNEL_TARGET_DENIED";
 pub const GW_TUNNEL_DNS_BLOCKED: &str = "GW_TUNNEL_DNS_BLOCKED";
+
+// --- Go-onboarding-blockers codes (B1 cross-protocol non-stream, B2 mgmt-token) ---
+// B1: cross-protocol non-streaming requests cannot be re-rendered because
+// `parse_response` is implemented only on the same-protocol pass-through path
+// for v1.x. Same-protocol non-stream is supported once T1-A/B/C land.
+pub const GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED: &str =
+    "GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED";
+// B2: management-token authentication (Mgmt header → ManagementTokenEntry →
+// SHA-256 verify → /healthz unlock). One code per failure mode for ops drilldown.
+pub const GW_AUTH_MGMT_TOKEN_MISSING: &str = "GW_AUTH_MGMT_TOKEN_MISSING";
+pub const GW_AUTH_MGMT_TOKEN_INVALID: &str = "GW_AUTH_MGMT_TOKEN_INVALID";
+pub const GW_AUTH_MGMT_TOKEN_EXPIRED: &str = "GW_AUTH_MGMT_TOKEN_EXPIRED";
+pub const GW_AUTH_MGMT_TOKEN_DISABLED: &str = "GW_AUTH_MGMT_TOKEN_DISABLED";
+pub const GW_AUTH_MGMT_TOKEN_REVOKED: &str = "GW_AUTH_MGMT_TOKEN_REVOKED";
+pub const GW_AUTH_MGMT_TOKEN_SCOPE_DENIED: &str = "GW_AUTH_MGMT_TOKEN_SCOPE_DENIED";
