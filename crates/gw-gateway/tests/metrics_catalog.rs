@@ -80,3 +80,9 @@ fn billing_w1_metrics_registered() {
         "missing metric: gw_billing_provenance_total"
     );
 }
+
+#[test]
+fn billing_w2_metrics_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_instance_heartbeat_renewals_total"));
+}

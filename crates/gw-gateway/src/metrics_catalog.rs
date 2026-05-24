@@ -249,6 +249,12 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "Per-dimension provenance tag counts; locates which codec/dim has high Estimated rate",
     },
+    // --- Billing robustness W2 ---
+    MetricSpec {
+        name: "gw_billing_instance_heartbeat_renewals_total",
+        kind: MetricKind::Counter,
+        help: "InstanceId heartbeat key renewal successes (Go-side reaper liveness signal)",
+    },
 ];
 
 pub fn describe_all() {

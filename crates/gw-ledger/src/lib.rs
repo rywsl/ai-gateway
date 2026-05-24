@@ -5,6 +5,7 @@
 pub mod encoding;
 pub mod flusher;
 pub mod freeze;
+pub mod instance_id;
 pub mod usage;
 
 pub use flusher::Ledger;
