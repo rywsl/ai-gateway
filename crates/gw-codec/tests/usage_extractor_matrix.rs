@@ -117,3 +117,56 @@ fn anthropic_message_start_with_usage_is_not_terminal() {
     assert_eq!(r.values.cache_creation_input_tokens, Some(1000));
     assert!(!r.is_terminal);
 }
+
+use gw_codec::gemini::usage_extractor::GeminiUsageExtractor;
+
+#[test]
+fn gemini_extracts_multimodal_sum() {
+    let body = br#"{
+        "candidates":[],
+        "usageMetadata":{
+            "promptTokenCount":1000,
+            "candidatesTokenCount":200,
+            "cachedContentTokenCount":300,
+            "thoughtsTokenCount":50,
+            "promptTokensDetails":[
+                {"modality":"TEXT","tokenCount":700},
+                {"modality":"IMAGE","tokenCount":200},
+                {"modality":"VIDEO","tokenCount":80},
+                {"modality":"AUDIO","tokenCount":20}
+            ]
+        }
+    }"#;
+    let e = GeminiUsageExtractor;
+    let r = e.extract_response(body);
+    assert_eq!(r.values.input_tokens, 1000);
+    assert_eq!(r.values.output_tokens, 200);
+    assert_eq!(r.values.cache_read_input_tokens, Some(300));
+    assert_eq!(r.values.thinking_tokens, Some(50));
+    assert_eq!(r.values.multimodal_input_tokens, Some(300)); // 200 + 80 + 20
+    assert!(r.is_terminal);
+    assert!(matches!(r.provenance.multimodal_input, ProvenanceTag::UpstreamFinal));
+}
+
+#[test]
+fn gemini_pure_text_yields_none_multimodal() {
+    let body = br#"{
+        "usageMetadata":{
+            "promptTokenCount":100,"candidatesTokenCount":50,
+            "promptTokensDetails":[{"modality":"TEXT","tokenCount":100}]
+        }
+    }"#;
+    let e = GeminiUsageExtractor;
+    let r = e.extract_response(body);
+    assert!(r.values.multimodal_input_tokens.is_none());
+    assert!(matches!(r.provenance.multimodal_input, ProvenanceTag::Unknown));
+}
+
+#[test]
+fn gemini_missing_usage_metadata_returns_default() {
+    let body = br#"{"candidates":[]}"#;
+    let e = GeminiUsageExtractor;
+    let r = e.extract_response(body);
+    assert_eq!(r.values.input_tokens, 0);
+    assert!(!r.is_terminal);
+}
