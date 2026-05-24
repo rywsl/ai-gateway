@@ -208,9 +208,14 @@ pub static METRICS: &[MetricSpec] = &[
         help: "tunnel decision outcome; label=result (direct/tunnel/denied/no_node/no_live)",
     },
     MetricSpec {
-        name: "gw_tunnel_transport_alive",
+        name: "gw_tunnel_transport_present",
         kind: MetricKind::Gauge,
         help: "1 if ReconnectingTransport::current() is Some, else 0; label=node_id",
+    },
+    MetricSpec {
+        name: "gw_tunnel_last_pong_age_seconds",
+        kind: MetricKind::Gauge,
+        help: "seconds since last pong from tunnel transport; label=node_id",
     },
     MetricSpec {
         name: "gw_tunnel_reconnect_total",

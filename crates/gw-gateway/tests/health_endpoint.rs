@@ -33,6 +33,9 @@ async fn start_server() -> Option<(u16, tokio::task::JoinHandle<anyhow::Result<(
     let state = gw_gateway::health::HealthState {
         key_health: health,
         resilience,
+        tunnel_enabled: false,
+        #[cfg(feature = "tunnel")]
+        tunnel_stack: None,
     };
     let h = tokio::spawn(gw_gateway::health::run_health_server(
         port,
