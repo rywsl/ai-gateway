@@ -301,6 +301,12 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         archive_cfg,
     ));
 
+    // 4c. DEDUCT DashMap GC (S-ledger T3). Periodically removes zero-state
+    // entries from the in-memory DEDUCT map to prevent unbounded growth.
+    // The JoinHandle is intentionally dropped: the spawned task lives for the
+    // life of the bootstrap runtime (which is parked on pending()).
+    let _deduct_gc_handle = gw_ledger::DeductGc::start_default();
+
     // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
     // The consumer's join handle is intentionally dropped: the task lives for
     // the life of the bootstrap runtime (which itself is parked on pending()).
