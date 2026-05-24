@@ -16,6 +16,7 @@ use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::error::codes;
 use gw_core::ids::{RequestId, TraceId};
 use gw_health::KeyHealthStore;
+use gw_ledger::FreezeGuard;
 use gw_ledger::Ledger;
 use gw_routing::in_flight::InFlightStore;
 use gw_store::{CounterStore, EntityStore};
@@ -113,6 +114,9 @@ pub struct LlmGateway {
     /// Detailed-log archive (T10). Sender handle for per-surface wire-fidelity
     /// capture. `try_send` is fire-and-forget; a full channel drops + metrics.
     pub(crate) detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
+    /// InflightLedger (W2-T6). Tracks in-flight request hashes in Redis so the
+    /// W4 crash-recovery reconciler can detect billing gaps after a restart.
+    pub(crate) inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
 }
 
 impl LlmGateway {
@@ -133,6 +137,7 @@ impl LlmGateway {
         resilience: Arc<ResilienceState>,
         #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
         detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
+        inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
     ) -> Self {
         Self {
             store,
@@ -151,6 +156,7 @@ impl LlmGateway {
             #[cfg(feature = "tunnel")]
             tunnel,
             detailed_archive,
+            inflight,
         }
     }
 
@@ -304,6 +310,41 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         filters::upstream::rewrite_request(session, upstream_request, ctx).await?;
+
+        // W2-T6: Register the in-flight billing entry now that the request is
+        // committed to being sent to the upstream. Best-effort — Redis errors
+        // are warned but never propagate to the client.
+        {
+            use gw_ledger::inflight::InflightRegistration;
+            let registration = InflightRegistration {
+                request_id: ctx.request_id.0.clone(),
+                attempt_index: ctx.attempt_index,
+                user_id: ctx
+                    .effective_user_id()
+                    .map(|u| u.to_string())
+                    .unwrap_or_default(),
+                vendor_key_id: ctx
+                    .picked_vendor_key
+                    .as_ref()
+                    .map(|vk| vk.key_id.to_string())
+                    .unwrap_or_default(),
+                freeze_amount: ctx
+                    .freeze_guard
+                    .as_ref()
+                    .map(|g| g.freeze_amount())
+                    .unwrap_or(0),
+                prompt_estimate_tokens: ctx.prompt_estimate_tokens.unwrap_or(0),
+            };
+            if let Err(e) = self.inflight.register(&registration).await {
+                tracing::warn!(
+                    error = ?e,
+                    request_id = %ctx.request_id,
+                    "inflight register failed; proceeding without crash-safety net"
+                );
+                metrics::counter!("gw_billing_inflight_register_failure_total").increment(1);
+            }
+        }
+
         if let (Some(body), Some(meta)) = (
             ctx.upstream_request_body.clone(),
             ctx.upstream_request_meta.clone(),
@@ -498,6 +539,44 @@ impl ProxyHttp for LlmGateway {
             &self.counters,
         )
         .await;
+
+        // W2-T6: mark_settled + clear after the UsageRecord has been sent
+        // to the ledger. If the request never reached the upstream (short-circuit
+        // before rewrite_request), `picked_vendor_key` will be None and there is
+        // no inflight hash to update — so we gate on vendor_key being set.
+        if ctx.picked_vendor_key.is_some() {
+            use crate::billing_lifecycle::VendorExposure;
+            use gw_ledger::inflight::SettleState;
+            let settle_state = match ctx.vendor_exposure {
+                VendorExposure::Settled => SettleState::Settled,
+                _ => SettleState::Terminated,
+            };
+            if let Err(e) = self
+                .inflight
+                .mark_settled(&ctx.request_id.0, ctx.attempt_index, settle_state)
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    request_id = %ctx.request_id,
+                    "inflight mark_settled failed"
+                );
+            }
+            // Clear runs unconditionally here. If the UsageRecord emit was dropped due to
+            // mpsc-full (the current Ledger try_send drop-on-full behavior), the inflight
+            // key is lost too — W2-T7 closes that gap with the must-deliver sync bypass.
+            if let Err(e) = self
+                .inflight
+                .clear(&ctx.request_id.0, ctx.attempt_index)
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    request_id = %ctx.request_id,
+                    "inflight clear failed"
+                );
+            }
+        }
 
         // Emit summary surface (always, including error paths). Bodies were
         // emitted at their respective trigger points; this entry carries the

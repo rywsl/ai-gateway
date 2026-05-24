@@ -135,6 +135,10 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
             },
         },
     ));
+    let inflight = Arc::new(gw_ledger::inflight::InflightLedger::new(
+        (*redis.pool).clone(),
+        "test-instance".to_string(),
+    ));
 
     // -----------------------------------------------------------------
     // 4. Construct LlmGateway. This is the "smoke" assertion: the
@@ -157,6 +161,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         #[cfg(feature = "tunnel")]
         None,
         detailed_archive,
+        inflight,
     );
 
     // -----------------------------------------------------------------

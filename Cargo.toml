@@ -98,6 +98,8 @@ figment = { version = "0.10", features = ["toml", "env", "test"] }
 tikv-jemallocator = "0.6"
 tikv-jemalloc-ctl = "0.6"
 
+hostname = "0.4"
+
 # 测试
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }

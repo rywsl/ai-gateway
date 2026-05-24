@@ -88,6 +88,9 @@ struct Wired {
     resilience: Arc<ResilienceState>,
     /// Detailed-log archive (T10). Flusher pool started during bootstrap.
     detailed_archive: Arc<gw_ledger::detailed_archive::DetailedArchive>,
+    /// InflightLedger (W2-T6). Tracks in-flight requests in Redis for
+    /// crash-safety billing recovery (W4 reconciler reads the residuals).
+    inflight: Arc<gw_ledger::inflight::InflightLedger>,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -187,6 +190,7 @@ pub fn run() -> anyhow::Result<()> {
         #[cfg(feature = "tunnel")]
         wired.tunnel,
         wired.detailed_archive,
+        wired.inflight,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -296,6 +300,29 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let detailed_archive = Arc::new(gw_ledger::detailed_archive::DetailedArchive::start(
         (*redis.pool).clone(),
         archive_cfg,
+    ));
+
+    // 4c. Billing instance_id + InflightLedger (W2-T6).
+    // instance_id is stable across restarts on the same host (stored in Redis
+    // under `gateway:instance:<hostname>`). The heartbeat task keeps the TTL
+    // alive so the W4 reconciler knows the gateway is live.
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "localhost".to_string());
+    let instance_id = gw_ledger::instance_id::resolve(&redis.pool, &hostname)
+        .await
+        .context("billing instance_id resolve failed")?;
+    tracing::info!(
+        target: "gw_gateway",
+        %instance_id,
+        %hostname,
+        "billing instance_id resolved"
+    );
+    gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
+    let inflight = Arc::new(gw_ledger::inflight::InflightLedger::new(
+        (*redis.pool).clone(),
+        instance_id.clone(),
     ));
 
     // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
@@ -522,5 +549,6 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         mgmt_blacklist,
         resilience,
         detailed_archive,
+        inflight,
     })
 }

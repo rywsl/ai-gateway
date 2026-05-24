@@ -260,6 +260,11 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "VendorExposure state machine transitions; labels=from,to",
     },
+    MetricSpec {
+        name: "gw_billing_inflight_register_failure_total",
+        kind: MetricKind::Counter,
+        help: "InflightLedger register() returned an error (Redis unreachable / write failed)",
+    },
 ];
 
 pub fn describe_all() {

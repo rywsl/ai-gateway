@@ -76,6 +76,7 @@ fn llm_gateway_constructor_signature_smoke() {
         mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
         resilience: Arc<gw_proxy::resilience::ResilienceState>,
         detailed_archive: Arc<gw_ledger::detailed_archive::DetailedArchive>,
+        inflight: Arc<gw_ledger::inflight::InflightLedger>,
     ) -> LlmGateway {
         LlmGateway::new(
             store,
@@ -94,6 +95,7 @@ fn llm_gateway_constructor_signature_smoke() {
             #[cfg(feature = "tunnel")]
             None,
             detailed_archive,
+            inflight,
         )
     }
     // Do not call it — `Ledger::start` would need a live Redis. We only need

@@ -1304,8 +1304,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8cb01cd46b0cf372153850f4c6c272d9cbea2da513e07538405148f95bd789f3"
 dependencies = [
  "atomic",
+ "parking_lot",
  "pear",
  "serde",
+ "tempfile",
  "toml",
  "uncased",
  "version_check",
@@ -1766,6 +1768,7 @@ dependencies = [
  "gw-store",
  "gw-tunnel-client",
  "hex",
+ "hostname",
  "metrics",
  "metrics-exporter-prometheus",
  "pingora",
@@ -1799,6 +1802,7 @@ dependencies = [
 name = "gw-ledger"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64",
  "bytes",
@@ -1814,6 +1818,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "uuid",
  "zstd",
 ]
 

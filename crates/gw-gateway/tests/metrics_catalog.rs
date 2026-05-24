@@ -92,3 +92,12 @@ fn billing_w2_t4_exposure_transitions_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(names.contains(&"gw_billing_exposure_transitions_total"));
 }
+
+#[test]
+fn billing_w2_t6_inflight_register_failure_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(
+        names.contains(&"gw_billing_inflight_register_failure_total"),
+        "missing metric: gw_billing_inflight_register_failure_total"
+    );
+}

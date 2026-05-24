@@ -90,7 +90,7 @@ pub async fn renew_heartbeat(pool: &RedisPool, instance_id: &str) -> anyhow::Res
     Ok(())
 }
 
-pub async fn spawn_heartbeat_task(pool: RedisPool, instance_id: String) {
+pub fn spawn_heartbeat_task(pool: RedisPool, instance_id: String) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         // Fire once at startup, then on each tick.

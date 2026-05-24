@@ -102,6 +102,11 @@ pub struct ReqCtx {
     pub usage: UsageAccumulator,
     pub vendor_exposure: crate::billing_lifecycle::VendorExposure,
     pub attempt_index: u32,
+    /// Token-count estimate from the request body (used by InflightLedger
+    /// register to record the predicted spend before upstream replies).
+    /// Populated by the freeze estimator when available; `None` otherwise.
+    /// The value is written as-is (or 0) to the inflight hash on `register`.
+    pub prompt_estimate_tokens: Option<u32>,
     pub freeze_guard: Option<RequestFreeze>,
     pub stream_slot: Option<StreamSlot>,
     pub bytes_sent_to_client: AtomicU64,
@@ -268,6 +273,7 @@ impl ReqCtx {
             },
             vendor_exposure: crate::billing_lifecycle::VendorExposure::Idle,
             attempt_index: 0,
+            prompt_estimate_tokens: None,
             freeze_guard: None,
             stream_slot: None,
             bytes_sent_to_client: AtomicU64::new(0),
