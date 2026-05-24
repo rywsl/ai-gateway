@@ -131,3 +131,38 @@ fn upstream_error_kinds_recognized() {
         }
     }
 }
+
+#[test]
+fn grace_enters_after_deadline_cancel() {
+    use gw_proxy::cancellation::{check_grace_status, GraceStatus};
+    use gw_proxy::ctx::ReqCtx;
+    let mut ctx = ReqCtx::default();
+    let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+    ctx.cancel_observed_at_ms = Some(now_ms - 50); // 50ms ago
+    let status = check_grace_status(&mut ctx, 200, now_ms);
+    // Within grace window (50 < 200 ms)
+    assert!(matches!(status, GraceStatus::Active));
+    assert!(ctx.cancel_grace_active);
+}
+
+#[test]
+fn grace_expires_after_window() {
+    use gw_proxy::cancellation::{check_grace_status, GraceStatus};
+    use gw_proxy::ctx::ReqCtx;
+    let mut ctx = ReqCtx::default();
+    let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+    ctx.cancel_observed_at_ms = Some(now_ms - 500); // 500ms ago
+    let status = check_grace_status(&mut ctx, 200, now_ms);
+    assert!(matches!(status, GraceStatus::Expired));
+}
+
+#[test]
+fn grace_no_cancel_returns_none() {
+    use gw_proxy::cancellation::{check_grace_status, GraceStatus};
+    use gw_proxy::ctx::ReqCtx;
+    let mut ctx = ReqCtx::default();
+    let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+    let status = check_grace_status(&mut ctx, 200, now_ms);
+    assert!(matches!(status, GraceStatus::NotApplicable));
+    assert!(!ctx.cancel_grace_active);
+}

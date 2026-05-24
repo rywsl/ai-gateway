@@ -120,3 +120,9 @@ fn billing_w3_t1_upstream_cancellation_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(names.contains(&"gw_billing_upstream_cancellation_total"));
 }
+
+#[test]
+fn billing_w3_t5_grace_metric_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_grace_yielded_final_usage_total"));
+}

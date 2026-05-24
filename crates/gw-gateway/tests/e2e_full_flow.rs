@@ -163,6 +163,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         detailed_archive,
         inflight,
         300_000,
+        200,
     );
 
     // -----------------------------------------------------------------

@@ -14,10 +14,10 @@
 //!   `LlmGateway::response_body_filter` on each chunk. If
 //!   `now_ms - ctx.timing.sent_ms > response_deadline_ms` the helper fires
 //!   [`observe_cancel`] with [`CancelCause::Deadline`] and returns `true`;
-//!   the filter returns `Err(Custom("response_deadline_exceeded"))` to abort
-//!   the upstream stream.
-//! * **Upstream RST / 5xx (W3-T4)**: pending.
-//! * **Grace timer (W3-T5)**: pending.
+//!   the filter enters grace mode via [`check_grace_status`] instead of
+//!   aborting immediately.
+//! * **Upstream RST / 5xx (W3-T4)**: classified in `logging`.
+//! * **Grace timer (W3-T5)**: `check_grace_status` / `record_grace_outcome`.
 
 use crate::ctx::ReqCtx;
 
@@ -38,6 +38,47 @@ impl CancelCause {
             CancelCause::RouteAbort => "route_abort",
         }
     }
+}
+
+/// Grace window status for cancel-aware body reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraceStatus {
+    /// No cancel observed yet — body reads proceed normally.
+    NotApplicable,
+    /// Cancel observed within grace window — body reads continue to chase
+    /// final usage frames.
+    Active,
+    /// Grace window expired — caller should abort the body read.
+    Expired,
+}
+
+/// Check whether we're inside the cancel grace window. Sets / clears
+/// `ctx.cancel_grace_active` so the response filter can short-circuit.
+pub fn check_grace_status(ctx: &mut ReqCtx, grace_ms: u64, now_ms: i64) -> GraceStatus {
+    let Some(cancel_at) = ctx.cancel_observed_at_ms else {
+        ctx.cancel_grace_active = false;
+        return GraceStatus::NotApplicable;
+    };
+    let elapsed = now_ms.saturating_sub(cancel_at);
+    if elapsed <= grace_ms as i64 {
+        ctx.cancel_grace_active = true;
+        GraceStatus::Active
+    } else {
+        ctx.cancel_grace_active = false;
+        GraceStatus::Expired
+    }
+}
+
+/// Record whether the grace window captured a terminal extraction.
+///
+/// Emits `gw_billing_grace_yielded_final_usage_total{yielded=true|false}`.
+pub fn record_grace_outcome(yielded: bool) {
+    let label = if yielded { "true" } else { "false" };
+    metrics::counter!(
+        "gw_billing_grace_yielded_final_usage_total",
+        "yielded" => label,
+    )
+    .increment(1);
 }
 
 /// True for [`std::io::ErrorKind`] variants that strongly indicate a
@@ -61,8 +102,8 @@ pub fn observe_client_close_for_io(ctx: &mut ReqCtx, kind: std::io::ErrorKind) {
 
 /// Check whether the request has exceeded `deadline_ms` since `Sent`.
 /// On exceedance, calls [`observe_cancel`] with [`CancelCause::Deadline`]
-/// and returns `true`. Caller is expected to abort the upstream stream
-/// (typically by returning a `pingora::Error`).
+/// and returns `true`. Caller is expected to enter grace mode (via
+/// [`check_grace_status`]) rather than aborting immediately.
 ///
 /// Returns `false` if `ctx.timing.sent_ms` is not yet set (request hasn't
 /// reached upstream).

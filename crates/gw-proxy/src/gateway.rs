@@ -121,6 +121,11 @@ pub struct LlmGateway {
     /// upstream stream is aborted and `CancelCause::Deadline` is recorded.
     /// Populated from `cfg.billing.response_deadline_ms` at boot time.
     pub(crate) response_deadline_ms: u64,
+    /// Cancel grace window (W3-T5). After a cancel trigger fires, the gateway
+    /// continues reading the upstream body for this many milliseconds to
+    /// capture a final usage frame the vendor may still be sending.
+    /// Populated from `cfg.billing.cancel_grace_ms` at boot time.
+    pub(crate) cancel_grace_ms: u64,
 }
 
 impl LlmGateway {
@@ -143,6 +148,7 @@ impl LlmGateway {
         detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
         inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
         response_deadline_ms: u64,
+        cancel_grace_ms: u64,
     ) -> Self {
         Self {
             store,
@@ -163,6 +169,7 @@ impl LlmGateway {
             detailed_archive,
             inflight,
             response_deadline_ms,
+            cancel_grace_ms,
         }
     }
 
@@ -458,14 +465,41 @@ impl ProxyHttp for LlmGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        // W3-T3: abort the upstream stream if the response has been in-flight
-        // longer than `response_deadline_ms` since `Sent`. First-writer-wins
-        // semantics in `observe_cancel` ensure the cause is recorded exactly once
-        // even if Pingora delivers multiple chunks after the deadline.
+        // W3-T3 / W3-T5: deadline check + grace window.
+        //
+        // 1. `check_response_deadline` fires `observe_cancel(Deadline)` on
+        //    first exceedance; first-writer-wins semantics ensure it records
+        //    exactly once.
+        // 2. `check_grace_status` reads `cancel_observed_at_ms` (set by any
+        //    cancel cause, not just Deadline) and decides:
+        //    - NotApplicable → normal path
+        //    - Active         → still in grace window; let this chunk through
+        //                       so the extractor can catch a final usage frame
+        //    - Expired        → grace window elapsed; record outcome + abort
         let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
-        if crate::cancellation::check_response_deadline(ctx, self.response_deadline_ms, now_ms) {
-            return Err(Error::new(ErrorType::Custom("response_deadline_exceeded")));
+        let _deadline_just_fired =
+            crate::cancellation::check_response_deadline(ctx, self.response_deadline_ms, now_ms);
+
+        match crate::cancellation::check_grace_status(ctx, self.cancel_grace_ms, now_ms) {
+            crate::cancellation::GraceStatus::NotApplicable => {
+                // Normal path — no cancel observed; continue below.
+            }
+            crate::cancellation::GraceStatus::Active => {
+                // Within grace window — fall through to let the extractor see
+                // this chunk; do not abort yet.
+            }
+            crate::cancellation::GraceStatus::Expired => {
+                // Grace window elapsed. Heuristic: if VendorExposure reached
+                // Settled the extractor saw a terminal frame during grace.
+                let yielded = matches!(
+                    ctx.vendor_exposure,
+                    crate::billing_lifecycle::VendorExposure::Settled,
+                );
+                crate::cancellation::record_grace_outcome(yielded);
+                return Err(Error::new(ErrorType::Custom("cancel_grace_expired")));
+            }
         }
+
         let res = filters::response::run(session, body, end_of_stream, ctx);
         if end_of_stream {
             self.emit_response_surfaces(ctx);

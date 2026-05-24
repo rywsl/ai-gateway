@@ -282,6 +282,12 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "Upstream cancellation events labelled by cause (client_close/deadline/upstream_err/route_abort)",
     },
+    // --- Billing robustness W3-T5 ---
+    MetricSpec {
+        name: "gw_billing_grace_yielded_final_usage_total",
+        kind: MetricKind::Counter,
+        help: "Whether the cancel grace window captured a final usage frame; label=yielded(true/false)",
+    },
 ];
 
 pub fn describe_all() {

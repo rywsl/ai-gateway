@@ -104,6 +104,10 @@ pub struct ReqCtx {
     pub attempt_index: u32,
     pub cancel_observed_at_ms: Option<i64>,
     pub cancel_cause: Option<crate::cancellation::CancelCause>,
+    /// W3-T5: set to `true` when the request enters the cancel grace window
+    /// (i.e. a cancel has been observed but the grace timer has not yet
+    /// expired). Cleared when grace expires or when no cancel has occurred.
+    pub cancel_grace_active: bool,
     /// Token-count estimate from the request body (used by InflightLedger
     /// register to record the predicted spend before upstream replies).
     /// Populated by the freeze estimator when available; `None` otherwise.
@@ -277,6 +281,7 @@ impl ReqCtx {
             attempt_index: 0,
             cancel_observed_at_ms: None,
             cancel_cause: None,
+            cancel_grace_active: false,
             prompt_estimate_tokens: None,
             freeze_guard: None,
             stream_slot: None,

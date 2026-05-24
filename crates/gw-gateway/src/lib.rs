@@ -93,6 +93,8 @@ struct Wired {
     inflight: Arc<gw_ledger::inflight::InflightLedger>,
     /// Response deadline (W3-T3). From `cfg.billing.response_deadline_ms`.
     response_deadline_ms: u64,
+    /// Cancel grace window (W3-T5). From `cfg.billing.cancel_grace_ms`.
+    cancel_grace_ms: u64,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -194,6 +196,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.detailed_archive,
         wired.inflight,
         wired.response_deadline_ms,
+        wired.cancel_grace_ms,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -554,5 +557,6 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         detailed_archive,
         inflight,
         response_deadline_ms: cfg.billing.response_deadline_ms,
+        cancel_grace_ms: cfg.billing.cancel_grace_ms,
     })
 }

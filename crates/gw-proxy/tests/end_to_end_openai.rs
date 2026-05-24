@@ -77,6 +77,8 @@ fn llm_gateway_constructor_signature_smoke() {
         resilience: Arc<gw_proxy::resilience::ResilienceState>,
         detailed_archive: Arc<gw_ledger::detailed_archive::DetailedArchive>,
         inflight: Arc<gw_ledger::inflight::InflightLedger>,
+        response_deadline_ms: u64,
+        cancel_grace_ms: u64,
     ) -> LlmGateway {
         LlmGateway::new(
             store,
@@ -96,6 +98,8 @@ fn llm_gateway_constructor_signature_smoke() {
             None,
             detailed_archive,
             inflight,
+            response_deadline_ms,
+            cancel_grace_ms,
         )
     }
     // Do not call it — `Ledger::start` would need a live Redis. We only need
