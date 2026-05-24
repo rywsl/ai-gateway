@@ -54,3 +54,36 @@ fn unlimited_max_allows_many_slots() {
     let _s2 = g.check_stream_slot(&uid, 0).unwrap();
     let _s3 = g.check_stream_slot(&uid, 0).unwrap();
 }
+
+#[test]
+fn tpm_under_limit_passes() {
+    let g = RateLimitGuard::new();
+    let uid = UserId::from("u1");
+    let p = MergedPermissions {
+        tpm_limit: 1000,
+        ..perm(60)
+    };
+    g.deduct_tpm(&uid, &p, 500).expect("500 of 1000 budget should pass");
+}
+
+#[test]
+fn tpm_over_limit_rejects_with_correct_code() {
+    let g = RateLimitGuard::new();
+    let uid = UserId::from("u1");
+    let p = MergedPermissions {
+        tpm_limit: 100,
+        ..perm(60)
+    };
+    let err = g.deduct_tpm(&uid, &p, 200).unwrap_err();
+    assert_eq!(err.status, 429);
+    assert_eq!(&*err.code, "GW_QUOTA_TPM_EXCEEDED");
+    assert_eq!(err.retry_after_secs, Some(60));
+}
+
+#[test]
+fn tpm_zero_limit_disables_enforcement() {
+    let g = RateLimitGuard::new();
+    let uid = UserId::from("u1");
+    let p = perm(60); // tpm_limit = 0
+    g.deduct_tpm(&uid, &p, 999_999).expect("tpm_limit=0 means enforcement off");
+}

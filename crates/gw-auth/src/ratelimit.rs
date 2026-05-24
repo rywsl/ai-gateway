@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 pub struct RateLimitGuard {
     pub per_user: DashMap<UserId, Arc<DefaultDirectRateLimiter>>,
+    pub per_user_tpm: DashMap<UserId, Arc<DefaultDirectRateLimiter>>,
     pub per_user_streams: DashMap<UserId, Arc<AtomicUsize>>,
     pub total_streams: Arc<AtomicUsize>,
 }
@@ -38,12 +39,12 @@ impl RateLimitGuard {
     pub fn new() -> Self {
         Self {
             per_user: DashMap::new(),
+            per_user_tpm: DashMap::new(),
             per_user_streams: DashMap::new(),
             total_streams: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    // TODO(phase-4): TPM enforcement via deferred deduction after token counting.
     pub fn check(&self, perm: &MergedPermissions) -> Result<RateLimitTicket, ErrorIR<'static>> {
         if perm.rpm_limit > 0 {
             let lim = self
@@ -82,6 +83,38 @@ impl RateLimitGuard {
             counter,
             total: Arc::clone(&self.total_streams),
         })
+    }
+
+    /// Deduct observed tokens from the user's TPM sliding-window counter.
+    ///
+    /// Called **after** the response has been fully sent to the client (in the
+    /// `logging` filter). A failure here does NOT block the current request —
+    /// it only means the *next* request from this user will be rejected with
+    /// `GW_QUOTA_TPM_EXCEEDED` until the window slides.
+    pub fn deduct_tpm(
+        &self,
+        uid: &UserId,
+        perm: &MergedPermissions,
+        tokens: u32,
+    ) -> Result<(), ErrorIR<'static>> {
+        if perm.tpm_limit == 0 {
+            return Ok(());
+        }
+        let Some(tokens_nz) = NonZeroU32::new(tokens) else {
+            return Ok(());
+        };
+        let lim = self
+            .per_user_tpm
+            .entry(uid.clone())
+            .or_insert_with(|| {
+                let q = Quota::per_minute(NonZeroU32::new(perm.tpm_limit).unwrap());
+                Arc::new(RateLimiter::direct(q))
+            })
+            .clone();
+        if lim.check_n(tokens_nz).is_err() {
+            return Err(tpm_err());
+        }
+        Ok(())
     }
 }
 
@@ -125,5 +158,19 @@ fn concurrent_err() -> ErrorIR<'static> {
         upstream_raw: None,
         request_id: "",
         retry_after_secs: Some(5),
+    }
+}
+
+fn tpm_err() -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::ClientQuota,
+        status: 429,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_QUOTA_TPM_EXCEEDED),
+        message: Cow::Borrowed("tpm exceeded"),
+        retryable: true,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: Some(60),
     }
 }

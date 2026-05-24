@@ -2,6 +2,7 @@
 //! UsageRecord + DetailedLog, optionally emit debug trace.
 
 use crate::ctx::ReqCtx;
+use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
 use gw_health::{KeyHealthStore, OutcomeKind};
@@ -61,6 +62,7 @@ pub async fn run(
     counters: &Arc<CounterStore>,
     store: &Arc<gw_store::EntityStore>,
     resilience: &crate::resilience::ResilienceState,
+    ratelimit: &Arc<RateLimitGuard>,
 ) {
     let now = std::time::Instant::now();
     ctx.timing.end = Some(now);
@@ -267,10 +269,9 @@ pub async fn run(
         }
 
         // -----------------------------------------------------------------
-        // TPM consumption metric. Spec step 3 expects this to feed back into
-        // a RateLimitGuard TPM tracker; gw-auth doesn't expose that API yet
-        // (see TODO in gw-auth/src/ratelimit.rs), so for now we emit a
-        // counter that downstream observability can scrape.
+        // TPM deferred deduction (T2). Feeds observed tokens into the
+        // per-user sliding-window TPM limiter. Fire-and-forget: the
+        // response is already sent, so a breach only gates the NEXT request.
         // -----------------------------------------------------------------
         let tpm_tokens = (ctx.usage.input_tokens as u64) + (ctx.usage.output_tokens as u64);
         if tpm_tokens > 0 {
@@ -279,6 +280,18 @@ pub async fn run(
                 "user_id" => effective.to_string(),
             )
             .increment(tpm_tokens);
+
+            if let Some(perm) = ctx.merged_perm.as_ref() {
+                if let Err(e) = ratelimit.deduct_tpm(&effective, perm, tpm_tokens as u32) {
+                    tracing::info!(
+                        target: "gw_tpm",
+                        user_id = %effective,
+                        tokens = tpm_tokens,
+                        code = %e.code,
+                        "tpm budget exhausted; next request will be rejected"
+                    );
+                }
+            }
         }
     }
 

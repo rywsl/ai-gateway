@@ -107,6 +107,7 @@ pub struct LlmGateway {
     /// peer address only. Default is `false` so a misconfigured deployment
     /// does not silently bypass IP blocklisting via a forged header.
     pub trust_xff: bool,
+    pub signature_required: bool,
     /// JWT claim validator (iss/aud/nbf, T1-E). `None` until T1-E builds it
     /// from `AuthConfig.global`; auth falls back to signature-only checks.
     pub jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
@@ -150,6 +151,7 @@ impl LlmGateway {
         counters: Arc<CounterStore>,
         global_rpm: u32,
         trust_xff: bool,
+        signature_required: bool,
         jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
         strategies: Arc<gw_routing::strategy::set::StrategySet>,
         failover_executor: FailoverExecutor,
@@ -169,6 +171,7 @@ impl LlmGateway {
             counters,
             global_rpm,
             trust_xff,
+            signature_required,
             jwt_validator,
             strategies,
             failover_executor,
@@ -269,6 +272,7 @@ impl ProxyHttp for LlmGateway {
             &self.counters,
             self.global_rpm,
             self.trust_xff,
+            self.signature_required,
             self.jwt_validator.as_ref(),
             self.capability_resolver.as_ref(),
             &self.mgmt_blacklist,
@@ -579,6 +583,9 @@ impl ProxyHttp for LlmGateway {
             &self.health,
             &self.ledger,
             &self.counters,
+            &self.store,
+            &self.resilience,
+            &self.ratelimit,
         )
         .await;
 
