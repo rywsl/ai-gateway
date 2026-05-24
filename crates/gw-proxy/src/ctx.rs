@@ -49,10 +49,14 @@ pub struct ResponseMeta {
 /// Mutable accumulator for token-usage seen on either the unary-response path
 /// or in stream `Usage` events. The `logging` filter reads these counters
 /// into the `UsageRecord` emitted to the usage stream.
+#[derive(Default, Clone, Copy, Debug)]
 pub struct UsageAccumulator {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cached_tokens: Option<u32>,
+    pub cache_creation_tokens: Option<u32>,
+    pub thinking_tokens: Option<u32>,
+    pub multimodal_input_tokens: Option<u32>,
 }
 
 #[derive(Default)]
@@ -254,6 +258,9 @@ impl ReqCtx {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: None,
+                cache_creation_tokens: None,
+                thinking_tokens: None,
+                multimodal_input_tokens: None,
             },
             freeze_guard: None,
             stream_slot: None,
@@ -313,5 +320,21 @@ impl ReqCtx {
             return Some(&p.effective_user_id);
         }
         self.user.as_ref().map(|u| &u.value.user_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_accumulator_default_has_six_dims() {
+        let u = UsageAccumulator::default();
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+        assert!(u.cached_tokens.is_none());
+        assert!(u.cache_creation_tokens.is_none());
+        assert!(u.thinking_tokens.is_none());
+        assert!(u.multimodal_input_tokens.is_none());
     }
 }
