@@ -265,6 +265,17 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "InflightLedger register() returned an error (Redis unreachable / write failed)",
     },
+    // --- Billing robustness W2-T7 ---
+    MetricSpec {
+        name: "gw_billing_mpsc_bypass_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecord emits that bypassed mpsc via sync XADD (capacity-tuning signal)",
+    },
+    MetricSpec {
+        name: "gw_billing_emit_path_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecord emit attempts by path (channel / closed)",
+    },
 ];
 
 pub fn describe_all() {

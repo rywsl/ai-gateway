@@ -101,3 +101,16 @@ fn billing_w2_t6_inflight_register_failure_registered() {
         "missing metric: gw_billing_inflight_register_failure_total"
     );
 }
+
+#[test]
+fn billing_w2_t7_must_deliver_metrics_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(
+        names.contains(&"gw_billing_mpsc_bypass_total"),
+        "missing metric: gw_billing_mpsc_bypass_total"
+    );
+    assert!(
+        names.contains(&"gw_billing_emit_path_total"),
+        "missing metric: gw_billing_emit_path_total"
+    );
+}

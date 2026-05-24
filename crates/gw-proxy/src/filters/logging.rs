@@ -278,7 +278,7 @@ pub async fn run(
             .increment(1);
         }
 
-        let _ = ledger.try_send(rec);
+        let _ = ledger.emit(rec).await;
 
         // -----------------------------------------------------------------
         // G3 (ADR-G3-2) — daily-quota post-increment. Bump

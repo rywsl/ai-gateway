@@ -9,6 +9,11 @@
 //!
 //! Batching cap is set by `batch_size`; an interval timer flushes any
 //! partial buffer so latency stays bounded even at low QPS.
+//!
+//! **Must-deliver semantic**: `emit` is the production billing path — on a
+//! full mpsc channel it falls back to a synchronous direct XADD rather than
+//! dropping; `try_send` retains the original drop-on-full behaviour for
+//! callers that explicitly opt out of the blocking fallback.
 
 use crate::usage::UsageRecord;
 use fred::interfaces::StreamsInterface;
@@ -23,6 +28,7 @@ const DLQ_MAXLEN: u64 = 100_000;
 
 pub struct Ledger {
     pub tx: mpsc::Sender<UsageRecord>,
+    redis: RedisCtx,
 }
 
 impl Ledger {
@@ -33,6 +39,7 @@ impl Ledger {
         flush_interval: Duration,
     ) -> Self {
         let (tx, mut rx) = mpsc::channel::<UsageRecord>(channel_capacity);
+        let worker_redis = redis.clone();
         tokio::spawn(async move {
             let mut buf: Vec<UsageRecord> = Vec::with_capacity(batch_size);
             let mut ticker = interval(flush_interval);
@@ -43,34 +50,75 @@ impl Ledger {
                             Some(rec) => {
                                 buf.push(rec);
                                 if buf.len() >= batch_size {
-                                    flush(&redis, &mut buf).await;
+                                    flush(&worker_redis, &mut buf).await;
                                 }
                             }
                             None => {
-                                if !buf.is_empty() { flush(&redis, &mut buf).await; }
+                                if !buf.is_empty() { flush(&worker_redis, &mut buf).await; }
                                 break;
                             }
                         }
                     }
                     _ = ticker.tick() => {
-                        if !buf.is_empty() { flush(&redis, &mut buf).await; }
+                        if !buf.is_empty() { flush(&worker_redis, &mut buf).await; }
                     }
                 }
             }
         });
-        Self { tx }
+        Self { tx, redis }
+    }
+
+    /// Must-deliver billing emit path. Attempts the mpsc fast path first; on a
+    /// full channel falls back to a synchronous direct XADD (bypass), routing
+    /// to the DLQ if even the bypass fails. Use this for all production billing
+    /// emits so that backpressure never silently drops revenue records.
+    pub async fn emit(&self, rec: UsageRecord) {
+        match self.tx.try_send(rec) {
+            Ok(()) => {
+                metrics::counter!("gw_billing_emit_path_total", "path" => "channel").increment(1);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(rec_back)) => {
+                metrics::counter!("gw_billing_mpsc_bypass_total").increment(1);
+                if let Err(e) = sync_xadd(&self.redis, &rec_back).await {
+                    tracing::error!(error = ?e, "must-deliver sync XADD bypass failed; routing to DLQ");
+                    let payload = match serde_json::to_string(&rec_back) {
+                        Ok(p) => p,
+                        Err(_) => "{}".to_string(),
+                    };
+                    let wrapped = wrap_for_dlq(&payload, "sync_xadd_bypass_failed", 0);
+                    if dlq_xadd(&self.redis, wrapped).await.is_err() {
+                        metrics::counter!("gateway_usage_records_lost_total").increment(1);
+                    }
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!("gw_billing_emit_path_total", "path" => "closed").increment(1);
+                tracing::error!("usage record channel closed; flusher dead");
+            }
+        }
     }
 
     /// Non-blocking enqueue. On a full channel we drop the record and bump
     /// the `gateway_usage_channel_full_total` counter — the alternative
     /// (blocking the proxy request task) would propagate Redis stalls into
-    /// upstream latency.
+    /// upstream latency. Prefer `emit` for production billing paths.
     #[allow(clippy::result_unit_err)]
     pub fn try_send(&self, rec: UsageRecord) -> Result<(), ()> {
         self.tx.try_send(rec).map_err(|_| {
             metrics::counter!("gateway_usage_channel_full_total").increment(1);
         })
     }
+}
+
+/// Direct single-record XADD to `usage:records`, used as the must-deliver
+/// bypass when the mpsc channel is full.
+async fn sync_xadd(redis: &RedisCtx, rec: &UsageRecord) -> Result<(), String> {
+    let payload = serde_json::to_string(rec).map_err(|e| format!("serialize: {e}"))?;
+    let client = redis.pool.next();
+    client
+        .xadd::<(), _, _, _, _>(USAGE_STREAM, false, None::<()>, "*", ("payload", payload))
+        .await
+        .map_err(|e| format!("xadd: {e}"))
 }
 
 fn dlq_cap() -> XCap {
