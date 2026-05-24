@@ -108,3 +108,26 @@ fn deadline_helper_no_sent_ms_is_noop() {
     assert!(!exceeded);
     assert!(ctx.cancel_cause.is_none());
 }
+
+#[test]
+fn upstream_error_kinds_recognized() {
+    use gw_proxy::cancellation::pingora_error_to_cancel_cause;
+    use gw_proxy::cancellation::CancelCause;
+
+    let cases = [
+        (true, false),  // (is_upstream, is_client) — expect Some(UpstreamErr) when is_upstream
+        (false, true),  // expect Some(ClientClose) when is_client
+        (false, false), // expect None
+    ];
+
+    for (is_upstream, is_client) in cases {
+        let result = pingora_error_to_cancel_cause(is_upstream, is_client);
+        if is_upstream {
+            assert!(matches!(result, Some(CancelCause::UpstreamErr)));
+        } else if is_client {
+            assert!(matches!(result, Some(CancelCause::ClientClose)));
+        } else {
+            assert!(result.is_none());
+        }
+    }
+}

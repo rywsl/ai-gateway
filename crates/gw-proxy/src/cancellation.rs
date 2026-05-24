@@ -79,6 +79,26 @@ pub fn check_response_deadline(ctx: &mut ReqCtx, deadline_ms: u64, now_ms: i64) 
     }
 }
 
+/// Classify a pingora-error inspection result into a `CancelCause`.
+/// Caller pre-extracts `is_upstream` / `is_client_close` flags from the Pingora
+/// error's `esource` and `etype` fields.
+///
+/// Precedence: upstream over client (rare for both to be true, but if so,
+/// upstream is the more actionable signal for billing). `None` means the
+/// error doesn't correspond to a cancel-worthy event.
+pub fn pingora_error_to_cancel_cause(
+    is_upstream: bool,
+    is_client_close: bool,
+) -> Option<CancelCause> {
+    if is_upstream {
+        Some(CancelCause::UpstreamErr)
+    } else if is_client_close {
+        Some(CancelCause::ClientClose)
+    } else {
+        None
+    }
+}
+
 /// First-writer-wins. Subsequent observations don't overwrite — the first
 /// cancel signal is the one that matters for diagnosing root cause.
 pub fn observe_cancel(ctx: &mut ReqCtx, cause: CancelCause) {
