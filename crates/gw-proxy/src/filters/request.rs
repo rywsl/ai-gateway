@@ -605,8 +605,8 @@ pub async fn run(
     ctx.model = Some(model_name.clone());
     ctx.is_stream = is_stream;
     // POSTs that mutate vendor state are *not* idempotent. We can refine
-    // this once the codec exposes "method classification"; for v1 mark
-    // non-stream completions as idempotent and stream/tool requests as not.
+    // this once the codec exposes "method classification"; non-stream
+    // completions are idempotent, stream/tool requests are not.
     ctx.idempotent = !is_stream;
 
     // ---------------------------------------------------------------------
@@ -663,7 +663,7 @@ pub async fn run(
     //     set and stash it on `ctx.required_caps`. `upstream_peer` then passes
     //     it into `get_candidate_keys`, which capability-filters each candidate
     //     channel. `None` resolver (deployment without Model entities) leaves
-    //     `ctx.required_caps` empty so routing is unconstrained (v1 behaviour).
+    //     `ctx.required_caps` empty so routing is unconstrained.
     // ---------------------------------------------------------------------
     if let Some(resolver) = capability_resolver {
         let header_require: Vec<String> = session
@@ -691,7 +691,7 @@ pub async fn run(
                 Some(header_refs.as_slice())
             },
             protocol,
-            retry_upgrade: None,
+            retry_upgrade: ctx.retry_upgrade_hint.as_ref(),
         };
         match resolver.resolve(&req).await {
             Ok(caps) => ctx.required_caps = Some(caps),

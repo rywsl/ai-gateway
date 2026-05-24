@@ -168,9 +168,8 @@ pub struct ReqCtx {
     pub signature_received: Option<Vec<u8>>,
     pub signature_timestamp: Option<String>,
     pub req_content_encoding: gw_codec::compression::Encoding,
-    /// HMAC secret bytes hoisted out of the resolved `ApiKeyEntry` so the
-    /// body-verify call site can run without keeping the `ApiKey` `Arc` alive.
-    /// Empty when signature verification is not required.
+    /// HMAC secret bytes from `ApiKeyEntry.signature_secret`. Empty when
+    /// `signature_required = false`.
     pub signature_secret: Vec<u8>,
 
     // --- Management path / capability (G-α.9 / G-β wire) ---
@@ -179,9 +178,13 @@ pub struct ReqCtx {
     pub mgmt: bool,
     /// Capability set resolved for this request (header / model-alias /
     /// retry-upgrade inputs collapsed into a single requirement). Filled by
-    /// the request filter once `CapabilityResolver` is wired into
-    /// `LlmGateway`; `None` in v1 (see TODO in `filters::request`).
+    /// the request filter's capability-resolve step; `None` when no resolver
+    /// is configured.
     pub required_caps: Option<gw_capability::types::RequiredCapabilities>,
+    /// When a failover retry occurs, the classifier populates this with the
+    /// error class and upgrade path so the capability resolver can relax
+    /// constraints on the next key selection.
+    pub retry_upgrade_hint: Option<gw_capability::resolver::RetryUpgradeHint>,
 
     // --- Response deadline (S-proxy-core T3) ---
     pub response_deadline: Option<std::time::Duration>,
@@ -297,6 +300,7 @@ impl ReqCtx {
             signature_secret: Vec::new(),
             mgmt: false,
             required_caps: None,
+            retry_upgrade_hint: None,
             tunnel_resolution: None,
             response_deadline: None,
             operation_id: None,
