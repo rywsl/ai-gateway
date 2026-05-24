@@ -91,6 +91,8 @@ struct Wired {
     /// InflightLedger (W2-T6). Tracks in-flight requests in Redis for
     /// crash-safety billing recovery (W4 reconciler reads the residuals).
     inflight: Arc<gw_ledger::inflight::InflightLedger>,
+    /// Response deadline (W3-T3). From `cfg.billing.response_deadline_ms`.
+    response_deadline_ms: u64,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -191,6 +193,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.tunnel,
         wired.detailed_archive,
         wired.inflight,
+        wired.response_deadline_ms,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -550,5 +553,6 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         resilience,
         detailed_archive,
         inflight,
+        response_deadline_ms: cfg.billing.response_deadline_ms,
     })
 }

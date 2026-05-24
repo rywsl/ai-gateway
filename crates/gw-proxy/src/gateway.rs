@@ -117,6 +117,10 @@ pub struct LlmGateway {
     /// InflightLedger (W2-T6). Tracks in-flight request hashes in Redis so the
     /// W4 crash-recovery reconciler can detect billing gaps after a restart.
     pub(crate) inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
+    /// Response deadline (W3-T3). Maximum time from `Sent` to EOS before the
+    /// upstream stream is aborted and `CancelCause::Deadline` is recorded.
+    /// Populated from `cfg.billing.response_deadline_ms` at boot time.
+    pub(crate) response_deadline_ms: u64,
 }
 
 impl LlmGateway {
@@ -138,6 +142,7 @@ impl LlmGateway {
         #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
         detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
         inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
+        response_deadline_ms: u64,
     ) -> Self {
         Self {
             store,
@@ -157,6 +162,7 @@ impl LlmGateway {
             tunnel,
             detailed_archive,
             inflight,
+            response_deadline_ms,
         }
     }
 
@@ -452,6 +458,14 @@ impl ProxyHttp for LlmGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
+        // W3-T3: abort the upstream stream if the response has been in-flight
+        // longer than `response_deadline_ms` since `Sent`. First-writer-wins
+        // semantics in `observe_cancel` ensure the cause is recorded exactly once
+        // even if Pingora delivers multiple chunks after the deadline.
+        let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+        if crate::cancellation::check_response_deadline(ctx, self.response_deadline_ms, now_ms) {
+            return Err(Error::new(ErrorType::Custom("response_deadline_exceeded")));
+        }
         let res = filters::response::run(session, body, end_of_stream, ctx);
         if end_of_stream {
             self.emit_response_surfaces(ctx);

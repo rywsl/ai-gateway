@@ -162,6 +162,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         None,
         detailed_archive,
         inflight,
+        300_000,
     );
 
     // -----------------------------------------------------------------

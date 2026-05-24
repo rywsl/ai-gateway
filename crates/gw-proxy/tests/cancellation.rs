@@ -70,3 +70,41 @@ fn non_client_close_kind_does_not_observe_cancel() {
     observe_client_close_for_io(&mut ctx, std::io::ErrorKind::PermissionDenied);
     assert!(ctx.cancel_cause.is_none());
 }
+
+#[test]
+fn deadline_helper_marks_when_exceeded() {
+    use gw_proxy::cancellation::{check_response_deadline, CancelCause};
+    use gw_proxy::ctx::ReqCtx;
+    let mut ctx = ReqCtx::default();
+    // sent 1000 ms ago
+    let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+    ctx.timing.sent_ms = Some(now_ms - 1000);
+    // deadline 500ms — should fire
+    let exceeded = check_response_deadline(&mut ctx, 500, now_ms);
+    assert!(exceeded);
+    assert!(matches!(ctx.cancel_cause, Some(CancelCause::Deadline)));
+}
+
+#[test]
+fn deadline_helper_does_not_mark_when_within_budget() {
+    use gw_proxy::cancellation::check_response_deadline;
+    use gw_proxy::ctx::ReqCtx;
+    let mut ctx = ReqCtx::default();
+    let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+    ctx.timing.sent_ms = Some(now_ms - 100);
+    // deadline 500ms — within budget
+    let exceeded = check_response_deadline(&mut ctx, 500, now_ms);
+    assert!(!exceeded);
+    assert!(ctx.cancel_cause.is_none());
+}
+
+#[test]
+fn deadline_helper_no_sent_ms_is_noop() {
+    use gw_proxy::cancellation::check_response_deadline;
+    use gw_proxy::ctx::ReqCtx;
+    let mut ctx = ReqCtx::default();
+    let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+    let exceeded = check_response_deadline(&mut ctx, 500, now_ms);
+    assert!(!exceeded);
+    assert!(ctx.cancel_cause.is_none());
+}
