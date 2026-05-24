@@ -276,6 +276,12 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "UsageRecord emit attempts by path (channel / closed)",
     },
+    // --- Billing robustness W3-T1 ---
+    MetricSpec {
+        name: "gw_billing_upstream_cancellation_total",
+        kind: MetricKind::Counter,
+        help: "Upstream cancellation events labelled by cause (client_close/deadline/upstream_err/route_abort)",
+    },
 ];
 
 pub fn describe_all() {

@@ -114,3 +114,9 @@ fn billing_w2_t7_must_deliver_metrics_registered() {
         "missing metric: gw_billing_emit_path_total"
     );
 }
+
+#[test]
+fn billing_w3_t1_upstream_cancellation_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_upstream_cancellation_total"));
+}

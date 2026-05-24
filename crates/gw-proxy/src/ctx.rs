@@ -102,6 +102,8 @@ pub struct ReqCtx {
     pub usage: UsageAccumulator,
     pub vendor_exposure: crate::billing_lifecycle::VendorExposure,
     pub attempt_index: u32,
+    pub cancel_observed_at_ms: Option<i64>,
+    pub cancel_cause: Option<crate::cancellation::CancelCause>,
     /// Token-count estimate from the request body (used by InflightLedger
     /// register to record the predicted spend before upstream replies).
     /// Populated by the freeze estimator when available; `None` otherwise.
@@ -273,6 +275,8 @@ impl ReqCtx {
             },
             vendor_exposure: crate::billing_lifecycle::VendorExposure::Idle,
             attempt_index: 0,
+            cancel_observed_at_ms: None,
+            cancel_cause: None,
             prompt_estimate_tokens: None,
             freeze_guard: None,
             stream_slot: None,
