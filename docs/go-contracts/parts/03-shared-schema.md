@@ -17,6 +17,7 @@ Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开�
 | `0005_proxy_nodes.sql` | `proxy_nodes`（tunnel-t T1，已 merged） |
 | `0006_auth_configs.sql` | `auth_configs`（T1-E 落地） |
 | `0007_management_tokens.sql` | `management_tokens`（B2，T1-D 落地） |
+| `0008_signature_secret.sql` | `api_keys.signature_secret BYTEA`（HMAC 独立密钥列，KEK 加密 at rest；S-proxy-core H-1） |
 
 ### 3.1.1 公共控制列（所有 entity 表）
 
@@ -100,6 +101,7 @@ deleted_at  TIMESTAMPTZ NULL
   "expires_at": null,            // RFC3339 / time::OffsetDateTime
   "signature_required": false,   // HMAC body signing 开关
   "signature_algo": "hmac_sha256",
+  "signature_secret": null,      // Option<Vec<u8>>，独立 HMAC 密钥；null 时签名不可用。KEK 加密 at rest（migration 0008）
   "force_capabilities": [],      // SmallVec<[String;4]>，caller-side 必需 capability
   "match_mode_exclusive": false
 }
@@ -180,6 +182,82 @@ deleted_at  TIMESTAMPTZ NULL
 - `upstream_request_filter` 注入 auth header 时若 `oauth.is_some()`,用 `access_token`(解密后)代替 `api_key`(参 gaps spec ADR-G3-2);
 - 临过期判定:`now >= access_expires_at - 60s` 仍使用现有 token,不主动 refresh,仅 emit metric `gw_oauth_token_near_expiry_total{vendor_key_id}`;
 - 上游 401 → `OAuthListener` 触发反向 `events:entity`(参 [parts/02 §2.4.3](../parts/02-go-as-consumer.md#243-vendor_keyoauth_failedoauth-失败通知))。
+
+### 3.2.5.2 Capability 字段契约（`forced_capabilities` / `exclusive_capability_match`）
+
+Migration 0004 同时在 `vendor_keys` 上引入了 **JSONB payload 字段**与**top-level 列**。Rust 端只读 JSONB；Go 端建索引、查询走 top-level 列。本节规定两侧的 schema 形态、索引激活、双写不变量。
+
+#### JSONB 形态
+
+`vendor_keys.payload` 中的两个字段：
+
+```json
+{
+  "forced_capabilities": ["streaming", "tool_use"],   // Vec<String>，default []
+  "exclusive_capability_match": false                  // bool，default false
+}
+```
+
+| 字段 | 类型 | 默认值 | Rust 权威类型 | 说明 |
+|------|------|--------|---------------|------|
+| `forced_capabilities` | JSON array of strings | `[]` | `Vec<String>` | channel-side advertised capability；`CapabilityResolver` 在路由阶段读取 |
+| `exclusive_capability_match` | JSON boolean | `false` | `bool` | `true` 时 resolver 仅在所有 required capability 全部命中时匹配；`false` 走宽松包含检查 |
+
+#### Top-level 列映射
+
+| Top-level 列 | PgSQL 类型 | 映射 |
+|---|---|---|
+| `forced_capabilities` | `JSONB` | 镜像 `payload.forced_capabilities` |
+| `exclusive_capability_match` | `BOOLEAN DEFAULT false` | 镜像 `payload.exclusive_capability_match` |
+
+#### Go 端索引激活
+
+```sql
+-- partial index：仅覆盖 exclusive_capability_match = true 的行（少数派）
+CREATE INDEX idx_vendor_keys_excl_cap
+    ON vendor_keys(exclusive_capability_match)
+    WHERE exclusive_capability_match = true;
+```
+
+Go 端查询 `WHERE exclusive_capability_match = true` 命中此 partial index，避免全表扫描。`forced_capabilities` 列无索引需求（Rust 不查 top-level，Go 端按需 JSONB `@>` 查询即可）。
+
+#### 双写不变量
+
+Go 写入 `vendor_keys` 时**必须**同时更新：
+
+1. `payload` JSONB 内的 `forced_capabilities` 与 `exclusive_capability_match`；
+2. top-level `forced_capabilities` 列与 `exclusive_capability_match` 列。
+
+两处**必须**语义一致。违反双写 → Rust 看到的 JSONB 与 Go 索引查询结果不一致，产生幽灵路由（Go 认为 key 是 exclusive 但 Rust 按 JSONB `false` 宽松匹配）或漏选（反向）。
+
+推荐写法（单条 UPDATE 原子保证）：
+
+```sql
+UPDATE vendor_keys
+   SET payload = jsonb_set(
+         jsonb_set(payload, '{forced_capabilities}', $caps::jsonb),
+         '{exclusive_capability_match}', $excl::jsonb
+       ),
+       forced_capabilities = $caps::jsonb,
+       exclusive_capability_match = $excl_bool,
+       version = version + 1,
+       updated_at = now()
+ WHERE id = $id;
+```
+
+#### 命名差异
+
+| 侧 | Entity | 字段名 | 类型 |
+|---|---|---|---|
+| Rust（channel-side） | `VendorKey` | `forced_capabilities` | `Vec<String>` |
+| Rust（caller-side） | `ApiKeyEntry` | `force_capabilities` | `SmallVec<[String;4]>` |
+| Go（caller-side） | `ApiKeyEntry` | `force_capabilities` | `[]string` |
+
+`VendorKey.forced_capabilities`（复数 `forced_`）与 `ApiKeyEntry.force_capabilities`（单数 `force_`）的命名/类型不对称是 **刻意的**，记录在 [`docs/architecture.md`](../architecture.md) §8 Deliberate behaviours。两者由不同 wave 引入（T4-B vs T0-C），不做追齐 rename。Go 端需保持各自表的字段名不变。
+
+#### 同步规则
+
+任何 Rust 侧对 `forced_capabilities` / `exclusive_capability_match` JSONB layout 的变更（字段名、类型、语义）**必须**同 PR 更新 `docs/go-contracts/`，参见 [`CLAUDE.md`](../../../CLAUDE.md) sync rule table "Cross-process touchpoint with Go" 行。
 
 ### 3.2.6 `model_groups.payload` — `ModelGroup`
 
@@ -513,6 +591,6 @@ Rust 端对应指标 `gateway_entity_*` / `gateway_vendor_key_decrypt_failures_t
 
 ## 3.9 未决问题
 
-1. `vendor_keys` 的 `forced_capabilities` / `exclusive_capability_match` top-level 列是否要 Rust 端用上（建索引查询）：当前未用，留 follow-up。
+1. `vendor_keys` 的 `forced_capabilities` / `exclusive_capability_match` top-level 列是否要 Rust 端用上（建索引查询）：**已规定，见 §3.2.5.2**。Rust 不查 top-level 列（仅 JSONB）；Go 端通过 partial index `idx_vendor_keys_excl_cap` 查询 `exclusive_capability_match = true`。双写不变量已落。
 2. PgSQL `deleted_at` 后多久可硬清理：本契约不规定；建议 ≥ 30 天 + 审计追溯。
 3. `gemini_file_mapping` 是否要进 Go 报表：当前仅 Rust 内部使用，Go 不接触；如需对外暴露需新增契约 part。

@@ -60,7 +60,7 @@ Business:
   gw-health        ◄── gw-adapter, gw-routing, gw-proxy, gw-gateway
   gw-adapter       ◄── (wired into gw-proxy in Phase 3)
   gw-routing       ◄── gw-proxy, gw-gateway
-  gw-capability    ◄── (resolver injection pending — wave-7 T6-A)
+  gw-capability    ◄── gw-proxy, gw-gateway
   gw-tunnel-client ◄── gw-gateway (feature="tunnel")
 
 Execution:
@@ -249,6 +249,7 @@ Pending lints (uncomment when target phase lands):
 | **must-deliver (`usage:records`) vs drop-on-outage (`usage:detailed`) are strictly separated.** `usage:records` mpsc full → synchronous XADD bypass (may briefly block `logging` filter); `usage:detailed` mpsc full → drop immediately. Different strategies reflect different invariants (accounting must arrive; archival may be lost). | Coupling billing reliability to observability reliability would require observability to never fail, an unreasonable constraint. Strict separation preserves both subsystem invariants. | [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`](superpowers/specs/2026-05-24-billing-robustness-design.md) §12, item 3 |
 | **T0 emit-lag watchdog does not self-heal.** When settled `UsageRecord` is not emitted within 60s, the watchdog increments `gw_billing_emit_lag_t0_total` and logs error but **does not auto-emit fallback**. | Self-healing would double-count with the eventual real emit; operator intervention to investigate root cause is preferable. Real account state is preserved in `InflightLedger` for 24h. | [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`](superpowers/specs/2026-05-24-billing-robustness-design.md) §12, item 4 |
 | **Deduplication of `UsageRecord` is delegated to Go.** Rust may emit multiple records for the same `(request_id, attempt_index)` (crash-recovery fallback + true emit coexisting), without idempotency check. Go settler deduplicates by provenance priority. | Rust-side idempotency requires cross-process coordination, higher complexity. Go-side dedup with provenance cascade is simpler and works correctly regardless of Rust emit ordering. | [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`](superpowers/specs/2026-05-24-billing-robustness-design.md) §12, item 5 |
+| **HMAC hard cutover**: `ApiKeyEntry.signature_secret` is the sole HMAC secret field. The v1 `hash-as-HMAC` path is removed. No dual-key fallback — existing deployments must populate `signature_secret` before enabling HMAC. Breaking change per overview §1.3. | `hash` served double duty (credential verify + HMAC), creating a covert channel where changing the API-key secret also rotated the HMAC key. `signature_secret` decouples the two concerns. Hard cutover avoids the complexity and risk of a dual-key transition period. | `crates/gw-proxy/src/filters/request.rs` step 3, `crates/gw-auth/src/signature.rs`, S-proxy-core H-1 |
 
 ## 9. Known gaps (closed by `feature/known-gaps-closure`)
 
@@ -272,7 +273,6 @@ The 13 gaps G1-G13 catalogued in [`docs/superpowers/specs/2026-05-21-known-gaps-
 
 ### 9.1 v2 follow-ups
 
-- **G6**: dedicated `signature_secret` field on `ApiKeyEntry` (currently reuses `hash` as the HMAC secret — v1.5 compromise).
 - **G7**: workspace-global `signature_required` toggle (ADR-G7-2; out of scope for v1.5). Stash the decompressed body so the codec parse step reuses it (the compressed-body parse gap — see §8 Deliberate behaviours).
 - **G8**: direct wire-to-wire codegen (codec-s3 N²) replacing the IR round-trip; multi-event SSE buffering across Pingora chunk boundaries. *(Cross-protocol non-streaming response body re-render landed in S-codec v2, 2026-05-24; entry trimmed accordingly.)*
 - **G11**: three-layer fallback (in-memory + on-disk file + periodic drainer + startup recovery) → billing-c-delta.

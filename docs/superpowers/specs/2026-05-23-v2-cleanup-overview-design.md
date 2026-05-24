@@ -337,7 +337,7 @@ L-1 的 sub-spec 必须含一个故意"Redis 下线 → usage:detailed 投递失
 - [x] S-codec brainstorming → spec → plan → impl → 合入(2026-05-24)
 - [x] S-routing brainstorming → spec → plan → impl → 合入(2026-05-24)
 - [x] S-ledger 同上(2026-05-24)
-- [ ] S-proxy-core 同上
+- [x] S-proxy-core 同上(2026-05-24)
 - [ ] S-admin-tunnel 同上
 - [x] S-contracts(Go 文档)同上(2026-05-24)
 - [ ] 6 个 sub-spec 全部合入后,开启 §6.3 grep gate(同 PR 验证零命中)
