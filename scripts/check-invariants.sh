@@ -27,7 +27,7 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=1; }
 # Execution crates MUST NOT depend on each other.
 # ---------------------------------------------------------------------------
 echo "[crate_layering] supporting-layer must not depend on business/execution crates"
-SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-auth gw-ledger"
+SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-auth gw-ledger gw-task-runtime"
 FORBIDDEN_FOR_SUPPORTING="gw-adapter gw-health gw-task gw-task-runtime gw-proxy gw-billing gw-gateway gw-task-worker"
 if command -v cargo >/dev/null && command -v jq >/dev/null; then
   meta="$(cargo metadata --no-deps --format-version 1 2>/dev/null)"
@@ -93,8 +93,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # no_proxy_worker_dep (§5.2) — gw-proxy and gw-task-runtime must not interdepend.
-# (gw-task-runtime does not exist yet; this trivially holds but we assert it so
-#  the check is live the moment that crate appears.)
+# (gw-task-runtime is a SUPPORTING layer crate; this check is now non-trivially-true.)
 # ---------------------------------------------------------------------------
 echo "[no_proxy_worker_dep] gw-proxy must not depend on gw-task-runtime"
 if grep -rn 'gw-task-runtime' crates/gw-proxy/Cargo.toml 2>/dev/null; then
@@ -106,7 +105,7 @@ fi
 # ---------------------------------------------------------------------------
 # no_worker_addr_config / no_gateway_addr_config (§5.2, C-8)
 # gateway config/code must not name a worker address, and vice versa.
-# gw-task-worker does not exist yet, so only the gateway side is checkable now.
+# gw-task-runtime exists as a SUPPORTING crate; only the gateway side is checked here.
 # ---------------------------------------------------------------------------
 echo "[no_worker_addr_config] gateway must not hardcode a worker host/port"
 if grep -rnE '(^|[^[:alnum:]_])(worker[_-]?host|worker[_-]?port|TASK_WORKER_(URL|HOST))([^[:alnum:]_]|$)' config/ crates/gw-gateway 2>/dev/null; then

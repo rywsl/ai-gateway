@@ -9,6 +9,7 @@ members = [
     "crates/gw-adapter",
     "crates/gw-routing",
     "crates/gw-ledger",
+    "crates/gw-task-runtime",
     "crates/gw-health",
     "crates/gw-capability",
     "crates/gw-proxy",

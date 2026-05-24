@@ -18,7 +18,7 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 ├────────── Business ───────────┤  gw-adapter, gw-health, gw-routing,
 │   may depend on ↓             │  gw-capability, gw-tunnel-client
 ├────────── Supporting ─────────┤  gw-core, gw-codec, gw-codec-macros,
-│   type / mechanism only        │  gw-store, gw-auth, gw-ledger
+│   type / mechanism only        │  gw-store, gw-auth, gw-ledger, gw-task-runtime
 └───────────────────────────────┘
 ```
 
@@ -34,6 +34,7 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 | `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (9 Moka caches with cold-load chain), `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
 | `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor RPM, ADR-024 hard caps, HMAC signature verify, IP allow/blocklist, model-permission regex w/ ReDoS budget, management-path detect. |
 | `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process `frozen_micro`), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction. |
+| `gw-task-runtime` | Supporting | `TaskFreezeRelease` trait and `RedisTaskFreezeRelease` stub — Lua-driven atomic freeze/release for task-scoped deductions. |
 | `gw-adapter` | Business | `UpstreamAdapter` trait (vendor-specific outbound rewrite hooks), `UpstreamErrorAnalyzer` trait, `ErrorOutcome`. |
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
 | `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
@@ -54,6 +55,7 @@ Supporting:
                        gw-tunnel-client, gw-proxy, gw-gateway
   gw-auth          ◄── gw-capability, gw-proxy, gw-gateway
   gw-ledger        ◄── gw-proxy, gw-gateway
+  gw-task-runtime  ◄── (T2 fills dependents)
 
 Business:
   gw-health        ◄── gw-adapter, gw-routing, gw-proxy, gw-gateway

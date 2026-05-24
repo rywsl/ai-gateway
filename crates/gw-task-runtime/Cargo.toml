@@ -1,0 +1,15 @@
+[package]
+name = "gw-task-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gw-core = { path = "../gw-core" }
+gw-store = { path = "../gw-store" }
+async-trait.workspace = true
+anyhow.workspace = true
+fred.workspace = true
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time", "macros"] }
+tracing.workspace = true
