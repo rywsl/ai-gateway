@@ -465,6 +465,25 @@ pub async fn rewrite_request(
 ) -> Result<()> {
     ctx.phase_start("upstream_request_filter");
 
+    if ctx.mgmt {
+        let user_id = ctx
+            .mgmt_user_id
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorType::Custom("gw_mgmt_missing_user_id")))?;
+        let scope = ctx
+            .mgmt_scope
+            .ok_or_else(|| Error::new(ErrorType::Custom("gw_mgmt_missing_scope")))?;
+        let scope = match scope {
+            gw_core::entity::MgmtScope::UserSelf => "user_self",
+            gw_core::entity::MgmtScope::AdminRead => "admin_read",
+            gw_core::entity::MgmtScope::AdminFull => "admin_full",
+        };
+        let _ = upstream_request.insert_header("x-gateway-mgmt-user-id", user_id.as_ref());
+        let _ = upstream_request.insert_header("x-gateway-mgmt-scope", scope);
+        ctx.phase_end();
+        return Ok(());
+    }
+
     let client_codec = ctx
         .client_codec
         .as_ref()

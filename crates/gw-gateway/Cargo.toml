@@ -51,6 +51,7 @@ rustls = "0.23"
 tikv-jemallocator.workspace = true
 secrecy.workspace = true
 hex.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 # Phase 6 e2e + failure-mode integration tests. Most of these are pulled in

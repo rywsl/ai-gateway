@@ -28,6 +28,7 @@ use pingora_proxy::{ProxyHttp, Session};
 use rand::RngCore;
 use std::sync::Arc;
 use std::time::Duration;
+use url::Url;
 
 /// Maximum cross-key connect retries per request (G10). At
 /// `MAX_CONNECT_RETRIES = 2` a request can try at most three keys before
@@ -101,6 +102,7 @@ pub struct LlmGateway {
     pub ledger: Arc<Ledger>,
     pub counters: Arc<CounterStore>,
     pub global_rpm: u32,
+    pub admin_upstream_url: Url,
     /// When `true`, parse the client IP from the `X-Forwarded-For` header
     /// (using the first / left-most entry, which represents the original
     /// client per RFC 7239 convention). When `false`, use the L4 socket
@@ -150,6 +152,7 @@ impl LlmGateway {
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
         global_rpm: u32,
+        admin_upstream_url: Url,
         trust_xff: bool,
         signature_required: bool,
         jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
@@ -170,6 +173,7 @@ impl LlmGateway {
             ledger,
             counters,
             global_rpm,
+            admin_upstream_url,
             trust_xff,
             signature_required,
             jwt_validator,
@@ -313,6 +317,23 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         ctx.phase_start("upstream_peer");
+        if ctx.mgmt {
+            let url = &self.admin_upstream_url;
+            let host = url
+                .host_str()
+                .ok_or_else(|| Error::new(ErrorType::Custom("gw_admin_upstream_no_host")))?;
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| Error::new(ErrorType::Custom("gw_admin_upstream_no_port")))?;
+            let tls = match url.scheme() {
+                "http" => false,
+                "https" => true,
+                _ => return Err(Error::new(ErrorType::Custom("gw_admin_upstream_bad_scheme"))),
+            };
+            let peer = HttpPeer::new(format!("{host}:{port}"), tls, host.to_string());
+            ctx.phase_end();
+            return Ok(Box::new(peer));
+        }
         let peer = filters::upstream::pick_peer(
             session,
             ctx,

@@ -89,6 +89,7 @@ fn llm_gateway_constructor_signature_smoke() {
             ledger,
             counters,
             global_rpm,
+            "http://localhost:3000".parse().unwrap(),
             trust_xff,
             false,
             jwt_validator,

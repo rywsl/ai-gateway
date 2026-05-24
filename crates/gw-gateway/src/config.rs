@@ -20,6 +20,8 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub server: ServerCfg,
+    #[serde(default)]
+    pub admin: AdminCfg,
     pub redis: RedisCfg,
     pub pgsql: PgCfg,
     pub ratelimit: RateLimitCfg,
@@ -50,6 +52,24 @@ pub struct ServerCfg {
     pub business_port: u16,
     pub metrics_port: u16,
     pub health_port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminCfg {
+    #[serde(default = "default_admin_upstream_url")]
+    pub upstream_url: String,
+}
+
+fn default_admin_upstream_url() -> String {
+    "http://localhost:3000".to_string()
+}
+
+impl Default for AdminCfg {
+    fn default() -> Self {
+        Self {
+            upstream_url: default_admin_upstream_url(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -92,6 +92,7 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 | Table | Keys / Purpose | Notes |
 |-------|----------------|-------|
 | `[server]` | `business_port` (8000), `metrics_port` (9090), `health_port` (8080) | |
+| `[admin]` | `upstream_url` (`http://localhost:3000`) | Verified `/admin/*` requests are reverse-proxied to this Go control-plane upstream. |
 | `[redis]` | URL, pool size | |
 | `[pgsql]` | URL, max connections | |
 | `[ratelimit]` | Workspace `global_rpm` ceiling (per-user lives in DB) | |

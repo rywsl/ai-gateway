@@ -149,6 +149,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         ledger.clone(),
         counters.clone(),
         100_000,
+        "http://localhost:3000".parse().unwrap(),
         false,
         false,
         None,

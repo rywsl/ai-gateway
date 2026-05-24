@@ -145,24 +145,9 @@ pub async fn run(
         }
 
         // Token verified; ctx.mgmt_user_id / mgmt_scope are populated.
-        // The Rust gateway does not host a mgmt-routing upstream in v1 —
-        // /admin/* business handlers live in the Go control plane. Until
-        // the proxy-to-Go mgmt route lands we terminate here with 501 so
-        // the request does not fall through to the LLM business path
-        // below. Observability traces still see the verified user.
-        let err = ErrorIR {
-            category: ErrorCategory::GatewayInternal,
-            status: 501,
-            upstream_status: None,
-            code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
-            message: Cow::Borrowed("mgmt routing not yet wired"),
-            retryable: false,
-            upstream_raw: None,
-            request_id: "",
-            retry_after_secs: None,
-        };
-        emit_and_bail(session, ctx, &err, &req_id_for_mgmt).await?;
-        unreachable!()
+        // Continue to `upstream_peer`, which routes management traffic to the
+        // Go control plane instead of the LLM vendor path below.
+        return Ok(false);
     }
 
     // ---------------------------------------------------------------------
