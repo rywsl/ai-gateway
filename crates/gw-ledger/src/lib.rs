@@ -12,6 +12,6 @@ pub mod usage;
 pub use flusher::Ledger;
 pub use freeze::{FreezeGuard, FreezeKind, RequestFreeze, TaskFreeze};
 pub use gw_core::permissions::MarkupChainSnapshot;
-pub use usage::{UsageRecord, UsageSource, UsageStatus};
+pub use usage::{UsageRecord, UsageStatus, VendorExposureState};
 
 pub mod detailed_archive;

@@ -78,9 +78,7 @@ pub fn run(
     // `upstream_codec.parse_response` so `ctx.usage` is populated from the
     // wire instead of leaving the logging filter to fall through to the
     // freeze-time estimate (ADR-B1-3 / T2-B). Decode failure increments
-    // `gw_codec_parse_response_failure_total` and leaves `ctx.usage` at zero;
-    // the logging filter already falls back to `UsageSource::Estimated` when
-    // `output_tokens == 0`.
+    // `gw_codec_parse_response_failure_total` and leaves `ctx.usage` at zero.
     //
     // Cross-protocol non-stream (S-codec T6): when the client wire form
     // differs from the upstream wire form, `handle_non_stream_chunk` also
@@ -348,6 +346,43 @@ fn apply_extracted_to_ctx(e: &gw_codec::usage_extractor::ExtractedUsage, ctx: &m
     if e.values.multimodal_input_tokens.is_some() {
         ctx.usage.multimodal_input_tokens = e.values.multimodal_input_tokens;
     }
+    copy_provenance(e, ctx);
+}
+
+/// Promote per-dimension provenance: only advance if the incoming tag has
+/// higher confidence. Order: UpstreamFinal > UpstreamPartial > Estimated >
+/// CrashFallback > Unknown.
+fn copy_provenance(e: &gw_codec::usage_extractor::ExtractedUsage, ctx: &mut ReqCtx) {
+    use gw_core::usage::ProvenanceTag;
+    fn rank(t: ProvenanceTag) -> u8 {
+        match t {
+            ProvenanceTag::UpstreamFinal => 4,
+            ProvenanceTag::UpstreamPartial => 3,
+            ProvenanceTag::Estimated => 2,
+            ProvenanceTag::CrashFallback => 1,
+            ProvenanceTag::Unknown => 0,
+        }
+    }
+    fn promote(dst: &mut ProvenanceTag, src: ProvenanceTag) {
+        if rank(src) > rank(*dst) {
+            *dst = src;
+        }
+    }
+    promote(&mut ctx.usage_provenance.input, e.provenance.input);
+    promote(&mut ctx.usage_provenance.output, e.provenance.output);
+    promote(
+        &mut ctx.usage_provenance.cache_read,
+        e.provenance.cache_read,
+    );
+    promote(
+        &mut ctx.usage_provenance.cache_creation,
+        e.provenance.cache_creation,
+    );
+    promote(&mut ctx.usage_provenance.thinking, e.provenance.thinking);
+    promote(
+        &mut ctx.usage_provenance.multimodal_input,
+        e.provenance.multimodal_input,
+    );
 }
 
 /// True iff the non-stream response needs cross-protocol re-render — i.e.
@@ -383,9 +418,7 @@ fn is_cross_protocol(ctx: &ReqCtx) -> bool {
 ///
 /// Failure semantics for usage extraction: any error from `parse_response`
 /// increments the counter `gw_codec_parse_response_failure_total{codec,
-/// upstream_status}` and leaves `ctx.usage` at its default zero. The logging
-/// filter already maps `output_tokens == 0` to `UsageSource::Estimated`, so
-/// no extra plumbing is needed downstream.
+/// upstream_status}` and leaves `ctx.usage` at its default zero.
 pub(crate) fn handle_non_stream_chunk(
     chunk: Option<&Bytes>,
     end_of_stream: bool,
@@ -584,9 +617,8 @@ mod non_stream_branch_tests {
         let mut ctx = make_ctx_non_stream();
         let body = Bytes::from_static(b"not json");
         handle_non_stream_chunk(Some(&body), true, &mut ctx);
-        // usage stays at zero — the logging filter falls back to
-        // UsageSource::Estimated when no vendor-observed dim has a value
-        // (input/output/cached/cache_creation all zero or None).
+        // usage stays at zero — the logging filter emits Unknown provenance tags
+        // when no vendor-observed dim has a value.
         assert_eq!(ctx.usage.input_tokens, 0);
         assert_eq!(ctx.usage.output_tokens, 0);
         // S-codec T6: on parse failure the helper repopulates

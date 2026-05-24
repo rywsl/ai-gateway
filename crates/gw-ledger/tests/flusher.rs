@@ -7,7 +7,7 @@ use fred::interfaces::StreamsInterface;
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
-use gw_ledger::usage::{UsageRecord, UsageSource, UsageStatus};
+use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
 use gw_store::redis_client::RedisCtx;
 use std::time::Duration;
@@ -35,8 +35,9 @@ fn make_record() -> UsageRecord {
             output_tokens: 50,
             ..Default::default()
         },
-        usage_source: UsageSource::Upstream,
-        retry_count: 0,
+        attempt_index: 0,
+        vendor_exposure_state: VendorExposureState::Settled,
+        usage_provenance: Default::default(),
         latency_ms: 100,
         ttft_ms: None,
         is_stream: false,

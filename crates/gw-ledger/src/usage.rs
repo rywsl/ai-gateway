@@ -8,8 +8,37 @@
 
 use gw_core::ids::{ApiKeyId, KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::MarkupChainSnapshot;
-use gw_core::usage::UsageSnapshot;
-use serde::Serialize;
+use gw_core::usage::{ProvenanceTag, UsageSnapshot};
+use serde::{Deserialize, Serialize};
+
+/// How far the vendor exposure progressed before the request ended.
+/// Used by Go to decide whether to bill (Settled) or reconcile (Terminated /
+/// CrashFallback). Replaces the old `UsageSource` field (W4-T1).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VendorExposureState {
+    /// Upstream sent the final usage event; stream/response fully consumed.
+    #[default]
+    Settled,
+    /// Upstream received the request but connection was cut before a final
+    /// usage event — Go must reconcile against the inflight hash.
+    Terminated,
+    /// InflightLedger reconciler produced the usage record on crash recovery.
+    CrashFallback,
+}
+
+/// Per-dimension provenance snapshot frozen at UsageRecord emission time.
+/// Each field records the highest-confidence `ProvenanceTag` seen across all
+/// extraction passes for that usage dimension.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct UsageProvenance {
+    pub input: ProvenanceTag,
+    pub output: ProvenanceTag,
+    pub cache_read: ProvenanceTag,
+    pub cache_creation: ProvenanceTag,
+    pub thinking: ProvenanceTag,
+    pub multimodal_input: ProvenanceTag,
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct UsageRecord {
@@ -35,12 +64,20 @@ pub struct UsageRecord {
     pub error_code: Option<String>,
     pub http_status: u16,
 
-    // --- Usage (6-dim) + source ---
+    // --- Usage (6-dim) + provenance ---
     pub usage: UsageSnapshot,
-    pub usage_source: UsageSource,
+
+    // --- Attempt / exposure (W4-T1) ---
+    /// 0-based index of the attempt that produced this record. Matches
+    /// `inflight:{instance}:{request_id}:{attempt_index}` in Redis.
+    pub attempt_index: u32,
+    /// How far the vendor exposure progressed; determines Go reconciliation
+    /// path (bill / reconcile / crash-recover).
+    pub vendor_exposure_state: VendorExposureState,
+    /// Per-dimension confidence level frozen at emission time.
+    pub usage_provenance: UsageProvenance,
 
     // --- Timing ---
-    pub retry_count: u32,
     pub latency_ms: u32,
     pub ttft_ms: Option<u32>,
     pub is_stream: bool,
@@ -72,15 +109,6 @@ pub enum UsageStatus {
     Cancelled,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageSource {
-    Upstream,
-    Estimated,
-    FallbackConservative,
-    Partial,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,8 +135,9 @@ mod tests {
                 output_tokens: 50,
                 ..Default::default()
             },
-            usage_source: UsageSource::Upstream,
-            retry_count: 0,
+            attempt_index: 0,
+            vendor_exposure_state: VendorExposureState::Settled,
+            usage_provenance: UsageProvenance::default(),
             latency_ms: 250,
             ttft_ms: Some(80),
             is_stream: true,
@@ -118,12 +147,23 @@ mod tests {
             operation_id: None,
         };
         let s = serde_json::to_string(&rec).unwrap();
-        // Smoke: critical fields appear; the retired field is GONE.
+        // Smoke: critical fields appear; the retired fields are GONE.
         assert!(s.contains("\"usage\""));
         assert!(s.contains("\"input_tokens\":100"));
         assert!(s.contains("\"markup_chain_snapshot\""));
         assert!(s.contains("\"estimate_pricing_version\":0"));
         assert!(!s.contains("cost_micro"), "Rust must not emit cost_micro");
+        assert!(
+            !s.contains("\"usage_source\""),
+            "usage_source must be removed"
+        );
+        assert!(
+            !s.contains("\"retry_count\""),
+            "retry_count must be removed"
+        );
+        assert!(s.contains("\"attempt_index\":0"));
+        assert!(s.contains("\"vendor_exposure_state\":\"settled\""));
+        assert!(s.contains("\"usage_provenance\""));
         // operation_id: None must be omitted via skip_serializing_if.
         assert!(
             !s.contains("operation_id"),

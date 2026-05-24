@@ -4,22 +4,9 @@
 
 use gw_core::usage::UsageSnapshot;
 
-/// Per-dimension confidence level for a single usage value.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProvenanceTag {
-    /// Vendor sent terminal usage event/payload.
-    UpstreamFinal,
-    /// Parsed mid-stream; never saw final.
-    UpstreamPartial,
-    /// Fell back to tokenizer/estimate.
-    Estimated,
-    /// InflightLedger reconciler-emitted.
-    CrashFallback,
-    /// Upstream produced nothing or context is half-residual.
-    #[default]
-    Unknown,
-}
+/// Re-exported from `gw_core::usage` so callers in both `gw-codec` and
+/// `gw-ledger` import from a single canonical location.
+pub use gw_core::usage::ProvenanceTag;
 
 /// Result of one extraction pass over a `ResponseIR` (non-stream) or
 /// `StreamEventIR` (one SSE chunk).

@@ -242,7 +242,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_billing_emit_total",
         kind: MetricKind::Counter,
-        help: "UsageRecord emit count, labelled by usage_source (W4: by vendor_exposure_state + provenance_output)",
+        help: "UsageRecord emit count, labelled by vendor_exposure_state (W4-T1)",
     },
     MetricSpec {
         name: "gw_billing_provenance_total",

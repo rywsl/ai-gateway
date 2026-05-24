@@ -102,6 +102,10 @@ pub struct ReqCtx {
     pub usage: UsageAccumulator,
     pub vendor_exposure: crate::billing_lifecycle::VendorExposure,
     pub attempt_index: u32,
+    /// Per-dimension provenance accumulator: promoted by each extraction pass
+    /// via `copy_provenance` in `filters/response.rs`. Frozen into the
+    /// `UsageRecord` at logging time.
+    pub usage_provenance: gw_ledger::usage::UsageProvenance,
     pub cancel_observed_at_ms: Option<i64>,
     pub cancel_cause: Option<crate::cancellation::CancelCause>,
     /// W3-T5: set to `true` when the request enters the cancel grace window
@@ -279,6 +283,7 @@ impl ReqCtx {
             },
             vendor_exposure: crate::billing_lifecycle::VendorExposure::Idle,
             attempt_index: 0,
+            usage_provenance: gw_ledger::usage::UsageProvenance::default(),
             cancel_observed_at_ms: None,
             cancel_cause: None,
             cancel_grace_active: false,

@@ -5,7 +5,7 @@ use crate::ctx::ReqCtx;
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
 use gw_health::{KeyHealthStore, OutcomeKind};
-use gw_ledger::usage::{UsageRecord, UsageSource, UsageStatus};
+use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::{FreezeGuard, Ledger};
 use gw_store::counter_store::daily_tokens_key;
 use gw_store::CounterStore;
@@ -220,16 +220,17 @@ pub async fn run(
                 thinking_tokens: ctx.usage.thinking_tokens,
                 multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
             },
-            usage_source: if ctx.usage.input_tokens > 0
-                || ctx.usage.output_tokens > 0
-                || ctx.usage.cached_tokens.unwrap_or(0) > 0
-                || ctx.usage.cache_creation_tokens.unwrap_or(0) > 0
-            {
-                UsageSource::Upstream
-            } else {
-                UsageSource::Estimated
+            attempt_index: ctx.attempt_index,
+            vendor_exposure_state: match ctx.vendor_exposure {
+                crate::billing_lifecycle::VendorExposure::Settled => VendorExposureState::Settled,
+                crate::billing_lifecycle::VendorExposure::Terminated => {
+                    VendorExposureState::Terminated
+                }
+                // Idle / Sent / Streaming should not reach logging without
+                // transition_to(Terminated) above, but guard defensively.
+                _ => VendorExposureState::Terminated,
             },
-            retry_count: ctx.retry_count,
+            usage_provenance: ctx.usage_provenance,
             latency_ms,
             ttft_ms,
             is_stream: ctx.is_stream,
@@ -254,7 +255,7 @@ pub async fn run(
         // -----------------------------------------------------------------
         metrics::counter!(
             "gw_billing_emit_total",
-            "usage_source" => format!("{:?}", rec.usage_source).to_lowercase(),
+            "vendor_exposure_state" => format!("{:?}", rec.vendor_exposure_state).to_lowercase(),
         )
         .increment(1);
 
