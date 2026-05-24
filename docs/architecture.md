@@ -33,8 +33,8 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 | `gw-codec` | Supporting | `ProtocolCodec` trait + OpenAI / Anthropic / Gemini codecs, same-protocol passthrough fast path, cross-protocol IR re-render, SSE accumulator, gzip/brotli compression, stream-policy truth table. |
 | `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (9 Moka caches with cold-load chain), `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
 | `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor RPM, ADR-024 hard caps, HMAC signature verify, IP allow/blocklist, model-permission regex w/ ReDoS budget, management-path detect. |
-| `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process `frozen_micro`), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction. |
-| `gw-task-runtime` | Supporting | `TaskFreezeRelease` trait and `RedisTaskFreezeRelease` stub — Lua-driven atomic freeze/release for task-scoped deductions. |
+| `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process request `frozen_micro`; task freezes delegate to `TaskFreezeRelease`), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction. |
+| `gw-task-runtime` | Supporting | `TaskFreezeRelease` trait and `RedisTaskFreezeRelease` — Lua-driven atomic freeze/release for task-scoped deductions. |
 | `gw-adapter` | Business | `UpstreamAdapter` trait (vendor-specific outbound rewrite hooks), `UpstreamErrorAnalyzer` trait, `ErrorOutcome`. |
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
 | `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
@@ -54,8 +54,8 @@ Supporting:
   gw-store         ◄── gw-auth, gw-routing, gw-ledger, gw-capability,
                        gw-tunnel-client, gw-proxy, gw-gateway
   gw-auth          ◄── gw-capability, gw-proxy, gw-gateway
+  gw-task-runtime  ◄── gw-ledger
   gw-ledger        ◄── gw-proxy, gw-gateway
-  gw-task-runtime  ◄── (T2 fills dependents)
 
 Business:
   gw-health        ◄── gw-adapter, gw-routing, gw-proxy, gw-gateway
@@ -149,6 +149,7 @@ Migrations live at `crates/gw-store/migrations/`. **Not auto-applied** — run `
 | `events:counter` | Counter event echo (Phase 5) | (deferred) | `StreamConsumer` (observability only in v1) |
 | `usage:records` | Billing records | `Ledger` flusher (XADD batched) | Go billing service |
 | `usage:detailed` | Wire-fidelity per-surface archive. 5 entries per request (downstream/upstream × request/response + summary). `encoding` ∈ {raw,lz4,zstd}+json picked by size. Headers + bodies stored raw (no redaction). XADD MAXLEN bounds Redis memory; Go drainer is mandatory consumer for 180d retention. Drop-on-outage (no DLQ). See [`detailed-log-complete-design`](superpowers/specs/2026-05-23-detailed-log-complete-design.md). | `DetailedFlusher` (async pool, per-surface XADD) | Go drainer (mandatory) |
+| `{user:<uid>}:tasks:leases`, `{user:<uid>}:entity:task:<task_id>`, `{user:<uid>}:counter:task_frozen_micro` | Task freeze release transaction. `RedisTaskFreezeRelease` runs one Lua `EVALSHA`/`EVAL`: `ZREM` lease; if present, `HSET status=released` and `HINCRBY frozen_micro -<frozen>`. The `{user:<uid>}` hash-tag keeps all keys in one Redis Cluster slot. | `gw-task-runtime` via `TaskFreeze::release()` | Gateway/task runtime task paths |
 | (in-process) | Sticky assignment | `Sticky` strategy | `Sticky` strategy. G12 (T2-C) moved bindings to an in-process `moka::sync::Cache` (`time_to_live = 30 min`, `max_capacity = 100_000`, LRU eviction on overflow); no Redis namespace is used. |
 | `jwt:blacklist:*` | JWT revocation (T1-C) | Control plane | `RedisJwtBlacklist` (with `FailMode::ClosedOnError` / `OpenOnError`) |
 | `lock:*`, `key_health:*`, `circuit:*`, `dedup:*` | Reserved for Phase 5+ | — | — |

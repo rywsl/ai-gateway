@@ -68,7 +68,7 @@ rand = "0.8"
 # 其余 TLS 栈（reqwest / sqlx / tokio-tungstenite / e2e-fake-upstream）同源。
 pingora = { version = "0.8", features = ["rustls"] }
 pingora-proxy = { version = "0.8", features = ["rustls"] }
-fred = { version = "9", features = ["metrics"] }
+fred = { version = "9", features = ["metrics", "i-scripts", "i-sorted-sets"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "json"] }
 jsonwebtoken = "9"
 governor = "0.7"

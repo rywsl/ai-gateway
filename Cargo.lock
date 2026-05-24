@@ -1805,6 +1805,7 @@ dependencies = [
  "fred",
  "gw-core",
  "gw-store",
+ "gw-task-runtime",
  "lz4_flex",
  "metrics",
  "serde",
@@ -1906,6 +1907,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "gw-task-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fred",
+ "gw-core",
+ "gw-store",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -3,7 +3,10 @@
 //! Provides the [`TaskFreezeRelease`] trait and a Redis-backed implementation
 //! ([`RedisTaskFreezeRelease`]) for releasing frozen task balances.
 
+mod release;
+
 pub use gw_core::ids::UserId;
+pub use release::{RedisTaskFreezeRelease, TASK_FREEZE_RELEASE_LUA};
 
 /// Outcome of a task freeze release operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +30,4 @@ pub trait TaskFreezeRelease: Send + Sync {
         task_id: &str,
         frozen_amount: u64,
     ) -> Result<ReleaseOutcome, anyhow::Error>;
-}
-
-/// Redis-backed implementation of [`TaskFreezeRelease`].
-///
-/// Uses Lua scripts for atomic check-and-release semantics.
-// T2 fills the implementation
-pub struct RedisTaskFreezeRelease {
-    _inner: (),
 }

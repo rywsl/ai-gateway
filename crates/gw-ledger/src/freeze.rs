@@ -7,21 +7,15 @@
 //!   Constructed before upstream send; released (idempotent) by the
 //!   `logging` filter once the request is settled, or by `Drop` on a
 //!   cancellation path.
-//! - [`TaskFreeze`] — placeholder for the task path. The real release
-//!   (`HINCRBY task_frozen_micro -frozen`, atomic with `entity:task` status
-//!   transition and `ZREM tasks:leases`) is implemented by `gw-task-runtime`
-//!   in Phase 6. The 1b stub does nothing on release; constructing one is
-//!   currently used only by type-system smoke tests.
+//! - [`TaskFreeze`] — used by the task path. Release dispatches to an
+//!   injected async releaser that atomically removes the lease, marks the task
+//!   released, and decrements the task frozen counter.
 //!
-//! What Phase 1b deliberately does NOT do (deferred to Phase 5/6):
-//!
-//! - Async `HINCRBY counter:user:<uid>:frozen_micro` to Redis (C-γ
-//!   §ADR-Cγ-3): in-process atomic only for now.
-//! - Lua-driven Task release path (C-γ Phase 6).
-//! - Writing `deducted_micro`: **never** — that's Go's exclusive write
-//!   per C-γ §ADR-Cγ-1.
+//! This module never writes `deducted_micro`: Go is the exclusive writer per
+//! C-γ §ADR-Cγ-1.
 
 use gw_core::ids::UserId;
+use gw_task_runtime::TaskFreezeRelease;
 use gw_store::deduction::{DeductionState, DEDUCT};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -57,8 +51,6 @@ pub struct RequestFreeze {
 impl RequestFreeze {
     /// Reserve `amount` micro-units against the user's `frozen_micro`.
     /// The returned guard MUST be released (explicitly or via `Drop`).
-    // TODO(memory): DEDUCT entries persist for the process lifetime; periodic
-    // GC of zero-state entries belongs to a follow-up under C-γ.
     pub fn new(uid: UserId, amount: u64) -> Self {
         let state = DEDUCT
             .entry(uid.clone())
@@ -123,17 +115,31 @@ impl Drop for RequestFreeze {
     }
 }
 
-/// Phase 1b placeholder. The real implementation in Phase 6 calls a Lua
-/// script that atomically updates `counter:user:<uid>:task_frozen_micro`,
-/// the `entity:task:<id>` status field, and `tasks:leases`.
-///
-/// In 1b this exists only so the trait has two impls and so dependent
-/// crates can name the type. Construction is restricted to `gw-task-runtime`
-/// in Phase 6 — there is no public constructor here.
+/// Per-task freeze. Release is delegated to the injected task runtime releaser
+/// so the synchronous guard API can remain shared with request freezes.
 pub struct TaskFreeze {
     pub(crate) uid: UserId,
+    pub(crate) task_id: String,
     pub(crate) freeze_amount: u64,
     pub(crate) released: AtomicBool,
+    pub(crate) releaser: Option<Arc<dyn TaskFreezeRelease>>,
+}
+
+impl TaskFreeze {
+    pub fn new(
+        uid: UserId,
+        task_id: impl Into<String>,
+        amount: u64,
+        releaser: Option<Arc<dyn TaskFreezeRelease>>,
+    ) -> Self {
+        Self {
+            uid,
+            task_id: task_id.into(),
+            freeze_amount: amount,
+            released: AtomicBool::new(false),
+            releaser,
+        }
+    }
 }
 
 impl FreezeGuard for TaskFreeze {
@@ -150,20 +156,36 @@ impl FreezeGuard for TaskFreeze {
     }
 
     fn release(&self) {
-        // Phase 1b: no-op. Phase 6 wires the Lua-driven release path
-        // (atomic settle: ZREM lease + HSET task status + HINCRBY
-        // task_frozen_micro -frozen) here.
-        let _ = self
+        if self
             .released
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let Some(releaser) = self.releaser.clone() else {
+            return;
+        };
+        let uid = self.uid.clone();
+        let task_id = self.task_id.clone();
+        let frozen_amount = self.freeze_amount;
+        tokio::spawn(async move {
+            if let Err(err) = releaser.release(&uid, &task_id, frozen_amount).await {
+                tracing::warn!(
+                    target: "gw_ledger",
+                    error = %err,
+                    uid = %uid,
+                    task_id = %task_id,
+                    "task freeze release failed"
+                );
+            }
+        });
     }
 }
 
 impl Drop for TaskFreeze {
     fn drop(&mut self) {
-        // Phase 1b: release() is a no-op, so this is harmless today.
-        // Phase 6 wires the real Lua-driven rollback in `release()` and
-        // this Drop becomes the cancellation safety net.
         self.release();
     }
 }

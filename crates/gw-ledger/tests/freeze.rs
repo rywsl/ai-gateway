@@ -5,7 +5,7 @@
 //! `events:counter` echo back to Rust, wired in Phase 5).
 
 use gw_core::ids::UserId;
-use gw_ledger::{FreezeGuard, RequestFreeze};
+use gw_ledger::{FreezeGuard, FreezeKind, RequestFreeze, TaskFreeze};
 use gw_store::deduction::DEDUCT;
 use std::sync::atomic::Ordering;
 
@@ -63,4 +63,15 @@ fn trait_object_release_dispatches() {
     g.release();
     let state = DEDUCT.get(&uid).unwrap().clone();
     assert_eq!(state.frozen_micro.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn task_freeze_without_releaser_is_idempotent_for_tests() {
+    let uid = UserId::from("u-task-freeze-no-releaser");
+    let g = TaskFreeze::new(uid.clone(), "task-no-releaser", 1000, None);
+    assert_eq!(g.kind(), FreezeKind::Task);
+    assert_eq!(g.uid(), &uid);
+    assert_eq!(g.freeze_amount(), 1000);
+    g.release();
+    g.release();
 }
