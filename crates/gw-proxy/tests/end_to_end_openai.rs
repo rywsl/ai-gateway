@@ -27,6 +27,7 @@ use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::LlmGateway;
 use gw_routing::in_flight::InFlightStore;
+use gw_routing::LatencyTracker;
 use gw_store::{CounterStore, EntityStore};
 
 /// Builds a `LlmGateway` whose collaborators are all in-memory defaults.
@@ -65,6 +66,7 @@ fn llm_gateway_constructor_signature_smoke() {
         store: Arc<EntityStore>,
         health: Arc<KeyHealthStore>,
         in_flight: Arc<InFlightStore>,
+        latency_tracker: Arc<LatencyTracker>,
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
@@ -81,6 +83,7 @@ fn llm_gateway_constructor_signature_smoke() {
             store,
             health,
             in_flight,
+            latency_tracker,
             ratelimit,
             ledger,
             counters,

@@ -6,6 +6,7 @@ use gw_core::entity::*;
 use gw_core::ids::*;
 use gw_health::KeyHealthStore;
 use gw_routing::in_flight::InFlightStore;
+use gw_routing::latency::LatencyTracker;
 use gw_routing::strategy::sticky::{Sticky, DEFAULT_STICKY_TTL_SECS};
 use gw_routing::strategy::*;
 use secrecy::SecretString;
@@ -42,6 +43,7 @@ fn fake_key(id: &str) -> Arc<VendorKey> {
 fn pick_with_conv(sticky: &Sticky, keys: &[Arc<VendorKey>], conv: &str) {
     let h = KeyHealthStore::default();
     let f = InFlightStore::default();
+    let lt = LatencyTracker::new();
     let user = UserId::from("u");
     let model = ModelName::from("m");
     let ctx = PickCtx {
@@ -50,6 +52,8 @@ fn pick_with_conv(sticky: &Sticky, keys: &[Arc<VendorKey>], conv: &str) {
         conversation_id: Some(conv),
         message_hash: None,
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
+        pricing: None,
+        latency_tracker: &lt,
     };
     let _ = sticky.pick(keys, &h, &f, &ctx);
 }

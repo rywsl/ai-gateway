@@ -4,6 +4,7 @@ use gw_core::entity::*;
 use gw_core::ids::*;
 use gw_health::KeyHealthStore;
 use gw_routing::in_flight::InFlightStore;
+use gw_routing::latency::LatencyTracker;
 use gw_routing::strategy::*;
 use secrecy::SecretString;
 use std::sync::Arc;
@@ -40,12 +41,15 @@ fn fixed_order_picks_highest_priority() {
     let keys = vec![fake_key("a", 0), fake_key("b", 10), fake_key("c", 5)];
     let h = KeyHealthStore::default();
     let f = InFlightStore::default();
+    let lt = LatencyTracker::new();
     let ctx = PickCtx {
         user_id: &UserId::from("u"),
         model: &ModelName::from("m"),
         conversation_id: None,
         message_hash: None,
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
+        pricing: None,
+        latency_tracker: &lt,
     };
     let picked = FixedOrder.pick(&keys, &h, &f, &ctx).unwrap();
     assert_eq!(picked.key_id.as_ref(), "b");
@@ -57,6 +61,7 @@ fn round_robin_rotates_through_three_keys() {
     let keys = vec![fake_key("a", 0), fake_key("b", 0), fake_key("c", 0)];
     let h = KeyHealthStore::default();
     let f = InFlightStore::default();
+    let lt = LatencyTracker::new();
     let rr = RoundRobin::new();
     let ctx = PickCtx {
         user_id: &UserId::from("u"),
@@ -64,6 +69,8 @@ fn round_robin_rotates_through_three_keys() {
         conversation_id: None,
         message_hash: None,
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
+        pricing: None,
+        latency_tracker: &lt,
     };
     let p1 = rr.pick(&keys, &h, &f, &ctx).unwrap().key_id.clone();
     let p2 = rr.pick(&keys, &h, &f, &ctx).unwrap().key_id.clone();
@@ -81,12 +88,15 @@ fn cost_first_picks_highest_priority_proxy() {
     let keys = vec![fake_key("a", -10), fake_key("b", 50), fake_key("c", 10)];
     let h = KeyHealthStore::default();
     let f = InFlightStore::default();
+    let lt = LatencyTracker::new();
     let ctx = PickCtx {
         user_id: &UserId::from("u"),
         model: &ModelName::from("m"),
         conversation_id: None,
         message_hash: None,
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
+        pricing: None,
+        latency_tracker: &lt,
     };
     let picked = CostFirst.pick(&keys, &h, &f, &ctx).unwrap();
     assert_eq!(picked.key_id.as_ref(), "b");

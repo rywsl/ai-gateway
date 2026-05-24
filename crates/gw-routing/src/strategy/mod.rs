@@ -2,6 +2,8 @@
 //! trait, plus a dispatching [`StrategyAny`] enum used by the routing pipeline.
 
 use crate::in_flight::InFlightStore;
+use crate::latency::LatencyTracker;
+use gw_core::entity::Pricing;
 use gw_core::entity::VendorKey;
 use gw_core::ids::*;
 use gw_core::protocol::ApiFormat;
@@ -25,6 +27,11 @@ pub struct PickCtx<'a> {
     pub conversation_id: Option<&'a str>,
     pub message_hash: Option<u64>,
     pub api_format: ApiFormat,
+    /// Per-model pricing info for cost-based strategies. `None` when the
+    /// Pricing row has not been loaded (fallback to priority-only ranking).
+    pub pricing: Option<&'a Pricing>,
+    /// Shared latency tracker for latency/error-aware strategies.
+    pub latency_tracker: &'a LatencyTracker,
 }
 
 /// Pluggable selection strategy. Implementors must be `Send + Sync` because the

@@ -27,6 +27,7 @@ use gw_core::ir::Mutations;
 use gw_health::KeyHealthStore;
 use gw_routing::candidates::get_candidate_keys;
 use gw_routing::in_flight::{InFlightGuard, InFlightStore};
+use gw_routing::latency::LatencyTracker;
 use gw_routing::strategy::set::StrategySet;
 use gw_routing::{PickCtx, Strategy};
 use gw_store::EntityStore;
@@ -91,6 +92,7 @@ pub async fn pick_peer(
     health: &Arc<KeyHealthStore>,
     in_flight: &Arc<InFlightStore>,
     strategies: &Arc<StrategySet>,
+    latency_tracker: &Arc<LatencyTracker>,
     #[cfg(feature = "tunnel")] tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
 ) -> Result<Box<HttpPeer>> {
     // The remaining `ErrorType::Custom(...)` short-circuits in this function
@@ -221,6 +223,8 @@ pub async fn pick_peer(
         conversation_id: ctx.conversation_id.as_deref(),
         message_hash: None,
         api_format: client_codec_kind,
+        pricing: ctx.pricing.as_ref().map(|p| &p.value as &Pricing),
+        latency_tracker: latency_tracker.as_ref(),
     };
     let picked = strategy
         .pick(&candidates, health, in_flight, &pick_ctx)

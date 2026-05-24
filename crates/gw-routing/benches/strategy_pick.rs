@@ -16,6 +16,7 @@ use gw_core::entity::*;
 use gw_core::ids::*;
 use gw_health::KeyHealthStore;
 use gw_routing::in_flight::InFlightStore;
+use gw_routing::latency::LatencyTracker;
 use gw_routing::strategy::*;
 use secrecy::SecretString;
 use std::sync::Arc;
@@ -74,6 +75,8 @@ fn bench_strategy_pick(c: &mut Criterion) {
         conversation_id: None,
         message_hash: None,
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
+        pricing: None,
+        latency_tracker: &LatencyTracker::new(),
     };
     let ctx_with_hash = PickCtx {
         user_id: &uid,
@@ -81,6 +84,8 @@ fn bench_strategy_pick(c: &mut Criterion) {
         conversation_id: Some(conv),
         message_hash: Some(0xdead_beef_dead_beef),
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
+        pricing: None,
+        latency_tracker: &LatencyTracker::new(),
     };
 
     use gw_routing::strategy::{

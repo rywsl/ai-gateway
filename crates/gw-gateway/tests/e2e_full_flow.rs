@@ -144,6 +144,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         store.clone(),
         health.clone(),
         in_flight.clone(),
+        Arc::new(gw_routing::LatencyTracker::new()),
         ratelimit.clone(),
         ledger.clone(),
         counters.clone(),

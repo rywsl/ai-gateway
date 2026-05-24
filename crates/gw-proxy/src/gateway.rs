@@ -18,6 +18,7 @@ use gw_core::ids::{RequestId, TraceId};
 use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_routing::in_flight::InFlightStore;
+use gw_routing::latency::LatencyTracker;
 use gw_store::{CounterStore, EntityStore};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
@@ -76,6 +77,7 @@ pub struct LlmGateway {
     pub store: Arc<EntityStore>,
     pub health: Arc<KeyHealthStore>,
     pub in_flight: Arc<InFlightStore>,
+    pub latency_tracker: Arc<LatencyTracker>,
     pub ratelimit: Arc<RateLimitGuard>,
     pub ledger: Arc<Ledger>,
     pub counters: Arc<CounterStore>,
@@ -121,6 +123,7 @@ impl LlmGateway {
         store: Arc<EntityStore>,
         health: Arc<KeyHealthStore>,
         in_flight: Arc<InFlightStore>,
+        latency_tracker: Arc<LatencyTracker>,
         ratelimit: Arc<RateLimitGuard>,
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
@@ -138,6 +141,7 @@ impl LlmGateway {
             store,
             health,
             in_flight,
+            latency_tracker,
             ratelimit,
             ledger,
             counters,
@@ -289,6 +293,7 @@ impl ProxyHttp for LlmGateway {
             &self.health,
             &self.in_flight,
             &self.strategies,
+            &self.latency_tracker,
             #[cfg(feature = "tunnel")]
             self.tunnel.as_ref(),
         )
