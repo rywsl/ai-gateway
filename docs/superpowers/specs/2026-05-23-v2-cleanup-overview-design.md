@@ -65,6 +65,7 @@ v1 阶段允许在 codec、routing、ledger、proxy 等关键路径上保留"先
 - **目标态**:三种 wire 形式的非流式响应在 IR 层完成双向映射,跨协议响应通过 `filters/upstream.rs:232` 路径自动重渲染并已纳入 `gw_codec_cross_render_total{from,to}` 指标;工具调用块在三种 wire 间往返不丢字段;SSE 多事件流的 thinking 签名跨块续行 + tool_call delta 合并由 codec 内部累积器处理,filter 层不感知。
 - **关键跨 crate 触点**:`gw-proxy::filters::upstream::pick_peer` 之后的 response_body_filter — 此处增加跨协议 re-render 调用。
 - **不在范围**:wire→wire 直接 codegen(原 G-8 路径)— v2 仍走 IR 往返,不引入 N² codegen;Kiro EventStream(已有 codec-s5)。
+- **与 billing-robustness 吸纳**: S-codec 吸纳了 [`2026-05-24-billing-robustness-design.md`](2026-05-24-billing-robustness-design.md) 中关于 UsageExtractor 的职责(详见该 spec §9 吸纳表)。
 
 ### S-routing — `2026-05-23-v2-routing-cleanup-design.md`
 
@@ -95,6 +96,7 @@ v1 阶段允许在 codec、routing、ledger、proxy 等关键路径上保留"先
 - **目标态**:每条 usage:records / usage:detailed 投递都有明确终态(投递成功 / 入 DLQ / 直接丢 + drop 指标);冻结释放走原子 Lua 脚本,DEDUCT 记录周期 GC,无内存累积;logging.rs 的 ctx 字段填充完整,无 "T6-B follow-up" 字样。
 - **关键跨 crate 触点**:`gw-proxy::filters::logging` 调用点;`docs/go-contracts/` 新增 DLQ replay 章节(由 S-contracts 同步起草)。
 - **不在范围**:DLQ 的消费 / replay / 启动恢复(归 Go,见 S-contracts);usage:detailed 的 spool 与 replay(per memory 直接丢)。
+- **与 billing-robustness 吸纳**: S-ledger 吸纳了 [`2026-05-24-billing-robustness-design.md`](2026-05-24-billing-robustness-design.md) 中关于 UsageRecordEmitter must-deliver、InflightLedger、AttemptManifest 的职责(详见该 spec §9 吸纳表)。
 
 ### S-proxy-core — `2026-05-23-v2-proxy-core-cleanup-design.md`
 
@@ -113,6 +115,7 @@ v1 阶段允许在 codec、routing、ledger、proxy 等关键路径上保留"先
 - **目标态**:每条请求在 request_filter 阶段都经过完整的 (auth → capability resolve → permission merge → ratelimit → HMAC verify → forced_params 应用)链;response_filter 强制 deadline 检查并在超时时同步关流;TPM 在 token 计数后延迟扣费,不再在请求前预扣。
 - **关键跨 crate 触点**:`gw-capability::CapabilityResolver` trait(已有);`gw-auth::ratelimit` 模块(同 crate);`gw-ledger` deadline 触发的强制 flush。
 - **不在范围**:HMAC 算法选择(沿用 v1 HMAC-SHA256);capability 解析规则本身(已有 capability crate 提供)。
+- **与 billing-robustness 吸纳**: S-proxy-core 吸纳了 [`2026-05-24-billing-robustness-design.md`](2026-05-24-billing-robustness-design.md) 中关于 VendorExposureTracker 与 UpstreamCancellationCoordinator 的职责(详见该 spec §9 吸纳表)。
 
 ### S-admin-tunnel — `2026-05-23-v2-admin-tunnel-cleanup-design.md`
 
@@ -336,7 +339,7 @@ L-1 的 sub-spec 必须含一个故意"Redis 下线 → usage:detailed 投递失
 - [ ] S-ledger 同上
 - [ ] S-proxy-core 同上
 - [ ] S-admin-tunnel 同上
-- [ ] S-contracts(Go 文档)同上
+- [x] S-contracts(Go 文档)同上(2026-05-24)
 - [ ] 6 个 sub-spec 全部合入后,开启 §6.3 grep gate(同 PR 验证零命中)
 - [ ] e2e soak 50k req / 60s × off+heavy 通过(§7.2 整体验收)
 
