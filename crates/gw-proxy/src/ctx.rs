@@ -183,6 +183,9 @@ pub struct ReqCtx {
     /// `LlmGateway`; `None` in v1 (see TODO in `filters::request`).
     pub required_caps: Option<gw_capability::types::RequiredCapabilities>,
 
+    // --- Response deadline (S-proxy-core T3) ---
+    pub response_deadline: Option<std::time::Duration>,
+
     // --- Tunnel (ADR-T-2) ---
     /// T6 / ADR-T-2 — set by `pick_peer` to `"direct"` or `Some(node_id)`.
     /// Read by `logging` for the detailed-log field and by metrics labels.
@@ -293,6 +296,7 @@ impl ReqCtx {
             mgmt: false,
             required_caps: None,
             tunnel_resolution: None,
+            response_deadline: None,
             operation_id: None,
             upstream_body_accum: None,
             mgmt_user_id: None,

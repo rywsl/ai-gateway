@@ -29,8 +29,10 @@
 //! emitted on success; failures map to `GW_CODEC_PARSE_RESPONSE` /
 //! `GW_CODEC_CROSS_RENDER_FAILED` warn logs and counters.
 //!
-//! TODO(task-4.3): wire a deadline check against ctx.timing.start and
-//! `Timeouts::stream_total`.
+//! Response deadline (S-proxy-core T3): the entry of `run()` checks
+//! `ctx.timing.start.elapsed()` against `ctx.response_deadline` and
+//! terminates the stream with `GW_RESPONSE_DEADLINE_EXCEEDED` if exceeded.
+//! The check runs *before* any body processing or cross-protocol re-render.
 
 use crate::ctx::ReqCtx;
 use bytes::{Bytes, BytesMut};
@@ -49,6 +51,8 @@ pub fn run(
     end_of_stream: bool,
     ctx: &mut ReqCtx,
 ) -> Result<Option<Duration>> {
+    check_deadline(ctx)?;
+
     // Track bytes shipped to the client for retry-eligibility decisions.
     if let Some(b) = body.as_ref() {
         ctx.bytes_sent_to_client
@@ -166,6 +170,22 @@ pub fn run(
     }
 
     Ok(None)
+}
+
+fn check_deadline(ctx: &ReqCtx) -> Result<()> {
+    if let (Some(start), Some(deadline)) = (ctx.timing.start, ctx.response_deadline) {
+        if start.elapsed() > deadline {
+            metrics::counter!(
+                "gw_response_deadline_exceeded_total",
+                "stream" => if ctx.is_stream { "true" } else { "false" },
+            )
+            .increment(1);
+            return Err(pingora::Error::new(pingora::ErrorType::Custom(
+                gw_core::error::codes::GW_RESPONSE_DEADLINE_EXCEEDED,
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn codec_for(k: ProtocolKind) -> AnyCodec {
@@ -519,5 +539,53 @@ mod non_stream_branch_tests {
         let body = Bytes::from_static(b"{\"usage\":{}}");
         handle_non_stream_chunk(Some(&body), true, &mut ctx);
         assert_eq!(ctx.usage.output_tokens, 0);
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use crate::ctx::ReqCtx;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn deadline_exceeded_returns_error() {
+        let mut ctx = ReqCtx::default();
+        ctx.is_stream = true;
+        ctx.timing.start = Some(Instant::now() - Duration::from_secs(700));
+        ctx.response_deadline = Some(Duration::from_secs(600));
+
+        let err = check_deadline(&ctx).unwrap_err();
+        assert!(
+            matches!(err.etype, pingora::ErrorType::Custom("GW_RESPONSE_DEADLINE_EXCEEDED")),
+        );
+    }
+
+    #[test]
+    fn deadline_not_exceeded_returns_ok() {
+        let mut ctx = ReqCtx::default();
+        ctx.is_stream = true;
+        ctx.timing.start = Some(Instant::now());
+        ctx.response_deadline = Some(Duration::from_secs(600));
+
+        assert!(check_deadline(&ctx).is_ok());
+    }
+
+    #[test]
+    fn no_deadline_set_returns_ok() {
+        let mut ctx = ReqCtx::default();
+        ctx.timing.start = Some(Instant::now() - Duration::from_secs(9999));
+        ctx.response_deadline = None;
+
+        assert!(check_deadline(&ctx).is_ok());
+    }
+
+    #[test]
+    fn no_start_time_returns_ok() {
+        let mut ctx = ReqCtx::default();
+        ctx.timing.start = None;
+        ctx.response_deadline = Some(Duration::from_secs(1));
+
+        assert!(check_deadline(&ctx).is_ok());
     }
 }

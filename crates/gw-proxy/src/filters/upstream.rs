@@ -377,6 +377,11 @@ pub async fn pick_peer(
         }
     }
     t.apply_to_peer(&mut peer, ctx.is_stream);
+    ctx.response_deadline = Some(if ctx.is_stream {
+        t.stream_total
+    } else {
+        t.total
+    });
 
     // Stash on ctx for upstream_request_filter + logging.
     ctx.picked_vendor_key = Some(picked_arc.clone());
