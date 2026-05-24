@@ -133,14 +133,26 @@ mod tests {
 
     #[test]
     fn test_classify_5xx() {
-        assert_eq!(classify_for_failover(502, false), FailoverClass::Retryable5xx);
-        assert_eq!(classify_for_failover(500, false), FailoverClass::Retryable5xx);
-        assert_eq!(classify_for_failover(503, false), FailoverClass::Retryable5xx);
+        assert_eq!(
+            classify_for_failover(502, false),
+            FailoverClass::Retryable5xx
+        );
+        assert_eq!(
+            classify_for_failover(500, false),
+            FailoverClass::Retryable5xx
+        );
+        assert_eq!(
+            classify_for_failover(503, false),
+            FailoverClass::Retryable5xx
+        );
     }
 
     #[test]
     fn test_classify_429() {
-        assert_eq!(classify_for_failover(429, false), FailoverClass::Retryable429);
+        assert_eq!(
+            classify_for_failover(429, false),
+            FailoverClass::Retryable429
+        );
     }
 
     #[test]
@@ -157,9 +169,18 @@ mod tests {
 
     #[test]
     fn test_classify_not_retryable() {
-        assert_eq!(classify_for_failover(400, false), FailoverClass::NotRetryable);
-        assert_eq!(classify_for_failover(200, false), FailoverClass::NotRetryable);
-        assert_eq!(classify_for_failover(404, false), FailoverClass::NotRetryable);
+        assert_eq!(
+            classify_for_failover(400, false),
+            FailoverClass::NotRetryable
+        );
+        assert_eq!(
+            classify_for_failover(200, false),
+            FailoverClass::NotRetryable
+        );
+        assert_eq!(
+            classify_for_failover(404, false),
+            FailoverClass::NotRetryable
+        );
     }
 
     #[test]

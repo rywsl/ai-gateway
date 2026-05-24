@@ -36,7 +36,9 @@ impl Strategy for LoadBalance {
             }
             let in_flight = f.get_or_create(&k.key_id).count.load(Ordering::Relaxed) as f32;
             let p50 = ctx.latency_tracker.p50_ttft_ms(&k.key_id, ctx.api_format);
-            let err = ctx.latency_tracker.error_rate_30s(&k.key_id, ctx.api_format);
+            let err = ctx
+                .latency_tracker
+                .error_rate_30s(&k.key_id, ctx.api_format);
             entries.push((i, in_flight, p50, err));
         }
 
@@ -75,10 +77,10 @@ impl Strategy for LoadBalance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::latency::LatencyTracker;
     use gw_core::entity::*;
     use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
     use gw_core::protocol::ProtocolKind;
-    use crate::latency::LatencyTracker;
     use secrecy::SecretString;
     use std::time::Duration;
 

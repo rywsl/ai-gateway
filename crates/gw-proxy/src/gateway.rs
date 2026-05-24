@@ -82,7 +82,7 @@ fn remaining_failover_candidates(
     candidates
         .iter()
         .filter(|candidate| {
-            failed_key.map_or(true, |fk| candidate.key_id != *fk)
+            failed_key.is_none_or(|fk| candidate.key_id != *fk)
                 && !ctx
                     .retry_blacklist
                     .iter()
@@ -460,10 +460,12 @@ impl ProxyHttp for LlmGateway {
                                 return Err(e);
                             }
                             FailoverDecision::Exhausted => {
-                                gw_routing::failover::record_failover_metric(
-                                    FailoverClass::NotRetryable,
-                                    strategy_name,
-                                );
+                                metrics::counter!(
+                                    "gw_routing_failover_total",
+                                    "reason" => "exhausted",
+                                    "strategy" => strategy_name.to_owned(),
+                                )
+                                .increment(1);
                             }
                             FailoverDecision::NotRetryable => {}
                         }
