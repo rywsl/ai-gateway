@@ -232,6 +232,33 @@ pub async fn run(
                 .unwrap_or_else(MarkupChainSnapshot::placeholder),
             operation_id: ctx.operation_id.clone(),
         };
+
+        // -----------------------------------------------------------------
+        // W1-T7: Emit billing metrics at UsageRecord emission.
+        // -----------------------------------------------------------------
+        metrics::counter!(
+            "gw_billing_emit_total",
+            "usage_source" => format!("{:?}", rec.usage_source).to_lowercase(),
+        )
+        .increment(1);
+
+        for (dim, present) in [
+            ("input", ctx.usage.input_tokens > 0),
+            ("output", ctx.usage.output_tokens > 0),
+            ("cache_read", ctx.usage.cached_tokens.is_some()),
+            ("cache_creation", ctx.usage.cache_creation_tokens.is_some()),
+            ("thinking", ctx.usage.thinking_tokens.is_some()),
+            ("multimodal_input", ctx.usage.multimodal_input_tokens.is_some()),
+        ] {
+            let tag = if present { "upstream_final" } else { "unknown" };
+            metrics::counter!(
+                "gw_billing_provenance_total",
+                "dimension" => dim,
+                "tag" => tag,
+            )
+            .increment(1);
+        }
+
         let _ = ledger.try_send(rec);
 
         // -----------------------------------------------------------------

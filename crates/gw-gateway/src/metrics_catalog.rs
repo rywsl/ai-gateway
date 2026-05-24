@@ -238,6 +238,17 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "OAuthListener reverse XADDs to events:entity (op=status_change field=oauth_failed)",
     },
+    // --- Billing robustness W1 ---
+    MetricSpec {
+        name: "gw_billing_emit_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecord emit count, labelled by usage_source (W4: by vendor_exposure_state + provenance_output)",
+    },
+    MetricSpec {
+        name: "gw_billing_provenance_total",
+        kind: MetricKind::Counter,
+        help: "Per-dimension provenance tag counts; locates which codec/dim has high Estimated rate",
+    },
 ];
 
 pub fn describe_all() {
