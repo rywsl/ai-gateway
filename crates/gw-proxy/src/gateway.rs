@@ -530,6 +530,24 @@ impl ProxyHttp for LlmGateway {
         err: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
+        // W3-T2: classify pingora errors for cancel attribution. Only ClientClose
+        // is handled here; UpstreamErr (W3-T4) will handle the rest of the matrix.
+        // We use esource == Downstream with IO-level etype as the conservative set:
+        // ConnectionClosed and WriteError are unambiguously downstream disconnects.
+        // ReadError with Downstream source also qualifies.
+        if let Some(e) = err {
+            use pingora::ErrorSource::Downstream;
+            use pingora::ErrorType::*;
+            if e.esource == Downstream
+                && matches!(e.etype, ConnectionClosed | WriteError | ReadError)
+            {
+                crate::cancellation::observe_cancel(
+                    ctx,
+                    crate::cancellation::CancelCause::ClientClose,
+                );
+            }
+        }
+
         filters::logging::run(
             session,
             err,

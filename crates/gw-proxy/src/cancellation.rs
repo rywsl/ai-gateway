@@ -1,9 +1,18 @@
 //! UpstreamCancellationCoordinator — uniform cancel-source detection.
 //!
-//! Spec §5.3. This module provides a `CancelCause` enum and an
-//! `observe_cancel` helper. Actual filter-side detection (TCP close,
-//! response deadline, upstream RST) lands in W3-T2/T3/T4. Grace timer
-//! handling lands in W3-T5.
+//! Spec §5.3. This module provides a [`CancelCause`] enum and the
+//! [`observe_cancel`] helper. Filter-side detection landed as follows:
+//!
+//! * **Client disconnect (W3-T2)**: classified in `LlmGateway::logging` by
+//!   matching `pingora::Error { esource: Downstream, etype: ConnectionClosed
+//!   | WriteError | ReadError }`. The spec §5.3 table cited
+//!   `response_body_filter` as the detection site, but Pingora 0.8 doesn't
+//!   expose a stable per-chunk disconnect check from that filter — the
+//!   `logging` classifier reaches the same outcome (a `ClientClose` cancel
+//!   cause on `ctx` before the UsageRecord is emitted).
+//! * **Response deadline (W3-T3)**: pending.
+//! * **Upstream RST / 5xx (W3-T4)**: pending.
+//! * **Grace timer (W3-T5)**: pending.
 
 use crate::ctx::ReqCtx;
 
@@ -23,6 +32,25 @@ impl CancelCause {
             CancelCause::UpstreamErr => "upstream_err",
             CancelCause::RouteAbort => "route_abort",
         }
+    }
+}
+
+/// True for [`std::io::ErrorKind`] variants that strongly indicate a
+/// client-side disconnect on the downstream HTTP/1.1 or HTTP/2 stream.
+pub fn io_error_kind_is_client_close(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        kind,
+        BrokenPipe | ConnectionReset | ConnectionAborted | UnexpectedEof
+    )
+}
+
+/// Observe a [`CancelCause::ClientClose`] cancellation if `kind` indicates
+/// one. No-op otherwise. Wraps [`observe_cancel`] with the io::ErrorKind
+/// filter.
+pub fn observe_client_close_for_io(ctx: &mut ReqCtx, kind: std::io::ErrorKind) {
+    if io_error_kind_is_client_close(kind) {
+        observe_cancel(ctx, CancelCause::ClientClose);
     }
 }
 

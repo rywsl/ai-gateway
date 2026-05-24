@@ -28,3 +28,45 @@ fn observe_cancel_is_idempotent_first_writer_wins() {
     assert!(matches!(ctx.cancel_cause, Some(CancelCause::ClientClose)));
     assert_eq!(ctx.cancel_observed_at_ms, first_ts);
 }
+
+#[test]
+fn client_close_error_kinds_map_to_client_close() {
+    use std::io::ErrorKind;
+    for kind in [
+        ErrorKind::BrokenPipe,
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::UnexpectedEof,
+    ] {
+        assert!(
+            gw_proxy::cancellation::io_error_kind_is_client_close(kind),
+            "expected {:?} to map to client_close",
+            kind
+        );
+    }
+    for kind in [ErrorKind::PermissionDenied, ErrorKind::NotFound] {
+        assert!(
+            !gw_proxy::cancellation::io_error_kind_is_client_close(kind),
+            "expected {:?} NOT to map to client_close",
+            kind
+        );
+    }
+}
+
+#[test]
+fn observe_client_close_records_cause() {
+    use gw_proxy::cancellation::{observe_client_close_for_io, CancelCause};
+    use gw_proxy::ctx::ReqCtx;
+    let mut ctx = ReqCtx::default();
+    observe_client_close_for_io(&mut ctx, std::io::ErrorKind::BrokenPipe);
+    assert!(matches!(ctx.cancel_cause, Some(CancelCause::ClientClose)));
+}
+
+#[test]
+fn non_client_close_kind_does_not_observe_cancel() {
+    use gw_proxy::cancellation::observe_client_close_for_io;
+    use gw_proxy::ctx::ReqCtx;
+    let mut ctx = ReqCtx::default();
+    observe_client_close_for_io(&mut ctx, std::io::ErrorKind::PermissionDenied);
+    assert!(ctx.cancel_cause.is_none());
+}
