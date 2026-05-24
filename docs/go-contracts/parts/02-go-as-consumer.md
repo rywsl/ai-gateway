@@ -175,20 +175,111 @@ DLQ 条目在 UsageRecord 之外再加一层元数据：
 
 > Rust 当前实现是 G11 v1（单 Redis stream fallback）。v2 三层兜底（内存 + 磁盘 + 周期 drain + 启动恢复）见 [`docs/superpowers/specs/2026-05-19-billing-c-delta-stream-dlq.md`](../../superpowers/specs/2026-05-19-billing-c-delta-stream-dlq.md)，本契约保留兼容（Go drainer 只需处理 `dlq_meta` + `usage_record` 包裹）。
 
-### 2.2.3 Go drainer 义务（推荐）
+### 2.2.3 Go drainer 义务（必需）
 
-- 周期 XREADGROUP `usage:records:dlq`；
-- 解开 `dlq_meta` + `usage_record`；
-- 同 §2.1 流程算 cost + 写 deducted + XADD events:counter + XACK；
-- 注意去重（与主流共用 `request_id` 索引）；
-- Drain 成功率监控（`dlq_drain_total{result}`）。
+> v1 期间 drainer 标记为"推荐"。v2 起 **必需**：Rust 三层兜底（C-δ）保证 record 最终落到 `usage:records:dlq`，Go 端不实现 drainer = 资金泄漏。
 
-Drainer 是 Go 端**可选**实现。不实现的代价：主路径写失败时记录永久丢失（已被 `gateway_usage_records_lost_total` 计数）。
+#### Consumer group 创建
+
+```
+XGROUP CREATE usage:records:dlq go-billing-dlq $ MKSTREAM
+```
+
+- 首次部署时执行一次（Go 启动代码或运维脚本均可）；
+- `$` 表示只消费创建后新写入的 entry；历史积压由下方 §启动恢复 处理。
+
+#### XREADGROUP 消费模式
+
+```
+XREADGROUP GROUP go-billing-dlq <consumer_name> COUNT 100 BLOCK 5000 STREAMS usage:records:dlq >
+```
+
+- `consumer_name`：建议 `<hostname>:<pid>`，便于 XPENDING 排查；
+- `COUNT 100`：单批上限，按实际吞吐调整；
+- `BLOCK 5000`：5 秒轮询周期。
+
+#### 处理管线
+
+每批 entry 按以下顺序处理：
+
+1. **解包**：从 XADD 的 `payload` 字段取 JSON → 解析顶层 `dlq_meta` + `usage_record`（schema 见 §2.2.2）；
+2. **去重**：以 `request_id` 查询 billing DB（PgSQL `usage_records(request_id PK)` + `ON CONFLICT DO NOTHING`，或 Redis `SET NX settled:<request_id> "1" EX 86400`）。命中即跳过，直接 XACK；
+3. **算 cost**：同 §2.1.3 流程，基于 `usage_record` 内 `usage` + `markup_chain_snapshot` + Go 端 `BillingPricing`；
+4. **写 deducted**：`INCRBY counter:user:<user_id>:deducted_micro <cost_micro>`；
+5. **通知 Rust**：`XADD events:counter * ns user_balance uid <user_id> op incrby field deducted_micro delta <cost_micro> value_after <new_value> ts_ms <now>`；
+6. **XACK**：`XACK usage:records:dlq go-billing-dlq <entry_id>`。
+
+#### 幂等性
+
+`request_id` 是唯一幂等键。DLQ record 与主流 `usage:records` record 共用同一个 `request_id`，所以 Go drainer 的去重索引必须与 §2.1.4 settler 共享。不论 record 从哪条 stream 来，同一 `request_id` 只结算一次。
+
+#### 重试退避
+
+DLQ 处理自身失败（DB 挂、网络抖）时：
+
+- **不 XACK** 失败的 entry；
+- 指数退避重试：`1s → 2s → 4s → 8s → 16s`（上限 16s）；
+- 连续失败 10 次 → 写 Go 侧告警日志 + `dlq_drain_failure_total{reason}` metric；
+- 不设 permanent-fail 语义（DLQ 本身就是末端，必须最终处理成功）。
+
+#### 启动恢复
+
+Go drainer 启动时执行以下顺序：
+
+1. **先 drain DLQ**：用 XREADGROUP + `0`（而非 `>`）读取 pending entries，逐条处理 + XACK，直到 pending == 0；
+2. **再 drain 积压**：切换到 `>` 读新 entry，处理到 `usage:records:dlq` 长度为 0 或无新 entry（BLOCK 超时返回 nil）；
+3. **最后启动主流消费**：开始消费 `usage:records`。
+
+这保证 DLQ 中滞留的 record 优先于新请求结算，避免 FIFO 倒序。
+
+#### 乱序容忍
+
+Rust 三层兜底可能导致同一批请求的 DLQ record 以 mem → disk → redis 不同路径到达，**不保证写入顺序与请求顺序一致**。Go drainer 不得依赖 entry 的 stream ID 排序来推断业务时序。结算逻辑必须只依赖 `request_id` 幂等性，不依赖处理顺序。
+
+#### 监控（Go 端）
+
+| 指标 | 类型 | 阈值 |
+|---|---|---|
+| `dlq_drain_total{result}` | counter | success rate < 95% 告警 |
+| `dlq_drain_failure_total{reason}` | counter | > 0 排查 |
+| `dlq_drain_lag_secs`（XPENDING 最老 entry） | gauge | > 300s 告警 |
+| `dlq_drain_dedup_hit_total` | counter | 仅观测（高值说明主流 + DLQ 重叠正常运作） |
 
 ### 2.2.4 不变量
 
 - DLQ 条目**不**包含 `cost_micro`（由 `no_cost_in_dlq` invariant 强制）。
 - DLQ 主路径失败的 Rust 行为：`tracing::warn!` + metric +（v1）drop。
+
+### 2.2.5 `dlq_layer` 扩展（v2）
+
+v2 三层兜底（C-δ）下，record 落入 DLQ 之前可能经过不同的缓冲层。Rust 在 `dlq_meta` 中新增 `dlq_layer` 字段标识来源层：
+
+| `dlq_layer` 值 | 含义 |
+|---|---|
+| `mem` | 内存环形缓冲区（mpsc retry queue）溢出后写入 DLQ stream |
+| `disk` | 本地磁盘 WAL（`${data_dir}/gw-ledger-emergency-dlq-*.jsonl`）恢复后写入 DLQ stream |
+| `redis` | 直接 XADD 到 `usage:records:dlq`（v1 唯一路径，v2 仍为主路径） |
+
+扩展后的 `dlq_meta` 示例：
+
+```json
+{
+  "dlq_meta": {
+    "first_failure_ts_ms": 1716345678901,
+    "primary_failure_reason": "redis connection refused",
+    "retry_count_before_dlq": 3,
+    "dlq_layer": "mem"
+  },
+  "usage_record": { /* 完整 UsageRecord，schema 同 §2.1.2 */ }
+}
+```
+
+**Go drainer 义务**：
+
+- 必须接受全部三个 `dlq_layer` 值，处理逻辑完全相同（不按层区分结算行为）；
+- `dlq_layer` 缺失时视为 `"redis"`（向后兼容 v1 写入的无此字段的 entry）；
+- 不得假设不同 `dlq_layer` 的 entry 之间存在任何顺序关系；
+- 建议在监控中按 `dlq_layer` 分维度统计：`dlq_drain_total{result, dlq_layer}`。
 
 ## 2.3 `usage:detailed` Stream（必需 consumer / 完整归档）
 
@@ -398,12 +489,61 @@ available = base - deducted - frozen
 ### 2.5.3 一致性窗口
 
 - Rust 本地 fetch_add 先于 HINCRBY 异步推送，存在 ~几十 ms 延迟。Go 在此窗口内看到的 frozen 偏低 → balance 可能误判为可用。**v1 接受此不一致**；Go settle 时如果检测到透支，可走"拒 settle + 告警"路径，由人工或后台对账修正。
-- Rust 进程崩溃 → 本地未 flush 的 frozen delta 丢失。Redis 上已 flush 的 frozen 仍存（"幽灵冻结"问题）。详见 C-γ §未决问题 #7，v1 留 follow-up。
+- Rust 进程崩溃 → 本地未 flush 的 frozen delta 丢失。Redis 上已 flush 的 frozen 仍存（"幽灵冻结"问题）。Go 端回收算法见 §2.5.5。
 
 ### 2.5.4 写权独占
 
 - Go **禁止**直接写 `frozen_micro`（会破坏 Rust 本地 AtomicI64 与 Redis 一致性）。
 - Rust **禁止**直接写 `base_micro` / `deducted_micro`。
+
+### 2.5.5 Ghost-freeze reconciliation（幽灵冻结回收）
+
+Rust 进程崩溃后，已 flush 到 Redis 的 `frozen_micro` 增量不会自动释放（§2.5.3 所述"幽灵冻结"）。本节规定 Go 端的回收算法。
+
+#### 触发条件
+
+Go 端周期任务，建议 **5 min** 间隔。额外触发点：Go 检测到某 Rust pod 健康检查（`/readyz`）连续失败时可立即触发一次针对该 replica 的回收。
+
+#### Rust 侧前置条件
+
+当前 Rust 代码（`gw-store/src/deduction.rs`）使用单个 `frozen_micro` AtomicI64，所有副本共享同一 Redis key。要支持按副本回收，Rust 需改为写 **副本级子键**：
+
+```
+HINCRBY counter:user:{user:<uid>}:frozen_micro:<replica_id> <delta>
+```
+
+其中 `replica_id` 是 Rust pod 唯一标识（如 Kubernetes Pod UID 或 `HOSTNAME`）。Go 读 frozen 总量时需 SUM 所有 `frozen_micro:*` 子键。
+
+此 Rust 侧改动归入 S-ledger spec，本契约仅文档化 Go 端接口契约和算法。Rust 未完成副本级拆分前，本节算法无法生效。
+
+#### 算法（4 步）
+
+1. **Scan**：Go 遍历活跃用户列表，对每个 `uid` 执行 `SCAN` 匹配 `counter:user:{user:<uid>}:frozen_micro:*`，收集所有 `replica_id` 及其对应 frozen 值。
+2. **Compare**：将收集到的 `replica_id` 集合与当前活跃 Rust 副本列表比对。活跃副本列表来源二选一：Kubernetes API（list pods with label selector）或轮询各 Rust pod 的 `/readyz` 端点。
+3. **Release**：对判定为 dead 的 `replica_id`：
+   ```
+   GET  counter:user:{user:<uid>}:frozen_micro:<replica_id>  → amount
+   DEL  counter:user:{user:<uid>}:frozen_micro:<replica_id>
+   ```
+   两条命令放在同一 `MULTI/EXEC` 事务内，保证原子性。`amount` 即为释放量，无需反向 HINCRBY。
+4. **Audit**：每次释放写审计日志（结构化日志或专用 audit 表）：
+   ```json
+   {
+     "event": "ghost_freeze_released",
+     "uid": "<uid>",
+     "replica_id": "<replica_id>",
+     "released_amount": <amount>,
+     "timestamp": "<ISO8601>"
+   }
+   ```
+
+#### 风险与缓解
+
+误判活跃 replica 为 dead 会释放有效冻结，用户可在短窗口内超额消费。缓解措施：
+
+- **Grace period**：replica 连续 **3 次**健康检查失败（即 ≥ 15 min 不可达）才判定 dead。
+- **上限保护**：单次回收释放的 `amount` 超过阈值（如 10,000,000 micro）时，跳过并告警，由人工确认。
+- **对账兜底**：Go settle 时检测到 `balance < 0` 仍走"拒 settle + 告警"路径（§2.5.3 已有机制），保证最终一致。
 
 ## 2.6 `counter:*:daily_tokens:*`（Rust 写、Go 报表可读）
 
@@ -492,6 +632,6 @@ Rust 端在消费 `events:entity` 时会 `DEL entity:{ns}:{id}`(详见 [parts/01
 ## 2.11 未决问题
 
 1. **`settled_billing` 是否要 Rust 强制要求 Go 保留**：本契约不强制（Rust 不读）。Go 自决保留与否。
-2. **`usage:records:dlq` 在 v2 三层兜底（C-δ）后的 payload 是否扩展**：v2 加 `dlq_layer` 字段（mem / disk / redis），Go drainer 必须兼容。
-3. **`counter:*:frozen_micro` 副本级子键**（C-γ §未决问题 #7）：解决"幽灵冻结"问题需要 `frozen_micro:<replica_id>` 子键，本契约 v1 不涵盖，留 follow-up。
+2. **`usage:records:dlq` 在 v2 三层兜底（C-δ）后的 payload 扩展**：~~已规定~~。`dlq_layer` 字段（`mem` / `disk` / `redis`）及 Go drainer 处理义务见 §2.2.5；DLQ replay 完整规格见 §2.2.3。
+3. **`counter:*:frozen_micro` 副本级子键**（C-γ §未决问题 #7）：Go 端 ghost-freeze 回收算法已规定，见 §2.5.5。Rust 侧副本级子键拆分归入 S-ledger spec。
 4. **Rust 反向写 `events:entity` 的 source 标记**：v1 用 `reason` 字段隐式识别；v2 加显式 `source=rust` 字段，Go 端读时可显式分流"Rust 反向写" vs "Go 自身写"。
