@@ -70,6 +70,7 @@ fn apikey(
             user_id: UserId::from(user_id),
             status: ApiKeyStatus::Active,
             hash: vec![0; 32],
+            signature_secret: None,
             allowed_models: models.iter().copied().map(ModelName::from).collect(),
             allowed_channels: vec![],
             rpm_limit: rpm,

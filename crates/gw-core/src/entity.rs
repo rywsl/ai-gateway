@@ -95,6 +95,8 @@ pub struct ApiKeyEntry {
     pub status: ApiKeyStatus,
     pub hash: Vec<u8>,
     #[serde(default)]
+    pub signature_secret: Option<Vec<u8>>,
+    #[serde(default)]
     pub allowed_models: Vec<ModelName>,
     #[serde(default)]
     pub allowed_channels: Vec<KeyId>,
@@ -131,6 +133,13 @@ impl std::fmt::Debug for ApiKeyEntry {
             .field(
                 "hash",
                 &format_args!("[REDACTED; {} bytes]", self.hash.len()),
+            )
+            .field(
+                "signature_secret",
+                &self
+                    .signature_secret
+                    .as_ref()
+                    .map(|secret| format!("[REDACTED; {} bytes]", secret.len())),
             )
             .field("allowed_models", &self.allowed_models)
             .field("allowed_channels", &self.allowed_channels)

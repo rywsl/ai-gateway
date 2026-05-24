@@ -10,6 +10,7 @@ fn entry_with(exp: Option<OffsetDateTime>) -> ApiKeyEntry {
         user_id: UserId::from("u_test"),
         status: ApiKeyStatus::Active,
         hash: vec![0; 32],
+        signature_secret: None,
         allowed_models: vec![],
         allowed_channels: vec![],
         rpm_limit: 0,

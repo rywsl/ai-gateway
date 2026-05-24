@@ -43,6 +43,7 @@ pub async fn run(
     counters: &Arc<CounterStore>,
     global_rpm: u32,
     trust_xff: bool,
+    signature_required: bool,
     jwt_validator: Option<&Arc<JwtValidator>>,
     capability_resolver: Option<&Arc<gw_capability::CapabilityResolver>>,
     mgmt_blacklist: &Arc<RedisJwtBlacklist>,
@@ -265,7 +266,7 @@ pub async fn run(
                         // T6-C: stash signature requirement state so the
                         // request_body_filter (or `body_verify::verify_body`)
                         // can run body-after HMAC verification.
-                        if entry.value.signature_required {
+                        if signature_required || entry.value.signature_required {
                             ctx.signature_required = true;
                             ctx.signature_algo = entry.value.signature_algo;
                             ctx.signature_received = session
@@ -280,10 +281,7 @@ pub async fn run(
                                 .get("x-timestamp")
                                 .and_then(|v| v.to_str().ok())
                                 .map(String::from);
-                            // G7 v1.5 — reuse the api-key hash as the HMAC
-                            // secret. A dedicated `signature_secret` field
-                            // on `ApiKeyEntry` is a future follow-up.
-                            ctx.signature_secret = entry.value.hash.clone();
+                            ctx.signature_secret = entry.value.signature_secret.clone().unwrap_or_default();
                         }
                         // G2 — capture the per-key IP allowlist so the
                         // post-blocklist gate (below) can consult it after
@@ -464,21 +462,17 @@ pub async fn run(
             content_encoding: ctx.req_content_encoding,
             signature_required: ctx.signature_required,
             signature_algo: ctx.signature_algo,
-            secret: ctx.signature_secret.clone(),
+            secret: &ctx.signature_secret,
             signature: ctx.signature_received.clone(),
             timestamp: ctx.signature_timestamp.clone(),
+            max_decoded_bytes: Some(32 * 1024 * 1024),
         };
         match crate::body_verify::verify_body(input) {
-            Ok((SignatureCheckResult::Valid, _)) | Ok((SignatureCheckResult::NotRequired, _)) => {
-                // Pass through. `cached_body` holds the raw on-wire bytes;
-                // `verify_body` decompresses internally for the signature
-                // compare but the plaintext is discarded here. Known gap:
-                // the codecs `serde_json::from_slice(&body_bytes)` directly
-                // (no decode step), so a signed + compressed request will
-                // currently verify OK then fail codec parse. The fix is to
-                // stash the decompressed body and feed it to step 8 — see
-                // docs/architecture.md §Deliberate behaviours (compressed-
-                // body parse gap), tracked as a follow-up.
+            Ok((SignatureCheckResult::Valid, decoded))
+            | Ok((SignatureCheckResult::NotRequired, decoded)) => {
+                if !matches!(ctx.req_content_encoding, gw_codec::compression::Encoding::Identity) {
+                    ctx.cached_body = Some(decoded.clone());
+                }
             }
             Ok((SignatureCheckResult::Missing, _)) => {
                 let err = ErrorIR {
@@ -571,12 +565,21 @@ pub async fn run(
             unreachable!()
         }
     };
-    let (model_name, is_stream, est_input_tokens) = match codec.parse_request(&body_bytes) {
-        Ok(ir) => (
+    let parse_body = ctx
+        .cached_body
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| body_bytes.clone());
+    let parsed = codec.parse_request(&parse_body);
+    let (model_name, is_stream, est_input_tokens) = match parsed {
+        Ok(ir) => {
+            let values = (
             ModelName::from(ir.model.as_ref()),
             ir.stream,
             codec.estimate_input_tokens(&ir),
-        ),
+            );
+            values
+        }
         Err(err) => {
             emit_and_bail(session, ctx, &err, &request_id).await?;
             unreachable!()

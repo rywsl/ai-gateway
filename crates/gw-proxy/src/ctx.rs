@@ -14,8 +14,9 @@ use bytes::{Bytes, BytesMut};
 use gw_auth::ratelimit::StreamSlot;
 use gw_codec::AnyCodec;
 use gw_core::debug::{DebugMode, TraceBuffer};
-use gw_core::entity::{Pricing, UserEntry, Vendor, VendorKey};
+use gw_core::entity::{ForcedParams, Pricing, UserEntry, Vendor, VendorKey};
 use gw_core::ids::{ApiKeyId, KeyId, ModelName, RequestId, TraceId, UserId};
+use gw_core::ir::ForcedMutations;
 use gw_core::permissions::MergedPermissions;
 use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
@@ -96,6 +97,8 @@ pub struct ReqCtx {
     /// FailoverExecutor iterates over remaining candidates without re-querying
     /// health / cooldown.
     pub picked_candidates: Option<Vec<Arc<VendorKey>>>,
+    pub forced_params: ForcedParams,
+    pub forced_mutations: ForcedMutations,
 
     // --- Lifecycle / ledger ---
     pub timing: ReqTiming,
@@ -165,12 +168,9 @@ pub struct ReqCtx {
     pub signature_received: Option<Vec<u8>>,
     pub signature_timestamp: Option<String>,
     pub req_content_encoding: gw_codec::compression::Encoding,
-    /// G7 — HMAC secret bytes hoisted out of the resolved `ApiKeyEntry` so the
-    /// body-verify call site (after the body-read loop in `request_filter`)
-    /// can run without keeping the `ApiKey` `Arc` alive. v1.5 reuses the
-    /// api-key hash as the HMAC secret; v2 will add a dedicated
-    /// `signature_secret: Vec<u8>` field to `ApiKeyEntry` (tracked as a Wave 5
-    /// or later follow-up). Empty when `signature_required = false`.
+    /// HMAC secret bytes hoisted out of the resolved `ApiKeyEntry` so the
+    /// body-verify call site can run without keeping the `ApiKey` `Arc` alive.
+    /// Empty when signature verification is not required.
     pub signature_secret: Vec<u8>,
 
     // --- Management path / capability (G-α.9 / G-β wire) ---
@@ -267,6 +267,8 @@ impl ReqCtx {
             pricing: None,
             strategy_name: None,
             picked_candidates: None,
+            forced_params: ForcedParams::default(),
+            forced_mutations: ForcedMutations::NONE,
             timing: ReqTiming::default(),
             usage: UsageAccumulator {
                 input_tokens: 0,

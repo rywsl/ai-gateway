@@ -90,6 +90,7 @@ fn llm_gateway_constructor_signature_smoke() {
             counters,
             global_rpm,
             trust_xff,
+            false,
             jwt_validator,
             strategies,
             failover_executor,

@@ -77,6 +77,7 @@ fn make_apikey(id: &str) -> Arc<Versioned<ApiKeyEntry>> {
             user_id: UserId::from("u1"),
             status: ApiKeyStatus::Active,
             hash: vec![0; 32],
+            signature_secret: None,
             allowed_models: vec![ModelName::from("gpt-4")],
             allowed_channels: vec![],
             rpm_limit: 200,

@@ -69,6 +69,9 @@ single_payload_soft_cap_bytes = 8_388_608
 # closed (i.e. blocklist matches the LB's IP, not arbitrary clients).
 trust_xff = false
 
+[signature]
+required = false
+
 [routing]
 # How long the `Sticky` strategy keeps a conversation_id → vendor_key_id
 # binding in its moka cache. Production default is 30 min — long enough to

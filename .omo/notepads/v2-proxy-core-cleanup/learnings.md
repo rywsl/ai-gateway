@@ -1,5 +1,8 @@
 # Learnings — v2-proxy-core-cleanup
 
+- 2026-05-24 T1 HMAC rework: `body_verify::verify_body` already decoded before HMAC comparison; the parse gap was solely that `request_filter` kept parsing the original `body_bytes` instead of `ctx.cached_body` after verification.
+- 2026-05-24 T1 HMAC rework: the `api_keys` table stores most fields in JSONB payload, so the dedicated `signature_secret BYTEA` column is merged into the loader payload via `jsonb_set(... to_jsonb(signature_secret) ...)` to hydrate `ApiKeyEntry.signature_secret` without changing Redis wire shape beyond the new field.
+
 ## T2: TPM deferred deduction
 - `governor::RateLimiter::check_n(NonZeroU32)` is the token-bucket deduction API; `check()` is the 1-unit RPM variant.
 - `NonZeroU32::new(0)` returns `None` — must guard against zero-token deductions or `check_n` panics on unwrap.

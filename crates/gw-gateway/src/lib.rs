@@ -67,6 +67,7 @@ struct Wired {
     counters: Arc<CounterStore>,
     global_rpm: u32,
     trust_xff: bool,
+    signature_required: bool,
     business_port: u16,
     // --- Wave 1+ placeholders (known-gaps closure) ---
     /// JWT claim validator (T1-E). `None` until T1-E builds it from
@@ -181,6 +182,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.counters,
         wired.global_rpm,
         wired.trust_xff,
+        wired.signature_required,
         wired.jwt_validator,
         wired.strategies,
         gw_routing::FailoverExecutor::default(),
@@ -521,6 +523,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         counters,
         global_rpm: cfg.ratelimit.global_rpm,
         trust_xff: cfg.security.trust_xff,
+        signature_required: cfg.signature.required,
         business_port: cfg.server.business_port,
         jwt_validator,
         strategies: Arc::new(gw_routing::strategy::set::StrategySet::new(

@@ -23,25 +23,33 @@ pub struct BodyVerifyInput<'a> {
     pub content_encoding: Encoding,
     pub signature_required: bool,
     pub signature_algo: SignatureAlgo,
-    pub secret: Vec<u8>,
+    pub secret: &'a [u8],
     pub signature: Option<Vec<u8>>,
     pub timestamp: Option<String>,
+    pub max_decoded_bytes: Option<usize>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum BodyVerifyError {
     #[error("body decompression failed: {0}")]
     Decompression(#[from] CompressionError),
+    #[error("decompressed body exceeds {limit} bytes")]
+    DecodedBodyTooLarge { limit: usize },
 }
 
 pub fn verify_body(
     input: BodyVerifyInput<'_>,
 ) -> Result<(SignatureCheckResult, Bytes), BodyVerifyError> {
     let decoded = decode(input.content_encoding, &input.body)?;
+    if let Some(limit) = input.max_decoded_bytes {
+        if decoded.len() > limit {
+            return Err(BodyVerifyError::DecodedBodyTooLarge { limit });
+        }
+    }
     let result = verify_required(
         input.signature_required,
         input.signature_algo,
-        &input.secret,
+        input.secret,
         input.signature.as_deref(),
         input.timestamp.as_deref(),
         &SignatureInput {

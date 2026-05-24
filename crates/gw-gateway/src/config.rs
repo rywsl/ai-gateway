@@ -30,6 +30,8 @@ pub struct Config {
     #[serde(default)]
     pub security: SecurityCfg,
     #[serde(default)]
+    pub signature: SignatureCfg,
+    #[serde(default)]
     pub loader: LoaderCfg,
     #[serde(default)]
     pub routing: RoutingCfg,
@@ -223,6 +225,12 @@ pub struct DebugCfg {}
 pub struct SecurityCfg {
     #[serde(default)]
     pub trust_xff: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+pub struct SignatureCfg {
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// Cold-loader (EntityStore) settings.
