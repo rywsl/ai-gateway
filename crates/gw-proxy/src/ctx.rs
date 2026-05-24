@@ -64,6 +64,8 @@ pub struct ReqTiming {
     pub start: Option<Instant>,
     pub ttft: Option<Instant>,
     pub end: Option<Instant>,
+    pub sent_ms: Option<i64>,
+    pub settled_ms: Option<i64>,
 }
 
 pub struct ReqCtx {
@@ -98,6 +100,8 @@ pub struct ReqCtx {
     // --- Lifecycle / ledger ---
     pub timing: ReqTiming,
     pub usage: UsageAccumulator,
+    pub vendor_exposure: crate::billing_lifecycle::VendorExposure,
+    pub attempt_index: u32,
     pub freeze_guard: Option<RequestFreeze>,
     pub stream_slot: Option<StreamSlot>,
     pub bytes_sent_to_client: AtomicU64,
@@ -262,6 +266,8 @@ impl ReqCtx {
                 thinking_tokens: None,
                 multimodal_input_tokens: None,
             },
+            vendor_exposure: crate::billing_lifecycle::VendorExposure::Idle,
+            attempt_index: 0,
             freeze_guard: None,
             stream_slot: None,
             bytes_sent_to_client: AtomicU64::new(0),
