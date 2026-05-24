@@ -21,9 +21,9 @@ use crate::timeouts::Timeouts;
 use bytes::BytesMut;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
-use gw_core::entity::{ModelGroup, Pricing, TimeoutSpec, Vendor};
+use gw_core::entity::{ForcedParams, ModelGroup, Pricing, TimeoutSpec, Vendor};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
-use gw_core::ir::Mutations;
+use gw_core::ir::{ForcedMutations, Mutations};
 use gw_health::KeyHealthStore;
 use gw_routing::candidates::get_candidate_keys;
 use gw_routing::in_flight::{InFlightGuard, InFlightStore};
@@ -386,6 +386,7 @@ pub async fn pick_peer(
     // Stash on ctx for upstream_request_filter + logging.
     ctx.picked_vendor_key = Some(picked_arc.clone());
     ctx.picked_vendor = Some(vendor);
+    ctx.forced_params = group.value.forced_params.clone();
 
     // Install the in-flight RAII guard now that we've committed to a key.
     // The Drop impl decrements the counter on every termination path
@@ -434,6 +435,29 @@ pub fn apply_timeout_precedence(vendor: &Vendor, pricing: &Pricing) -> TimeoutSp
     eff
 }
 
+fn apply_forced_params_mutations(fp: &ForcedParams) -> (Mutations, ForcedMutations) {
+    let mut m = Mutations::NONE;
+    let mut fm = ForcedMutations::NONE;
+    if fp.temperature.is_some() {
+        m.set_temperature();
+        fm.set_temperature();
+    }
+    if fp.top_p.is_some() {
+        m.set_temperature(); // top_p is not in Mutations; mark temperature as closest proxy
+        fm.set_top_p();
+    }
+    (m, fm)
+}
+
+fn apply_forced_params_to_ir(ir: &mut gw_core::ir::RequestIR<'_>, fp: &ForcedParams) {
+    if let Some(t) = fp.temperature {
+        ir.temperature = Some(t);
+    }
+    if let Some(p) = fp.top_p {
+        ir.top_p = Some(p);
+    }
+}
+
 pub async fn rewrite_request(
     _session: &mut Session,
     upstream_request: &mut RequestHeader,
@@ -473,8 +497,8 @@ pub async fn rewrite_request(
 
     // Render the outbound body. Same-protocol passthrough avoids a
     // parse+render round trip when the IR was not mutated.
-    let mutations = Mutations::NONE; // TODO(task-4.3): track real mutations from forced_params etc.
-    let outbound: bytes::Bytes = if upstream_kind == client_codec.kind() {
+    let (mutations, forced_mutations) = apply_forced_params_mutations(&ctx.forced_params);
+    let outbound: bytes::Bytes = if mutations.is_empty() && upstream_kind == client_codec.kind() {
         match client_codec {
             AnyCodec::OpenAi(c) => match same_protocol_passthrough(c, cached_body, &mutations) {
                 Ok(cow) => bytes::Bytes::from(cow.into_owned()),
@@ -502,16 +526,22 @@ pub async fn rewrite_request(
             },
         }
     } else {
-        // Cross-protocol: parse client → render upstream.
-        let ir = client_codec
+        // Parse → mutate (forced_params) → render through the upstream codec.
+        let mut ir = client_codec
             .parse_request(cached_body)
             .map_err(|_e| Error::new(ErrorType::Custom("gw_request_parse_failed")))?;
+        apply_forced_params_to_ir(&mut ir, &ctx.forced_params);
         let mut buf = BytesMut::with_capacity(cached_body.len());
         upstream_codec
             .render_request(&ir, &mut buf)
             .map_err(|_e| Error::new(ErrorType::Custom("gw_request_render_failed")))?;
         buf.freeze()
     };
+
+    for field in forced_mutations.field_names() {
+        metrics::counter!("gw_forced_params_applied_total", "field" => field).increment(1);
+    }
+    ctx.forced_mutations = forced_mutations;
     ctx.cached_body = Some(outbound.clone());
     ctx.upstream_codec = Some(upstream_codec);
 

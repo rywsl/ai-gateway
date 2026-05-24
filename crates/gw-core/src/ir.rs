@@ -311,6 +311,72 @@ impl Mutations {
     }
 }
 
+/// Tracks which IR fields were overridden by vendor-key `forced_params`.
+/// Parallel to [`Mutations`] but exclusively for forced-params origin tracking;
+/// powers the `gw_forced_params_applied_total{field}` metric.
+#[derive(Clone, Debug, Default)]
+pub struct ForcedMutations {
+    pub fields: u32,
+}
+impl ForcedMutations {
+    pub const NONE: Self = Self { fields: 0 };
+
+    pub fn is_empty(&self) -> bool {
+        self.fields == 0
+    }
+
+    pub fn set_max_tokens(&mut self) {
+        self.fields |= 1 << 0;
+    }
+    pub fn set_temperature(&mut self) {
+        self.fields |= 1 << 1;
+    }
+    pub fn set_metadata(&mut self) {
+        self.fields |= 1 << 2;
+    }
+    pub fn set_tools(&mut self) {
+        self.fields |= 1 << 3;
+    }
+    pub fn set_system_prompt(&mut self) {
+        self.fields |= 1 << 4;
+    }
+    pub fn set_messages(&mut self) {
+        self.fields |= 1 << 5;
+    }
+    pub fn set_thinking_config(&mut self) {
+        self.fields |= 1 << 6;
+    }
+    pub fn set_response_format(&mut self) {
+        self.fields |= 1 << 7;
+    }
+    pub fn set_stream(&mut self) {
+        self.fields |= 1 << 8;
+    }
+    pub fn set_top_p(&mut self) {
+        self.fields |= 1 << 9;
+    }
+
+    /// Returns the field names that were overridden, for metric label emission.
+    pub fn field_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        const NAMES: &[(u32, &str)] = &[
+            (1 << 0, "max_tokens"),
+            (1 << 1, "temperature"),
+            (1 << 2, "metadata"),
+            (1 << 3, "tools"),
+            (1 << 4, "system_prompt"),
+            (1 << 5, "messages"),
+            (1 << 6, "thinking_config"),
+            (1 << 7, "response_format"),
+            (1 << 8, "stream"),
+            (1 << 9, "top_p"),
+        ];
+        NAMES
+            .iter()
+            .filter(move |(bit, _)| self.fields & bit != 0)
+            .map(|(_, name)| *name)
+    }
+}
+
 #[cfg(test)]
 mod mutations_bits_tests {
     use super::Mutations;
@@ -360,6 +426,80 @@ mod mutations_bits_tests {
             ("thinking_config", Mutations::set_thinking_config),
             ("response_format", Mutations::set_response_format),
             ("stream", Mutations::set_stream),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod forced_mutations_bits_tests {
+    use super::ForcedMutations;
+
+    #[test]
+    fn empty_by_default() {
+        let m = ForcedMutations::default();
+        assert!(m.is_empty());
+        assert_eq!(m.fields, 0);
+    }
+
+    #[test]
+    fn none_const_is_empty() {
+        assert!(ForcedMutations::NONE.is_empty());
+    }
+
+    #[test]
+    fn each_setter_uses_a_distinct_bit() {
+        let mut bits = std::collections::HashSet::new();
+        for (name, setter) in setters() {
+            let mut m = ForcedMutations::default();
+            setter(&mut m);
+            assert!(!m.is_empty(), "{name} did not flip any bit");
+            assert!(
+                m.fields.count_ones() == 1,
+                "{name} flipped more than one bit"
+            );
+            assert!(
+                bits.insert(m.fields),
+                "{name} flipped a bit another setter already owns"
+            );
+        }
+    }
+
+    #[test]
+    fn setters_are_idempotent() {
+        let mut m = ForcedMutations::default();
+        m.set_temperature();
+        m.set_temperature();
+        assert_eq!(m.fields.count_ones(), 1);
+    }
+
+    #[test]
+    fn field_names_returns_set_fields() {
+        let mut m = ForcedMutations::default();
+        m.set_temperature();
+        m.set_top_p();
+        let names: Vec<_> = m.field_names().collect();
+        assert_eq!(names, vec!["temperature", "top_p"]);
+    }
+
+    #[test]
+    fn field_names_empty_when_none() {
+        let m = ForcedMutations::NONE;
+        assert_eq!(m.field_names().count(), 0);
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setters() -> Vec<(&'static str, fn(&mut ForcedMutations))> {
+        vec![
+            ("max_tokens", ForcedMutations::set_max_tokens),
+            ("temperature", ForcedMutations::set_temperature),
+            ("metadata", ForcedMutations::set_metadata),
+            ("tools", ForcedMutations::set_tools),
+            ("system_prompt", ForcedMutations::set_system_prompt),
+            ("messages", ForcedMutations::set_messages),
+            ("thinking_config", ForcedMutations::set_thinking_config),
+            ("response_format", ForcedMutations::set_response_format),
+            ("stream", ForcedMutations::set_stream),
+            ("top_p", ForcedMutations::set_top_p),
         ]
     }
 }

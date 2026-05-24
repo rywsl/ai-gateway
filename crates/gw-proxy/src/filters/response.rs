@@ -550,8 +550,7 @@ mod deadline_tests {
 
     #[test]
     fn deadline_exceeded_returns_error() {
-        let mut ctx = ReqCtx::default();
-        ctx.is_stream = true;
+        let mut ctx = ReqCtx { is_stream: true, ..Default::default() };
         ctx.timing.start = Some(Instant::now() - Duration::from_secs(700));
         ctx.response_deadline = Some(Duration::from_secs(600));
 
@@ -563,8 +562,7 @@ mod deadline_tests {
 
     #[test]
     fn deadline_not_exceeded_returns_ok() {
-        let mut ctx = ReqCtx::default();
-        ctx.is_stream = true;
+        let mut ctx = ReqCtx { is_stream: true, ..Default::default() };
         ctx.timing.start = Some(Instant::now());
         ctx.response_deadline = Some(Duration::from_secs(600));
 
