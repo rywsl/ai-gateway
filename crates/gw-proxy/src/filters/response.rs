@@ -289,19 +289,15 @@ fn handle_event(
 /// Return a boxed `UsageExtractor` for the given upstream protocol kind.
 /// OpenAI Responses and OpenAI Chat share the same Chat extractor for W1;
 /// the routing to `::responses()` is deferred to a later wave.
-fn extractor_for_kind(
-    kind: ProtocolKind,
-) -> Box<dyn gw_codec::usage_extractor::UsageExtractor> {
+fn extractor_for_kind(kind: ProtocolKind) -> Box<dyn gw_codec::usage_extractor::UsageExtractor> {
     match kind {
         ProtocolKind::OpenAi => {
             Box::new(gw_codec::openai::usage_extractor::OpenAiUsageExtractor::chat())
         }
-        ProtocolKind::Anthropic => Box::new(
-            gw_codec::anthropic::usage_extractor::AnthropicUsageExtractor,
-        ),
-        ProtocolKind::Gemini => Box::new(
-            gw_codec::gemini::usage_extractor::GeminiUsageExtractor,
-        ),
+        ProtocolKind::Anthropic => {
+            Box::new(gw_codec::anthropic::usage_extractor::AnthropicUsageExtractor)
+        }
+        ProtocolKind::Gemini => Box::new(gw_codec::gemini::usage_extractor::GeminiUsageExtractor),
     }
 }
 
@@ -593,12 +589,14 @@ mod non_stream_branch_tests {
             upstream_codec: Some(AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)),
             ..ReqCtx::default()
         };
-        let body = Bytes::from_static(br#"{
+        let body = Bytes::from_static(
+            br#"{
             "id":"msg_1","type":"message","role":"assistant","content":[],
             "model":"claude-3-5-sonnet","stop_reason":"end_turn","stop_sequence":null,
             "usage":{"input_tokens":50,"output_tokens":25,
                      "cache_creation_input_tokens":1000,"cache_read_input_tokens":500}
-        }"#);
+        }"#,
+        );
         handle_non_stream_chunk(Some(&body), true, &mut ctx);
         assert_eq!(ctx.usage.input_tokens, 50);
         assert_eq!(ctx.usage.output_tokens, 25);

@@ -71,6 +71,12 @@ fn no_duplicate_metric_names() {
 #[test]
 fn billing_w1_metrics_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
-    assert!(names.contains(&"gw_billing_emit_total"), "missing metric: gw_billing_emit_total");
-    assert!(names.contains(&"gw_billing_provenance_total"), "missing metric: gw_billing_provenance_total");
+    assert!(
+        names.contains(&"gw_billing_emit_total"),
+        "missing metric: gw_billing_emit_total"
+    );
+    assert!(
+        names.contains(&"gw_billing_provenance_total"),
+        "missing metric: gw_billing_provenance_total"
+    );
 }

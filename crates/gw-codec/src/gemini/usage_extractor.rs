@@ -92,5 +92,9 @@ fn sum_non_text_modalities(details: &[ModalityCount]) -> Option<u32> {
         .filter(|d| !d.modality.eq_ignore_ascii_case("TEXT"))
         .map(|d| d.token_count)
         .sum();
-    if total > 0 { Some(total) } else { None }
+    if total > 0 {
+        Some(total)
+    } else {
+        None
+    }
 }

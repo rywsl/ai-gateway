@@ -44,7 +44,10 @@ fn openai_chat_extracts_six_dims() {
     assert_eq!(r.values.thinking_tokens, Some(20));
     assert!(r.is_terminal);
     assert!(matches!(r.provenance.input, ProvenanceTag::UpstreamFinal));
-    assert!(matches!(r.provenance.thinking, ProvenanceTag::UpstreamFinal));
+    assert!(matches!(
+        r.provenance.thinking,
+        ProvenanceTag::UpstreamFinal
+    ));
 }
 
 #[test]
@@ -96,14 +99,19 @@ fn anthropic_extracts_cache_creation_and_read() {
     assert_eq!(r.values.cache_creation_input_tokens, Some(1000));
     assert_eq!(r.values.cache_read_input_tokens, Some(500));
     assert!(r.is_terminal);
-    assert!(matches!(r.provenance.cache_creation, ProvenanceTag::UpstreamFinal));
+    assert!(matches!(
+        r.provenance.cache_creation,
+        ProvenanceTag::UpstreamFinal
+    ));
 }
 
 #[test]
 fn anthropic_message_delta_with_usage_is_terminal() {
     let frame = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n";
     let e = AnthropicUsageExtractor;
-    let r = e.extract_chunk(frame).expect("usage event yields ExtractedUsage");
+    let r = e
+        .extract_chunk(frame)
+        .expect("usage event yields ExtractedUsage");
     assert_eq!(r.values.output_tokens, 42);
     assert!(r.is_terminal);
 }
@@ -112,7 +120,9 @@ fn anthropic_message_delta_with_usage_is_terminal() {
 fn anthropic_message_start_with_usage_is_not_terminal() {
     let frame = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":0,\"cache_creation_input_tokens\":1000,\"cache_read_input_tokens\":500}}}\n";
     let e = AnthropicUsageExtractor;
-    let r = e.extract_chunk(frame).expect("message_start carries initial usage");
+    let r = e
+        .extract_chunk(frame)
+        .expect("message_start carries initial usage");
     assert_eq!(r.values.input_tokens, 50);
     assert_eq!(r.values.cache_creation_input_tokens, Some(1000));
     assert!(!r.is_terminal);
@@ -145,7 +155,10 @@ fn gemini_extracts_multimodal_sum() {
     assert_eq!(r.values.thinking_tokens, Some(50));
     assert_eq!(r.values.multimodal_input_tokens, Some(300)); // 200 + 80 + 20
     assert!(r.is_terminal);
-    assert!(matches!(r.provenance.multimodal_input, ProvenanceTag::UpstreamFinal));
+    assert!(matches!(
+        r.provenance.multimodal_input,
+        ProvenanceTag::UpstreamFinal
+    ));
 }
 
 #[test]
@@ -159,7 +172,10 @@ fn gemini_pure_text_yields_none_multimodal() {
     let e = GeminiUsageExtractor;
     let r = e.extract_response(body);
     assert!(r.values.multimodal_input_tokens.is_none());
-    assert!(matches!(r.provenance.multimodal_input, ProvenanceTag::Unknown));
+    assert!(matches!(
+        r.provenance.multimodal_input,
+        ProvenanceTag::Unknown
+    ));
 }
 
 #[test]

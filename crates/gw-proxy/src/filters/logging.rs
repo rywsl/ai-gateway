@@ -248,7 +248,10 @@ pub async fn run(
             ("cache_read", ctx.usage.cached_tokens.is_some()),
             ("cache_creation", ctx.usage.cache_creation_tokens.is_some()),
             ("thinking", ctx.usage.thinking_tokens.is_some()),
-            ("multimodal_input", ctx.usage.multimodal_input_tokens.is_some()),
+            (
+                "multimodal_input",
+                ctx.usage.multimodal_input_tokens.is_some(),
+            ),
         ] {
             let tag = if present { "upstream_final" } else { "unknown" };
             metrics::counter!(
