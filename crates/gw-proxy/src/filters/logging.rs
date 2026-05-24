@@ -59,6 +59,22 @@ pub async fn run(
     ledger: &Arc<Ledger>,
     counters: &Arc<CounterStore>,
 ) {
+    // W2-T4: force Terminated on any request that reached Sent or Streaming
+    // but didn't arrive at a terminal state (cancel, error, deadline, etc.).
+    // Idle requests (never dispatched to upstream) are left alone.
+    {
+        use crate::billing_lifecycle::{
+            is_terminal as exposure_is_terminal, transition_to, VendorExposure,
+        };
+        if matches!(
+            ctx.vendor_exposure,
+            VendorExposure::Sent | VendorExposure::Streaming
+        ) {
+            transition_to(ctx, VendorExposure::Terminated);
+        }
+        let _ = exposure_is_terminal; // silence unused-import warning
+    }
+
     let now = std::time::Instant::now();
     ctx.timing.end = Some(now);
 

@@ -567,6 +567,9 @@ pub async fn rewrite_request(
     // Rewrite Content-Length: the body may have changed.
     let _ = upstream_request.insert_header("content-length", outbound.len().to_string());
 
+    // W2-T4: mark the request as dispatched to the upstream vendor.
+    crate::billing_lifecycle::transition_to(ctx, crate::billing_lifecycle::VendorExposure::Sent);
+
     ctx.phase_end();
     Ok(())
 }

@@ -255,6 +255,11 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "InstanceId heartbeat key renewal successes (Go-side reaper liveness signal)",
     },
+    MetricSpec {
+        name: "gw_billing_exposure_transitions_total",
+        kind: MetricKind::Counter,
+        help: "VendorExposure state machine transitions; labels=from,to",
+    },
 ];
 
 pub fn describe_all() {

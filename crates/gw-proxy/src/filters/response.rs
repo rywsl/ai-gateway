@@ -55,6 +55,18 @@ pub fn run(
             .fetch_add(b.len() as u64, Ordering::Relaxed);
     }
 
+    // W2-T4: on first non-empty body chunk, transition Sent -> Streaming.
+    if matches!(
+        ctx.vendor_exposure,
+        crate::billing_lifecycle::VendorExposure::Sent
+    ) && body.as_ref().map(|b| !b.is_empty()).unwrap_or(false)
+    {
+        crate::billing_lifecycle::transition_to(
+            ctx,
+            crate::billing_lifecycle::VendorExposure::Streaming,
+        );
+    }
+
     // Archive: capture raw upstream chunk before any codec rewrite. Empty
     // EOS chunks are fine; the accumulator simply doesn't grow.
     if let Some(b) = body.as_ref() {
@@ -273,6 +285,18 @@ fn handle_event(
     // thinking, and multimodal from the raw JSON that the IR doesn't carry.
     if let Some(e) = extractor_for_kind(upstream_kind).extract_chunk(event_bytes) {
         apply_extracted_to_ctx(&e, ctx);
+        // W2-T4: terminal chunk from extractor signals the stream is complete.
+        if e.is_terminal
+            && matches!(
+                ctx.vendor_exposure,
+                crate::billing_lifecycle::VendorExposure::Streaming
+            )
+        {
+            crate::billing_lifecycle::transition_to(
+                ctx,
+                crate::billing_lifecycle::VendorExposure::Settled,
+            );
+        }
     }
 
     // Put the accumulator back so `run` can take+freeze it. Empty buffers are
@@ -493,6 +517,18 @@ pub(crate) fn handle_non_stream_chunk(
     if !return_body_to_accum {
         let extracted = extractor_for_kind(codec_kind).extract_response(&body);
         apply_extracted_to_ctx(&extracted, ctx);
+        // W2-T4: non-stream EOS with a successful parse is always terminal.
+        if extracted.is_terminal
+            && matches!(
+                ctx.vendor_exposure,
+                crate::billing_lifecycle::VendorExposure::Streaming
+            )
+        {
+            crate::billing_lifecycle::transition_to(
+                ctx,
+                crate::billing_lifecycle::VendorExposure::Settled,
+            );
+        }
     }
     if return_body_to_accum {
         ctx.upstream_body_accum = Some(body);

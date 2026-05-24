@@ -86,3 +86,9 @@ fn billing_w2_metrics_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(names.contains(&"gw_billing_instance_heartbeat_renewals_total"));
 }
+
+#[test]
+fn billing_w2_t4_exposure_transitions_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_exposure_transitions_total"));
+}
