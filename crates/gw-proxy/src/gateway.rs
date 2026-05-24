@@ -552,6 +552,44 @@ impl ProxyHttp for LlmGateway {
                     // Drop the in-flight guard for the failed key so the next
                     // pick is not counted against the previous key's quota.
                     ctx.inflight_guard = None;
+
+                    // Spec §5.6: emit a partial UsageRecord for the failed
+                    // attempt and bump attempt_index before the next pick.
+                    // `on_retry_sync` handles the synchronous state mutation
+                    // and returns a record; the async inflight+ledger work is
+                    // spawned on the current tokio runtime.
+                    let attempt_record = crate::billing_lifecycle::on_retry_sync(ctx);
+                    if let Some(rec) = attempt_record {
+                        let inflight = self.inflight.clone();
+                        let ledger = self.ledger.clone();
+                        // old attempt_index is now ctx.attempt_index - 1 (bumped by on_retry_sync)
+                        let old_attempt = ctx.attempt_index.saturating_sub(1);
+                        let request_id = ctx.request_id.0.clone();
+                        tokio::spawn(async move {
+                            use gw_ledger::inflight::SettleState;
+                            if let Err(e) = inflight
+                                .mark_settled(&request_id, old_attempt, SettleState::Terminated)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = ?e,
+                                    request_id = %request_id,
+                                    attempt = old_attempt,
+                                    "fail_to_connect on_retry: inflight mark_settled failed"
+                                );
+                            }
+                            ledger.emit(rec).await;
+                            if let Err(e) = inflight.clear(&request_id, old_attempt).await {
+                                tracing::warn!(
+                                    error = ?e,
+                                    request_id = %request_id,
+                                    attempt = old_attempt,
+                                    "fail_to_connect on_retry: inflight clear failed"
+                                );
+                            }
+                        });
+                    }
+
                     metrics::counter!(
                         "gw_retry_attempt_total",
                         "outcome" => "recovered",
