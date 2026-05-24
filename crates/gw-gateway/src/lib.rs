@@ -337,6 +337,39 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         instance_id.clone(),
     ));
 
+    // W4-T4 — Startup reconciler: scan billing:inflight:<instance_id>:* for
+    // residuals from the previous boot and emit CrashFallback UsageRecords.
+    // Runs before traffic starts (bootstrap completes, then Pingora starts).
+    {
+        let pool_for_recon = (*redis.pool).clone();
+        let inst_for_recon = instance_id.clone();
+        let emit_ledger = ledger.clone();
+        let emit = move |r: gw_ledger::usage::UsageRecord| {
+            let l = emit_ledger.clone();
+            Box::pin(async move {
+                l.emit(r).await;
+                Ok(())
+            })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        };
+        match gw_ledger::inflight_reconciler::run(&pool_for_recon, &inst_for_recon, emit).await {
+            Ok(n) if n > 0 => tracing::warn!(
+                target: "gw_gateway",
+                recovered = n,
+                "InflightReconciler: emitted CrashFallback records from prior boot"
+            ),
+            Ok(_) => tracing::info!(
+                target: "gw_gateway",
+                "InflightReconciler: no residuals from prior boot"
+            ),
+            Err(e) => tracing::error!(
+                target: "gw_gateway",
+                error = ?e,
+                "InflightReconciler startup failed"
+            ),
+        }
+    }
+
     // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
     // The consumer's join handle is intentionally dropped: the task lives for
     // the life of the bootstrap runtime (which itself is parked on pending()).

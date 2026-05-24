@@ -7,6 +7,7 @@ pub mod flusher;
 pub mod freeze;
 pub mod inflight;
 pub mod inflight_reaper;
+pub mod inflight_reconciler;
 pub mod instance_id;
 pub mod usage;
 

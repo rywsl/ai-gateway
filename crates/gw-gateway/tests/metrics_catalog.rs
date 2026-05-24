@@ -132,3 +132,9 @@ fn billing_w4_t3_emit_lag_t0_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(names.contains(&"gw_billing_emit_lag_t0_total"));
 }
+
+#[test]
+fn billing_w4_t4_inflight_recovered_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_inflight_recovered_total"));
+}

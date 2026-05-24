@@ -294,6 +294,12 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "T0 incident counter — ts_settled_ms exceeded emit_lag_t0_secs without DEL. ANY non-zero value = page on-call.",
     },
+    // --- Billing robustness W4-T4 ---
+    MetricSpec {
+        name: "gw_billing_inflight_recovered_total",
+        kind: MetricKind::Counter,
+        help: "Number of CrashFallback UsageRecords emitted by the startup reconciler",
+    },
 ];
 
 pub fn describe_all() {
