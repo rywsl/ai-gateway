@@ -14,7 +14,8 @@
 //!
 //! - `/livez` — unconditional liveness ping.
 //! - `/readyz` — gated on [`READY`] (init complete).
-//! - `/healthz/circuits`, `/healthz/key/<id>`, `/healthz/resilience` —
+//! - `/healthz/circuits`, `/healthz/key/<id>`, `/healthz/resilience`,
+//!   `/healthz/tunnel` —
 //!   admin-only; require `Authorization: Mgmt <token>` (validated in T6-A
 //!   wiring). v1 returns 401 unconditionally so production deployments that
 //!   expose 8080 do not leak circuit / health internals before the mgmt
@@ -43,13 +44,16 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// `LlmGateway` so the snapshot the operator sees matches the state the
 /// request path observes.
 ///
-/// T3-Pre constructs and threads this through `run_health_server`; T3-C
-/// will replace the current blanket-401 routing block with a verify-then-
-/// snapshot chain that consumes both `key_health` / `resilience` here
-/// and the `store` + `mgmt_blacklist` passed alongside.
+/// Constructed and threaded through `run_health_server`; the `/healthz/*`
+/// surface has its own management-token verify chain before rendering
+/// snapshots from `key_health` / `resilience` plus the `store` and
+/// `mgmt_blacklist` passed alongside.
 pub struct HealthState {
     pub key_health: Arc<gw_health::KeyHealthStore>,
     pub resilience: Arc<gw_proxy::resilience::ResilienceState>,
+    pub tunnel_enabled: bool,
+    #[cfg(feature = "tunnel")]
+    pub tunnel_stack: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
 }
 
 pub async fn run_health_server(
@@ -130,7 +134,8 @@ async fn handle_connection(
         }
         path if path.starts_with("/healthz/circuits")
             || path.starts_with("/healthz/key/")
-            || path == "/healthz/resilience" =>
+            || path == "/healthz/resilience"
+            || path == "/healthz/tunnel" =>
         {
             // ADR-B2-3 + B2-5: mgmt-token gated admin endpoints. Verify
             // chain mirrors the proxy's request_filter mgmt branch
@@ -267,9 +272,62 @@ fn build_healthz_body(path: &str, state: &HealthState) -> String {
         state.key_health.key_snapshot_json(key_id)
     } else if path == "/healthz/resilience" {
         state.resilience.snapshot_json()
+    } else if path == "/healthz/tunnel" {
+        build_tunnel_healthz_body(state)
     } else {
         String::from("{}")
     }
+}
+
+fn build_tunnel_healthz_body(state: &HealthState) -> String {
+    if !state.tunnel_enabled {
+        return String::from(r#"{"enabled":false,"nodes":[]}"#);
+    }
+
+    #[cfg(feature = "tunnel")]
+    {
+        if let Some(ref stack) = state.tunnel_stack {
+            let nodes = stack.health_snapshot();
+            let mut buf = String::from(r#"{"enabled":true,"nodes":["#);
+            for (i, n) in nodes.iter().enumerate() {
+                if i > 0 {
+                    buf.push(',');
+                }
+                buf.push_str(&format!(
+                    r#"{{"node_id":"{}","transport_present":{},"last_pong_age_seconds":{}}}"#,
+                    escape_json_string(&n.node_id),
+                    n.transport_present,
+                    match n.last_pong_age_secs {
+                        Some(v) => format!("{v:.1}"),
+                        None => "null".to_owned(),
+                    },
+                ));
+            }
+            buf.push_str("]}");
+            return buf;
+        }
+    }
+
+    String::from(r#"{"enabled":true,"nodes":[]}"#)
+}
+
+#[cfg(feature = "tunnel")]
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Parse the request path from the first line of an HTTP/1.1 request.

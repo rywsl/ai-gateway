@@ -21,6 +21,8 @@ use gw_tunnel_client::safe_dns::SafeDnsResolver;
 use gw_tunnel_client::transport::TransportConfig;
 use pingora::upstreams::peer::HttpPeer;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::task::JoinHandle;
 
 /// Error returned by `peer_for_node` when the chosen transport is not yet
 /// connected. Mapped to `GW_TUNNEL_NO_LIVE` / `GW_TUNNEL_TARGET_DENIED` in
@@ -33,15 +35,18 @@ pub enum TunnelPeerError {
     TargetDenied { host: String, port: u16 },
 }
 
+pub struct TunnelNodeHealth {
+    pub node_id: String,
+    pub transport_present: bool,
+    pub last_pong_age_secs: Option<f64>,
+}
+
 pub struct TunnelStack {
     /// node_id -> reconnecting transport. Created lazily on first use.
     transports: DashMap<String, Arc<ReconnectingTransport>>,
     /// Live `ProxyNodeView`s. Swapped wholesale by `reload_nodes`.
     nodes: ArcSwap<Vec<ProxyNodeView>>,
-    /// DoH resolver — held for the lifetime of the stack so per-node health
-    /// probes (added in a follow-up) can use it. T3-A keeps it stored but
-    /// unused; T5 / health probing populate the usage.
-    #[allow(dead_code)]
+    /// DoH resolver used by probe_loop for DNS-based health checks.
     dns: Arc<SafeDnsResolver>,
     /// Pool config applied to every newly-spawned `ReconnectingTransport`.
     pool_cfg: PoolConfig,
@@ -66,9 +71,55 @@ impl TunnelStack {
     }
 
     /// Wholesale-swap the live node list. Called by the bootstrap-side
-    /// invalidation subscriber (T5) when the proxy_node table changes.
+    /// invalidation subscriber when the proxy_node table changes.
     pub fn reload_nodes(&self, nodes: Vec<ProxyNodeView>) {
         self.nodes.store(Arc::new(nodes));
+    }
+
+    /// Periodically sample transport state per node and emit gauge metrics.
+    pub fn start_probe_loop(self: &Arc<Self>, interval: Duration) -> JoinHandle<()> {
+        let stack = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                let nodes = stack.nodes.load_full();
+                for node in nodes.iter() {
+                    let present = stack
+                        .transports
+                        .get(&node.id)
+                        .map(|t| t.current().is_some())
+                        .unwrap_or(false);
+                    metrics::gauge!(
+                        "gw_tunnel_transport_present",
+                        "node_id" => node.id.clone()
+                    )
+                    .set(if present { 1.0 } else { 0.0 });
+                }
+            }
+        })
+    }
+
+    /// Snapshot for the `/healthz/tunnel` admin endpoint. Returns each
+    /// known node's id together with whether a live transport exists.
+    /// `last_pong_age_secs` is `None` until T3 adds the pong tracker.
+    pub fn health_snapshot(&self) -> Vec<TunnelNodeHealth> {
+        let nodes = self.nodes.load_full();
+        nodes
+            .iter()
+            .map(|n| {
+                let transport_present = self
+                    .transports
+                    .get(&n.id)
+                    .map(|t| t.current().is_some())
+                    .unwrap_or(false);
+                TunnelNodeHealth {
+                    node_id: n.id.clone(),
+                    transport_present,
+                    last_pong_age_secs: None,
+                }
+            })
+            .collect()
     }
 
     /// Decide Direct vs Tunnel for a given (provider, key, preference).

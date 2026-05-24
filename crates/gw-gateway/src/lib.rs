@@ -69,6 +69,7 @@ struct Wired {
     trust_xff: bool,
     signature_required: bool,
     business_port: u16,
+    admin_upstream_url: url::Url,
     // --- Wave 1+ placeholders (known-gaps closure) ---
     /// JWT claim validator (T1-E). `None` until T1-E builds it from
     /// `AuthConfig.global`.
@@ -181,6 +182,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.ledger,
         wired.counters,
         wired.global_rpm,
+        wired.admin_upstream_url,
         wired.trust_xff,
         wired.signature_required,
         wired.jwt_validator,
@@ -219,6 +221,16 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
+    let admin_upstream_url = url::Url::parse(&cfg.admin.upstream_url)
+        .with_context(|| format!("invalid admin.upstream_url: {}", cfg.admin.upstream_url))?;
+    match admin_upstream_url.scheme() {
+        "http" | "https" => {}
+        scheme => anyhow::bail!("admin.upstream_url must use http or https, got {scheme}"),
+    }
+    if admin_upstream_url.host_str().is_none() {
+        anyhow::bail!("admin.upstream_url must include a host");
+    }
+
     // 1. KMS — load and validate KEK material so config errors surface at
     // startup. The cache is moved into LoaderCtx so vendor_key decryption
     // works on the hot path.
@@ -334,27 +346,6 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             );
         }
     }
-
-    // 6. Health server.
-    let health_port = cfg.server.health_port;
-    let health_state = health::HealthState {
-        key_health: health.clone(),
-        resilience: resilience.clone(),
-    };
-    let health_store = store.clone();
-    let health_blacklist = mgmt_blacklist.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            health::run_health_server(health_port, health_state, health_store, health_blacklist)
-                .await
-        {
-            tracing::error!(
-                target: "gw_gateway::health",
-                error = %e,
-                "health server exited unexpectedly"
-            );
-        }
-    });
 
     // T1-E (G6) — build the hybrid JwtValidator if AuthConfig.global is
     // available. Absent → validator stays None and request_filter falls back
@@ -506,12 +497,38 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             }
         });
 
+        let _probe_handle = stack.start_probe_loop(Duration::from_secs(5));
+
         tracing::info!(target: "gw_gateway", "TunnelStack constructed (tunnel.enabled=true)");
         Some(stack)
     } else {
         tracing::info!(target: "gw_gateway", "tunnel.enabled=false; skipping TunnelStack");
         None
     };
+
+    // 6. Health server (positioned after TunnelStack so `tunnel` is in scope).
+    let health_port = cfg.server.health_port;
+    let health_state = health::HealthState {
+        key_health: health.clone(),
+        resilience: resilience.clone(),
+        tunnel_enabled: cfg.tunnel.enabled,
+        #[cfg(feature = "tunnel")]
+        tunnel_stack: tunnel.clone(),
+    };
+    let health_store = store.clone();
+    let health_blacklist = mgmt_blacklist.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            health::run_health_server(health_port, health_state, health_store, health_blacklist)
+                .await
+        {
+            tracing::error!(
+                target: "gw_gateway::health",
+                error = %e,
+                "health server exited unexpectedly"
+            );
+        }
+    });
 
     Ok(Wired {
         store,
@@ -522,6 +539,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         ledger,
         counters,
         global_rpm: cfg.ratelimit.global_rpm,
+        admin_upstream_url,
         trust_xff: cfg.security.trust_xff,
         signature_required: cfg.signature.required,
         business_port: cfg.server.business_port,
