@@ -33,8 +33,8 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 | `gw-codec` | Supporting | `ProtocolCodec` trait + OpenAI / Anthropic / Gemini codecs, same-protocol passthrough fast path, cross-protocol IR re-render, SSE accumulator, gzip/brotli compression, stream-policy truth table. |
 | `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (9 Moka caches with cold-load chain), `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
 | `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor RPM, ADR-024 hard caps, HMAC signature verify, IP allow/blocklist, model-permission regex w/ ReDoS budget, management-path detect. |
-| `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process request `frozen_micro`; task freezes delegate to `TaskFreezeRelease`), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction. |
-| `gw-task-runtime` | Supporting | `TaskFreezeRelease` trait and `RedisTaskFreezeRelease` — Lua-driven atomic freeze/release for task-scoped deductions. |
+| `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process request `frozen_micro`; task freezes delegate to its `TaskFreezeRelease` trait), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction. |
+| `gw-task-runtime` | Supporting | `RedisTaskFreezeRelease` implementation — Lua-driven atomic freeze/release for task-scoped deductions. |
 | `gw-adapter` | Business | `UpstreamAdapter` trait (vendor-specific outbound rewrite hooks), `UpstreamErrorAnalyzer` trait, `ErrorOutcome`. |
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
 | `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
@@ -54,8 +54,7 @@ Supporting:
   gw-store         ◄── gw-auth, gw-routing, gw-ledger, gw-capability,
                        gw-tunnel-client, gw-proxy, gw-gateway
   gw-auth          ◄── gw-capability, gw-proxy, gw-gateway
-  gw-task-runtime  ◄── gw-ledger
-  gw-ledger        ◄── gw-proxy, gw-gateway
+  gw-ledger        ◄── gw-task-runtime, gw-proxy, gw-gateway
 
 Business:
   gw-health        ◄── gw-adapter, gw-routing, gw-proxy, gw-gateway

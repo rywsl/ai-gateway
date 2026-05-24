@@ -15,7 +15,6 @@
 //! C-γ §ADR-Cγ-1.
 
 use gw_core::ids::UserId;
-use gw_task_runtime::TaskFreezeRelease;
 use gw_store::deduction::{DeductionState, DEDUCT};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -36,6 +35,30 @@ pub trait FreezeGuard: Send + Sync {
     fn freeze_amount(&self) -> u64;
     fn uid(&self) -> &UserId;
     fn release(&self);
+}
+
+/// Outcome of a task freeze release operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    /// The frozen amount was successfully released.
+    Released,
+    /// The task had already been released (idempotent).
+    AlreadyReleased,
+}
+
+/// Trait for releasing a previously frozen task balance.
+#[async_trait::async_trait]
+pub trait TaskFreezeRelease: Send + Sync {
+    /// Release `frozen_amount` for the given user and task.
+    ///
+    /// Returns [`ReleaseOutcome::Released`] on first release,
+    /// [`ReleaseOutcome::AlreadyReleased`] on repeated calls (idempotent).
+    async fn release(
+        &self,
+        uid: &UserId,
+        task_id: &str,
+        frozen_amount: u64,
+    ) -> Result<ReleaseOutcome, anyhow::Error>;
 }
 
 /// Per-request freeze. Mutates the in-process `DeductionState.frozen_micro`

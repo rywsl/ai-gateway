@@ -1,8 +1,9 @@
-use crate::{ReleaseOutcome, TaskFreezeRelease, UserId};
+use crate::UserId;
 use anyhow::{anyhow, Context};
 use fred::clients::RedisPool;
 use fred::error::RedisError;
 use fred::interfaces::LuaInterface;
+use gw_ledger::{ReleaseOutcome, TaskFreezeRelease};
 
 pub const TASK_FREEZE_RELEASE_LUA: &str = include_str!("lua/task_freeze_release.lua");
 

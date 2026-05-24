@@ -1799,13 +1799,13 @@ dependencies = [
 name = "gw-ledger"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64",
  "bytes",
  "fred",
  "gw-core",
  "gw-store",
- "gw-task-runtime",
  "lz4_flex",
  "metrics",
  "serde",
@@ -1917,6 +1917,7 @@ dependencies = [
  "async-trait",
  "fred",
  "gw-core",
+ "gw-ledger",
  "gw-store",
  "testcontainers",
  "testcontainers-modules",

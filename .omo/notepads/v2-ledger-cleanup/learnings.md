@@ -29,6 +29,7 @@
 - Release keys are cluster co-located via `{user:<uid>}`: `:tasks:leases`, `:entity:task:<task_id>`, `:counter:task_frozen_micro`.
 - Counter key is a HASH and the script mutates field `frozen_micro` via `HINCRBY`; tests seed/read that field, not string `GET`.
 - `gw-ledger::TaskFreeze::release()` remains synchronous and spawns the async releaser; `None` releaser is a test/no-op path.
+- Layering correction: `TaskFreezeRelease` and `ReleaseOutcome` live in `gw-ledger`; `gw-task-runtime` depends on `gw-ledger` to implement the trait. `gw-ledger → gw-task-runtime` violates `check-invariants.sh` because `gw-task-runtime` is forbidden for supporting peers.
 
 ## 2026-05-24 T5: Docs + cleanup + overview update
 - Removed all "Phase 1b" / "Phase 5" / "Phase 6" v1 marker references from doc comments in freeze.rs, usage.rs, tests/freeze.rs, logging.rs, merge.rs, permissions.rs

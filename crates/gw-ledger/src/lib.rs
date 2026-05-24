@@ -2,13 +2,15 @@
 //! (ADR-004 + C-γ §ADR-Cγ-2), mpsc-backed usage-record flusher with Redis
 //! pipeline, and detailed-archive writer.
 
+pub mod deduct_gc;
 pub mod encoding;
 pub mod flusher;
 pub mod freeze;
 pub mod usage;
 
+pub use deduct_gc::DeductGc;
 pub use flusher::Ledger;
-pub use freeze::{FreezeGuard, FreezeKind, RequestFreeze, TaskFreeze};
+pub use freeze::{FreezeGuard, FreezeKind, ReleaseOutcome, RequestFreeze, TaskFreeze, TaskFreezeRelease};
 pub use gw_core::permissions::MarkupChainSnapshot;
 pub use usage::{UsageRecord, UsageSource, UsageStatus};
 

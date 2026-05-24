@@ -1,33 +1,10 @@
 //! Task freeze/release runtime — SUPPORTING layer.
 //!
-//! Provides the [`TaskFreezeRelease`] trait and a Redis-backed implementation
-//! ([`RedisTaskFreezeRelease`]) for releasing frozen task balances.
+//! Provides a Redis-backed implementation ([`RedisTaskFreezeRelease`]) of
+//! [`TaskFreezeRelease`] for releasing frozen task balances.
 
 mod release;
 
 pub use gw_core::ids::UserId;
+pub use gw_ledger::{ReleaseOutcome, TaskFreezeRelease};
 pub use release::{RedisTaskFreezeRelease, TASK_FREEZE_RELEASE_LUA};
-
-/// Outcome of a task freeze release operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReleaseOutcome {
-    /// The frozen amount was successfully released.
-    Released,
-    /// The task had already been released (idempotent).
-    AlreadyReleased,
-}
-
-/// Trait for releasing a previously frozen task balance.
-#[async_trait::async_trait]
-pub trait TaskFreezeRelease: Send + Sync {
-    /// Release `frozen_amount` for the given user and task.
-    ///
-    /// Returns [`ReleaseOutcome::Released`] on first release,
-    /// [`ReleaseOutcome::AlreadyReleased`] on repeated calls (idempotent).
-    async fn release(
-        &self,
-        uid: &UserId,
-        task_id: &str,
-        frozen_amount: u64,
-    ) -> Result<ReleaseOutcome, anyhow::Error>;
-}
