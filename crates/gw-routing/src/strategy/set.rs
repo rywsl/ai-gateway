@@ -84,9 +84,8 @@ impl StrategySet {
         Self::new(Duration::from_secs(DEFAULT_STICKY_TTL_SECS))
     }
 
-    /// Sentinel constructor for Wave 0 scaffolding. Equivalent to
-    /// [`Self::new_default`] today; kept as a separate name so T2-C's moka
-    /// migration can replace `new_default` without touching wave-0 use sites.
+    /// Alias for [`Self::new_default`], retained for backward compatibility
+    /// with existing test call sites.
     pub fn placeholder() -> Self {
         Self::new_default()
     }

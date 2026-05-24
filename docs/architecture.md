@@ -268,7 +268,6 @@ The 13 gaps G1-G13 catalogued in [`docs/superpowers/specs/2026-05-21-known-gaps-
 - **G6**: dedicated `signature_secret` field on `ApiKeyEntry` (currently reuses `hash` as the HMAC secret — v1.5 compromise).
 - **G7**: workspace-global `signature_required` toggle (ADR-G7-2; out of scope for v1.5). Stash the decompressed body so the codec parse step reuses it (the compressed-body parse gap — see §8 Deliberate behaviours).
 - **G8**: direct wire-to-wire codegen (codec-s3 N²) replacing the IR round-trip; multi-event SSE buffering across Pingora chunk boundaries. *(Cross-protocol non-streaming response body re-render landed in S-codec v2, 2026-05-24; entry trimmed accordingly.)*
-- **G10**: response-side (5xx/429) retry executor → `FailoverExecutor v2` (routing-r-e); same-key retry with backoff; per-`ModelGroup` retry config.
 - **G11**: three-layer fallback (in-memory + on-disk file + periodic drainer + startup recovery) → billing-c-delta.
 - **G3**: per-tenant timezone for the daily-quota day window (v1.5 is UTC-only).
 - **G13**: reconcile `ApiKeyEntry.force_capabilities` (SmallVec, singular `force_`) vs `VendorKey.forced_capabilities` (Vec, plural) into one breaking rename.

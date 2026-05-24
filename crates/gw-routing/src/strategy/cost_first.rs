@@ -1,13 +1,8 @@
-//! Cost-first strategy.
+//! `CostFirst` strategy: pick the cheapest available key by
+//! `priority × model_markup` score (ascending — lower = cheaper).
 //!
-//! v1 limitation: VendorKey has no embedded cost/markup field; true cost
-//! resolution requires async lookup into `gw_store::EntityStore.pricing`,
-//! which is too expensive on the per-candidate hot path. This v1 implementation
-//! delegates to a priority-DESCENDING sort (same direction as FixedOrder) as a
-//! coarse proxy — operators are expected to set higher `priority` on cheaper
-//! key pools.
-//!
-//! TODO(v2): consult Pricing.model_markup and sort ascending by true cost.
+//! When `ctx.pricing` is `None` (pricing row not loaded), falls back to
+//! priority-descending ordering (identical to the v1 behaviour).
 
 use super::*;
 
@@ -25,14 +20,174 @@ impl Strategy for CostFirst {
         _f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
-        let mut sorted: Vec<_> = candidates.iter().enumerate().collect();
-        // priority desc (higher = preferred / cheaper-tier-by-convention)
-        sorted.sort_by_key(|(_, k)| -k.priority);
-        for (i, _) in &sorted {
-            if h.is_available(&candidates[*i].key_id, ctx.api_format) {
-                return Some(&candidates[*i]);
-            }
+        let markup = ctx.pricing.map(|p| p.model_markup).unwrap_or(1.0);
+
+        let mut scored: Vec<(usize, f32)> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| h.is_available(&k.key_id, ctx.api_format))
+            .map(|(i, k)| {
+                let cost = k.priority as f32 * markup;
+                (i, cost)
+            })
+            .collect();
+
+        if ctx.pricing.is_some() {
+            // With pricing: ascending by priority * markup (lower = cheaper).
+            scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            // Without pricing: priority descending (higher = preferred, v1 fallback).
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         }
-        None
+
+        scored.first().map(|(i, _)| &candidates[*i])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gw_core::entity::{KeyStatus, Pricing};
+    use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
+    use gw_core::protocol::ProtocolKind;
+    use gw_health::cooldown::{CooldownDirective, CooldownReason};
+    use secrecy::SecretString;
+
+    fn make_key(key_id: &str, priority: i32) -> Arc<VendorKey> {
+        Arc::new(VendorKey {
+            key_id: KeyId::from(key_id),
+            vendor_id: VendorId::from("vendor-test"),
+            api_key: SecretString::from("sk-test".to_string()),
+            accessible_models: vec![],
+            model_mapping: Default::default(),
+            accessible_endpoints: vec![],
+            protocol_conversion: false,
+            priority,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: vec![],
+            forced_capabilities: vec![],
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+        })
+    }
+
+    #[test]
+    fn test_picks_lowest_cost_with_pricing() {
+        let strategy = CostFirst;
+        let candidates = vec![
+            make_key("key-a", 1),
+            make_key("key-b", 5),
+            make_key("key-c", 3),
+        ];
+        let health = KeyHealthStore::default();
+        let inflight = InFlightStore::default();
+        let lt = LatencyTracker::default();
+        let uid = UserId::from("user-1");
+        let model = ModelName::from("gpt-4");
+        let pricing = Pricing {
+            model: ModelName::from("gpt-4"),
+            input_price_micro_per_token: 0,
+            output_price_micro_per_token: 0,
+            max_output: 0,
+            model_markup: 1.2,
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            total_timeout_ms: None,
+            stream_total_timeout_ms: None,
+        };
+        let ctx = PickCtx {
+            user_id: &uid,
+            model: &model,
+            conversation_id: None,
+            message_hash: None,
+            api_format: ProtocolKind::OpenAi,
+            pricing: Some(&pricing),
+            latency_tracker: &lt,
+        };
+
+        let picked = strategy.pick(&candidates, &health, &inflight, &ctx);
+        assert_eq!(picked.unwrap().key_id.as_ref(), "key-a");
+    }
+
+    #[test]
+    fn test_fallback_without_pricing() {
+        let strategy = CostFirst;
+        let candidates = vec![
+            make_key("key-a", 1),
+            make_key("key-b", 5),
+            make_key("key-c", 3),
+        ];
+        let health = KeyHealthStore::default();
+        let inflight = InFlightStore::default();
+        let lt = LatencyTracker::default();
+        let uid = UserId::from("user-1");
+        let model = ModelName::from("gpt-4");
+        let ctx = PickCtx {
+            user_id: &uid,
+            model: &model,
+            conversation_id: None,
+            message_hash: None,
+            api_format: ProtocolKind::OpenAi,
+            pricing: None,
+            latency_tracker: &lt,
+        };
+
+        let picked = strategy.pick(&candidates, &health, &inflight, &ctx);
+        assert_eq!(picked.unwrap().key_id.as_ref(), "key-b");
+    }
+
+    #[test]
+    fn test_skips_unavailable() {
+        let strategy = CostFirst;
+        let candidates = vec![
+            make_key("key-a", 1),
+            make_key("key-b", 5),
+            make_key("key-c", 3),
+        ];
+        let health = KeyHealthStore::default();
+        health.apply_cooldown(
+            &candidates[0].key_id,
+            ProtocolKind::OpenAi,
+            CooldownDirective {
+                reason: CooldownReason::Status429RateLimit,
+                ttl_secs: 3600,
+                reset_consecutive: false,
+            },
+        );
+        let inflight = InFlightStore::default();
+        let lt = LatencyTracker::default();
+        let uid = UserId::from("user-1");
+        let model = ModelName::from("gpt-4");
+        let pricing = Pricing {
+            model: ModelName::from("gpt-4"),
+            input_price_micro_per_token: 0,
+            output_price_micro_per_token: 0,
+            max_output: 0,
+            model_markup: 1.0,
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            total_timeout_ms: None,
+            stream_total_timeout_ms: None,
+        };
+        let ctx = PickCtx {
+            user_id: &uid,
+            model: &model,
+            conversation_id: None,
+            message_hash: None,
+            api_format: ProtocolKind::OpenAi,
+            pricing: Some(&pricing),
+            latency_tracker: &lt,
+        };
+
+        let picked = strategy.pick(&candidates, &health, &inflight, &ctx);
+        assert_eq!(picked.unwrap().key_id.as_ref(), "key-c");
     }
 }
