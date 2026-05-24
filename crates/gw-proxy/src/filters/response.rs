@@ -267,6 +267,14 @@ fn handle_event(
         }
     }
 
+    // W1-T6: extract 3 new dims from the raw SSE event bytes. This is
+    // additive to the per-IR-event `StreamEventIR::Usage` accumulation above
+    // (which fills input/output/cached). The extractor adds cache_creation,
+    // thinking, and multimodal from the raw JSON that the IR doesn't carry.
+    if let Some(e) = extractor_for_kind(upstream_kind).extract_chunk(event_bytes) {
+        apply_extracted_to_ctx(&e, ctx);
+    }
+
     // Put the accumulator back so `run` can take+freeze it. Empty buffers are
     // not stashed: `run` would treat `Some(empty)` as a chunk substitution and
     // wrongly zero out the outbound body.
@@ -276,6 +284,50 @@ fn handle_event(
 
     // S-codec T2: restore the stream state for the next framed event.
     ctx.stream_state = Some(state);
+}
+
+/// Return a boxed `UsageExtractor` for the given upstream protocol kind.
+/// OpenAI Responses and OpenAI Chat share the same Chat extractor for W1;
+/// the routing to `::responses()` is deferred to a later wave.
+fn extractor_for_kind(
+    kind: ProtocolKind,
+) -> Box<dyn gw_codec::usage_extractor::UsageExtractor> {
+    match kind {
+        ProtocolKind::OpenAi => {
+            Box::new(gw_codec::openai::usage_extractor::OpenAiUsageExtractor::chat())
+        }
+        ProtocolKind::Anthropic => Box::new(
+            gw_codec::anthropic::usage_extractor::AnthropicUsageExtractor,
+        ),
+        ProtocolKind::Gemini => Box::new(
+            gw_codec::gemini::usage_extractor::GeminiUsageExtractor,
+        ),
+    }
+}
+
+/// Merge extracted 6-dim usage into `ctx.usage`. Fields from `parse_response`
+/// (input/output/cached) are only overridden when the extractor produced a
+/// non-zero / non-None value, so we never clobber wire-sourced data with zeros
+/// from a partial chunk.
+fn apply_extracted_to_ctx(e: &gw_codec::usage_extractor::ExtractedUsage, ctx: &mut ReqCtx) {
+    if e.values.input_tokens > 0 {
+        ctx.usage.input_tokens = e.values.input_tokens;
+    }
+    if e.values.output_tokens > 0 {
+        ctx.usage.output_tokens = e.values.output_tokens;
+    }
+    if e.values.cache_read_input_tokens.is_some() {
+        ctx.usage.cached_tokens = e.values.cache_read_input_tokens;
+    }
+    if e.values.cache_creation_input_tokens.is_some() {
+        ctx.usage.cache_creation_tokens = e.values.cache_creation_input_tokens;
+    }
+    if e.values.thinking_tokens.is_some() {
+        ctx.usage.thinking_tokens = e.values.thinking_tokens;
+    }
+    if e.values.multimodal_input_tokens.is_some() {
+        ctx.usage.multimodal_input_tokens = e.values.multimodal_input_tokens;
+    }
 }
 
 /// True iff the non-stream response needs cross-protocol re-render — i.e.
@@ -434,6 +486,18 @@ pub(crate) fn handle_non_stream_chunk(
             }
         }
     }
+    // W1-T6: extract the 3 new dims (cache_creation, thinking, multimodal)
+    // that `parse_response` / the IR don't surface. Always runs on EOS even
+    // when `parse_response` succeeded — the extractor is a second read over
+    // the same bytes and never fails fatally (parse errors return a default).
+    // We skip extraction when `return_body_to_accum` is true (i.e. either
+    // `parse_response` already failed, or cross-render failed but the usage
+    // was already written) — those cases kept the body in the accum for the
+    // caller to forward verbatim, and a second parse is wasteful.
+    if !return_body_to_accum {
+        let extracted = extractor_for_kind(codec_kind).extract_response(&body);
+        apply_extracted_to_ctx(&extracted, ctx);
+    }
     if return_body_to_accum {
         ctx.upstream_body_accum = Some(body);
     }
@@ -489,7 +553,8 @@ mod non_stream_branch_tests {
         let body = Bytes::from_static(b"not json");
         handle_non_stream_chunk(Some(&body), true, &mut ctx);
         // usage stays at zero — the logging filter falls back to
-        // UsageSource::Estimated when output_tokens == 0.
+        // UsageSource::Estimated when no vendor-observed dim has a value
+        // (input/output/cached/cache_creation all zero or None).
         assert_eq!(ctx.usage.input_tokens, 0);
         assert_eq!(ctx.usage.output_tokens, 0);
         // S-codec T6: on parse failure the helper repopulates
@@ -519,5 +584,27 @@ mod non_stream_branch_tests {
         let body = Bytes::from_static(b"{\"usage\":{}}");
         handle_non_stream_chunk(Some(&body), true, &mut ctx);
         assert_eq!(ctx.usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn anthropic_non_stream_eos_extracts_six_dims_into_ctx() {
+        let mut ctx = ReqCtx {
+            is_stream: false,
+            upstream_codec: Some(AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)),
+            ..ReqCtx::default()
+        };
+        let body = Bytes::from_static(br#"{
+            "id":"msg_1","type":"message","role":"assistant","content":[],
+            "model":"claude-3-5-sonnet","stop_reason":"end_turn","stop_sequence":null,
+            "usage":{"input_tokens":50,"output_tokens":25,
+                     "cache_creation_input_tokens":1000,"cache_read_input_tokens":500}
+        }"#);
+        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+        assert_eq!(ctx.usage.input_tokens, 50);
+        assert_eq!(ctx.usage.output_tokens, 25);
+        assert_eq!(ctx.usage.cached_tokens, Some(500));
+        assert_eq!(ctx.usage.cache_creation_tokens, Some(1000));
+        assert!(ctx.usage.thinking_tokens.is_none());
+        assert!(ctx.usage.multimodal_input_tokens.is_none());
     }
 }

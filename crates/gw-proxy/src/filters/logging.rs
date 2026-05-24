@@ -200,13 +200,15 @@ pub async fn run(
                 input_tokens: ctx.usage.input_tokens,
                 output_tokens: ctx.usage.output_tokens,
                 cache_read_input_tokens: ctx.usage.cached_tokens,
-                // Phase 2 (codec S4 extract_usage_any) populates the
-                // remaining three fields directly from upstream wire.
-                cache_creation_input_tokens: None,
-                thinking_tokens: None,
-                multimodal_input_tokens: None,
+                cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
+                thinking_tokens: ctx.usage.thinking_tokens,
+                multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
             },
-            usage_source: if ctx.usage.output_tokens > 0 {
+            usage_source: if ctx.usage.input_tokens > 0
+                || ctx.usage.output_tokens > 0
+                || ctx.usage.cached_tokens.unwrap_or(0) > 0
+                || ctx.usage.cache_creation_tokens.unwrap_or(0) > 0
+            {
                 UsageSource::Upstream
             } else {
                 UsageSource::Estimated
