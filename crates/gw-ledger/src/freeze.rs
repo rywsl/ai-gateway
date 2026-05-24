@@ -20,8 +20,7 @@ use gw_store::deduction::{DeductionState, DEDUCT};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
-/// Categorises a freeze for telemetry and (Phase 6) routing in the task
-/// settle path.
+/// Categorises a freeze for telemetry and routing in the task settle path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FreezeKind {
     Request,
@@ -40,7 +39,7 @@ pub trait FreezeGuard: Send + Sync {
 }
 
 /// Per-request freeze. Mutates the in-process `DeductionState.frozen_micro`
-/// only — Redis sync is Phase 5 (C-γ §ADR-Cγ-3) work.
+/// only — Redis sync is handled via C-γ §ADR-Cγ-3.
 pub struct RequestFreeze {
     pub(crate) uid: UserId,
     pub(crate) freeze_amount: u64,

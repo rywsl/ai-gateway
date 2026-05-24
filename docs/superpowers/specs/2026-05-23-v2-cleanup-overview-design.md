@@ -336,7 +336,7 @@ L-1 的 sub-spec 必须含一个故意"Redis 下线 → usage:detailed 投递失
 - [ ] 本 overview 合入 + CLAUDE.md `§v2 cleanup status` 一节落地 + `scripts/check-invariants.sh` 新增 v1 marker gate 开关(初始关闭,见 §6.3 注)
 - [x] S-codec brainstorming → spec → plan → impl → 合入(2026-05-24)
 - [x] S-routing brainstorming → spec → plan → impl → 合入(2026-05-24)
-- [ ] S-ledger 同上
+- [x] S-ledger 同上(2026-05-24)
 - [ ] S-proxy-core 同上
 - [ ] S-admin-tunnel 同上
 - [x] S-contracts(Go 文档)同上(2026-05-24)

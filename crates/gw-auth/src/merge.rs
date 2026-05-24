@@ -152,10 +152,10 @@ pub async fn merge_permissions(
         tpm_limit: tpm,
         max_concurrent_streams: main.value.max_concurrent_streams,
         markup_chain: MarkupChainSnapshot {
-            // Phase 1b: tier values for user-group / api-key / vendor remain 1.0
-            // placeholders. G5 (T2-B) populates `model_markup` from the loaded
-            // Pricing entry so the Go billing service receives the per-model
-            // multiplier; the remaining per-tier fields land in Phase 5 (Bm1).
+            // Tier values for user-group / api-key / vendor remain 1.0.
+            // G5 (T2-B) populates `model_markup` from the loaded Pricing
+            // entry so the Go billing service receives the per-model
+            // multiplier; the remaining per-tier fields land via Bm1.
             user_group_markup: 1.0,
             api_key_markup: 1.0,
             vendor_markup: 1.0,

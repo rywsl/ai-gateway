@@ -47,9 +47,9 @@ pub struct UsageRecord {
 
     // --- Freeze snapshot (for Go reconciliation) ---
     pub freeze_amount_micro: u64,
-    /// EstimatePricing version Rust used at freeze time. Phase 1b writes 0
-    /// (placeholder); Phase 5 (C-b) sources the real version from the
-    /// `entity:estimate_pricing` snapshot.
+    /// EstimatePricing version Rust used at freeze time. Currently writes 0;
+    /// C-b will source the real version from the `entity:estimate_pricing`
+    /// snapshot.
     pub estimate_pricing_version: u64,
 
     // --- Markup snapshot (Go re-computes cost) ---
@@ -114,7 +114,7 @@ mod tests {
             is_stream: true,
             freeze_amount_micro: 1500,
             estimate_pricing_version: 0,
-            markup_chain_snapshot: MarkupChainSnapshot::placeholder(),
+            markup_chain_snapshot: MarkupChainSnapshot::identity(),
             operation_id: None,
         };
         let s = serde_json::to_string(&rec).unwrap();

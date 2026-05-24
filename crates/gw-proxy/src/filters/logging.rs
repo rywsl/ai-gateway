@@ -51,6 +51,7 @@ fn bucket(s: u16) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     _session: &mut Session,
     err: Option<&pingora::Error>,
@@ -58,6 +59,8 @@ pub async fn run(
     health: &Arc<KeyHealthStore>,
     ledger: &Arc<Ledger>,
     counters: &Arc<CounterStore>,
+    store: &Arc<gw_store::EntityStore>,
+    resilience: &crate::resilience::ResilienceState,
 ) {
     let now = std::time::Instant::now();
     ctx.timing.end = Some(now);
@@ -221,13 +224,13 @@ pub async fn run(
                 .as_ref()
                 .map(|g| g.freeze_amount())
                 .unwrap_or(0),
-            // Phase 5 (C-β) sources real version from entity:estimate_pricing.
+            // C-β sources real version from entity:estimate_pricing.
             estimate_pricing_version: 0,
             markup_chain_snapshot: ctx
                 .merged_perm
                 .as_ref()
                 .map(|m| m.markup_chain)
-                .unwrap_or_else(MarkupChainSnapshot::placeholder),
+                .unwrap_or_else(MarkupChainSnapshot::identity),
             operation_id: ctx.operation_id.clone(),
         };
         let _ = ledger.try_send(rec);
@@ -289,13 +292,8 @@ pub async fn run(
         );
     }
 
-    // ---------------------------------------------------------------------
     // T6-B: invoke ErrorHandler fanout if a ClassifierOutcome was produced
-    // earlier in the filter chain. Listeners are stateless stubs in v1 so
-    // ad-hoc construction is acceptable; the follow-up moves construction to
-    // `LlmGateway::new` so shared Arc handles (KeyHealthStore, EntityStore,
-    // ResilienceState) can be threaded through `HandlerCtx`.
-    // ---------------------------------------------------------------------
+    // earlier in the filter chain.
     if let Some(oc) = ctx.error_outcome.as_ref() {
         use crate::error::handler::{ErrorHandler, HandlerCtx};
         use crate::error::listeners::{
@@ -312,9 +310,15 @@ pub async fn run(
             Arc::new(MetricsListener::default()) as _,
             Arc::new(LedgerListener::default()) as _,
         ]);
-        // TODO(T6-B follow-up): populate real fields (request_id, api_key_id,
-        // vendor_key_id, api_format, key_health, entity_store, resilience).
-        let hctx = HandlerCtx::stub();
+        let hctx = HandlerCtx {
+            request_id: ctx.request_id.0.as_str(),
+            api_key_id: ctx.api_key_id.as_ref().map(|id| id.0.as_str()),
+            vendor_key_id: ctx.picked_vendor_key.as_ref().map(|k| k.key_id.0.as_str()),
+            api_format: ctx.upstream_codec.as_ref().map(|c| c.kind()),
+            key_health: Some(&**health),
+            entity_store: Some(store),
+            resilience: Some(resilience),
+        };
         handler.fanout(&hctx, oc);
     }
 }

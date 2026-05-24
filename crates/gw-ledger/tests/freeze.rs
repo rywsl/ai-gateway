@@ -2,7 +2,7 @@
 //!
 //! Critically: `release` does NOT touch `deducted_micro`. Go is the sole
 //! writer of `deducted_micro` (via the `usage:records` consumer + an
-//! `events:counter` echo back to Rust, wired in Phase 5).
+//! `events:counter` echo back to Rust).
 
 use gw_core::ids::UserId;
 use gw_ledger::{FreezeGuard, FreezeKind, RequestFreeze, TaskFreeze};

@@ -17,7 +17,7 @@ fn perm(rpm: u32) -> MergedPermissions {
         rpm_limit: rpm,
         tpm_limit: 0,
         max_concurrent_streams: 100,
-        markup_chain: MarkupChainSnapshot::placeholder(),
+        markup_chain: MarkupChainSnapshot::identity(),
     }
 }
 

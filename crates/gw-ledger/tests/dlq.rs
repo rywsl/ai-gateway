@@ -46,7 +46,7 @@ fn sample_record() -> UsageRecord {
         is_stream: false,
         freeze_amount_micro: 0,
         estimate_pricing_version: 0,
-        markup_chain_snapshot: MarkupChainSnapshot::placeholder(),
+        markup_chain_snapshot: MarkupChainSnapshot::identity(),
         operation_id: None,
     }
 }

@@ -29,3 +29,13 @@
 - Release keys are cluster co-located via `{user:<uid>}`: `:tasks:leases`, `:entity:task:<task_id>`, `:counter:task_frozen_micro`.
 - Counter key is a HASH and the script mutates field `frozen_micro` via `HINCRBY`; tests seed/read that field, not string `GET`.
 - `gw-ledger::TaskFreeze::release()` remains synchronous and spawns the async releaser; `None` releaser is a test/no-op path.
+
+## 2026-05-24 T5: Docs + cleanup + overview update
+- Removed all "Phase 1b" / "Phase 5" / "Phase 6" v1 marker references from doc comments in freeze.rs, usage.rs, tests/freeze.rs, logging.rs, merge.rs, permissions.rs
+- Renamed `MarkupChainSnapshot::placeholder()` → `MarkupChainSnapshot::identity()` (multiplicative identity semantics, removes "placeholder" from grep scope)
+- All 6 callers of `placeholder()` updated to `identity()`: usage.rs, flusher.rs, dlq.rs, logging.rs, e2e_failure_modes.rs, ratelimit.rs
+- architecture.md §Known gaps: no F-1 entries found (F-1 gap tracked in overview §10, not in architecture.md)
+- Overview §11: S-ledger marked `[x]` with date (2026-05-24)
+- Verification: grep for `TODO(v2)|TODO(memory)|TODO(T6-B|Phase 1b|placeholder|No-op until` → ZERO hits across all scoped paths
+- check-invariants.sh `[no_v1_markers_in_prod]` = ok
+- crate_layering failure (gw-ledger → gw-task-runtime) is pre-existing, not introduced by doc changes
