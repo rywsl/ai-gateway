@@ -92,7 +92,7 @@ metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 
 # 配置
-figment = { version = "0.10", features = ["toml", "env"] }
+figment = { version = "0.10", features = ["toml", "env", "test"] }
 
 # 内存
 tikv-jemallocator = "0.6"

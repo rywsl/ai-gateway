@@ -37,6 +37,8 @@ pub struct Config {
     pub tunnel: TunnelCfg,
     #[serde(default)]
     pub detailed_log: DetailedLogCfg,
+    #[serde(default)]
+    pub billing: BillingCfg,
     // TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
     // `HardCapCfg` defaults. Once it accepts caller-supplied caps, reintroduce
     // an `[auth]` section here and thread `hard_cap_max_input_tokens` /
@@ -352,6 +354,64 @@ impl Default for TunnelCfg {
     }
 }
 
+/// Billing-robustness knobs. Spec:
+/// [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct BillingCfg {
+    /// Window (ms) after a cancel trigger during which the gateway continues
+    /// reading upstream body to catch a final usage frame. Spec §5.3.
+    #[serde(default = "default_cancel_grace_ms")]
+    pub cancel_grace_ms: u64,
+    /// Total upstream response timeout (ms). Spec §5.3 / L7.
+    #[serde(default = "default_response_deadline_ms")]
+    pub response_deadline_ms: u64,
+    /// InflightLedger T0 watchdog scan period (seconds). Spec §5.4.2.
+    #[serde(default = "default_reaper_interval_secs")]
+    pub reaper_interval_secs: u64,
+    /// Threshold for emit-lag (seconds since `ts_settled_ms`) that triggers a
+    /// T0 incident. Spec §5.4.2.
+    #[serde(default = "default_emit_lag_t0_secs")]
+    pub emit_lag_t0_secs: u64,
+    /// Heartbeat key renewal cadence (seconds). Spec §5.4.1.
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    /// Heartbeat key TTL (seconds). Must be >> heartbeat_interval_secs.
+    #[serde(default = "default_heartbeat_ttl_secs")]
+    pub heartbeat_ttl_secs: u64,
+}
+
+fn default_cancel_grace_ms() -> u64 {
+    200
+}
+fn default_response_deadline_ms() -> u64 {
+    300_000
+}
+fn default_reaper_interval_secs() -> u64 {
+    30
+}
+fn default_emit_lag_t0_secs() -> u64 {
+    60
+}
+fn default_heartbeat_interval_secs() -> u64 {
+    60
+}
+fn default_heartbeat_ttl_secs() -> u64 {
+    600
+}
+
+impl Default for BillingCfg {
+    fn default() -> Self {
+        Self {
+            cancel_grace_ms: default_cancel_grace_ms(),
+            response_deadline_ms: default_response_deadline_ms(),
+            reaper_interval_secs: default_reaper_interval_secs(),
+            emit_lag_t0_secs: default_emit_lag_t0_secs(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
+            heartbeat_ttl_secs: default_heartbeat_ttl_secs(),
+        }
+    }
+}
+
 impl RedisCfg {
     /// Expose the connection URL for the redis client. The string is only
     /// consumed at startup by the connect call.
@@ -422,6 +482,26 @@ impl Config {
             if self.tunnel.missed_pong_threshold == 0 {
                 anyhow::bail!("invalid config: tunnel.missed_pong_threshold must be > 0");
             }
+        }
+
+        if self.billing.cancel_grace_ms == 0 {
+            anyhow::bail!("invalid config: billing.cancel_grace_ms must be > 0");
+        }
+        if self.billing.response_deadline_ms == 0 {
+            anyhow::bail!("invalid config: billing.response_deadline_ms must be > 0");
+        }
+        if self.billing.heartbeat_interval_secs == 0 {
+            anyhow::bail!("invalid config: billing.heartbeat_interval_secs must be > 0");
+        }
+        if self.billing.heartbeat_ttl_secs == 0 {
+            anyhow::bail!("invalid config: billing.heartbeat_ttl_secs must be > 0");
+        }
+        if self.billing.heartbeat_interval_secs * 10 > self.billing.heartbeat_ttl_secs {
+            anyhow::bail!(
+                "invalid config: billing.heartbeat_interval_secs ({}) * 10 must be <= heartbeat_ttl_secs ({})",
+                self.billing.heartbeat_interval_secs,
+                self.billing.heartbeat_ttl_secs,
+            );
         }
 
         Ok(())
@@ -521,5 +601,80 @@ mod tunnel_cfg_tests {
             .extract()
             .unwrap();
         assert!(cfg.validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod billing_cfg_tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+    use figment::Figment;
+
+    #[test]
+    fn billing_section_defaults_match_spec() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+        assert_eq!(cfg.billing.cancel_grace_ms, 200);
+        assert_eq!(cfg.billing.response_deadline_ms, 300_000);
+        assert_eq!(cfg.billing.reaper_interval_secs, 30);
+        assert_eq!(cfg.billing.emit_lag_t0_secs, 60);
+        assert_eq!(cfg.billing.heartbeat_interval_secs, 60);
+        assert_eq!(cfg.billing.heartbeat_ttl_secs, 600);
+    }
+
+    #[test]
+    fn billing_validate_rejects_zero_cancel_grace() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[billing]\ncancel_grace_ms = 0\n";
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn billing_validate_rejects_zero_response_deadline() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[billing]\nresponse_deadline_ms = 0\n";
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn billing_validate_rejects_heartbeat_interval_too_close_to_ttl() {
+        // heartbeat_interval_secs * 10 must be <= heartbeat_ttl_secs
+        // Setting interval=100, ttl=600: 100*10=1000 > 600 → reject
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = "[billing]\nheartbeat_interval_secs = 100\nheartbeat_ttl_secs = 600\n";
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn billing_env_override() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("GW_BILLING__CANCEL_GRACE_MS", "500");
+            let defaults = include_str!("../../../config/default.toml");
+            let cfg: Config = Figment::new()
+                .merge(Toml::string(defaults))
+                .merge(figment::providers::Env::prefixed("GW_").split("__"))
+                .extract()
+                .expect("env override extracts");
+            assert_eq!(cfg.billing.cancel_grace_ms, 500);
+            Ok(())
+        });
     }
 }
