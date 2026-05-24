@@ -326,6 +326,12 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         "billing instance_id resolved"
     );
     gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
+    gw_ledger::inflight_reaper::spawn(
+        (*redis.pool).clone(),
+        instance_id.clone(),
+        cfg.billing.reaper_interval_secs,
+        cfg.billing.emit_lag_t0_secs,
+    );
     let inflight = Arc::new(gw_ledger::inflight::InflightLedger::new(
         (*redis.pool).clone(),
         instance_id.clone(),

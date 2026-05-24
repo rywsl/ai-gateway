@@ -126,3 +126,9 @@ fn billing_w3_t5_grace_metric_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(names.contains(&"gw_billing_grace_yielded_final_usage_total"));
 }
+
+#[test]
+fn billing_w4_t3_emit_lag_t0_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_emit_lag_t0_total"));
+}

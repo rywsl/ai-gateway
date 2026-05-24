@@ -288,6 +288,12 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "Whether the cancel grace window captured a final usage frame; label=yielded(true/false)",
     },
+    // --- Billing robustness W4-T3 ---
+    MetricSpec {
+        name: "gw_billing_emit_lag_t0_total",
+        kind: MetricKind::Counter,
+        help: "T0 incident counter — ts_settled_ms exceeded emit_lag_t0_secs without DEL. ANY non-zero value = page on-call.",
+    },
 ];
 
 pub fn describe_all() {

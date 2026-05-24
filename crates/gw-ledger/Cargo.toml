@@ -15,6 +15,7 @@ tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time", "macr
 async-trait.workspace = true
 time.workspace = true
 fred.workspace = true
+futures.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 uuid = { workspace = true }
