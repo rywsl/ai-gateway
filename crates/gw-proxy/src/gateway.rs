@@ -19,6 +19,7 @@ use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_routing::in_flight::InFlightStore;
 use gw_routing::latency::LatencyTracker;
+use gw_routing::{FailoverClass, FailoverDecision, FailoverExecutor};
 use gw_store::{CounterStore, EntityStore};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
@@ -73,6 +74,24 @@ fn classify_connect_error(e: &Error) -> ConnectErrorKind {
     }
 }
 
+fn remaining_failover_candidates(
+    candidates: &[Arc<gw_core::entity::VendorKey>],
+    ctx: &ReqCtx,
+) -> Vec<Arc<gw_core::entity::VendorKey>> {
+    let failed_key = ctx.picked_vendor_key.as_ref().map(|k| &k.key_id);
+    candidates
+        .iter()
+        .filter(|candidate| {
+            failed_key.map_or(true, |fk| candidate.key_id != *fk)
+                && !ctx
+                    .retry_blacklist
+                    .iter()
+                    .any(|tried| tried == &candidate.key_id)
+        })
+        .cloned()
+        .collect()
+}
+
 pub struct LlmGateway {
     pub store: Arc<EntityStore>,
     pub health: Arc<KeyHealthStore>,
@@ -94,6 +113,8 @@ pub struct LlmGateway {
     /// Shared selection-strategy instances (T0-B). One `StrategyAny` per kind,
     /// dispatched via `StrategySet::pick_for`.
     pub strategies: Arc<gw_routing::strategy::set::StrategySet>,
+    /// Response-side failover executor (5xx / 429 before body starts).
+    pub failover_executor: FailoverExecutor,
     /// Capability resolver (T3-C). `None` until wired; `filters::request`
     /// then leaves `ctx.required_caps` empty (v1 behaviour).
     pub capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
@@ -131,6 +152,7 @@ impl LlmGateway {
         trust_xff: bool,
         jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
         strategies: Arc<gw_routing::strategy::set::StrategySet>,
+        failover_executor: FailoverExecutor,
         capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
         mgmt_blacklist: Arc<RedisJwtBlacklist>,
         resilience: Arc<ResilienceState>,
@@ -149,6 +171,7 @@ impl LlmGateway {
             trust_xff,
             jwt_validator,
             strategies,
+            failover_executor,
             capability_resolver,
             mgmt_blacklist,
             resilience,
@@ -406,6 +429,56 @@ impl ProxyHttp for LlmGateway {
                 let _ = upstream_response.remove_header("content-encoding");
             }
         }
+        if let Some(status) = ctx.upstream_status {
+            match gw_routing::classify_for_failover(status, ctx.body_started) {
+                class @ (FailoverClass::Retryable5xx | FailoverClass::Retryable429) => {
+                    if let Some(candidates) = ctx.picked_candidates.as_ref() {
+                        let remaining = remaining_failover_candidates(candidates, ctx);
+                        let attempt = ctx.failover_attempt.saturating_add(1);
+                        let decision = self.failover_executor.next_candidate(&remaining, attempt);
+                        let strategy_name = ctx.strategy_name.unwrap_or("unknown");
+                        gw_routing::failover::record_failover_metric(class, strategy_name);
+
+                        match decision {
+                            FailoverDecision::Retry(new_key) => {
+                                if let Some(k) = ctx.picked_vendor_key.as_ref() {
+                                    if !ctx.retry_blacklist.iter().any(|id| id == &k.key_id) {
+                                        ctx.retry_blacklist.push(k.key_id.clone());
+                                    }
+                                }
+                                ctx.failover_attempt = attempt;
+                                ctx.inflight_guard = None;
+                                ctx.picked_vendor_key = Some(new_key);
+                                ctx.picked_vendor = None;
+                                ctx.upstream_codec = None;
+                                ctx.upstream_status = None;
+                                ctx.body_started = false;
+
+                                let mut e = Error::new(ErrorType::HTTPStatus(status));
+                                e.as_up();
+                                e.set_retry(true);
+                                return Err(e);
+                            }
+                            FailoverDecision::Exhausted => {
+                                gw_routing::failover::record_failover_metric(
+                                    FailoverClass::NotRetryable,
+                                    strategy_name,
+                                );
+                            }
+                            FailoverDecision::NotRetryable => {}
+                        }
+                    }
+                }
+                FailoverClass::BodyAlreadyStarted => {
+                    let strategy_name = ctx.strategy_name.unwrap_or("unknown");
+                    gw_routing::failover::record_failover_metric(
+                        FailoverClass::BodyAlreadyStarted,
+                        strategy_name,
+                    );
+                }
+                FailoverClass::NotRetryable => {}
+            }
+        }
         Ok(())
     }
 
@@ -416,6 +489,9 @@ impl ProxyHttp for LlmGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
+        if !ctx.body_started && body.is_some() {
+            ctx.body_started = true;
+        }
         let res = filters::response::run(session, body, end_of_stream, ctx);
         if end_of_stream {
             self.emit_response_surfaces(ctx);

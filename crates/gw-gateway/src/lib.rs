@@ -183,6 +183,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.trust_xff,
         wired.jwt_validator,
         wired.strategies,
+        gw_routing::FailoverExecutor::default(),
         wired.capability_resolver,
         wired.mgmt_blacklist,
         wired.resilience,

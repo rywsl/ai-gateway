@@ -209,6 +209,9 @@ pub async fn pick_peer(
         };
         return emit_envelope_and_bail(session, ctx, envelope_for(code, message, 503)).await;
     }
+    if ctx.picked_candidates.is_none() {
+        ctx.picked_candidates = Some(candidates.clone());
+    }
 
     // -------------------------------------------------------------
     // Strategy dispatch.
@@ -217,6 +220,7 @@ pub async fn pick_peer(
     // (and any future stateful strategy) is shared across requests rather
     // than allocated per call.
     let strategy = strategies.pick_for(group.value.strategy);
+    ctx.strategy_name = Some(strategy.name());
     let pick_ctx = PickCtx {
         user_id: &perm.effective_user_id,
         model: &model,
@@ -226,9 +230,21 @@ pub async fn pick_peer(
         pricing: ctx.pricing.as_ref().map(|p| &p.value as &Pricing),
         latency_tracker: latency_tracker.as_ref(),
     };
-    let picked = strategy
-        .pick(&candidates, health, in_flight, &pick_ctx)
-        .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?;
+    let failover_pick = if ctx.failover_attempt > 0 && ctx.upstream_status.is_none() {
+        ctx.picked_vendor_key.as_ref().and_then(|next| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.key_id == next.key_id)
+        })
+    } else {
+        None
+    };
+    let picked = match failover_pick {
+        Some(candidate) => candidate,
+        None => strategy
+            .pick(&candidates, health, in_flight, &pick_ctx)
+            .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?,
+    };
     let picked_arc = Arc::clone(picked);
 
     let vendor = match store.vendor_or_load(&picked_arc.vendor_id).await {

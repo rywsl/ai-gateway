@@ -152,6 +152,7 @@ async fn e2e_storage_seeded_and_gateway_constructs() {
         false,
         None,
         Arc::new(gw_routing::strategy::set::StrategySet::new_default()),
+        gw_routing::FailoverExecutor::default(),
         None,
         mgmt_blacklist,
         resilience,

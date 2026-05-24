@@ -90,6 +90,12 @@ pub struct ReqCtx {
     pub picked_vendor_key: Option<Arc<VendorKey>>,
     pub picked_vendor: Option<Arc<Versioned<Vendor>>>,
     pub pricing: Option<Arc<Versioned<Pricing>>>,
+    /// Name of the strategy used for this request. Emitted on failover metrics.
+    pub strategy_name: Option<&'static str>,
+    /// Candidate keys computed during pick_peer. Cached for failover — the
+    /// FailoverExecutor iterates over remaining candidates without re-querying
+    /// health / cooldown.
+    pub picked_candidates: Option<Vec<Arc<VendorKey>>>,
 
     // --- Lifecycle / ledger ---
     pub timing: ReqTiming,
@@ -121,6 +127,13 @@ pub struct ReqCtx {
     // --- HTTP status seen on response ---
     pub upstream_status: Option<u16>,
     pub retry_count: u32,
+    /// Current failover attempt counter (0 on first try). Used by
+    /// FailoverExecutor::next_candidate to enforce the max_retries cap.
+    pub failover_attempt: u8,
+    /// True once the first response body byte has been sent to the client.
+    /// Set by response_body_filter. FailoverExecutor uses this to decide
+    /// if response-side retry is still possible (body_started → not retryable).
+    pub body_started: bool,
     /// Keys already tried (and failed) for this request, excluded from
     /// candidate selection on cross-key retry (G10). Empty on the first
     /// attempt.
@@ -249,6 +262,8 @@ impl ReqCtx {
             picked_vendor_key: None,
             picked_vendor: None,
             pricing: None,
+            strategy_name: None,
+            picked_candidates: None,
             timing: ReqTiming::default(),
             usage: UsageAccumulator {
                 input_tokens: 0,
@@ -263,6 +278,8 @@ impl ReqCtx {
             stream_state: None,
             upstream_status: None,
             retry_count: 0,
+            failover_attempt: 0,
+            body_started: false,
             retry_blacklist: Vec::new(),
             upstream_error_code: None,
             pending_client_body: None,
