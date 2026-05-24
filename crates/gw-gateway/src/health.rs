@@ -16,10 +16,9 @@
 //! - `/readyz` — gated on [`READY`] (init complete).
 //! - `/healthz/circuits`, `/healthz/key/<id>`, `/healthz/resilience`,
 //!   `/healthz/tunnel` —
-//!   admin-only; require `Authorization: Mgmt <token>` (validated in T6-A
-//!   wiring). v1 returns 401 unconditionally so production deployments that
-//!   expose 8080 do not leak circuit / health internals before the mgmt
-//!   token plumbing lands.
+//!   admin-only; require `Authorization: Mgmt <token>` validated by the
+//!   management-token verify chain (S-admin-tunnel). Unverified requests
+//!   receive 401.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -65,11 +64,9 @@ pub async fn run_health_server(
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(target: "gw_gateway::health", port, "health server listening");
 
-    // T3-Pre: `state`, `store`, and `mgmt_blacklist` are accepted so T3-C
-    // can wire the verify chain on the `/healthz/*` admin surface. v1
-    // keeps the blanket-401 behaviour below; the handles are explicitly
-    // held in the accept loop so subsequent commits add the verify
-    // branch without changing the signature again.
+    // `store` and `mgmt_blacklist` are consumed by the admin verify chain
+    // on `/healthz/*` endpoints. The verify chain is now wired; these
+    // handles are held in the accept loop for the admin surface.
     let state = Arc::new(state);
     loop {
         let (stream, _peer) = match listener.accept().await {

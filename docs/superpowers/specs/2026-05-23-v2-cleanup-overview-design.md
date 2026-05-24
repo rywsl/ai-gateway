@@ -322,8 +322,6 @@ L-1 的 sub-spec 必须含一个故意"Redis 下线 → usage:detailed 投递失
 | R-1 (CapabilityResolver) | `gw-proxy/src/filters/request.rs:96-104`、`gw-proxy/src/ctx.rs:140` | S-proxy-core | Rust |
 | H-1 (HMAC + signature_secret + signature_required) | `gw-proxy/src/body_verify.rs` 全模块、`VendorKey` 字段 | S-proxy-core | Rust |
 | Q-1 (TPM 延迟扣费 + deadline + forced_params) | `gw-auth/src/ratelimit.rs:46`、`gw-proxy/src/filters/response.rs:21`、`gw-proxy/src/filters/upstream.rs:482` | S-proxy-core | Rust |
-| A-1 (admin / mgmt routing) | `gw-proxy/src/filters/request.rs:144`、`gw-gateway/src/health.rs:47` | S-admin-tunnel | Rust |
-| T-1 (tunnel 健康/遥测/healthz) | `gw-proxy/src/tunnel_stack.rs:42`、`gw_tunnel_transport_alive` 采样器、`/healthz/tunnel` | S-admin-tunnel | Rust |
 | G-11 (Go 半) | `docs/go-contracts/parts/04-go-dlq-replay.md`(新增) | S-contracts | Go |
 | C-γ #7 (ghost-freeze) | `docs/go-contracts/parts/02-go-as-consumer.md` | S-contracts | Go |
 | `exclusive_capability_match` 索引 | `docs/go-contracts/parts/03-shared-schema.md:516` | S-contracts | Go |
@@ -338,7 +336,7 @@ L-1 的 sub-spec 必须含一个故意"Redis 下线 → usage:detailed 投递失
 - [x] S-routing brainstorming → spec → plan → impl → 合入(2026-05-24)
 - [x] S-ledger 同上(2026-05-24)
 - [x] S-proxy-core 同上(2026-05-24)
-- [ ] S-admin-tunnel 同上
+- [x] S-admin-tunnel 同上(2026-05-24)
 - [x] S-contracts(Go 文档)同上(2026-05-24)
 - [ ] 6 个 sub-spec 全部合入后,开启 §6.3 grep gate(同 PR 验证零命中)
 - [ ] e2e soak 50k req / 60s × off+heavy 通过(§7.2 整体验收)

@@ -3,9 +3,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Best-effort Redis connect for the health-endpoint integration tests. The
-/// tests do not exercise the blacklist itself — they only assert the
-/// 401-blanket admin response — but T3-Pre extended `run_health_server` to
-/// take an `Arc<RedisJwtBlacklist>` so a real handle has to be constructed.
+/// tests do not exercise the blacklist itself — they assert the admin
+/// verify-chain behaviour — but `run_health_server` takes an
+/// `Arc<RedisJwtBlacklist>` so a real handle has to be constructed.
 /// When Redis is unreachable (the default `cargo test --workspace` flow on a
 /// host without docker), the helper returns `None` and the test caller
 /// skips with `#[ignore]` semantics by short-circuiting.
