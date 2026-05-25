@@ -628,3 +628,98 @@ def test_sticky_strategy_binds_user_to_same_key_then_expires(
         f"expected gw_sticky_bind_total to increment by >=1 across the "
         f"TTL-expired rebind; pre={pre_bind}, post={post_bind}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. Capability resolver positive match: two vendor keys, one advertises
+#    "vision" and one does not. The model group requires "vision" (via
+#    force_capabilities on the api_key). The CapabilityResolver must select
+#    only the key that advertises "vision" and the request must succeed.
+# ---------------------------------------------------------------------------
+
+
+def test_capability_resolver_positive_match(
+    gateway_url: str,
+    fake_web: FakeWebClient,
+    fake_upstream: FakeUpstreamClient,
+) -> None:
+    """Seed two vendor keys under one vendor. Key A advertises capabilities
+    ["vision"], Key B has no capabilities. The api_key requires
+    force_capabilities=["vision"] with match_mode_exclusive=True. The
+    CapabilityResolver filters candidates to only Key A; the request
+    succeeds (200) and usage:records confirms vendor_key_id == Key A.
+    """
+    # -- seed user + api_key requiring vision capability
+    seed_user_apikey(
+        fake_web,
+        user_id="u-cap-pos",
+        api_key_id="ak-cap-pos",
+        api_key_plaintext="sk-cap-pos",
+        allowed_groups=["grp-cap-pos"],
+        force_capabilities=["vision"],
+        match_mode_exclusive=True,
+    )
+    fake_web.set_balance("u-cap-pos", BALANCE_LARGE)
+
+    # -- seed one vendor (both keys share the same working upstream)
+    seed_vendor(fake_web, vendor_id="v-cap-pos", base_urls=[WORKING_BASE])
+
+    # -- Key A: advertises "vision"
+    seed_vendor_key(
+        fake_web,
+        key_id="vk-cap-pos-vision",
+        vendor_id="v-cap-pos",
+        model=MODEL,
+        accessible_endpoints=[PROTO_OPENAI],
+        forced_capabilities=["vision"],
+        exclusive_capability_match=False,
+    )
+
+    # -- Key B: no capabilities (non-restrictive at the key level, but
+    #    won't match the required "vision" capability)
+    seed_vendor_key(
+        fake_web,
+        key_id="vk-cap-pos-none",
+        vendor_id="v-cap-pos",
+        model=MODEL,
+        accessible_endpoints=[PROTO_OPENAI],
+    )
+
+    # -- model group with both keys; fixed_order so Key A is first
+    seed_model_group(
+        fake_web,
+        group="grp-cap-pos",
+        vendor_key_ids=["vk-cap-pos-vision", "vk-cap-pos-none"],
+        strategy="fixed_order",
+    )
+    seed_pricing(fake_web, model=MODEL)
+
+    # -- issue request and assert success
+    client = make_openai_client(gateway_url, "sk-cap-pos", "ak-cap-pos")
+    stream = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": "hi"}],
+        stream=True,
+    )
+    pieces: list[str] = []
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            pieces.append(chunk.choices[0].delta.content)
+    assert "".join(pieces) == "hi", pieces
+
+    # -- verify the request hit Key A (the vision-capable key), not Key B
+    assert wait_for_records(fake_web, min_xlen=1, timeout=5.0) >= 1
+    records = _redis_xrange("usage:records")
+    relevant = [
+        r
+        for r in records
+        if r.get("user_id") == "u-cap-pos" and r.get("api_key_id") == "ak-cap-pos"
+    ]
+    assert len(relevant) >= 1, (
+        f"expected >=1 usage:records for u-cap-pos/ak-cap-pos; "
+        f"got {len(relevant)}"
+    )
+    assert relevant[0]["vendor_key_id"] == "vk-cap-pos-vision", (
+        f"capability resolver should select the vision-capable key "
+        f"vk-cap-pos-vision, but got {relevant[0]['vendor_key_id']}"
+    )

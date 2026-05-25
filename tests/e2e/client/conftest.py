@@ -578,6 +578,118 @@ def usage_records_consumer(redis_client) -> UsageRecordsConsumer:
 
 
 # ---------------------------------------------------------------------------
+# Detailed-archive decoding helpers. The gateway's `usage:detailed` stream
+# carries wire-fidelity per-surface entries (downstream_request, upstream_request,
+# upstream_response, downstream_response, summary) encoded in one of three tiers:
+# raw+json (< threshold), lz4+json (medium), zstd+json (large).  Payload is
+# stored as raw binary bytes (fred `RedisValue` from `Vec<u8>`) so a
+# `decode_responses=False` client must be used for compressed entries; the
+# helpers below handle both `bytes` and `str` payload values so they work
+# regardless of client mode.
+# ---------------------------------------------------------------------------
+
+
+def decode_detailed_record(raw_entry: dict) -> dict:
+    """Decode a `usage:detailed` stream entry based on its ``encoding`` field.
+
+    Supports three encoding tiers (mirrors
+    ``crates/gw-ledger/src/encoding.rs::Encoding``):
+
+    - ``raw+json``  — payload is UTF-8 JSON; ``json.loads`` directly.
+    - ``lz4+json``  — payload is lz4-compressed bytes; decompress then
+      ``json.loads``.
+    - ``zstd+json`` — payload is zstd-compressed bytes; decompress then
+      ``json.loads``.
+
+    When the Redis client uses ``decode_responses=True``, compressed payloads
+    are base64-encoded strings (all fields stay string-typed).  When
+    ``decode_responses=False``, payload comes as raw ``bytes`` — the helper
+    detects the type and skips base64 decoding in that case.
+
+    Returns ``{"kind", "encoding", "decoded_payload"}`` where
+    *decoded_payload* is the parsed JSON dict.
+    """
+    import base64
+    import json
+
+    encoding: str = raw_entry["encoding"]
+    payload = raw_entry["payload"]
+
+    def _to_bytes(p):
+        """Convert payload to raw bytes: if already bytes, return directly;
+        if str, base64-decode first."""
+        if isinstance(p, bytes):
+            return p
+        return base64.b64decode(p)
+
+    if encoding == "raw+json":
+        decoded_payload = json.loads(payload)
+    elif encoding == "lz4+json":
+        import lz4.frame
+
+        raw = _to_bytes(payload)
+        decompressed = lz4.frame.decompress(raw)
+        decoded_payload = json.loads(decompressed)
+    elif encoding == "zstd+json":
+        import zstandard
+
+        raw = _to_bytes(payload)
+        dctx = zstandard.ZstdDecompressor()
+        decompressed = dctx.decompress(raw)
+        decoded_payload = json.loads(decompressed)
+    else:
+        raise ValueError(f"unknown encoding: {encoding}")
+
+    return {
+        "kind": raw_entry["kind"],
+        "encoding": encoding,
+        "decoded_payload": decoded_payload,
+    }
+
+
+def redis_xrange_decoded(
+    redis_client,
+    stream: str,
+    count: Optional[int] = None,
+    min_id: str = "-",
+    max_id: str = "+",
+) -> list[dict]:
+    """Wrap ``XRANGE`` on a Redis stream, returning a list of field dicts.
+
+    Each ``(stream_id, {field: value})`` pair is flattened to
+    ``{**fields, "_id": stream_id}`` so the caller can inspect both the
+    entry ID and all field values without parsing the XRANGE response
+    shape.
+
+    Works with both ``decode_responses=True`` (all fields are str) and
+    ``decode_responses=False`` (string fields come as bytes, payload may be
+    binary).  Bytes keys and non-payload bytes values are decoded to ``str``;
+    the ``payload`` field is preserved in its native type (``bytes`` or
+    ``str``) so ``decode_detailed_record`` can handle it correctly.
+    """
+    kwargs: dict = {"min": min_id, "max": max_id}
+    if count is not None:
+        kwargs["count"] = count
+    raw = redis_client.xrange(stream, **kwargs)
+
+    result: list[dict] = []
+    for entry_id, fields in raw:
+        id_str = entry_id.decode("utf-8") if isinstance(entry_id, bytes) else entry_id
+        row: dict = {"_id": id_str}
+        for k, v in fields.items():
+            key_str = k.decode("utf-8") if isinstance(k, bytes) else k
+            if key_str == "payload":
+                # Preserve payload in native type for decode_detailed_record.
+                row[key_str] = v
+            elif isinstance(v, bytes):
+                row[key_str] = v.decode("utf-8", errors="replace")
+            else:
+                row[key_str] = v
+        result.append(row)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # _check_fakes_alive — session-scoped autouse probe that fails fast if either
 # fake is unreachable, with a clearer message than the per-test reset would
 # produce. Session-scoped fixtures sort before function-scoped ones, so this
@@ -985,6 +1097,38 @@ def seed_pricing(
             "stream_total_timeout_ms": stream_total_timeout_ms,
         },
     )
+
+
+def seed_permission_tiers(
+    fake_web: "FakeWebClient",
+    *,
+    global_config: Optional[dict] = None,
+    user_group: Optional[dict] = None,
+    user: Optional[dict] = None,
+    sub_account: Optional[dict] = None,
+    api_key: Optional[dict] = None,
+) -> None:
+    """Seed 5-tier permission entries for merge-permission e2e scenarios.
+
+    Each tier dict must include an ``id`` key (entity primary key) plus the
+    permission fields: ``allowed_models``, ``allowed_channels``,
+    ``allowed_groups``, ``rpm_limit``, ``tpm_limit``, ``markup_percent``.
+
+    Tier precedence (lowest → highest): global_config → user_group → user →
+    sub_account → api_key.  Merge semantics per ADR-023: intersection for
+    models/channels/groups (empty set = unrestricted at that tier, skipped),
+    min-positive for rpm/tpm, product for markup.
+    """
+    if global_config is not None:
+        fake_web.put_entity("global_configs", global_config["id"], global_config)
+    if user_group is not None:
+        fake_web.put_entity("user_groups", user_group["id"], user_group)
+    if user is not None:
+        fake_web.put_entity("users", user["id"], user)
+    if sub_account is not None:
+        fake_web.put_entity("users", sub_account["id"], sub_account)
+    if api_key is not None:
+        fake_web.put_entity("api_keys", api_key["id"], api_key)
 
 
 # ---------------------------------------------------------------------------

@@ -97,6 +97,9 @@ make e2e-soak        # full 833 rps × 60s × off + heavy (spec §12.1 verificat
 make e2e-soak-smoke  # 100 rps × 10s smoke for driver/seed iteration
 ```
 
+Running `make e2e-soak-smoke` before opening a PR is strongly encouraged for changes that touch request handling, codec, routing, or ledger code paths. The smoke run takes roughly 15 seconds with Docker up and catches accounting drift, resource leaks, and cross-protocol regressions that unit tests won't. It's recommended as a final local sanity check, not a CI gate.
+If `make e2e-soak-smoke` passes clean, the full `make e2e-soak` run is unlikely to surprise you.
+
 Smoke-run the binary:
 
 ```bash
