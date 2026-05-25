@@ -343,7 +343,7 @@ fi
 # Excludes: anything under a tests/ directory (overview §1.2 carve-out for
 # test fixtures named *Stub / Dummy* / placeholder_e2e_*).
 # ---------------------------------------------------------------------------
-v1_mode="${GW_V2_GATE_MODE:-warn}"
+v1_mode="${GW_V2_GATE_MODE:-error}"
 echo "[no_v1_markers_in_prod] no v1 placeholder markers in crates/ (mode: $v1_mode)"
 v1_hits=$(grep -rnE \
     -e 'unimplemented!\(' \

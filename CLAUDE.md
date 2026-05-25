@@ -36,19 +36,19 @@ For the dependency DAG, traits, persistence namespaces, KEK rotation, and the fu
 
 ## v2 cleanup status
 
-The repo is mid-transition from v1 (with intentional placeholder paths) to v2 (all Rust-side functionality landed; no `unimplemented!()` / `todo!()` / `TODO(v2)` / "wave-X follow-up" / "for v1" markers in production code paths). v1-era phrasing in this file and in `docs/` is **stale** wherever a sub-spec below has landed; trust the sub-spec.
+All six Rust-side v2 sub-specs have landed. Production code paths no longer contain `unimplemented!()` / `todo!()` / `TODO(v2)` / "wave-X follow-up" / "for v1" markers. `scripts/check-invariants.sh` enforces this via `no_v1_markers_in_prod` (gate mode: `error`).
 
 Tracking:
 - Overview + Go-vs-Rust split + sub-spec index: [`docs/superpowers/specs/2026-05-23-v2-cleanup-overview-design.md`](docs/superpowers/specs/2026-05-23-v2-cleanup-overview-design.md)
-- Sub-specs (each runs its own brainstorming → spec → plan → impl cycle):
-  - `S-codec` — non-stream response + cross-protocol re-render + tool-call block mapping + SSE cross-block accumulator
-  - `S-routing` — `latency_first` / `cost_first` / `load_balance` realization + 5xx/429 retry executor
-  - `S-ledger` — Phase 6 atomic freeze release + DEDUCT GC + detailed-log real sink (drop-on-outage) + Rust half of billing-c-delta DLQ
-  - `S-proxy-core` — CapabilityResolver injection + HMAC body verify + TPM deferred deduction + response deadline + `forced_params` mutation tracking
-  - `S-admin-tunnel` — mgmt-routing + `/admin/*` verify-then-route + tunnel health probe + `/healthz/tunnel` + transport-alive gauge sampler
-  - `S-contracts` — Go-side DLQ replay, ghost-freeze reconciliation, `exclusive_capability_match` index activation (Go contract doc only)
+- Sub-specs:
+  - `S-codec` ✅ — non-stream response + cross-protocol re-render + tool-call block mapping + SSE cross-block accumulator
+  - `S-routing` ✅ — `latency_first` / `cost_first` / `load_balance` realization + 5xx/429 retry executor
+  - `S-ledger` ✅ — Phase 6 atomic freeze release + DEDUCT GC + detailed-log real sink (drop-on-outage) + Rust half of billing-c-delta DLQ
+  - `S-proxy-core` ✅ — CapabilityResolver injection + HMAC body verify + TPM deferred deduction + response deadline + `forced_params` mutation tracking
+  - `S-admin-tunnel` ✅ — mgmt-routing + `/admin/*` verify-then-route + tunnel health probe + `/healthz/tunnel` + transport-alive gauge sampler
+  - `S-contracts` ✅ — Go-side DLQ replay, ghost-freeze reconciliation, `exclusive_capability_match` index activation (Go contract doc only)
 
-**Operational rule for agents during v2 cleanup**: do not introduce new `unimplemented!()` / `todo!()` / `TODO(v2)` / "for v1" markers anywhere in `crates/`. If a feature can't land in the current PR, decline to write the placeholder and surface the dependency instead. Existing markers are tracked in the overview's §10 item-ID reverse-lookup table.
+**Operational rule**: the `no_v1_markers_in_prod` lint in `scripts/check-invariants.sh` now runs in `error` mode. Any new `unimplemented!()` / `todo!()` / `TODO(v2)` / "for v1" marker in `crates/` will fail CI. If a feature can't land in the current PR, decline to write the placeholder and surface the dependency instead.
 
 ## Source layout
 
