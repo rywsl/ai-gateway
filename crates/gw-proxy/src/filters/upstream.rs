@@ -225,7 +225,11 @@ pub async fn pick_peer(
         user_id: &perm.effective_user_id,
         model: &model,
         conversation_id: ctx.conversation_id.as_deref(),
-        message_hash: None,
+        message_hash: ctx
+            .cached_body
+            .as_ref()
+            .filter(|b| !b.is_empty())
+            .and_then(|b| body_hash_u64(b)),
         api_format: client_codec_kind,
         pricing: ctx.pricing.as_ref().map(|p| &p.value as &Pricing),
         latency_tracker: latency_tracker.as_ref(),
@@ -656,6 +660,45 @@ fn codec_for(k: gw_core::protocol::ProtocolKind) -> AnyCodec {
         ProtocolKind::OpenAi => AnyCodec::OpenAi(gw_codec::openai::OpenAi),
         ProtocolKind::Anthropic => AnyCodec::Anthropic(gw_codec::anthropic::Anthropic),
         ProtocolKind::Gemini => AnyCodec::Gemini(gw_codec::gemini::Gemini),
+    }
+}
+
+/// SHA-256 of request body truncated to u64 for CacheAffinity message_hash.
+///
+/// Returns `None` for empty input (preserves degraded behavior when no body
+/// is available). The hash is the first 8 bytes of the SHA-256 digest
+/// interpreted as a little-endian u64.
+#[inline]
+pub(crate) fn body_hash_u64(body: &[u8]) -> Option<u64> {
+    if body.is_empty() {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(body);
+    Some(u64::from_le_bytes(digest[..8].try_into().unwrap()))
+}
+
+#[cfg(test)]
+mod body_hash_tests {
+    use super::*;
+
+    #[test]
+    fn empty_input_returns_none() {
+        assert_eq!(body_hash_u64(b""), None);
+    }
+
+    #[test]
+    fn non_empty_returns_deterministic_value() {
+        // SHA-256("test") first 8 bytes as little-endian u64
+        let expected: u64 = 7313085519096743583;
+        assert_eq!(body_hash_u64(b"test"), Some(expected));
+    }
+
+    #[test]
+    fn deterministic_across_calls() {
+        let first = body_hash_u64(b"test");
+        let second = body_hash_u64(b"test");
+        assert_eq!(first, second);
     }
 }
 

@@ -38,6 +38,7 @@ thiserror.workspace = true
 dashmap.workspace = true
 arc-swap.workspace = true
 fred.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
