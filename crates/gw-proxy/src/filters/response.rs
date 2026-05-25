@@ -39,7 +39,7 @@ use bytes::{Bytes, BytesMut};
 use gw_codec::cross_render::{CrossRender, WireFormat};
 use gw_codec::AnyCodec;
 use gw_core::ir::StreamEventIR;
-use gw_core::protocol::ProtocolKind;
+use gw_core::protocol::{ApiShape, ProtocolKind};
 use pingora::Result;
 use pingora_proxy::Session;
 use std::sync::atomic::Ordering;
@@ -237,6 +237,7 @@ fn handle_event(
             return;
         }
     };
+    let upstream_shape = codec.api_shape();
     let upstream_kind = codec.kind();
     // G8 — cross-protocol render accumulator. Taken out at the start of the
     // event so every IR event re-renders INTO the same `BytesMut`; overwriting
@@ -301,7 +302,7 @@ fn handle_event(
     // additive to the per-IR-event `StreamEventIR::Usage` accumulation above
     // (which fills input/output/cached). The extractor adds cache_creation,
     // thinking, and multimodal from the raw JSON that the IR doesn't carry.
-    if let Some(e) = extractor_for_kind(upstream_kind).extract_chunk(event_bytes) {
+    if let Some(e) = extractor_for_shape(upstream_shape).extract_chunk(event_bytes) {
         apply_extracted_to_ctx(&e, ctx);
         // W2-T4: terminal chunk from extractor signals the stream is complete.
         if e.is_terminal
@@ -328,18 +329,20 @@ fn handle_event(
     ctx.stream_state = Some(state);
 }
 
-/// Return a boxed `UsageExtractor` for the given upstream protocol kind.
-/// OpenAI Responses and OpenAI Chat share the same Chat extractor for W1;
-/// the routing to `::responses()` is deferred to a later wave.
-fn extractor_for_kind(kind: ProtocolKind) -> Box<dyn gw_codec::usage_extractor::UsageExtractor> {
-    match kind {
-        ProtocolKind::OpenAi => {
+fn extractor_for_shape(shape: ApiShape) -> Box<dyn gw_codec::usage_extractor::UsageExtractor> {
+    match shape {
+        ApiShape::OpenAiChat => {
             Box::new(gw_codec::openai::usage_extractor::OpenAiUsageExtractor::chat())
         }
-        ProtocolKind::Anthropic => {
+        ApiShape::OpenAiResponses => {
+            Box::new(gw_codec::openai::usage_extractor::OpenAiUsageExtractor::responses())
+        }
+        ApiShape::AnthropicMessages => {
             Box::new(gw_codec::anthropic::usage_extractor::AnthropicUsageExtractor)
         }
-        ProtocolKind::Gemini => Box::new(gw_codec::gemini::usage_extractor::GeminiUsageExtractor),
+        ApiShape::GeminiGenerate => {
+            Box::new(gw_codec::gemini::usage_extractor::GeminiUsageExtractor)
+        }
     }
 }
 
@@ -466,6 +469,7 @@ pub(crate) fn handle_non_stream_chunk(
         return;
     };
     let codec_kind = codec.kind();
+    let codec_shape = codec.api_shape();
     // `parse_response` borrows from `body`; both the successful `ResponseIR`
     // and the error `ErrorIR` hold that borrow, so we cannot move `body`
     // back into `ctx.upstream_body_accum` while the match arms hold the
@@ -568,7 +572,7 @@ pub(crate) fn handle_non_stream_chunk(
     // was already written) — those cases kept the body in the accum for the
     // caller to forward verbatim, and a second parse is wasteful.
     if !return_body_to_accum {
-        let extracted = extractor_for_kind(codec_kind).extract_response(&body);
+        let extracted = extractor_for_shape(codec_shape).extract_response(&body);
         apply_extracted_to_ctx(&extracted, ctx);
         // W2-T4: non-stream EOS with a successful parse is always terminal.
         if extracted.is_terminal
