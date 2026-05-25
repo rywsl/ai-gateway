@@ -47,6 +47,7 @@ pub async fn run(
     jwt_validator: Option<&Arc<JwtValidator>>,
     capability_resolver: Option<&Arc<gw_capability::CapabilityResolver>>,
     mgmt_blacklist: &Arc<RedisJwtBlacklist>,
+    hard_cap_cfg: &gw_auth::hard_cap::HardCapCfg,
 ) -> Result<bool> {
     ctx.phase_start("request_filter");
     ctx.timing.start = Some(Instant::now());
@@ -173,6 +174,19 @@ pub async fn run(
         .map(str::to_owned);
 
     let request_id = ctx.request_id.0.clone();
+
+    // Emit an error response to the client, then short-circuit the filter chain.
+    //
+    // Wraps `emit_and_bail` + `unreachable!()` — the `unreachable!()` is centralised
+    // here rather than repeated at every call site. `emit_and_bail` always returns
+    // `Err`, so the `?` operator unwinds before `unreachable!()` is reached.
+    macro_rules! bail {
+        ($session:expr, $ctx:expr, $err:expr, $rid:expr) => {{
+            emit_and_bail($session, $ctx, $err, $rid).await?;
+            unreachable!("emit_and_bail always returns Err; see fn doc")
+        }};
+    }
+
     let user_id_res: Result<(UserId, Option<ApiKeyId>, Option<Vec<String>>)> = if let Some(bearer) =
         auth_header
             .as_deref()
@@ -211,15 +225,13 @@ pub async fn run(
                         request_id: "",
                         retry_after_secs: None,
                     };
-                    emit_and_bail(session, ctx, &err, &request_id).await?;
-                    unreachable!()
+                    bail!(session, ctx, &err, &request_id)
                 }
             },
             None => match verify_jwt(bearer, store).await {
                 Ok(uid) => Ok((uid, None, None)),
                 Err(err) => {
-                    emit_and_bail(session, ctx, &err, &request_id).await?;
-                    unreachable!()
+                    bail!(session, ctx, &err, &request_id)
                 }
             },
         }
@@ -245,8 +257,7 @@ pub async fn run(
                                 request_id: "",
                                 retry_after_secs: None,
                             };
-                            emit_and_bail(session, ctx, &err, &request_id).await?;
-                            unreachable!()
+                            bail!(session, ctx, &err, &request_id)
                         }
                         // T6-C: stash signature requirement state so the
                         // request_body_filter (or `body_verify::verify_body`)
@@ -291,14 +302,12 @@ pub async fn run(
                             request_id: "",
                             retry_after_secs: None,
                         };
-                        emit_and_bail(session, ctx, &err, &request_id).await?;
-                        unreachable!()
+                        bail!(session, ctx, &err, &request_id)
                     }
                 }
             }
             Err(err) => {
-                emit_and_bail(session, ctx, &err, &request_id).await?;
-                unreachable!()
+                bail!(session, ctx, &err, &request_id)
             }
         }
     } else {
@@ -313,8 +322,7 @@ pub async fn run(
             request_id: "",
             retry_after_secs: None,
         };
-        emit_and_bail(session, ctx, &err, &request_id).await?;
-        unreachable!()
+        bail!(session, ctx, &err, &request_id)
     };
     let (user_id, api_key_id, ip_allowlist_for_request) = user_id_res?;
 
@@ -333,8 +341,7 @@ pub async fn run(
                 request_id: "",
                 retry_after_secs: None,
             };
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
     };
     ctx.user = Some(user_entry);
@@ -356,8 +363,7 @@ pub async fn run(
     let client_ip_v = client_ip_from_session(session, trust_xff);
     if let Some(ip) = client_ip_v {
         if let Err(err) = check_blocklist(ip, Some(&user_id), api_key_id.as_ref(), store).await {
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
     }
 
@@ -380,8 +386,7 @@ pub async fn run(
                 request_id: "",
                 retry_after_secs: None,
             };
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
     }
 
@@ -403,8 +408,7 @@ pub async fn run(
                 request_id: "",
                 retry_after_secs: None,
             };
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
         body_buf.extend_from_slice(&chunk);
     }
@@ -475,8 +479,7 @@ pub async fn run(
                     request_id: "",
                     retry_after_secs: None,
                 };
-                emit_and_bail(session, ctx, &err, &request_id).await?;
-                unreachable!()
+                bail!(session, ctx, &err, &request_id)
             }
             Ok((SignatureCheckResult::TimestampDrift, _)) => {
                 let err = ErrorIR {
@@ -490,8 +493,7 @@ pub async fn run(
                     request_id: "",
                     retry_after_secs: None,
                 };
-                emit_and_bail(session, ctx, &err, &request_id).await?;
-                unreachable!()
+                bail!(session, ctx, &err, &request_id)
             }
             Ok((SignatureCheckResult::Invalid, _)) => {
                 let err = ErrorIR {
@@ -505,8 +507,7 @@ pub async fn run(
                     request_id: "",
                     retry_after_secs: None,
                 };
-                emit_and_bail(session, ctx, &err, &request_id).await?;
-                unreachable!()
+                bail!(session, ctx, &err, &request_id)
             }
             Err(_decompress_err) => {
                 // Body decompression failed: signature is computed over
@@ -524,8 +525,7 @@ pub async fn run(
                     request_id: "",
                     retry_after_secs: None,
                 };
-                emit_and_bail(session, ctx, &err, &request_id).await?;
-                unreachable!()
+                bail!(session, ctx, &err, &request_id)
             }
         }
     }
@@ -550,8 +550,7 @@ pub async fn run(
                 request_id: "",
                 retry_after_secs: None,
             };
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
     };
     let parse_body = ctx
@@ -570,8 +569,7 @@ pub async fn run(
             values
         }
         Err(err) => {
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
     };
     // ADR-S1: some wire formats (Gemini) signal streaming via the URL path
@@ -621,8 +619,7 @@ pub async fn run(
     let merged = match merge_permissions(&auth_ctx, store, global_rpm, pricing.clone()).await {
         Ok(p) => p,
         Err(err) => {
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
     };
 
@@ -641,8 +638,7 @@ pub async fn run(
             request_id: "",
             retry_after_secs: None,
         };
-        emit_and_bail(session, ctx, &err, &request_id).await?;
-        unreachable!()
+        bail!(session, ctx, &err, &request_id)
     }
 
     // ---------------------------------------------------------------------
@@ -723,8 +719,7 @@ pub async fn run(
             request_id: "",
             retry_after_secs: Some(30),
         };
-        emit_and_bail(session, ctx, &err, &request_id).await?;
-        unreachable!()
+        bail!(session, ctx, &err, &request_id)
     }
 
     // ---------------------------------------------------------------------
@@ -764,8 +759,7 @@ pub async fn run(
                 request_id: "",
                 retry_after_secs: None,
             };
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
     }
 
@@ -789,8 +783,7 @@ pub async fn run(
                     request_id: "",
                     retry_after_secs: Some(30),
                 };
-                emit_and_bail(session, ctx, &err, &request_id).await?;
-                unreachable!()
+                bail!(session, ctx, &err, &request_id)
             }
         }
     }
@@ -802,8 +795,7 @@ pub async fn run(
     match ratelimit.check(&merged) {
         Ok(_ticket) => { /* dropped at end of fn — RPM only checks once per request */ }
         Err(err) => {
-            emit_and_bail(session, ctx, &err, &request_id).await?;
-            unreachable!()
+            bail!(session, ctx, &err, &request_id)
         }
     }
     if is_stream {
@@ -811,8 +803,7 @@ pub async fn run(
         {
             Ok(slot) => ctx.stream_slot = Some(slot),
             Err(err) => {
-                emit_and_bail(session, ctx, &err, &request_id).await?;
-                unreachable!()
+                bail!(session, ctx, &err, &request_id)
             }
         }
     }
@@ -820,22 +811,16 @@ pub async fn run(
     // ---------------------------------------------------------------------
     // 9. Hard caps (single-request size + cost).
     // ---------------------------------------------------------------------
-    use gw_auth::hard_cap::{check_cost, check_input_tokens, HardCapCfg};
-    let hc_cfg = HardCapCfg {
-        max_input_tokens: 1_000_000,
-        max_cost_micro: 5_000_000_000,
-    };
-    if let Err(err) = check_input_tokens(est_input_tokens, &hc_cfg) {
-        emit_and_bail(session, ctx, &err, &request_id).await?;
-        unreachable!()
+    use gw_auth::hard_cap::{check_cost, check_input_tokens};
+    if let Err(err) = check_input_tokens(est_input_tokens, hard_cap_cfg) {
+        bail!(session, ctx, &err, &request_id)
     }
     // freeze-estimate uses a flat 1 micro per estimated token times the
     // markup product. The freeze is released in `logging`; Go computes the
     // real cost from the UsageRecord.
     let freeze_estimate_micro = freeze_estimate(est_input_tokens, merged.markup_chain.product);
-    if let Err(err) = check_cost(freeze_estimate_micro, &hc_cfg) {
-        emit_and_bail(session, ctx, &err, &request_id).await?;
-        unreachable!()
+    if let Err(err) = check_cost(freeze_estimate_micro, hard_cap_cfg) {
+        bail!(session, ctx, &err, &request_id)
     }
 
     // ---------------------------------------------------------------------
@@ -920,9 +905,9 @@ fn freeze_estimate(est_input_tokens: u32, markup: f32) -> u64 {
     with_markup.max(1)
 }
 
-/// Emit an error via the client codec and return a short-circuit Err so the
-/// `?` operator unwinds. The caller writes `unreachable!()` after the await
-/// because `Err` already terminates the function on the call site.
+/// Emit an error via the client codec and return a short-circuit `Err` so the
+/// `?` operator unwinds. Callers use the `bail!` macro, which appends the
+/// `unreachable!()` in a single place rather than at every call site.
 async fn emit_and_bail(
     session: &mut Session,
     ctx: &mut ReqCtx,
