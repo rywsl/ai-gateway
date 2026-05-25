@@ -293,10 +293,6 @@ pub async fn run(
         // age out without an explicit sweeper. Best-effort: Redis errors
         // are logged but never propagate (daily quota is observational,
         // not billing).
-        //
-        // TODO(metrics): wire `gw_daily_quota_increment_error_total` once
-        // the metrics catalog opens a slot for it (out of scope for T2-A —
-        // see the T2-A plan note about metrics_catalog gating).
         // -----------------------------------------------------------------
         let total_tokens =
             (ctx.usage.input_tokens as u64).saturating_add(ctx.usage.output_tokens as u64);
@@ -305,14 +301,13 @@ pub async fn run(
             let day = format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day());
             let key = daily_tokens_key(&effective, &day);
             let counters_for_spawn = counters.clone();
-            // Best-effort fire-and-forget; the request lifecycle does not
-            // wait for this to complete. 48 h TTL = 172800 s.
             tokio::spawn(async move {
                 if let Err(e) = counters_for_spawn
                     .incrby_with_expire(&key, total_tokens as i64, 172_800)
                     .await
                 {
                     tracing::warn!(target: "gw_daily_quota", error = %e, "daily quota increment failed");
+                    metrics::counter!("gw_daily_quota_increment_error_total").increment(1);
                 }
             });
         }

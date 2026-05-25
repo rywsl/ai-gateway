@@ -305,6 +305,82 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "Number of CrashFallback UsageRecords emitted by the startup reconciler",
     },
+    // --- Gateway-wide operational counters ---
+    MetricSpec {
+        name: "gateway_started_total",
+        kind: MetricKind::Counter,
+        help: "Incremented once at process startup so /metrics is non-empty before traffic",
+    },
+    MetricSpec {
+        name: "gateway_requests_total",
+        kind: MetricKind::Counter,
+        help: "Total proxy requests; label=status_class (2xx/4xx/5xx/err)",
+    },
+    MetricSpec {
+        name: "gateway_tpm_consumed_total",
+        kind: MetricKind::Counter,
+        help: "Observed tokens fed into the per-user sliding-window TPM limiter; label=user_id",
+    },
+    MetricSpec {
+        name: "gateway_freeze_leak_recovered_total",
+        kind: MetricKind::Counter,
+        help: "Freeze guards recovered via Drop rollback (leak-safety net)",
+    },
+    // --- Usage flusher ---
+    MetricSpec {
+        name: "gateway_usage_records_lost_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecords permanently lost (primary XADD + DLQ both failed)",
+    },
+    MetricSpec {
+        name: "gateway_usage_channel_full_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecord dropped because the mpsc channel was full",
+    },
+    MetricSpec {
+        name: "gateway_usage_serialize_errors_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecord serde_json serialization failures (record dropped)",
+    },
+    MetricSpec {
+        name: "gateway_usage_queue_errors_total",
+        kind: MetricKind::Counter,
+        help: "Individual XADD queue failures in the pipelined usage flush batch",
+    },
+    MetricSpec {
+        name: "gateway_usage_flush_errors_total",
+        kind: MetricKind::Counter,
+        help: "Pipelined usage flush RTT failures (entire batch routed to DLQ)",
+    },
+    // --- Deduct GC ---
+    MetricSpec {
+        name: "gw_deduct_gc_removed_total",
+        kind: MetricKind::Counter,
+        help: "Deduction tracking entries garbage-collected (all dimensions zeroed)",
+    },
+    // --- Forced params ---
+    MetricSpec {
+        name: "gw_forced_params_applied_total",
+        kind: MetricKind::Counter,
+        help: "Forced parameter overrides applied to upstream request; label=field",
+    },
+    // --- Error handler ---
+    MetricSpec {
+        name: "gw_classifier_outcome_total",
+        kind: MetricKind::Counter,
+        help: "Error classifier outcomes; label=class",
+    },
+    MetricSpec {
+        name: "gw_error_handler_ledger_total",
+        kind: MetricKind::Counter,
+        help: "Error outcomes recorded by the ledger listener",
+    },
+    // --- Daily quota ---
+    MetricSpec {
+        name: "gw_daily_quota_increment_error_total",
+        kind: MetricKind::Counter,
+        help: "Redis INCRBY+EXPIRE failures when bumping per-user daily token counter",
+    },
 ];
 
 pub fn describe_all() {

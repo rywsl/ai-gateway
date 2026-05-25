@@ -138,3 +138,26 @@ fn billing_w4_t4_inflight_recovered_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(names.contains(&"gw_billing_inflight_recovered_total"));
 }
+
+#[test]
+fn runtime_operational_metrics_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    for required in [
+        "gateway_started_total",
+        "gateway_requests_total",
+        "gateway_tpm_consumed_total",
+        "gateway_freeze_leak_recovered_total",
+        "gateway_usage_records_lost_total",
+        "gateway_usage_channel_full_total",
+        "gateway_usage_serialize_errors_total",
+        "gateway_usage_queue_errors_total",
+        "gateway_usage_flush_errors_total",
+        "gw_deduct_gc_removed_total",
+        "gw_forced_params_applied_total",
+        "gw_classifier_outcome_total",
+        "gw_error_handler_ledger_total",
+        "gw_daily_quota_increment_error_total",
+    ] {
+        assert!(names.contains(&required), "missing metric: {required}");
+    }
+}
