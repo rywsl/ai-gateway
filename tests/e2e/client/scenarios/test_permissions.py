@@ -16,12 +16,10 @@ Exercises two capability surfaces:
    NOTE: The Rust `regex` crate uses RE2-style linear-time matching, so
    true catastrophic backtracking (`(a+)+$`) cannot occur. The budget guard
    is observational (post-check timestamp), not preemptive. These tests
-   validate the auto-disable pathway IF it were triggered by an
-   implementation change (e.g. switching to a PCRE engine) or by a
-   sufficiently expensive DFA construction. In practice the pathological
-   pattern compiles fine under RE2 and matches in microseconds, so tests 4
-   and 5 are marked `xfail` until the `model_whitelist_regex` entity field
-   lands on `ApiKeyEntry` and a preemptive budget mechanism is wired.
+   validate the auto-disable pathway via the ReDoS budget guard
+   (check_with_budget) wired in request_filter. The pathological regex
+   ``(a+)+$`` is evaluated against adversarial model names; the budget
+   kills evaluation within 100ms and the request is denied with 403.
 
 Error codes under test:
   - 403 `GW_REQUEST_MODEL_NOT_FOUND` — model not in merged `allowed_models`.
@@ -309,14 +307,6 @@ def test_permission_merge_markup_product(
 # =========================================================================
 
 
-@pytest.mark.xfail(
-    reason=(
-        "model_whitelist_regex field not yet on ApiKeyEntry; "
-        "Rust regex crate is RE2-style (linear) so (a+)+$ cannot cause "
-        "catastrophic backtracking. Test documents expected behaviour."
-    ),
-    strict=False,
-)
 def test_redos_pathological_regex_killed_within_budget(
     gateway_url: str,
     fake_web: FakeWebClient,
@@ -324,15 +314,10 @@ def test_redos_pathological_regex_killed_within_budget(
     metrics_url: str,
 ) -> None:
     """Api-key with pathological regex ``(a+)+$``, request model
-    ``aaaaaaaaaaaaaaaaab``. Permission denied, ``gw_redos_timeout_total``
-    incremented, response latency < 200ms.
-
-    NOTE: The `model_whitelist_regex` field does not exist on `ApiKeyEntry`
-    yet. This test seeds it via raw `put_entity` to document the expected
-    integration point. The gateway's serde will likely ignore the unknown
-    field, so the model permission check falls through to `allowed_models`
-    (empty = unrestricted) and the request succeeds instead of being denied.
-    When the field lands, remove the `xfail` marker.
+    ``aaaaaaaaaaaaaaaaab``. The ReDoS budget guard (check_with_budget)
+    kills evaluation within 100ms, returns no match, and the request
+    is denied with 403 ``GW_REQUEST_MODEL_NOT_FOUND``.
+    ``gw_redos_timeout_total`` is incremented, response latency < 200ms.
     """
     prefix = "rd_budget"
     uid = f"u-{prefix}"
@@ -430,14 +415,6 @@ def test_redos_pathological_regex_killed_within_budget(
 # =========================================================================
 
 
-@pytest.mark.xfail(
-    reason=(
-        "model_whitelist_regex field not yet on ApiKeyEntry; "
-        "Rust regex crate is RE2-style (linear) so (a+)+$ cannot cause "
-        "catastrophic backtracking. Test documents expected behaviour."
-    ),
-    strict=False,
-)
 def test_redos_auto_disable_after_threshold(
     gateway_url: str,
     fake_web: FakeWebClient,
@@ -447,9 +424,7 @@ def test_redos_auto_disable_after_threshold(
     """Fire 11 requests with pathological regex (TIMEOUT_THRESHOLD=10).
     After 10 timeouts the api-key's regex evaluator is auto-disabled.
     The 11th request is denied EVEN for a non-pathological model name that
-    would normally match.
-
-    Same caveat as test 4 — `model_whitelist_regex` is not yet wired.
+    would normally match — fail-closed with 403 ``GW_REQUEST_MODEL_NOT_FOUND``.
     """
     prefix = "rd_disable"
     uid = f"u-{prefix}"

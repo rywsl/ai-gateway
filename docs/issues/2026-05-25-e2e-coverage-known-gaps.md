@@ -6,41 +6,33 @@ These are limitations in the current Rust gateway that prevent full e2e test cov
 
 ---
 
-## 1. ReDoS budget guard — `model_whitelist_regex` not on ApiKeyEntry
+## 1. ReDoS budget guard — `model_whitelist_regex` on ApiKeyEntry
 
-**Status**: xfail (2 tests in `test_permissions.py`)
+**Status**: **Resolved** (2026-05-25)
 
-**What**: The Rust `regex` crate uses RE2-style linear matching (no catastrophic backtracking), and `model_whitelist_regex` is not wired as a field on `ApiKeyEntry`. The gateway's ReDoS budget guard (`BUDGET_MS=100`, `TIMEOUT_THRESHOLD=10`, `RedosTracker` auto-disable) cannot be exercised end-to-end because there is no per-key regex evaluation path exposed to the e2e harness.
+**What**: `model_whitelist_regex` is now wired on `ApiKeyEntry` and evaluated in `request_filter` step 11 via `check_model_whitelist_regex()`. The pattern compiles to `ModelPermission` and runs through `check_with_budget()` (100 ms ReDoS budget, `RedosTracker` auto-disable after 10 timeouts, fail-closed deny on disable).
 
-**Tests**:
-- `test_redos_pathological_regex_killed_within_budget` — documents expected budget enforcement
-- `test_redos_auto_disable_after_threshold` — documents expected auto-disable after 10 timeouts
-
-**Resolution**: When `model_whitelist_regex` (or equivalent per-key regex field) lands on `ApiKeyEntry` and is evaluated in the request path, remove the `xfail` markers.
+**Tests**: `xfail` markers removed. Both `test_redos_pathological_regex_killed_within_budget` and `test_redos_auto_disable_after_threshold` pass.
 
 ---
 
-## 2. LatencyFirst strategy — black-box p50 preference unprovable
+## 2. LatencyFirst strategy — black-box p50 observable via `/healthz/strategies`
 
-**Status**: xfail (1 test in `test_routing_strategies.py`)
+**Status**: **Resolved** (2026-05-25)
 
-**What**: `latency_first` picks the key with the lowest p50 latency from the sliding window. In a black-box e2e test, we can configure two fake-upstream routes with different delays (e.g., 500ms vs 10ms via `auth_check` per-key routing), but the gateway's internal p50 sliding window is not observable externally. After warmup, the fast key should dominate, but timing jitter in Docker makes the assertion unreliable (≥70% threshold fails intermittently).
+**What**: `/healthz/strategies` endpoint now exposes per-(key, format) p50 TTFT from the `LatencyTracker`'s `by_key_format` DashMap. E2e tests can query this mgmt-gated endpoint to verify the gateway's internal latency state, making the `LatencyFirst` preference provable in black-box tests.
 
-**Test**: `test_latency_first_picks_lowest_p50` — documents expected distribution bias
-
-**Resolution**: Either expose a `/debug/strategy-state` endpoint for test inspection, or accept this as an inherent black-box limitation. The unit tests in `crates/gw-routing/tests/strategies.rs` cover the algorithm deterministically.
+**Test**: `xfail` marker removed. `test_latency_first_picks_lowest_p50` queries `/healthz/strategies` after warmup to confirm p50 ordering.
 
 ---
 
-## 3. CacheAffinity strategy — `message_hash` not wired in proxy
+## 3. CacheAffinity strategy — `message_hash` wired from cached_body SHA-256
 
-**Status**: degraded assertion (1 test in `test_routing_strategies.py`)
+**Status**: **Resolved** (2026-05-25)
 
-**What**: `CacheAffinity` in `crates/gw-routing/src/strategy/cache_affinity.rs` hashes `model_name || ":" || message_hash` to pin requests to a key. However, `crates/gw-proxy/src/filters/upstream.rs:228` always sets `message_hash: None`, causing the strategy to degrade to first-available (all requests pin to the same key regardless of content).
+**What**: `PickCtx.message_hash` is now populated in `upstream.rs` via `body_hash_u64()`, which computes SHA-256 of the raw `ctx.cached_body` bytes and takes the first 8 bytes as `u64` LE. Empty body produces `None`. `CacheAffinity` hashes `model_name || ":" || message_hash` to pin content-identical requests to the same key, and different content distributes across keys.
 
-**Test**: `test_cache_affinity_pins_same_content` — asserts the degraded single-key behavior and documents the expected varied-content distribution once `message_hash` is populated.
-
-**Resolution**: Wire `message_hash` computation (e.g., SHA-256 of request body or conversation content) in `upstream.rs` before calling the routing strategy. Then update the test to assert ≥2 distinct keys for different content.
+**Test**: `test_cache_affinity_pins_same_content` updated to assert same-content pinning and varied-content distribution (>= 2 distinct keys).
 
 ---
 

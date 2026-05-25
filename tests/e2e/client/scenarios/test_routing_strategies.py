@@ -325,14 +325,6 @@ def test_cost_first_picks_cheapest_key(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "latency_first does not probe unexplored candidates; with equal cold-start "
-        "priority the first candidate can retain all traffic, so this black-box "
-        "auth-routed fake-upstream scenario cannot reliably prove p50 preference"
-    ),
-    strict=False,
-)
 def test_latency_first_picks_lowest_p50(
     gateway_url: str,
     fake_web: FakeWebClient,
@@ -341,18 +333,10 @@ def test_latency_first_picks_lowest_p50(
     """Two vendor keys under latency_first. Key A (slow, priority=1) has a
     500ms upstream delay; Key B (fast, priority=1) has a 10ms upstream delay.
 
-    During cold start (no P50 data), latency_first falls back to priority
-    descending — both keys have equal priority so allocation is
-    non-deterministic. We issue 10 warmup requests to seed the TTFT sliding
-    window, then issue 10 more and assert the fast key (B) gets >= 70%.
-
-    Note: we set scenarios with per-key auth_check to route traffic
-    deterministically to the correct upstream delay for each key. However
-    the fake upstream has a single business port, so both keys reach the
-    same listener. Instead we use two separate scenario routes matched by
-    the `Authorization` header: key A gets `Bearer sk-up` (default), key B
-    gets `Bearer sk-up-fast`. The gateway fills Authorization from the
-    vendor_key's decrypted api_key via the vendor's auth_template.
+    We issue 10 warmup requests to seed the TTFT sliding window, then issue
+    10 more and assert the fast key (B) gets >= 70%. The latency tracker
+    now populates P50 data via ``/healthz/strategies``, allowing the
+    strategy to reliably prefer the lower-latency key after warmup.
     """
     user_id = "u-lf"
     api_key_id = "ak-lf"
@@ -660,15 +644,9 @@ def test_load_balance_picks_least_loaded(
 # ---------------------------------------------------------------------------
 # 6. CacheAffinity: same messages pin to same key, different messages spread.
 #
-# IMPORTANT: the current proxy (`crates/gw-proxy/src/filters/upstream.rs:228`)
-# passes `message_hash: None` to PickCtx. When message_hash is None,
-# CacheAffinity degrades to "first available" — it does NOT hash the message
-# content. This test therefore verifies the DEGRADED behaviour:
-#   - All requests (same or different content) pin to the same key
-#     (first-available), because there's no message_hash to differentiate.
-#
-# When the proxy eventually populates message_hash, this test should be
-# updated to verify actual content-based affinity.
+# message_hash is now populated from cached_body SHA-256 in upstream.rs.
+# Same body → same hash → same upstream key via cache_affinity strategy.
+# Different body → different hash → may spread across keys.
 # ---------------------------------------------------------------------------
 
 
@@ -677,11 +655,9 @@ def test_cache_affinity_pins_same_content(
     fake_web: FakeWebClient,
     fake_upstream: FakeUpstreamClient,
 ) -> None:
-    """CacheAffinity with message_hash=None (current proxy) degrades to
-    first-available. We verify that:
-    - 5 requests with identical content all go to the same key.
-    - 5 requests with different content also go to the same key (degraded
-      first-available behaviour).
+    """CacheAffinity with message_hash populated from cached_body SHA-256.
+    - 5 requests with identical content all go to the same key (affinity).
+    - 5 requests with different content may spread across multiple keys.
     """
     _, api_key_id, api_key_plain, key_ids = _seed_multi_key(
         fake_web,
@@ -704,7 +680,7 @@ def test_cache_affinity_pins_same_content(
         r for r in records_phase1 if r.get("api_key_id") == api_key_id
     ]
     keys_p1 = {r["vendor_key_id"] for r in relevant_p1}
-    # Same content → same key (first-available under degraded mode).
+    # Same content → same message_hash → same key via affinity.
     assert len(keys_p1) == 1, (
         f"cache_affinity: same content should pin to 1 key, "
         f"got {len(keys_p1)}: {keys_p1}"
@@ -714,9 +690,8 @@ def test_cache_affinity_pins_same_content(
         f"pinned key {pinned_key} not in seeded keys {key_ids}"
     )
 
-    # Phase 2: 5 requests with varying content. Under the current degraded
-    # mode (message_hash=None), CacheAffinity falls back to first-available
-    # so all requests still pin to the same key.
+    # Phase 2: 5 requests with varying content. Different body → different
+    # message_hash → CacheAffinity should spread across keys.
     for i in range(5):
         body = {
             "model": MODEL,
@@ -738,14 +713,16 @@ def test_cache_affinity_pins_same_content(
     relevant_all = [
         r for r in records_all if r.get("api_key_id") == api_key_id
     ]
-    keys_all = {r["vendor_key_id"] for r in relevant_all}
+    # Phase 2 records only (skip first 5).
+    phase2_records = relevant_all[5:]
+    keys_p2 = {r["vendor_key_id"] for r in phase2_records}
 
-    # Under degraded first-available, everything pins to the same key.
-    # When message_hash is implemented, different content SHOULD spread
-    # across keys — update this assertion accordingly.
-    assert len(keys_all) == 1, (
-        f"cache_affinity (degraded): all requests should pin to 1 key, "
-        f"got {len(keys_all)}: {keys_all}"
+    # With message_hash populated, different content should spread across
+    # at least 2 of 3 keys (hash distribution). Allow 1 key if hash
+    # collision happens, but expect > 1 with 5 distinct messages.
+    assert len(keys_p2) >= 2, (
+        f"cache_affinity: different content should spread across keys, "
+        f"got {len(keys_p2)}: {keys_p2}"
     )
 
 

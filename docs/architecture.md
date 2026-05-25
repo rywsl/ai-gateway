@@ -190,15 +190,19 @@ server.run_forever()    // never returns
 |------|--------|--------|
 | 8000 | Pingora business proxy | `gw-proxy::LlmGateway` |
 | 9090 | Prometheus `/metrics` | `gw-gateway::metrics_catalog` |
-| 8080 | Health HTTP — `/livez`, `/readyz`, `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience` | `gw-gateway::health` |
+| 8080 | Health HTTP — `/livez`, `/readyz`, `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience`, `/healthz/strategies` | `gw-gateway::health` |
 
-The `/healthz/{circuits,key/<id>,resilience}` admin routes verify
+The `/healthz/{circuits,key/<id>,resilience,strategies}` admin routes verify
 `Authorization: Mgmt mt_<id>.<secret>` against the same
 `RedisJwtBlacklist::check_mgmt` and `EntityStore::mgmt_token_or_load`
 chain the proxy `request_filter` uses (FailClosed). The required scope
 is `MgmtScope::AdminRead`; finer AdminFull/AdminRead splits are enforced
 by the Go control plane. On success the route returns the matching
-`snapshot_json` body (`application/json`). `/livez` and `/readyz`
+`snapshot_json` body (`application/json`). `/healthz/strategies` returns
+`[{key_id, format, p50_ttft_ms}]` per entry in the `LatencyTracker`'s
+`by_key_format` DashMap, exposing per-(key, format) p50 TTFT for
+`LatencyFirst` strategy debugging; cold start (no samples yet) returns
+`[]`. `/livez` and `/readyz`
 remain unauthenticated.
 
 ## 7. Invariants (`scripts/check-invariants.sh`)
@@ -248,6 +252,7 @@ Pending lints (uncomment when target phase lands):
 | Daily-quota UTC midnight race | The pre-check in `request_filter` reads `counter:user:{eid}:daily_tokens:{day_N}`, but the post-increment in `logging` may run after the request crosses the UTC midnight boundary and land on day N+1's counter. Affects < 0.001 % of traffic; daily quota is best-effort accounting, not security. | `crates/gw-proxy/src/filters/request.rs` daily-quota pre-check, `crates/gw-proxy/src/filters/logging.rs` post-increment |
 | Capability field-name / type asymmetry (`ApiKeyEntry.force_capabilities: SmallVec<[String;4]>` vs `VendorKey.forced_capabilities: Vec<String>`) | G13 (T3-C) reads forced caps from two different entities: the resolver pulls *required* caps from `ApiKeyEntry.force_capabilities` + `ApiKeyEntry.match_mode_exclusive` (caller-side requirement), while the candidate filter reads *advertised* caps from `VendorKey.forced_capabilities` + `VendorKey.exclusive_capability_match` (channel-side capability). The two were introduced by different waves (T4-B vs T0-C) and the naming/collection-type drift is left as-is rather than risk a churny rename; reconciliation is a follow-up. | `crates/gw-capability/src/backend.rs`, `crates/gw-routing/src/candidates.rs` |
 | **`require_tunnel = true` is fail-closed.** When a `VendorKey.tunnel_preference.require_tunnel = true` resolves to `Direct` (no node matches the provider/key), `pick_peer` emits `GW_TUNNEL_NO_NODE` rather than silently falling back to Direct. This is enforced by the `tunnel_require_means_hard_fail` invariant. | Fail-closed design: a key that demands a tunnel must not silently use a Direct path. | `crates/gw-proxy/src/filters/upstream.rs`, `scripts/check-invariants.sh` |
+| **ReDoS auto-disable is fail-closed.** When `RedosTracker` auto-disables a key's regex after `TIMEOUT_THRESHOLD` (10) consecutive budget timeouts, subsequent requests are denied with `GW_REQUEST_MODEL_NOT_FOUND` 403. The regex is not silently skipped. | A silently-skipped regex would let any model through, defeating the whitelist. Deny is the only safe default. | `crates/gw-auth/src/model_permissions.rs`, `crates/gw-proxy/src/filters/request.rs` step 11 |
 | **`bail!` macro wraps `emit_and_bail` + `unreachable!()`.** The `request_filter` defines a local `bail!` macro that calls `emit_and_bail(session, ctx, err, rid).await?` followed by `unreachable!()`. The `unreachable!()` is never reached because `emit_and_bail` always returns `Err`, which the `?` operator propagates. The macro centralizes this two-line pattern across 26+ call sites. | Without the macro, every error exit would duplicate `emit_and_bail(...).await?; unreachable!()`. The `unreachable!()` satisfies the type checker (the block must produce `!` or a value). | `crates/gw-proxy/src/filters/request.rs:183` |
 | **Client disconnection does not cancel billing.** `ClientDelivery::Disconnected` only triggers upstream cancellation; it does not prevent `UsageRecord` emission. | The vendor has already charged; we are obligated to bill the customer. Decouples client delivery from billing lifecycle. | [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`](superpowers/specs/2026-05-24-billing-robustness-design.md) §12, item 1 |
 | **Crash-recovery fallback `UsageRecord` underestimates output.** `CrashFallback` state emits `output_tokens=0`, `input_tokens=prompt_estimate`; **this is a known underestimate**. | Partial usage in-flight on crash exists only in RAM; Redis holds only prompt-estimate baseline. Production deployments must ensure MTBF >> single-request duration to keep this path rare. | [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`](superpowers/specs/2026-05-24-billing-robustness-design.md) §12, item 2 |
