@@ -100,7 +100,7 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 12b. **Daily token quota (G3, ADR-G3-2)** — when `user.daily_quota_tokens > 0`, GET `counter:user:{effective_user_id}:daily_tokens:{YYYY-MM-DD}` (UTC) via `CounterStore::get_str_key`, then `check_daily_quota(consumed, freeze_estimate, quota)` rejects with `403 GW_QUOTA_DAILY_TOKENS_EXCEEDED` when `consumed + freeze_estimate > quota`. `quota == 0` is unlimited and short-circuits before the Redis read. Redis error fails open (consistent with the balance check above — daily quota is observational, not billing). The post-increment of actual `input + output` tokens with a 48 h TTL lives in §2.8 `logging`.
 13. **User circuit** — `USER_CIRCUIT.get(&effective_user_id)`. `Open { until, .. }` and `now < until` → 402 short-circuit. The flusher (Phase 5) populates this when balance flips negative.
 14. **Rate limit** — `RateLimitGuard::check(&merged)` (governor RPM). If streaming, `check_stream_slot()` returns a RAII ticket on `ctx.stream_slot`.
-15. **Hard caps (ADR-024)** — `HardCapCfg { max_input_tokens: 1_000_000, max_cost_micro: 5_000_000_000 }`. `check_input_tokens` and `check_cost(freeze_estimate)` enforce single-request ceilings.
+15. **Hard caps (ADR-024)** — `HardCapCfg` loaded from `[auth]` config (`hard_cap_max_input_tokens`, default 1,000,000; `hard_cap_max_cost_micro`, default 5,000,000,000). `check_input_tokens` and `check_cost(freeze_estimate)` enforce single-request ceilings.
 16. **Freeze** — `RequestFreeze::new(effective_user_id, freeze_estimate_micro)` atomically increments `DEDUCT[uid].frozen_micro`. Stashed on `ctx.freeze_guard` as `Box<dyn FreezeGuard>`.
 
 ### 2.3 `upstream_peer`
@@ -215,7 +215,7 @@ Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 ke
 |---------|------|--------|
 | `usage:records` Redis stream | `gw-ledger::flusher` (XADD batched, configurable batch / interval) | `filters::logging` builds `UsageRecord`, calls `ledger.try_send` |
 | `usage:detailed` Redis stream | `gw-ledger::detailed_archive::DetailedArchive` (workers XADD per-surface encoding) | `filters::*` and `filters::logging` call `archive.try_send(CapturedSurface)` |
-| Prometheus `/metrics` | `metrics-exporter-prometheus` | `gw-gateway::metrics_catalog` defines 19 metric families (e.g. `gw_codec_convert_total`, `gw_freeze_acquire/release_total`, `gw_redos_timeout_total`, `gw_kms_state`, `gw_oauth_refresh_total`, `gw_capability_resolve_total`, `gw_resilience_*`, `gw_detailed_log_oversized_total`) |
+| Prometheus `/metrics` | `metrics-exporter-prometheus` | `gw-gateway::metrics_catalog` defines 60 metric families across codec, freeze, auth, capability, resilience, detailed-log, billing, routing, tunnel, and quota surfaces (e.g. `gw_codec_cross_render_total`, `gw_billing_emit_total`, `gw_daily_quota_increment_error_total`, `gw_forced_params_applied_total`, `gw_deduct_gc_removed_total`). The catalog is the single source of truth for metric names and help text. |
 | Health `/livez` | always 200 | — |
 | Health `/readyz` | 200 once `READY=true` (flipped after `Wired` handoff) | `gw-gateway::health` |
 | Health `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience` | Mgmt-verified (`Authorization: Mgmt mt_<id>.<secret>`, scope ≥ `AdminRead`, FailClosed blacklist). 200 returns the `snapshot_json` body; verify failures map to `GW_AUTH_MGMT_TOKEN_*`. | `gw-gateway::health` |
