@@ -158,8 +158,8 @@ def _run_soak(
         account_drain_quiescence_reached(window=window),
         resource_all_in_flight_gauges_zero(metrics_text),
         resource_rss_growth_under_threshold(
-            before_bytes=rss_before or 0,
-            after_bytes=rss_after or 0,
+            before_bytes=rss_before,
+            after_bytes=rss_after,
             threshold_mib=100,
         ),
         error_code_compliance_all_in_catalog(
@@ -181,6 +181,7 @@ def _run_soak(
         soft_records_to_2xx_ratio(
             driver_report,
             records_delta=int(window["redis_streams"]["usage_records_delta"]),
+            chaos_mode=cfg.chaos_mode,
         ),
     ]
 

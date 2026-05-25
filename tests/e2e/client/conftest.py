@@ -1240,36 +1240,69 @@ def gateway_metrics_text(metrics_url: str) -> str:
 
 
 def gateway_rss_bytes() -> int | None:
-    """`docker stats --no-stream` mem usage for the gateway service.
-    Returns the parsed RSS in bytes, or None if parsing fails."""
-    # We must NOT pass `$(...)` syntax to subprocess with shell=False.
+    """Read gateway container RSS in bytes via /proc/1/status VmRSS.
+    Falls back to `docker stats --no-stream` if docker exec fails.
+    Returns None if all methods fail."""
+    import logging
+    log = logging.getLogger(__name__)
+
     # Look up the container id first via `docker compose ps -q gateway`.
-    cid_proc = subprocess.run(
-        ["docker", "compose", "-f", "../docker-compose.yml",
-         "ps", "-q", "gateway"],
-        capture_output=True, text=True, timeout=10,
-    )
-    cid = cid_proc.stdout.strip()
+    try:
+        cid_proc = subprocess.run(
+            ["docker", "compose", "-f", "../docker-compose.yml",
+             "ps", "-q", "gateway"],
+            capture_output=True, text=True, timeout=10,
+        )
+        cid = cid_proc.stdout.strip()
+    except Exception:
+        return None
     if not cid:
         return None
-    proc = subprocess.run(
-        ["docker", "stats", "--no-stream", "--format",
-         "{{.MemUsage}}", cid],
-        capture_output=True, text=True, timeout=15,
-    )
-    out = proc.stdout.strip()
-    if not out:
-        return None
-    # Format like "123.4MiB / 7.5GiB". Parse first token.
-    head = out.split("/")[0].strip()
-    units = {"B": 1, "KiB": 1024, "MiB": 1024**2,
-             "GiB": 1024**3, "TiB": 1024**4}
-    for u, mul in units.items():
-        if head.endswith(u):
-            try:
-                return int(float(head[:-len(u)]) * mul)
-            except ValueError:
-                return None
+
+    # --- Primary: read VmRSS from /proc/1/status inside the container ---
+    try:
+        exec_proc = subprocess.run(
+            ["docker", "exec", cid, "cat", "/proc/1/status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if exec_proc.returncode == 0:
+            for line in exec_proc.stdout.splitlines():
+                if line.startswith("VmRSS:"):
+                    # Format: "VmRSS:    12345 kB"
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            kb_value = int(parts[1])
+                            return kb_value * 1024
+                        except ValueError:
+                            log.warning("gateway_rss_bytes: failed to parse VmRSS value: %s", line)
+            log.warning("gateway_rss_bytes: VmRSS line not found in /proc/1/status")
+    except Exception as exc:
+        log.warning("gateway_rss_bytes: docker exec failed, falling back to docker stats: %s", exc)
+
+    # --- Fallback: docker stats --no-stream ---
+    try:
+        proc = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format",
+             "{{.MemUsage}}", cid],
+            capture_output=True, text=True, timeout=15,
+        )
+        out = proc.stdout.strip()
+        if not out:
+            return None
+        # Format like "123.4MiB / 7.5GiB". Parse first token.
+        head = out.split("/")[0].strip()
+        units = {"B": 1, "KiB": 1024, "MiB": 1024**2,
+                 "GiB": 1024**3, "TiB": 1024**4}
+        for u, mul in units.items():
+            if head.endswith(u):
+                try:
+                    return int(float(head[:-len(u)]) * mul)
+                except ValueError:
+                    return None
+    except Exception as exc:
+        log.warning("gateway_rss_bytes: docker stats fallback also failed: %s", exc)
+
     return None
 # -----------------------------------------------------------------------------
 # T4-B fixtures: management-token / blacklist helpers for /healthz e2e.
