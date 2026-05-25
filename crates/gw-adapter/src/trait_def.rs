@@ -7,7 +7,7 @@
 use crate::ctx::AdapterCtx;
 use crate::error::AdapterError;
 use async_trait::async_trait;
-use gw_codec::wire::{WireAnyRequest, WireAnyResponse};
+use gw_codec::wire::WireAnyRequest;
 
 #[async_trait]
 pub trait UpstreamAdapter: Send + Sync + 'static {
@@ -36,7 +36,6 @@ pub trait UpstreamAdapter: Send + Sync + 'static {
     fn patch_response(
         &self,
         _ctx: &AdapterCtx<'_>,
-        _wire: &mut WireAnyResponse<'_>,
     ) -> Result<(), AdapterError> {
         Ok(())
     }

@@ -15,10 +15,6 @@ pub const GW_REQUEST_INPUT_TOO_LARGE: &str = "GW_REQUEST_INPUT_TOO_LARGE";
 pub const GW_REQUEST_COST_TOO_HIGH: &str = "GW_REQUEST_COST_TOO_HIGH";
 pub const GW_REQUEST_CONTENT_REJECTED: &str = "GW_REQUEST_CONTENT_REJECTED";
 pub const GW_REQUEST_MODEL_NOT_FOUND: &str = "GW_REQUEST_MODEL_NOT_FOUND";
-/// v1.0 only — non-streaming requests are rejected at the request filter
-/// because `parse_response` is not yet implemented for any codec. Will be
-/// supported in v1.1 once codec `parse_response` lands.
-pub const GW_REQUEST_NONSTREAM_NOT_SUPPORTED: &str = "GW_REQUEST_NONSTREAM_NOT_SUPPORTED";
 pub const GW_ROUTING_NO_AVAILABLE_CHANNEL: &str = "GW_ROUTING_NO_AVAILABLE_CHANNEL";
 pub const GW_UPSTREAM_TIMEOUT: &str = "GW_UPSTREAM_TIMEOUT";
 pub const GW_UPSTREAM_5XX: &str = "GW_UPSTREAM_5XX";

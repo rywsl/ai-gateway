@@ -141,7 +141,9 @@ where
                     }
                 }
             }
-            _ => {}
+            _ => {
+                tracing::debug!(target: "gw_codec", event_type = %typ, "unknown SSE event type dropped during accumulation");
+            }
         }
     }
     Ok(json!({

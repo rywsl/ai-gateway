@@ -70,7 +70,7 @@ struct Wired {
     signature_required: bool,
     business_port: u16,
     admin_upstream_url: url::Url,
-    // --- Wave 1+ placeholders (known-gaps closure) ---
+    // --- Fields wired during bootstrap ---
     /// JWT claim validator (T1-E). `None` until T1-E builds it from
     /// `AuthConfig.global`.
     jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,

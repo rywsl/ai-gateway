@@ -696,7 +696,7 @@ pub async fn run(
     // 7. Balance enforcement. Read the payer's `balance_micro` counter from
     //     Redis and reject when it has fallen to zero or below. This is the
     //     primary zero-balance gate; the USER_CIRCUIT check below is a
-    //     fast-path follow-up that catches users whose circuit was tripped
+    //     fast-path short-circuit that catches users whose circuit was tripped
     //     open in a prior request (e.g. by the ledger flusher on a debit
     //     that drove balance negative).
     //
@@ -906,7 +906,7 @@ pub fn check_daily_quota(
 /// G3 — format an `OffsetDateTime` as a UTC calendar day key (`YYYY-MM-DD`).
 /// Centralised so the request-filter pre-check and the logging post-increment
 /// cannot disagree on day boundaries. UTC by construction; per-tenant timezone
-/// support is a v2 follow-up.
+/// support requires Go billing coordination; tracked separately.
 pub fn day_key_utc(now: OffsetDateTime) -> String {
     let d = now.date();
     format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())

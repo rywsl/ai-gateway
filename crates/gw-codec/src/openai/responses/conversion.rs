@@ -3,7 +3,7 @@
 //! v1 ships hand-written `via` functions for the 4 most common transitions.
 //! Once codec S1 matrix-codegen lands, these are migrated to derive-generated
 //! variants. For now: text-only paths are correct; multimodal / tool_use is
-//! left to S2 / S4 follow-ups.
+//! left unimplemented.
 
 use super::OpenAiResponsesRequest;
 use serde_json::{json, Value};

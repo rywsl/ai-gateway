@@ -2,8 +2,8 @@
 //!
 //! Responsibilities (ADR-001 / ADR-014):
 //! 1. Stamp `ctx.trace_id` into a `traceparent`-ish header so downstream logs
-//!    correlate (we keep the auto-generated id from `new_ctx`; W3C parsing
-//!    can be added in a follow-up).
+//!    correlate (we keep the auto-generated id from `new_ctx`; W3C
+//!    trace-context parsing is not yet implemented).
 //! 2. Run the unauthenticated portion of the IP blocklist (`Global` scope
 //!    entries only — scoped entries are re-checked in `request_filter` once
 //!    the user/api_key resolves).

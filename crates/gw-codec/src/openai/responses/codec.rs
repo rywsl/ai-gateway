@@ -5,9 +5,9 @@
 //!
 //! T4-B scope is the response side (`render_response` / `parse_response` /
 //! `parse_stream_chunk` / `render_stream_chunk` / `new_stream_state`). The
-//! request side is deferred to T6 (S-codec proxy hookup): `parse_request`
-//! returns `bad_request_err` until then; `render_request` falls back to the
-//! Chat wire form so callers can still serialise an IR built elsewhere.
+//! request side: `parse_request` returns `bad_request_err` (Responses wire
+//! parsing requires a zero-copy `OpenAiResponsesRequest` variant); `render_request`
+//! falls back to the Chat wire form so callers can still serialise an IR.
 
 use std::borrow::Cow;
 
@@ -44,7 +44,7 @@ impl ProtocolCodec for OpenAiResponsesCodec {
         // `OpenAiResponsesRequest` (currently owned `String` everywhere),
         // which is out of scope until T6 surfaces a concrete consumer.
         Err(bad_request_err(
-            "openai responses parse_request not wired (deferred to T6)".to_owned(),
+            "openai responses parse_request not wired".to_owned(),
         ))
     }
 

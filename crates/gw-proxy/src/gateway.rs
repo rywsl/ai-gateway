@@ -637,8 +637,8 @@ impl ProxyHttp for LlmGateway {
     /// `GW_UPSTREAM_CONNECT_FAILED` and propagate. Metric:
     /// `gw_retry_attempt_total{outcome=recovered|exhausted|tls_blocked}`.
     ///
-    /// v1.5 scope: this hook handles **connect-only** retry. Response-side
-    /// (5xx / 429) retry remains deferred to the routing-r-e `FailoverExecutor v2`.
+    /// Connect-only retry hook. Response-side (5xx / 429) retry is handled by
+    /// `FailoverExecutor` in `response_filter` (see lines 515–556).
     fn fail_to_connect(
         &self,
         _session: &mut Session,

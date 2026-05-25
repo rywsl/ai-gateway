@@ -26,4 +26,4 @@ pub mod wire;
 
 pub use any::AnyCodec;
 pub use trait_def::{Headers, ProtocolCodec};
-pub use wire::{WireAnyRequest, WireAnyResponse, WireAnyStreamChunk};
+pub use wire::WireAnyRequest;
