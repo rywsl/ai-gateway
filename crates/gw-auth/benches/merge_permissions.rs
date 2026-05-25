@@ -89,6 +89,7 @@ fn make_apikey(id: &str) -> Arc<Versioned<ApiKeyEntry>> {
             signature_algo: SignatureAlgo::default(),
             force_capabilities: smallvec::SmallVec::new(),
             match_mode_exclusive: false,
+            model_whitelist_regex: None,
         },
     ))
 }

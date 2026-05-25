@@ -165,6 +165,9 @@ pub async fn merge_permissions(
                 .unwrap_or(1.0),
             product: markup,
         },
+        model_whitelist_regex: api_key
+            .as_ref()
+            .and_then(|a| a.value.model_whitelist_regex.clone()),
     })
 }
 

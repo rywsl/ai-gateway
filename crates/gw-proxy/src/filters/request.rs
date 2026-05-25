@@ -18,6 +18,9 @@ use gw_auth::ip_filter::check_blocklist;
 use gw_auth::jwt::{verify_jwt, JwtError, JwtValidator};
 use gw_auth::jwt_blacklist::RedisJwtBlacklist;
 use gw_auth::merge_permissions;
+use gw_auth::model_permissions::{
+    check_with_budget, ModelPermission, PermissionEffect, RedosTracker,
+};
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_auth::AuthCtx;
 use gw_core::entity::ApiKeyEntry;
@@ -30,7 +33,7 @@ use pingora::Result;
 use pingora_proxy::Session;
 use std::borrow::Cow;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use time::OffsetDateTime;
 
@@ -640,6 +643,14 @@ pub async fn run(
         };
         bail!(session, ctx, &err, &request_id)
     }
+    if let Err(err) = check_model_whitelist_regex(
+        &model_name,
+        merged.model_whitelist_regex.as_deref(),
+        api_key_id.as_ref().map(ApiKeyId::as_ref),
+        model_regex_redos_tracker(),
+    ) {
+        bail!(session, ctx, &err, &request_id)
+    }
 
     // ---------------------------------------------------------------------
     // 6b. G13 (ADR-G13-2) — capability resolve. After permission merge and the
@@ -905,6 +916,65 @@ fn freeze_estimate(est_input_tokens: u32, markup: f32) -> u64 {
     with_markup.max(1)
 }
 
+fn model_regex_redos_tracker() -> &'static RedosTracker {
+    static TRACKER: OnceLock<RedosTracker> = OnceLock::new();
+    TRACKER.get_or_init(RedosTracker::new)
+}
+
+fn check_model_whitelist_regex(
+    model_name: &ModelName,
+    pattern: Option<&str>,
+    api_key_id: Option<&str>,
+    redos_tracker: &RedosTracker,
+) -> std::result::Result<(), ErrorIR<'static>> {
+    let Some(pattern) = pattern else {
+        return Ok(());
+    };
+    let permission = match ModelPermission::new(pattern, PermissionEffect::Allow) {
+        Ok(permission) => permission,
+        Err(err) => {
+            tracing::warn!(
+                target: "gw_proxy::request_filter",
+                error = %err,
+                pattern,
+                "model_whitelist_regex compile failed; denying request"
+            );
+            return Err(model_whitelist_regex_denied_error(
+                "model_whitelist_regex compile failed",
+            ));
+        }
+    };
+    let api_key_id = api_key_id.unwrap_or("");
+    match check_with_budget(
+        model_name.as_ref(),
+        &[permission],
+        api_key_id,
+        redos_tracker,
+    ) {
+        Some(true) => Ok(()),
+        Some(false) => Err(model_whitelist_regex_denied_error(
+            "model not in model_whitelist_regex",
+        )),
+        None => Err(model_whitelist_regex_denied_error(
+            "model_whitelist_regex disabled for api key",
+        )),
+    }
+}
+
+fn model_whitelist_regex_denied_error(message: &'static str) -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::ClientAuth,
+        status: 403,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_REQUEST_MODEL_NOT_FOUND),
+        message: Cow::Borrowed(message),
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    }
+}
+
 /// Emit an error via the client codec and return a short-circuit `Err` so the
 /// `?` operator unwinds. Callers use the `bail!` macro, which appends the
 /// `unreachable!()` in a single place rather than at every call site.
@@ -977,5 +1047,77 @@ mod mgmt_path_branch_tests {
             src.contains(&load),
             "T3-B store integration missing — mgmt_token_or_load not called"
         );
+    }
+}
+
+#[cfg(test)]
+mod model_whitelist_regex_tests {
+    use super::*;
+    use gw_auth::model_permissions::RedosTracker;
+
+    #[test]
+    fn regex_allows_matching_model() {
+        let tracker = RedosTracker::new();
+        let result = check_model_whitelist_regex(
+            &ModelName::from("gpt-4o"),
+            Some("^gpt-4.*"),
+            Some("ak_regex_allow"),
+            &tracker,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn regex_denies_non_matching_model_with_model_not_found_code() {
+        let tracker = RedosTracker::new();
+        let err = check_model_whitelist_regex(
+            &ModelName::from("claude-3-5-sonnet"),
+            Some("^gpt-4.*"),
+            Some("ak_regex_deny"),
+            &tracker,
+        )
+        .expect_err("non-matching model must be denied");
+
+        assert_eq!(err.status, 403);
+        assert_eq!(err.code, codes::GW_REQUEST_MODEL_NOT_FOUND);
+    }
+
+    #[test]
+    fn regex_auto_disabled_tracker_denies_fail_closed() {
+        let tracker = RedosTracker::new();
+        let api_key_id = "ak_regex_disabled";
+        for _ in 0..10 {
+            tracker.record_timeout(api_key_id);
+        }
+
+        let err = check_model_whitelist_regex(
+            &ModelName::from("gpt-4o"),
+            Some("^gpt-4.*"),
+            Some(api_key_id),
+            &tracker,
+        )
+        .expect_err("disabled api key must fail closed");
+
+        assert_eq!(err.status, 403);
+        assert_eq!(err.code, codes::GW_REQUEST_MODEL_NOT_FOUND);
+    }
+
+    #[test]
+    fn none_regex_skips_check_even_when_tracker_disabled() {
+        let tracker = RedosTracker::new();
+        let api_key_id = "ak_regex_skipped";
+        for _ in 0..10 {
+            tracker.record_timeout(api_key_id);
+        }
+
+        let result = check_model_whitelist_regex(
+            &ModelName::from("any-model"),
+            None,
+            Some(api_key_id),
+            &tracker,
+        );
+
+        assert!(result.is_ok());
     }
 }

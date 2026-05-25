@@ -122,6 +122,8 @@ pub struct ApiKeyEntry {
     /// If true, the matching mode for capability resolution is Exclusive.
     #[serde(default)]
     pub match_mode_exclusive: bool,
+    #[serde(default)]
+    pub model_whitelist_regex: Option<String>,
 }
 
 impl std::fmt::Debug for ApiKeyEntry {
@@ -597,6 +599,7 @@ mod mgmt_scope_tests {
 #[cfg(test)]
 mod tests {
     use super::entity_helpers::EncryptedBlob;
+    use super::ApiKeyEntry;
 
     /// Verifies that `EncryptedBlob` round-trips through `serde_json`. `Vec<u8>`
     /// fields serialise as JSON integer arrays (serde_json default) and
@@ -615,5 +618,33 @@ mod tests {
         assert_eq!(restored.nonce, original.nonce);
         assert_eq!(restored.auth_tag, original.auth_tag);
         assert_eq!(restored.kek_kid, original.kek_kid);
+    }
+
+    /// ApiKeyEntry with `model_whitelist_regex` present deserialises to `Some(pattern)`.
+    #[test]
+    fn api_key_entry_deser_with_model_whitelist_regex() {
+        let json = r#"{
+            "key_id": "ak1",
+            "user_id": "u1",
+            "status": "active",
+            "hash": [0,0,0,0],
+            "model_whitelist_regex": "^gpt-4.*"
+        }"#;
+        let entry: ApiKeyEntry = serde_json::from_str(json).expect("deser with regex");
+        assert_eq!(entry.model_whitelist_regex.as_deref(), Some("^gpt-4.*"));
+    }
+
+    /// ApiKeyEntry without `model_whitelist_regex` deserialises to `None`
+    /// (backward compat via `#[serde(default)]`).
+    #[test]
+    fn api_key_entry_deser_without_model_whitelist_regex() {
+        let json = r#"{
+            "key_id": "ak2",
+            "user_id": "u2",
+            "status": "active",
+            "hash": [0,0,0,0]
+        }"#;
+        let entry: ApiKeyEntry = serde_json::from_str(json).expect("deser without regex");
+        assert!(entry.model_whitelist_regex.is_none());
     }
 }

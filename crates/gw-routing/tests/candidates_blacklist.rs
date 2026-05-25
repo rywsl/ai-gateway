@@ -54,6 +54,7 @@ fn perm() -> MergedPermissions {
         tpm_limit: 0,
         max_concurrent_streams: 0,
         markup_chain: Default::default(),
+        model_whitelist_regex: None,
     }
 }
 

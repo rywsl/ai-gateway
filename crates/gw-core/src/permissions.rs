@@ -54,4 +54,53 @@ pub struct MergedPermissions {
     pub tpm_limit: u32,
     pub max_concurrent_streams: u32,
     pub markup_chain: MarkupChainSnapshot,
+    /// Api-key-tier model whitelist regex — direct copy from `ApiKeyEntry`,
+    /// not 5-tier propagated. Evaluated by gw-proxy (Task 4).
+    pub model_whitelist_regex: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MergedPermissions propagates `model_whitelist_regex` directly from
+    /// ApiKeyEntry — it is NOT 5-tier merged.
+    #[test]
+    fn merged_permissions_model_whitelist_regex_from_api_key() {
+        let perm = MergedPermissions {
+            user_id: UserId::from("u1"),
+            effective_user_id: UserId::from("u1"),
+            client_ip: "127.0.0.1".parse().unwrap(),
+            allowed_models: HashSet::new(),
+            allowed_channels: HashSet::new(),
+            allowed_groups: HashSet::new(),
+            forced_model_group: None,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_concurrent_streams: 0,
+            markup_chain: MarkupChainSnapshot::identity(),
+            model_whitelist_regex: Some("^gpt-4.*".to_string()),
+        };
+        assert_eq!(perm.model_whitelist_regex.as_deref(), Some("^gpt-4.*"));
+    }
+
+    /// MergedPermissions with no api-key has `model_whitelist_regex: None`.
+    #[test]
+    fn merged_permissions_model_whitelist_regex_none_when_no_api_key() {
+        let perm = MergedPermissions {
+            user_id: UserId::from("u1"),
+            effective_user_id: UserId::from("u1"),
+            client_ip: "127.0.0.1".parse().unwrap(),
+            allowed_models: HashSet::new(),
+            allowed_channels: HashSet::new(),
+            allowed_groups: HashSet::new(),
+            forced_model_group: None,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_concurrent_streams: 0,
+            markup_chain: MarkupChainSnapshot::identity(),
+            model_whitelist_regex: None,
+        };
+        assert!(perm.model_whitelist_regex.is_none());
+    }
 }

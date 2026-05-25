@@ -22,6 +22,7 @@ fn entry_with(exp: Option<OffsetDateTime>) -> ApiKeyEntry {
         signature_algo: SignatureAlgo::default(),
         force_capabilities: Default::default(),
         match_mode_exclusive: false,
+        model_whitelist_regex: None,
     }
 }
 
