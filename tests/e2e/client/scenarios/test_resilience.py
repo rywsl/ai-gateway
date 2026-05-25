@@ -1,4 +1,4 @@
-"""Resilience capability surface tests (3 scenarios).
+"""Resilience capability surface tests (4 scenarios).
 
 Exercises gateway behaviour under adversarial upstream conditions and verifies
 the health-endpoint contract:
@@ -15,11 +15,16 @@ the health-endpoint contract:
        completed bootstrap.
 
   3. test_readyz_semantics_differ_from_livez
-     — /livez is always 200 (liveness); /readyz is 200 only when the gateway
-       is fully ready. Documents the semantic split and the P2 future
-       enhancement (503 on PG failure).
+      — /livez is always 200 (liveness); /readyz is 200 only when the gateway
+        is fully ready. Documents the semantic split and the P2 future
+        enhancement (503 on PG failure).
 
-Entity-ID prefix: `res_` (resilience).
+  4. test_kek_rotation_dual_decrypt_window
+      — Documents the desired KEK rotation dual-decrypt e2e window. Skipped
+        until gateway KMS bootstrap can load both old and new KEKs; current
+        docker/env wiring (`GW_KMS__KEK_HEX`) installs a single `primary` KEK.
+
+Entity-ID prefixes: `res_` (resilience), `kek_` (KEK rotation).
 """
 from __future__ import annotations
 
@@ -29,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
 
 import requests
+import pytest
 
 from conftest import (
     BALANCE_LARGE,
@@ -70,12 +76,105 @@ def _wait_for_readyz(gateway_health_url: str, timeout: float = 30.0) -> None:
         try:
             r = requests.get(f"{gateway_health_url.rstrip('/')}/readyz", timeout=2)
             if r.status_code == 200:
-                time.sleep(1.0)
                 return
         except requests.RequestException:
             pass
         time.sleep(0.25)
     raise TimeoutError(f"/readyz did not return 200 within {timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# 0. KEK rotation dual-decrypt window (currently skipped)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.kek_rotation
+@pytest.mark.skip(reason="KEK dual-decrypt not implemented — single-KEK only")
+def test_kek_rotation_dual_decrypt_window(
+    fake_web,
+    fake_upstream,
+    gateway_url: str,
+    gateway_health_url: str,
+) -> None:
+    """Desired e2e contract for KEK rotation.
+
+    Investigation result:
+    - `crates/gw-store/src/encrypt.rs` has an in-memory `KekCache` dual-read
+      state machine (`enter_dual_read`, `drop_old_kek`) and unit coverage.
+    - `crates/gw-gateway/src/kms.rs` bootstraps exactly one KEK from
+      `GW_KMS__KEK_HEX` under the configured key id, so a docker-compose
+      restart with a new env value cannot retain the old KEK for fallback.
+
+    When gateway KMS supports loading old+new KEKs, unskip this test and let it
+    verify: old encrypted vendor key remains readable after restart with the
+    new KEK, and a newly seeded key encrypted under the new KEK is also readable.
+    """
+    old_kek_hex = "deadbeef" * 8
+    new_kek_hex = "feedface" * 8
+    assert len(bytes.fromhex(old_kek_hex)) == 32
+    assert len(bytes.fromhex(new_kek_hex)) == 32
+
+    model = "kek_model"
+    group = "kek_group"
+    user_id = "kek_user"
+    api_key_id = "kek_api_key"
+    api_key_plaintext = "kek_secret"
+    old_vendor_id = "kek_vendor_old"
+    new_vendor_id = "kek_vendor_new"
+    old_key_id = "kek_vk_old"
+    new_key_id = "kek_vk_new"
+
+    seed_user_apikey(
+        fake_web,
+        user_id=user_id,
+        api_key_id=api_key_id,
+        api_key_plaintext=api_key_plaintext,
+        allowed_groups=[group],
+        signature_required=True,
+    )
+    fake_web.set_balance(user_id, BALANCE_LARGE)
+    seed_vendor(fake_web, vendor_id=old_vendor_id)
+    seed_vendor_key(
+        fake_web,
+        key_id=old_key_id,
+        vendor_id=old_vendor_id,
+        model=model,
+        accessible_endpoints=["open_ai"],
+        upstream_key="kek_old_upstream_secret",
+    )
+    seed_model_group(fake_web, group=group, vendor_key_ids=[old_key_id])
+    seed_pricing(fake_web, model=model)
+
+    _compose_gateway("kill", "-s", "SIGTERM", "gateway", timeout=30)
+    _compose_gateway("up", "-d", "gateway", timeout=60)
+    _wait_for_readyz(gateway_health_url, timeout=30.0)
+
+    old_resp = post_chat(
+        gateway_url,
+        pair_headers(api_key_plaintext, api_key_id),
+        {"model": model, "messages": [{"role": "user", "content": "old"}], "stream": True},
+        timeout=10,
+    )
+    assert old_resp.status_code == 200, old_resp.text[:500]
+
+    seed_vendor(fake_web, vendor_id=new_vendor_id)
+    seed_vendor_key(
+        fake_web,
+        key_id=new_key_id,
+        vendor_id=new_vendor_id,
+        model=model,
+        accessible_endpoints=["open_ai"],
+        upstream_key="kek_new_upstream_secret",
+    )
+    seed_model_group(fake_web, group=group, vendor_key_ids=[old_key_id, new_key_id])
+
+    new_resp = post_chat(
+        gateway_url,
+        pair_headers(api_key_plaintext, api_key_id),
+        {"model": model, "messages": [{"role": "user", "content": "new"}], "stream": True},
+        timeout=10,
+    )
+    assert new_resp.status_code == 200, new_resp.text[:500]
 
 
 # ---------------------------------------------------------------------------

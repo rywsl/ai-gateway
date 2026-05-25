@@ -1,9 +1,10 @@
-"""E4-C-strat: routing strategy black-box scenarios (6).
+"""E4-C-strat: routing strategy black-box scenarios (8).
 
-Exercises the six non-trivial routing strategies — RoundRobin, WeightedRr,
-CostFirst, LatencyFirst, LoadBalance, and CacheAffinity — by seeding
-multi-key model_groups with the appropriate `strategy` string and asserting
-on the distribution of vendor_key_id values in `usage:records`.
+Exercises the eight routing strategies — RoundRobin, WeightedRr,
+CostFirst, LatencyFirst, LoadBalance, CacheAffinity, and Sticky edge
+cases — by seeding multi-key model_groups with the appropriate `strategy`
+string and asserting on the distribution of vendor_key_id values in
+`usage:records`.
 
 Gateway internals referenced:
 - `crates/gw-core/src/entity.rs::StrategyKind` — serde `rename_all="snake_case"`
@@ -32,6 +33,7 @@ Entity-ID prefixes (globally unique across the test suite):
   lf_   — latency-first
   lb_   — load-balance
   ca_   — cache-affinity
+  stk_  — sticky edge cases
 """
 
 from __future__ import annotations
@@ -745,3 +747,237 @@ def test_cache_affinity_pins_same_content(
         f"cache_affinity (degraded): all requests should pin to 1 key, "
         f"got {len(keys_all)}: {keys_all}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Sticky strategy edge-case helpers
+# ---------------------------------------------------------------------------
+# Entity IDs use ``stk_`` prefix. Covers TTL-expiry rebind and
+# multi-conversation key distribution — edge cases beyond the basic
+# bind+hit+expire flow in test_routing_retry.py.
+
+
+def _make_openai_client_with_conv(
+    gateway_url: str, api_key: str, key_id: str, conv_id: str
+):
+    """OpenAI client with pair-auth + X-Conversation-Id header."""
+    import httpx as _httpx
+    import openai
+
+    def _hook(request: "_httpx.Request") -> None:
+        for h in list(request.headers.keys()):
+            if h.lower() == "authorization":
+                del request.headers[h]
+        request.headers["x-api-key"] = api_key
+        request.headers["x-api-key-id"] = key_id
+        request.headers["x-conversation-id"] = conv_id
+
+    transport = _httpx.Client(
+        event_hooks={"request": [_hook]},
+        timeout=30.0,
+    )
+    return openai.OpenAI(
+        base_url=f"{gateway_url.rstrip('/')}/v1",
+        api_key="unused",
+        http_client=transport,
+        max_retries=0,
+    )
+
+
+def _seed_sticky_pair(
+    fake_web: FakeWebClient,
+    *,
+    user_id: str,
+    api_key_id: str,
+    api_key_plaintext: str,
+    group: str,
+    key_ids: list[str],
+    vendor_id: str,
+) -> None:
+    """Seed user + api_key + vendor + N vendor_keys + model_group(sticky) + pricing."""
+    seed_user_apikey(
+        fake_web,
+        user_id=user_id,
+        api_key_id=api_key_id,
+        api_key_plaintext=api_key_plaintext,
+        allowed_groups=[group],
+    )
+    fake_web.set_balance(user_id, BALANCE_LARGE)
+    seed_vendor(fake_web, vendor_id=vendor_id, base_urls=[WORKING_BASE])
+    for kid in key_ids:
+        seed_vendor_key(
+            fake_web,
+            key_id=kid,
+            vendor_id=vendor_id,
+            model=MODEL,
+            accessible_endpoints=[PROTO_OPENAI],
+        )
+    seed_model_group(
+        fake_web,
+        group=group,
+        vendor_key_ids=key_ids,
+        strategy="sticky",
+    )
+    seed_pricing(fake_web, model=MODEL)
+
+
+def _do_sticky_stream(
+    gateway_url: str, api_key: str, key_id: str, conv_id: str
+) -> None:
+    """Fire one streaming chat request with the given conversation id."""
+    client = _make_openai_client_with_conv(gateway_url, api_key, key_id, conv_id)
+    stream = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": "hi"}],
+        stream=True,
+    )
+    pieces: list[str] = []
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            pieces.append(chunk.choices[0].delta.content)
+    assert "".join(pieces) == "hi", pieces
+
+
+# ---------------------------------------------------------------------------
+# 7. Sticky rebinds after TTL expiry
+# ---------------------------------------------------------------------------
+
+
+def test_sticky_rebinds_after_ttl_expiry(
+    gateway_url: str,
+    fake_web: FakeWebClient,
+    fake_upstream: FakeUpstreamClient,
+    metrics_url: str,
+) -> None:
+    """After the sticky TTL (2 s) expires the next request MUST go through
+    the bind path again (incrementing ``gw_sticky_bind_total``), even if
+    the deterministic hash happens to pick the same key.
+    """
+    _seed_sticky_pair(
+        fake_web,
+        user_id="stk_u1",
+        api_key_id="stk_ak1",
+        api_key_plaintext="stk_sk1",
+        group="stk_grp1",
+        key_ids=["stk_vk1a", "stk_vk1b"],
+        vendor_id="stk_v1",
+    )
+
+    conv_id = "stk_conv_rebind"
+
+    # --- leg 1: initial bind --------------------------------------------------
+    pre_bind = metrics_snapshot("gw_sticky_bind_total", metrics_url)
+    _do_sticky_stream(gateway_url, "stk_sk1", "stk_ak1", conv_id)
+    assert wait_for_records(fake_web, min_xlen=1, timeout=5.0) >= 1
+
+    post_bind_1 = metrics_snapshot("gw_sticky_bind_total", metrics_url)
+    delta_1 = label_delta(pre_bind, post_bind_1, "")
+    assert delta_1 >= 1, (
+        f"expected gw_sticky_bind_total to increment on first bind; "
+        f"pre={pre_bind}, post={post_bind_1}"
+    )
+
+    # --- leg 2: cache hit (same conv within TTL) ------------------------------
+    pre_hit = metrics_snapshot("gw_sticky_hit_total", metrics_url)
+    _do_sticky_stream(gateway_url, "stk_sk1", "stk_ak1", conv_id)
+    assert wait_for_records(fake_web, min_xlen=2, timeout=5.0) >= 2
+
+    post_hit = metrics_snapshot("gw_sticky_hit_total", metrics_url)
+    delta_hit = label_delta(pre_hit, post_hit, "")
+    assert delta_hit >= 1, (
+        f"expected gw_sticky_hit_total to increment on cache-hit leg; "
+        f"pre={pre_hit}, post={post_hit}"
+    )
+
+    # --- leg 3: wait for TTL expiry, then rebind ------------------------------
+    # GW_ROUTING__STICKY_TTL_SECS=2 in docker-compose.
+    time.sleep(2.5)
+
+    pre_rebind = metrics_snapshot("gw_sticky_bind_total", metrics_url)
+    _do_sticky_stream(gateway_url, "stk_sk1", "stk_ak1", conv_id)
+    assert wait_for_records(fake_web, min_xlen=3, timeout=5.0) >= 3
+
+    # Poll-loop: confirm gw_sticky_bind_total ticked (up to 3 s extra slack).
+    deadline = time.monotonic() + 3.0
+    rebind_delta = 0.0
+    while time.monotonic() < deadline:
+        post_rebind = metrics_snapshot("gw_sticky_bind_total", metrics_url)
+        rebind_delta = label_delta(pre_rebind, post_rebind, "")
+        if rebind_delta >= 1:
+            break
+        time.sleep(0.2)
+
+    assert rebind_delta >= 1, (
+        f"expected gw_sticky_bind_total to increment after TTL expiry rebind; "
+        f"pre={pre_rebind}, last_post={post_rebind}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. Different conversations → different keys (distribution)
+# ---------------------------------------------------------------------------
+
+
+def test_sticky_different_conversations_different_keys(
+    gateway_url: str,
+    fake_web: FakeWebClient,
+    fake_upstream: FakeUpstreamClient,
+    metrics_url: str,
+) -> None:
+    """10 requests with DISTINCT conversation IDs must produce at least 2
+    distinct vendor key bindings.
+    """
+    key_ids = ["stk_vk2a", "stk_vk2b"]
+    _seed_sticky_pair(
+        fake_web,
+        user_id="stk_u2",
+        api_key_id="stk_ak2",
+        api_key_plaintext="stk_sk2",
+        group="stk_grp2",
+        key_ids=key_ids,
+        vendor_id="stk_v2",
+    )
+
+    n_requests = 10
+    pre_bind = metrics_snapshot("gw_sticky_bind_total", metrics_url)
+
+    for i in range(n_requests):
+        conv_id = f"stk_conv_dist_{i}"
+        _do_sticky_stream(gateway_url, "stk_sk2", "stk_ak2", conv_id)
+
+    # Wait for all records to land.
+    assert wait_for_records(fake_web, min_xlen=n_requests, timeout=15.0) >= n_requests
+
+    # --- assert metric: bind_total incremented >= 10 --------------------------
+    deadline = time.monotonic() + 5.0
+    bind_delta = 0.0
+    while time.monotonic() < deadline:
+        post_bind = metrics_snapshot("gw_sticky_bind_total", metrics_url)
+        bind_delta = label_delta(pre_bind, post_bind, "")
+        if bind_delta >= n_requests:
+            break
+        time.sleep(0.2)
+
+    assert bind_delta >= n_requests, (
+        f"expected gw_sticky_bind_total to increment by >={n_requests} for "
+        f"{n_requests} distinct conv_ids; got delta={bind_delta}"
+    )
+
+    # --- assert distribution: at least 2 distinct keys used -------------------
+    records = _redis_xrange("usage:records")
+    relevant = [
+        r for r in records
+        if r.get("user_id") == "stk_u2" and r.get("api_key_id") == "stk_ak2"
+    ]
+    assert len(relevant) >= n_requests, (
+        f"expected >={n_requests} usage:records for stk_u2/stk_ak2; "
+        f"got {len(relevant)}"
+    )
+
+    distinct_keys = {r["vendor_key_id"] for r in relevant}
+    assert len(distinct_keys) >= 2, (
+        f"expected at least 2 distinct vendor_key_ids across {n_requests} "
+        f"different conversation IDs; got {distinct_keys}"
+    )
+    for k in distinct_keys:
+        assert k in set(key_ids), f"unexpected vendor_key_id {k}"
