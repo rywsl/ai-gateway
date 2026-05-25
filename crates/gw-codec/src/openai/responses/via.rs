@@ -12,7 +12,7 @@ use gw_core::ir::{
 };
 use serde_json::value::RawValue;
 
-use crate::common::content_to_text;
+use crate::common::internal_err;
 use crate::openai::wire::{OpenAiCompletionTokensDetails, OpenAiPromptTokensDetails};
 
 use super::wire_response::{
@@ -207,11 +207,11 @@ impl<'a> TryFrom<&ResponseIR<'a>> for OpenAiResponsesResponse<'a> {
             .find(|m| matches!(m, MessageIR::Assistant { .. }));
 
         if let Some(MessageIR::Assistant {
-            content,
+            content: ContentIR::Text(content),
             tool_calls,
         }) = last_assistant
         {
-            let text = content_to_text(content);
+            let text = content.clone();
             output.push(ResponseOutputItem::Message {
                 id: Cow::Borrowed(""),
                 content: if text.is_empty() {
@@ -233,6 +233,14 @@ impl<'a> TryFrom<&ResponseIR<'a>> for OpenAiResponsesResponse<'a> {
                     });
                 }
             }
+        } else if last_assistant.is_some() {
+            return Err(internal_err(
+                "expected ContentIR::Text, got non-text content",
+            ));
+        } else if !ir.messages.is_empty() {
+            return Err(internal_err(
+                "expected Assistant, got non-assistant message",
+            ));
         }
 
         // If no Assistant message but the IR carries tool_use_blocks (Anthropic

@@ -18,7 +18,7 @@ use super::wire::{
     GeminiGenerationConfig, GeminiPart, GeminiRequest, GeminiResponse, GeminiSystemInstruction,
     GeminiUsage,
 };
-use crate::common::content_to_text;
+use crate::common::{content_to_text, internal_err};
 use gw_core::error::ErrorIR;
 use gw_core::ir::{
     ContentIR, FinishReasonIR, MessageIR, RequestIR, ResponseIR, ToolCallIR, UsageIR,
@@ -330,11 +330,11 @@ impl<'a> TryFrom<&ResponseIR<'a>> for GeminiResponse<'a> {
 
         let mut parts: Vec<GeminiPart<'a>> = Vec::new();
         if let Some(MessageIR::Assistant {
-            content,
+            content: ContentIR::Text(content),
             tool_calls,
         }) = last_assistant
         {
-            let text = content_to_text(content);
+            let text = content.clone();
             if !text.is_empty() {
                 parts.push(GeminiPart::Text { text });
             }
@@ -348,6 +348,14 @@ impl<'a> TryFrom<&ResponseIR<'a>> for GeminiResponse<'a> {
                     });
                 }
             }
+        } else if last_assistant.is_some() {
+            return Err(internal_err(
+                "expected ContentIR::Text, got non-text content",
+            ));
+        } else if !ir.messages.is_empty() {
+            return Err(internal_err(
+                "expected Assistant, got non-assistant message",
+            ));
         }
         if parts.is_empty() {
             parts.push(GeminiPart::Text {

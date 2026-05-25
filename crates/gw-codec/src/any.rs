@@ -4,7 +4,7 @@
 use bytes::BytesMut;
 use gw_core::error::ErrorIR;
 use gw_core::ir::{RequestIR, ResponseIR, StreamEventIR};
-use gw_core::protocol::ProtocolKind;
+use gw_core::protocol::{ApiShape, ProtocolKind};
 
 use crate::anthropic::Anthropic;
 use crate::gemini::Gemini;
@@ -30,6 +30,21 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(_) => ProtocolKind::OpenAi,
             AnyCodec::Anthropic(_) => ProtocolKind::Anthropic,
             AnyCodec::Gemini(_) => ProtocolKind::Gemini,
+        }
+    }
+
+    /// Return the finer-grained [`ApiShape`] for this codec variant.
+    ///
+    /// Unlike [`kind`](AnyCodec::kind) (which maps both `OpenAi` and
+    /// `OpenAiResponses` to `ProtocolKind::OpenAi`), this preserves the
+    /// chat / responses distinction.
+    #[inline]
+    pub fn api_shape(&self) -> ApiShape {
+        match self {
+            AnyCodec::OpenAi(_) => ApiShape::OpenAiChat,
+            AnyCodec::OpenAiResponses(_) => ApiShape::OpenAiResponses,
+            AnyCodec::Anthropic(_) => ApiShape::AnthropicMessages,
+            AnyCodec::Gemini(_) => ApiShape::GeminiGenerate,
         }
     }
 

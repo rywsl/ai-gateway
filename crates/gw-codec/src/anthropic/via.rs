@@ -19,7 +19,7 @@
 use super::wire::{
     AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicResponse, AnthropicUsage,
 };
-use crate::common::content_to_text;
+use crate::common::{content_to_text, internal_err};
 use gw_core::error::ErrorIR;
 use gw_core::ir::{
     ContentIR, ContentPart, FinishReasonIR, ImageSource, MessageIR, RequestIR, ResponseIR,
@@ -464,11 +464,11 @@ impl<'a> TryFrom<&ResponseIR<'a>> for AnthropicResponse<'a> {
             .find(|m| matches!(m, MessageIR::Assistant { .. }));
 
         if let Some(MessageIR::Assistant {
-            content: msg_content,
+            content: ContentIR::Text(msg_content),
             tool_calls,
         }) = last_assistant
         {
-            let text = content_to_text(msg_content);
+            let text = msg_content.clone();
             if !text.is_empty() {
                 content.push(AnthropicContent::Text { text });
             }
@@ -495,6 +495,14 @@ impl<'a> TryFrom<&ResponseIR<'a>> for AnthropicResponse<'a> {
                     });
                 }
             }
+        } else if last_assistant.is_some() {
+            return Err(internal_err(
+                "expected ContentIR::Text, got non-text content",
+            ));
+        } else if !ir.messages.is_empty() {
+            return Err(internal_err(
+                "expected Assistant, got non-assistant message",
+            ));
         } else if let Some(blocks) = ir.tool_use_blocks.as_ref() {
             // No Assistant message but the IR carries tool_use_blocks —
             // emit them so the renderer is symmetric with the OpenAI

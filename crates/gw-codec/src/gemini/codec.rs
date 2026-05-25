@@ -545,12 +545,7 @@ mod tests {
         assert!(matches!(parsed.finish_reason, Some(FinishReasonIR::Stop)));
 
         // Assistant message preserves the tool_call entry.
-        let tool_calls = match &parsed.messages[0] {
-            MessageIR::Assistant { tool_calls, .. } => {
-                tool_calls.as_ref().expect("tool_calls present")
-            }
-            _ => panic!("expected Assistant"),
-        };
+        let tool_calls = gemini_assistant_tool_calls(&parsed).unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name.as_ref(), "get_weather");
         assert!(tool_calls[0].arguments_json.get().contains("SF"));
@@ -583,26 +578,116 @@ mod tests {
             events.len() >= 3,
             "expected ToolCallStart + ToolCallDelta + End, got {events:?}"
         );
-        match &events[0] {
-            StreamEventIR::ToolCallStart { name, .. } => {
-                assert_eq!(name.as_ref(), "get_weather");
-            }
-            other => panic!("expected ToolCallStart first, got {other:?}"),
-        }
-        match &events[1] {
+        assert_gemini_tool_call_start_first(&events).unwrap();
+        assert_gemini_tool_call_delta_second(&events).unwrap();
+        assert_gemini_end_last(&events).unwrap();
+    }
+
+    #[test]
+    fn test_gemini_ir_invariant_assistant_role_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::User {
+                content: ContentIR::Text(Cow::Borrowed("not assistant")),
+            }],
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(Gemini.render_response(&ir, &mut buf).is_err());
+    }
+
+    #[test]
+    fn test_gemini_ir_invariant_tool_call_start_first_returns_err() {
+        let events = vec![StreamEventIR::Delta {
+            text: Some(Cow::Borrowed("hi")),
+            tool_call: None,
+            thinking: None,
+        }];
+
+        assert!(assert_gemini_tool_call_start_first(&events).is_err());
+    }
+
+    #[test]
+    fn test_gemini_ir_invariant_tool_call_delta_second_returns_err() {
+        let events = vec![
+            StreamEventIR::ToolCallStart {
+                index: 0,
+                id: Cow::Borrowed(""),
+                name: Cow::Borrowed("get_weather"),
+            },
+            StreamEventIR::End {
+                finish_reason: FinishReasonIR::Stop,
+            },
+        ];
+
+        assert!(assert_gemini_tool_call_delta_second(&events).is_err());
+    }
+
+    #[test]
+    fn test_gemini_ir_invariant_end_last_returns_err() {
+        let events = vec![
+            StreamEventIR::ToolCallStart {
+                index: 0,
+                id: Cow::Borrowed(""),
+                name: Cow::Borrowed("get_weather"),
+            },
             StreamEventIR::ToolCallDelta {
+                index: 0,
+                arguments_chunk: Cow::Borrowed(r#"{"city":"SF"}"#),
+            },
+        ];
+
+        assert!(assert_gemini_end_last(&events).is_err());
+    }
+
+    fn gemini_assistant_tool_calls<'parsed, 'ir>(
+        parsed: &'parsed ResponseIR<'ir>,
+    ) -> Result<&'parsed Vec<ToolCallIR<'ir>>, ErrorIR<'static>> {
+        match parsed.messages.first() {
+            Some(MessageIR::Assistant { tool_calls, .. }) => tool_calls
+                .as_ref()
+                .ok_or_else(|| internal_err("expected Assistant")),
+            _ => Err(internal_err("expected Assistant")),
+        }
+    }
+
+    fn assert_gemini_tool_call_start_first(
+        events: &[StreamEventIR<'_>],
+    ) -> Result<(), ErrorIR<'static>> {
+        match events.first() {
+            Some(StreamEventIR::ToolCallStart { name, .. }) => {
+                assert_eq!(name.as_ref(), "get_weather");
+                Ok(())
+            }
+            _ => Err(internal_err(
+                "expected ToolCallStart first, got other event",
+            )),
+        }
+    }
+
+    fn assert_gemini_tool_call_delta_second(
+        events: &[StreamEventIR<'_>],
+    ) -> Result<(), ErrorIR<'static>> {
+        match events.get(1) {
+            Some(StreamEventIR::ToolCallDelta {
                 arguments_chunk, ..
-            } => {
+            }) => {
                 assert!(
                     arguments_chunk.contains("SF"),
                     "args chunk should carry payload: {arguments_chunk}"
                 );
+                Ok(())
             }
-            other => panic!("expected ToolCallDelta second, got {other:?}"),
+            _ => Err(internal_err(
+                "expected ToolCallDelta second, got other event",
+            )),
         }
-        match events.last().unwrap() {
-            StreamEventIR::End { .. } => {}
-            other => panic!("expected End last, got {other:?}"),
+    }
+
+    fn assert_gemini_end_last(events: &[StreamEventIR<'_>]) -> Result<(), ErrorIR<'static>> {
+        match events.last() {
+            Some(StreamEventIR::End { .. }) => Ok(()),
+            _ => Err(internal_err("expected End last, got other event")),
         }
     }
 }

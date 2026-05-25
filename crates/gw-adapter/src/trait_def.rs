@@ -33,10 +33,7 @@ pub trait UpstreamAdapter: Send + Sync + 'static {
     }
 
     /// Modify the incoming response wire. Default: no-op.
-    fn patch_response(
-        &self,
-        _ctx: &AdapterCtx<'_>,
-    ) -> Result<(), AdapterError> {
+    fn patch_response(&self, _ctx: &AdapterCtx<'_>) -> Result<(), AdapterError> {
         Ok(())
     }
 

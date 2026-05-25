@@ -629,13 +629,7 @@ mod tests {
         let usage = parsed.usage.expect("usage round-tripped");
         assert_eq!(usage.input_tokens, 5);
         assert_eq!(usage.output_tokens, 3);
-        match &parsed.messages[0] {
-            MessageIR::Assistant { content, .. } => match content {
-                ContentIR::Text(t) => assert_eq!(t.as_ref(), "Hello, world!"),
-                _ => panic!("expected ContentIR::Text"),
-            },
-            _ => panic!("expected Assistant"),
-        }
+        assert_anthropic_assistant_text(&parsed, "Hello, world!").unwrap();
     }
 
     #[test]
@@ -738,5 +732,49 @@ data: {"type":"content_block_stop","index":0}
             .expect("ThinkingDelta emitted at content_block_stop");
         assert_eq!(text, "step 1");
         assert_eq!(sig.as_deref(), Some("sig123"));
+    }
+
+    #[test]
+    fn test_anthropic_ir_invariant_text_content_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Parts(Default::default()),
+                tool_calls: None,
+            }],
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(Anthropic.render_response(&ir, &mut buf).is_err());
+    }
+
+    #[test]
+    fn test_anthropic_ir_invariant_assistant_role_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::User {
+                content: ContentIR::Text(Cow::Borrowed("not assistant")),
+            }],
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(Anthropic.render_response(&ir, &mut buf).is_err());
+    }
+
+    fn assert_anthropic_assistant_text(
+        parsed: &ResponseIR<'_>,
+        expected: &str,
+    ) -> Result<(), ErrorIR<'static>> {
+        match parsed.messages.first() {
+            Some(MessageIR::Assistant {
+                content: ContentIR::Text(t),
+                ..
+            }) => {
+                assert_eq!(t.as_ref(), expected);
+                Ok(())
+            }
+            Some(MessageIR::Assistant { .. }) => Err(internal_err("expected ContentIR::Text")),
+            _ => Err(internal_err("expected Assistant")),
+        }
     }
 }

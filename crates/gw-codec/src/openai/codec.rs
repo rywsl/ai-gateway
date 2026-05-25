@@ -435,14 +435,7 @@ mod tests {
         assert_eq!(usage.input_tokens, 5);
         assert_eq!(usage.output_tokens, 3);
 
-        // Assistant text round-trips through OpenAI chat.completion message.
-        match &parsed.messages[0] {
-            MessageIR::Assistant { content, .. } => match content {
-                ContentIR::Text(t) => assert_eq!(t.as_ref(), "Hello, world!"),
-                _ => panic!("expected ContentIR::Text"),
-            },
-            _ => panic!("expected Assistant"),
-        }
+        assert_openai_assistant_text(&parsed, "Hello, world!").unwrap();
     }
 
     #[test]
@@ -466,13 +459,7 @@ mod tests {
         let mut buf = BytesMut::new();
         OpenAi.render_response(&ir, &mut buf).unwrap();
         let parsed: ResponseIR = OpenAi.parse_response(&buf).unwrap();
-        let calls = match &parsed.messages[0] {
-            MessageIR::Assistant {
-                tool_calls: Some(c),
-                ..
-            } => c.clone(),
-            _ => panic!("expected tool_calls"),
-        };
+        let calls = openai_assistant_tool_calls(&parsed).unwrap();
         assert_eq!(calls[0].name, "get_weather");
         assert!(calls[0].arguments_json.get().contains("SF"));
         assert!(matches!(
@@ -518,5 +505,86 @@ mod tests {
             .unwrap();
         let acc = &st.pending_tool_calls.get(&0).unwrap().arguments;
         assert_eq!(acc, r#"{"city":"SF"}"#);
+    }
+
+    #[test]
+    fn test_openai_chat_ir_invariant_text_content_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Parts(Default::default()),
+                tool_calls: None,
+            }],
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(OpenAi.render_response(&ir, &mut buf).is_err());
+    }
+
+    #[test]
+    fn test_openai_chat_ir_invariant_assistant_role_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::User {
+                content: ContentIR::Text(Cow::Borrowed("not assistant")),
+            }],
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(OpenAi.render_response(&ir, &mut buf).is_err());
+    }
+
+    #[test]
+    fn test_openai_chat_ir_invariant_tool_calls_present_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Text(Cow::Borrowed("")),
+                tool_calls: None,
+            }],
+            finish_reason: Some(FinishReasonIR::ToolCalls),
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(OpenAi.render_response(&ir, &mut buf).is_err());
+    }
+
+    fn assert_openai_assistant_text(
+        parsed: &ResponseIR<'_>,
+        expected: &str,
+    ) -> Result<(), ErrorIR<'static>> {
+        match parsed.messages.first() {
+            Some(MessageIR::Assistant {
+                content: ContentIR::Text(t),
+                ..
+            }) => {
+                assert_eq!(t.as_ref(), expected);
+                Ok(())
+            }
+            Some(MessageIR::Assistant { .. }) => Err(internal_err("expected ContentIR::Text")),
+            _ => Err(internal_err("expected Assistant")),
+        }
+    }
+
+    fn openai_assistant_tool_calls(
+        parsed: &ResponseIR<'_>,
+    ) -> Result<Vec<ToolCallIR<'static>>, ErrorIR<'static>> {
+        match parsed.messages.first() {
+            Some(MessageIR::Assistant {
+                tool_calls: Some(c),
+                ..
+            }) => Ok(c
+                .iter()
+                .map(|tc| ToolCallIR {
+                    id: Cow::Owned(tc.id.to_string()),
+                    name: Cow::Owned(tc.name.to_string()),
+                    arguments_json: Cow::Owned(
+                        RawValue::from_string(tc.arguments_json.get().to_owned()).unwrap(),
+                    ),
+                })
+                .collect()),
+            Some(MessageIR::Assistant { .. }) => Err(internal_err("expected tool_calls")),
+            _ => Err(internal_err("expected tool_calls")),
+        }
     }
 }

@@ -6,7 +6,7 @@ use super::wire::{
     OpenAiChoice, OpenAiFunctionCall, OpenAiMessage, OpenAiPromptTokensDetails, OpenAiRequest,
     OpenAiResponse, OpenAiTool, OpenAiToolCall, OpenAiToolFunction, OpenAiUsage,
 };
-use crate::common::content_to_text;
+use crate::common::{content_to_text, internal_err};
 use gw_core::error::ErrorIR;
 use gw_core::ir::{
     ContentIR, FinishReasonIR, MessageIR, MetadataIR, RequestIR, ResponseIR, ToolCallIR,
@@ -288,13 +288,30 @@ impl<'a> TryFrom<&ResponseIR<'a>> for OpenAiResponse<'a> {
         let (content_text, ir_tool_calls): (Cow<'a, str>, Option<Vec<&ToolCallIR<'a>>>) =
             match last_assistant {
                 Some(MessageIR::Assistant {
-                    content,
+                    content: ContentIR::Text(content),
                     tool_calls,
                 }) => (
-                    content_to_text(content),
+                    content.clone(),
                     tool_calls.as_ref().map(|v| v.iter().collect::<Vec<_>>()),
                 ),
-                _ => (Cow::Borrowed(""), None),
+                Some(MessageIR::Assistant { .. }) => {
+                    return Err(internal_err(
+                        "expected ContentIR::Text, got non-text content",
+                    ));
+                }
+                Some(
+                    MessageIR::System { .. } | MessageIR::User { .. } | MessageIR::Tool { .. },
+                ) => {
+                    return Err(internal_err(
+                        "expected Assistant, got non-assistant message",
+                    ))
+                }
+                None if ir.messages.is_empty() => (Cow::Borrowed(""), None),
+                None => {
+                    return Err(internal_err(
+                        "expected Assistant, got non-assistant message",
+                    ))
+                }
             };
 
         // If the message-level tool_calls is empty but the IR carries
@@ -328,6 +345,11 @@ impl<'a> TryFrom<&ResponseIR<'a>> for OpenAiResponse<'a> {
                     .collect()
             })
         };
+
+        if matches!(ir.finish_reason, Some(FinishReasonIR::ToolCalls)) && wire_tool_calls.is_none()
+        {
+            return Err(internal_err("expected tool_calls, got none"));
+        }
 
         let message = OpenAiMessage::Assistant {
             content: if content_text.is_empty() && wire_tool_calls.is_some() {
@@ -472,13 +494,31 @@ mod tool_choice_tests {
             "function": { "name": "get_weather" }
         }));
         let ir = parse_tool_choice(&wire_in).expect("parses Function");
-        match &ir {
-            ToolChoiceIR::Function { name } => assert_eq!(name.as_ref(), "get_weather"),
-            other => panic!("expected ToolChoiceIR::Function, got {other:?}"),
-        }
+        assert_tool_choice_function(&ir).unwrap();
         let wire_out = render_tool_choice(&ir);
         let s = wire_out.get();
         assert!(s.contains("\"type\":\"function\""), "rendered: {s}");
         assert!(s.contains("\"name\":\"get_weather\""), "rendered: {s}");
+    }
+
+    #[test]
+    fn test_openai_tool_choice_ir_invariant_function_returns_err() {
+        let err = assert_tool_choice_function(&ToolChoiceIR::Auto).unwrap_err();
+
+        assert_eq!(err.status, 500);
+    }
+
+    fn assert_tool_choice_function(tc: &ToolChoiceIR<'_>) -> Result<(), ErrorIR<'static>> {
+        match tc {
+            ToolChoiceIR::Function { name } => {
+                assert_eq!(name.as_ref(), "get_weather");
+                Ok(())
+            }
+            ToolChoiceIR::Auto => Err(internal_err("expected ToolChoiceIR::Function, got Auto")),
+            ToolChoiceIR::None => Err(internal_err("expected ToolChoiceIR::Function, got None")),
+            ToolChoiceIR::Required => Err(internal_err(
+                "expected ToolChoiceIR::Function, got Required",
+            )),
+        }
     }
 }

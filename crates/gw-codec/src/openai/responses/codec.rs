@@ -594,20 +594,14 @@ mod tests {
         let parsed: ResponseIR = OpenAiResponsesCodec.parse_response(&buf).unwrap();
         assert_eq!(parsed.id, "resp_abc");
         assert_eq!(parsed.model, "o1");
-        let reasoning = parsed.reasoning.expect("reasoning round-tripped");
+        let reasoning = parsed.reasoning.as_ref().expect("reasoning round-tripped");
         assert_eq!(reasoning.summary.as_ref(), "step 1; step 2");
-        let usage = parsed.usage.expect("usage round-tripped");
+        let usage = parsed.usage.as_ref().expect("usage round-tripped");
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.reasoning_tokens, Some(20));
         assert!(matches!(parsed.finish_reason, Some(FinishReasonIR::Stop)));
-        match &parsed.messages[0] {
-            MessageIR::Assistant { content, .. } => match content {
-                ContentIR::Text(t) => assert_eq!(t.as_ref(), "answer"),
-                _ => panic!("expected ContentIR::Text"),
-            },
-            _ => panic!("expected Assistant"),
-        }
+        assert_responses_assistant_text(&parsed, "answer").unwrap();
     }
 
     #[test]
@@ -637,15 +631,7 @@ mod tests {
             parsed.finish_reason,
             Some(FinishReasonIR::ToolCalls)
         ));
-        match &parsed.messages[0] {
-            MessageIR::Assistant { tool_calls, .. } => {
-                let calls = tool_calls.as_ref().expect("tool_calls present");
-                assert_eq!(calls[0].id.as_ref(), "call_42");
-                assert_eq!(calls[0].name.as_ref(), "get_weather");
-                assert!(calls[0].arguments_json.get().contains("SF"));
-            }
-            _ => panic!("expected Assistant"),
-        }
+        assert_responses_assistant_tool_call(&parsed).unwrap();
     }
 
     #[test]
@@ -724,5 +710,78 @@ data: {"type":"response.output_item.added","item":{"type":"reasoning","id":"r_1"
             .expect("Usage emitted");
         assert_eq!(usage.input_tokens, 4);
         assert_eq!(usage.output_tokens, 1);
+    }
+
+    #[test]
+    fn test_openai_responses_ir_invariant_text_content_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Parts(Default::default()),
+                tool_calls: None,
+            }],
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(OpenAiResponsesCodec.render_response(&ir, &mut buf).is_err());
+    }
+
+    #[test]
+    fn test_openai_responses_ir_invariant_assistant_role_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::User {
+                content: ContentIR::Text(Cow::Borrowed("not assistant")),
+            }],
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(OpenAiResponsesCodec.render_response(&ir, &mut buf).is_err());
+    }
+
+    #[test]
+    fn test_openai_responses_ir_invariant_tool_call_assistant_returns_err() {
+        let ir = ResponseIR {
+            messages: vec![MessageIR::User {
+                content: ContentIR::Text(Cow::Borrowed("not assistant")),
+            }],
+            finish_reason: Some(FinishReasonIR::ToolCalls),
+            ..ResponseIR::default()
+        };
+        let mut buf = BytesMut::new();
+
+        assert!(OpenAiResponsesCodec.render_response(&ir, &mut buf).is_err());
+    }
+
+    fn assert_responses_assistant_text(
+        parsed: &ResponseIR<'_>,
+        expected: &str,
+    ) -> Result<(), ErrorIR<'static>> {
+        match parsed.messages.first() {
+            Some(MessageIR::Assistant {
+                content: ContentIR::Text(t),
+                ..
+            }) => {
+                assert_eq!(t.as_ref(), expected);
+                Ok(())
+            }
+            Some(MessageIR::Assistant { .. }) => Err(internal_err("expected ContentIR::Text")),
+            _ => Err(internal_err("expected Assistant")),
+        }
+    }
+
+    fn assert_responses_assistant_tool_call(
+        parsed: &ResponseIR<'_>,
+    ) -> Result<(), ErrorIR<'static>> {
+        match parsed.messages.first() {
+            Some(MessageIR::Assistant { tool_calls, .. }) => {
+                let calls = tool_calls.as_ref().expect("tool_calls present");
+                assert_eq!(calls[0].id.as_ref(), "call_42");
+                assert_eq!(calls[0].name.as_ref(), "get_weather");
+                assert!(calls[0].arguments_json.get().contains("SF"));
+                Ok(())
+            }
+            _ => Err(internal_err("expected Assistant")),
+        }
     }
 }
