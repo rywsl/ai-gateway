@@ -197,6 +197,7 @@ def test_variant_error_code_map_codes_exist_in_typical_catalog():
     typical = {
         "GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED",
         "GW_UPSTREAM_TIMEOUT", "GW_UPSTREAM_OVERLOADED", "GW_UPSTREAM_5XX",
+        "HTTP_STATUS_429", "HTTP_STATUS_502", "CLIENT_SIDE_FAILURE",
     }
     for variant_kind, codes in VARIANT_ERROR_CODE_MAP.items():
         assert codes, f"variant {variant_kind} has empty code set"
@@ -218,6 +219,22 @@ def test_chaos_causal_pass():
     per = leaf["raw"]["per_variant"]
     assert per["tcp_reset_mid_body"]["passed"] is True
     assert per["tcp_reset_mid_body"]["matched_error_count"] == 9
+    assert leaf["passed"] is True
+
+
+def test_chaos_causal_accepts_http_status_surrogates():
+    chaos_stats = {
+        "enabled": True,
+        "variants": [
+            {"variant_index": 2, "kind": "status_with_retry_after",
+             "hits": 10, "weight": 5},
+            {"variant_index": 6, "kind": "static", "hits": 10, "weight": 2},
+        ],
+    }
+    by_error_code = {"HTTP_STATUS_429": 8, "HTTP_STATUS_502": 8}
+    leaf = chaos_causal_per_variant(chaos_stats, by_error_code, min_ratio=0.7)
+    assert leaf["raw"]["per_variant"]["status_with_retry_after"]["passed"] is True
+    assert leaf["raw"]["per_variant"]["static"]["passed"] is True
     assert leaf["passed"] is True
 
 

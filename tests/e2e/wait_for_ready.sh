@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-./tests/e2e/run_migrations.sh
 for i in $(seq 1 60); do
   if curl -sf http://localhost:8080/readyz > /dev/null; then
     echo "gateway ready"; exit 0

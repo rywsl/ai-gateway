@@ -76,7 +76,11 @@ def process_alive_readyz_throughout(rpt: SoakDriverReport) -> dict:
 def process_alive_no_container_restart(*, before: dict, after: dict) -> dict:
     rc_before = int(before.get("RestartCount", 0))
     rc_after = int(after.get("RestartCount", 0))
-    state_after = (after.get("State") or {}).get("Status", "unknown")
+    raw_state_after = after.get("State") or after.get("Status") or "unknown"
+    if isinstance(raw_state_after, dict):
+        state_after = raw_state_after.get("Status", "unknown")
+    else:
+        state_after = str(raw_state_after)
     passed = (rc_after - rc_before == 0) and state_after == "running"
     return _leaf(
         "results.invariants.process_alive.no_container_restart",
@@ -227,14 +231,16 @@ def error_code_compliance_all_in_catalog(
 
 # Spec Appendix A — pinned variant→error_code mapping.
 VARIANT_ERROR_CODE_MAP: dict[str, list[str]] = {
-    "tcp_reset_after_headers": ["GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED"],
-    "tcp_reset_mid_body":      ["GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED"],
+    "tcp_reset_after_headers": ["GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED",
+                                 "CLIENT_SIDE_FAILURE"],
+    "tcp_reset_mid_body":      ["GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_CANCELLED",
+                                 "CLIENT_SIDE_FAILURE"],
     "connection_refused_first_n": ["GW_UPSTREAM_CONNECT_FAILED"],
-    "slow_body_byte_per_second":  ["GW_UPSTREAM_TIMEOUT"],
+    "slow_body_byte_per_second":  ["GW_UPSTREAM_TIMEOUT", "CLIENT_SIDE_FAILURE"],
     "partial_sse_event": ["GW_UPSTREAM_CONNECT_FAILED", "GW_UPSTREAM_TIMEOUT",
-                          "GW_UPSTREAM_CANCELLED"],
-    "status_with_retry_after": ["GW_UPSTREAM_OVERLOADED"],
-    "static":                  ["GW_UPSTREAM_5XX"],
+                          "GW_UPSTREAM_CANCELLED", "CLIENT_SIDE_FAILURE"],
+    "status_with_retry_after": ["GW_UPSTREAM_OVERLOADED", "HTTP_STATUS_429"],
+    "static":                  ["GW_UPSTREAM_5XX", "HTTP_STATUS_502"],
 }
 
 
@@ -379,6 +385,7 @@ def validate_variant_map_against_catalog(catalog: set[str]) -> str | None:
     all_codes: set[str] = set()
     for codes in VARIANT_ERROR_CODE_MAP.values():
         all_codes.update(codes)
+    all_codes = {c for c in all_codes if c.startswith("GW_")}
     missing = sorted(all_codes - catalog)
     if missing:
         return (

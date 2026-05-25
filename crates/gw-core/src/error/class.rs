@@ -97,6 +97,10 @@ pub struct ClassifyCtx<'a> {
     pub api_format: crate::protocol::ProtocolKind,
     /// 上游路由 / 选 key 时使用的协议（可与 api_format 不同，如 stream-policy 桥接情形）
     pub protocol: crate::protocol::ProtocolKind,
+    /// Whether the vendor key has OAuth credentials attached.
+    /// When `true` and upstream returns 401, the classifier emits
+    /// `OAuthSignalKind::RefreshFailed` instead of generic `AccountBlocked`.
+    pub has_oauth: bool,
 }
 
 pub trait HeadersAccessor {

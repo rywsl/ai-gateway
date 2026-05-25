@@ -27,7 +27,7 @@ from conftest import (
     gateway_metrics_text,
     gateway_rss_bytes,
 )
-from soak.chaos_profiles import profile_for, to_scenario
+from soak.chaos_profiles import happy_scenario, profile_for, to_scenario
 from soak.codes_catalog import parse_codes_catalog
 from soak.driver import SoakConfig, SoakDriver
 from soak.invariants import (
@@ -84,8 +84,9 @@ def _run_soak(
 
     handles = seed_soak(fake_web, n_users=cfg.n_users)
     profile = profile_for(cfg.chaos_mode)
-    if profile is not None:
-        fake_upstream.set_scenario(to_scenario(profile))
+    fake_upstream.set_scenario(
+        happy_scenario() if profile is None else to_scenario(profile)
+    )
 
     snap = requests.post(
         f"{fake_web.base}/soak/window/start",
@@ -136,6 +137,13 @@ def _run_soak(
 
     by_error_code = dict(driver_report.by_error_code)
     by_error_code.update(window["detailed_log_spectrum"].get("by_error_code", {}))
+    for status, count in driver_report.by_status.items():
+        if status >= 400:
+            by_error_code[f"HTTP_STATUS_{status}"] = (
+                by_error_code.get(f"HTTP_STATUS_{status}", 0) + count
+            )
+    if driver_report.requests_failed_client_side:
+        by_error_code["CLIENT_SIDE_FAILURE"] = driver_report.requests_failed_client_side
     observed_codes = set(driver_report.by_error_code) | set(
         c for c in window["detailed_log_spectrum"].get("by_error_code", {}) if c != "__absent__"
     )

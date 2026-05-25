@@ -38,7 +38,7 @@ impl ErrorClassifier for DefaultClassifier {
 
     fn classify_upstream(
         &self,
-        _ctx: &ClassifyCtx<'_>,
+        ctx: &ClassifyCtx<'_>,
         http_status: u16,
         headers: &dyn HeadersAccessor,
         _vendor_payload: Option<&serde_json::Value>,
@@ -47,6 +47,19 @@ impl ErrorClassifier for DefaultClassifier {
             .get("retry-after")
             .and_then(|s| s.parse::<u32>().ok());
         match http_status {
+            401 if ctx.has_oauth => ClassifierOutcome {
+                class: ErrorClass::AccountBlocked(AccountBlockReason::OAuthRefreshFailed),
+                retryable: Retryability::CrossKey,
+                cooldown: Some(CooldownDirective {
+                    reason_code: 12,
+                    ttl_secs: retry_after.unwrap_or(300),
+                    reset_consecutive: false,
+                }),
+                oauth_signal: Some(OAuthSignal {
+                    kind: OAuthSignalKind::RefreshFailed,
+                }),
+                ..Default::default()
+            },
             401 => ClassifierOutcome {
                 class: ErrorClass::AccountBlocked(AccountBlockReason::Status401Unauthorized),
                 retryable: Retryability::CrossKey,

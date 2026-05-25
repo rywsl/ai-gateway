@@ -9,9 +9,9 @@ Validates the full B1 deliverable end-to-end through the docker stack:
   (T2-B in `crates/gw-proxy/src/filters/response.rs`).
 - `request_filter` no longer short-circuits non-stream requests (T2-A
   removed the `is_stream == false` guard).
-- The ledger emits a `usage:records` entry with `is_stream=false` and
-  `usage_source="upstream"` (the freeze-time `Estimated` fallback only
-  kicks in when `output_tokens == 0`).
+- The ledger emits a `usage:records` entry with `is_stream=false`,
+  `vendor_exposure_state="settled"`, and output-token provenance from the
+  upstream final response.
 - **Cross-protocol + non-stream now round-trips end-to-end** (S-codec v2,
   2026-05-24). The pre-T6 `503
   GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` short-circuit was
@@ -190,7 +190,8 @@ def _static_json_scenario(body: str) -> dict:
 #    completion-token count.
 # 4. Asserts a `usage:records` entry was XADD'd; if `usage_records_consumer`
 #    is available (Redis exposed), additionally pops the record and asserts
-#    `is_stream=false`, `usage.output_tokens > 0`, `usage_source="upstream"`.
+#    `is_stream=false`, `usage.output_tokens > 0`, settled exposure, and
+#    upstream-final output provenance.
 # ---------------------------------------------------------------------------
 
 
@@ -200,8 +201,11 @@ def _assert_record_shape(record: dict) -> None:
     assert record["usage"]["output_tokens"] > 0, (
         f"expected non-zero output_tokens, got {record['usage']!r}"
     )
-    assert record["usage_source"] == "upstream", (
-        f"expected usage_source=upstream, got {record['usage_source']!r}"
+    assert record["vendor_exposure_state"] == "settled", (
+        f"expected vendor_exposure_state=settled, got {record!r}"
+    )
+    assert record["usage_provenance"]["output"] == "upstream_final", (
+        f"expected upstream_final output provenance, got {record!r}"
     )
 
 

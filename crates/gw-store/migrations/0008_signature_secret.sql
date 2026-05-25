@@ -1,1 +1,1 @@
-ALTER TABLE api_keys ADD COLUMN signature_secret BYTEA;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS signature_secret BYTEA;

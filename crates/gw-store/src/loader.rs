@@ -166,7 +166,7 @@ struct VendorKeyRow {
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
 const USER_GROUP_SQL: &str =
     "SELECT payload, version FROM user_groups WHERE id = $1 AND deleted_at IS NULL";
-const API_KEY_SQL: &str = "SELECT jsonb_set(payload, '{signature_secret}', to_jsonb(signature_secret), true) AS payload, version FROM api_keys WHERE id = $1 AND deleted_at IS NULL";
+const API_KEY_SQL: &str = "SELECT jsonb_set(payload, '{signature_secret}', COALESCE(to_jsonb(signature_secret), 'null'::jsonb), true) AS payload, version FROM api_keys WHERE id = $1 AND deleted_at IS NULL";
 const IP_BLOCK_SQL: &str =
     "SELECT payload, version FROM ip_blocks WHERE id = $1 AND deleted_at IS NULL";
 const VENDOR_SQL: &str =

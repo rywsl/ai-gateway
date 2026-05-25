@@ -7,7 +7,7 @@ from __future__ import annotations
 
 # A single happy SSE response that mirrors `scenario.rs::default_scenario`
 # (2 events: a content delta + [DONE]). Used as variants[0] of every
-# Weighted route — chaos-off mode falls through to it (spec §4.1).
+# Weighted route — chaos-off mode installs it as the only variant (spec §4.1).
 _HAPPY_SSE = {
     "kind": "sse",
     "delay_ms": 0,
@@ -16,6 +16,11 @@ _HAPPY_SSE = {
         {"data": "[DONE]"},
     ],
 }
+
+SOAK_PATH_REGEX = (
+    r"^/(v1/chat/completions|v1/messages|"
+    r"v1beta/models/[^/]+:(streamGenerateContent|generateContent))$"
+)
 
 
 def _variant(weight: int, spec: dict) -> dict:
@@ -65,9 +70,8 @@ HEAVY_PROFILE: list[dict] = [
 def profile_for(mode: str) -> list[dict] | None:
     """Return the profile for `mode`, or `None` for `'off'`.
 
-    `'off'` means: do not POST any weighted scenario; let fake-upstream
-    serve its default happy SSE. (Equivalent to also POSTing a degenerate
-    `[(100, sse_happy)]` Weighted, but skipping is simpler.)
+    `'off'` means: no chaos profile. The soak orchestrator still installs
+    `happy_scenario()` so all protocol paths match the fake upstream.
     """
     if mode == "off":
         return None
@@ -78,7 +82,11 @@ def profile_for(mode: str) -> list[dict] | None:
     raise ValueError(f"unknown chaos mode: {mode}")
 
 
-def to_scenario(profile: list[dict], path_regex: str = "^/v1/chat/completions$") -> dict:
+def happy_scenario(path_regex: str = SOAK_PATH_REGEX) -> dict:
+    return to_scenario([_variant(100, _HAPPY_SSE)], path_regex=path_regex)
+
+
+def to_scenario(profile: list[dict], path_regex: str = SOAK_PATH_REGEX) -> dict:
     """Wrap a profile into the full Scenario JSON the fake-upstream
     admin endpoint accepts. Only one route is needed — chaos in soak
     is global, not per-path."""

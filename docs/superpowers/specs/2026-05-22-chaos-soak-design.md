@@ -729,17 +729,17 @@ e2e-soak:
 
 ## 10. Appendix A — variant→error_code mapping (for §7.1.5)
 
-This table is **pinned** — every code listed here is grep-verifiable in `crates/gw-core/src/error/codes.rs` at this spec's commit and is what the default classifier (`crates/gw-core/src/error/classify_default.rs`) emits for the corresponding upstream condition. The orchestrator validates this table against `codes.rs` at startup (per C6, no calibration phase: if a code listed here is absent from `codes.rs`, the soak fails immediately, before any traffic).
+This table is **pinned** — every `GW_*` code listed here is grep-verifiable in `crates/gw-core/src/error/codes.rs` at this spec's commit and is what the default classifier (`crates/gw-core/src/error/classify_default.rs`) emits for the corresponding upstream condition. `HTTP_STATUS_*` and `CLIENT_SIDE_FAILURE` are soak-driver observation buckets, not gateway error codes. The orchestrator validates the `GW_*` subset against `codes.rs` at startup (per C6, no calibration phase: if a `GW_*` code listed here is absent from `codes.rs`, the soak fails immediately, before any traffic).
 
 | Fault variant | Expected gateway error codes (any-of match) | Routing classifier hop |
 |---|---|---|
-| `tcp_reset_after_headers` | `GW_UPSTREAM_CONNECT_FAILED`, `GW_UPSTREAM_CANCELLED` | Pingora upstream-side connection-error path (`crates/gw-proxy/src/gateway.rs:311`) |
-| `tcp_reset_mid_body` | `GW_UPSTREAM_CONNECT_FAILED`, `GW_UPSTREAM_CANCELLED` | Body torn → connection error or stream-cancel |
+| `tcp_reset_after_headers` | `GW_UPSTREAM_CONNECT_FAILED`, `GW_UPSTREAM_CANCELLED`, `CLIENT_SIDE_FAILURE` | Pingora upstream-side connection-error path (`crates/gw-proxy/src/gateway.rs:311`), or the client sees the torn response as a transport failure before an error envelope |
+| `tcp_reset_mid_body` | `GW_UPSTREAM_CONNECT_FAILED`, `GW_UPSTREAM_CANCELLED`, `CLIENT_SIDE_FAILURE` | Body torn → connection error / stream-cancel, or client-side transport failure before envelope extraction |
 | `connection_refused_first_n` | `GW_UPSTREAM_CONNECT_FAILED` | Accept-time RST → connect failure |
-| `slow_body_byte_per_second` | `GW_UPSTREAM_TIMEOUT` | read-timeout / stream-total-timeout trip |
-| `partial_sse_event` | `GW_UPSTREAM_CONNECT_FAILED`, `GW_UPSTREAM_TIMEOUT`, `GW_UPSTREAM_CANCELLED` | Torn event with clean FIN — classified into one of these depending on whether bytes arrived before tear |
-| `status_with_retry_after` (status=429) | `GW_UPSTREAM_OVERLOADED` | `classify_default.rs:93-106` — 429 → `RateLimitedUpstream` → `GW_UPSTREAM_OVERLOADED` |
-| `static` (status=502, used as the fault example) | `GW_UPSTREAM_5XX` | `classify_default.rs:117-126` — 500..=599 → `UpstreamTransient` → `GW_UPSTREAM_5XX` |
+| `slow_body_byte_per_second` | `GW_UPSTREAM_TIMEOUT`, `CLIENT_SIDE_FAILURE` | read-timeout / stream-total-timeout trip, or driver timeout before a gateway envelope is read |
+| `partial_sse_event` | `GW_UPSTREAM_CONNECT_FAILED`, `GW_UPSTREAM_TIMEOUT`, `GW_UPSTREAM_CANCELLED`, `CLIENT_SIDE_FAILURE` | Torn event with clean FIN — classified into one of these depending on whether bytes arrived before tear |
+| `status_with_retry_after` (status=429) | `GW_UPSTREAM_OVERLOADED`, `HTTP_STATUS_429` | `classify_default.rs:93-106` — 429 → `RateLimitedUpstream` → `GW_UPSTREAM_OVERLOADED`; pass-through 429s are counted by observed HTTP status |
+| `static` (status=502, used as the fault example) | `GW_UPSTREAM_5XX`, `HTTP_STATUS_502` | `classify_default.rs:117-126` — 500..=599 → `UpstreamTransient` → `GW_UPSTREAM_5XX`; pass-through 502s are counted by observed HTTP status |
 
 **The "any-of" semantics**: a variant passes its causal-reconciliation invariant if the sum of `driver.by_error_code[c]` over `c ∈ expected_codes` meets the 0.7 ratio threshold (§7.1.5). One variant cannot map onto a single code because the upstream-error path can route into multiple classes depending on byte timing — but the union is pinned, not vague.
 

@@ -162,16 +162,18 @@ class EventsEntityConsumer:
 
     Each entry is a flat field dict `{ns, id, op, field, reason?, ts_ms}` —
     no JSON `payload` wrapping (mirrors the XADD shape in
-    `crates/gw-proxy/src/error/listeners/oauth.rs`). The `isolate_state`
-    autouse fixture FLUSHALLs Redis before each test so anchoring at "0"
-    is race-free.
+    `crates/gw-proxy/src/error/listeners/oauth.rs`). Anchors at the
+    current stream tip so only events produced AFTER construction are
+    visible, avoiding stale entries from prior test runs (reset()
+    deliberately preserves `events:entity` to keep consumer groups alive).
     """
 
     STREAM = "events:entity"
 
     def __init__(self, client) -> None:
         self.client = client
-        self.last_id = "0"
+        info = client.xinfo_stream(self.STREAM) if client.exists(self.STREAM) else None
+        self.last_id = info["last-generated-id"] if info else "0"
 
     def next_event(self, timeout: float = 5.0) -> dict:
         block_ms = max(1, int(timeout * 1000))
@@ -300,20 +302,6 @@ def test_oauth_vendor_key_injects_access_token(
     assert chunks, "expected at least one streamed chunk on the OAuth path"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "OAuthListener reverse-XADD only fires on "
-        "OAuthSignalKind::RefreshFailed. The default classifier "
-        "(`crates/gw-core/src/error/classify_default.rs`) currently emits "
-        "OAuthSignalKind::AccountBlocked for HTTP 401, not RefreshFailed. "
-        "The RefreshFailed signal needs an additional classifier branch "
-        "(e.g. 401 + vendor_key.oauth.is_some()) before this end-to-end "
-        "wiring exists. The listener-side reverse-XADD logic itself is "
-        "covered by `crates/gw-proxy/src/error/listeners/oauth.rs` unit "
-        "tests; this e2e is staged for when the classifier upgrade lands."
-    ),
-    strict=False,
-)
 def test_oauth_upstream_401_triggers_reverse_event(
     gateway_url: str,
     fake_web: FakeWebClient,
@@ -324,13 +312,10 @@ def test_oauth_upstream_401_triggers_reverse_event(
     OAuthListener to reverse-XADD `events:entity`.
 
     fake-upstream is configured to return 401 unconditionally
-    (`status_with_retry_after`). The gateway's classifier was intended
-    to map that to `OAuthSignal::RefreshFailed` when the vendor key
-    carries `oauth`. The Go task-worker would consume the resulting
-    event and drive a refresh; here we verify the event lands with the
-    expected fields.
-
-    Currently expected to xfail — see the decorator's `reason`.
+    (`status_with_retry_after`). The gateway's classifier maps that to
+    `OAuthSignal::RefreshFailed` when the vendor key carries `oauth`.
+    The Go task-worker would consume the resulting event and drive a
+    refresh; here we verify the event lands with the expected fields.
     """
     user_id = "u-oauth-2"
     api_key_id = "ak-oauth-2"

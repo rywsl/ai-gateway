@@ -569,6 +569,46 @@ impl ProxyHttp for LlmGateway {
                 FailoverClass::NotRetryable => {}
             }
         }
+
+        if let Some(status) = ctx.upstream_status {
+            if status >= 400 {
+                if let Some(ref meta) = ctx.archive_upstream_response_meta {
+                    let picked = ctx.picked_vendor_key.as_ref();
+                    let classify_ctx = gw_core::error::ClassifyCtx {
+                        key_id: picked.map_or("", |k| k.key_id.0.as_str()),
+                        vendor_id: picked.map_or("", |k| k.vendor_id.0.as_str()),
+                        api_format: ctx
+                            .client_codec
+                            .as_ref()
+                            .map_or(gw_core::protocol::ProtocolKind::OpenAi, |c| c.kind()),
+                        protocol: ctx
+                            .upstream_codec
+                            .as_ref()
+                            .map_or(gw_core::protocol::ProtocolKind::OpenAi, |c| c.kind()),
+                        has_oauth: picked.is_some_and(|k| k.oauth.is_some()),
+                    };
+                    struct MetaHeaders<'a>(&'a [(String, String)]);
+                    impl gw_core::error::HeadersAccessor for MetaHeaders<'_> {
+                        fn get(&self, name: &str) -> Option<&str> {
+                            self.0
+                                .iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                                .map(|(_, v)| v.as_str())
+                        }
+                    }
+                    let headers = MetaHeaders(&meta.headers);
+                    use gw_core::error::ErrorClassifier as _;
+                    let outcome = gw_core::error::DefaultClassifier.classify_upstream(
+                        &classify_ctx,
+                        status,
+                        &headers,
+                        None,
+                    );
+                    ctx.error_outcome = Some(outcome);
+                }
+            }
+        }
+
         Ok(())
     }
 

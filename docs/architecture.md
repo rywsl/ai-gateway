@@ -337,7 +337,7 @@ These two fake crates must never depend on the gateway's own crates (`gw-codec` 
 ### 10.3 How to run it
 
 ```bash
-make e2e-up      # docker-compose up: pg + redis + fake_upstream + fake_web + gw-gateway
+make e2e-up      # docker-compose up: pg + redis + fake_upstream + fake_web, apply migrations, then gw-gateway
 make e2e         # e2e-up, then run the pytest suite, then e2e-down
 make e2e-down    # tear the stack down
 ```

@@ -24,6 +24,14 @@ fn ctx() -> ClassifyCtx<'static> {
         vendor_id: "v1",
         api_format: ProtocolKind::OpenAi,
         protocol: ProtocolKind::OpenAi,
+        has_oauth: false,
+    }
+}
+
+fn ctx_oauth() -> ClassifyCtx<'static> {
+    ClassifyCtx {
+        has_oauth: true,
+        ..ctx()
     }
 }
 
@@ -61,6 +69,29 @@ fn upstream_401_yields_account_blocked_with_oauth_signal() {
     assert_eq!(oc.retryable, Retryability::CrossKey);
     let sig = oc.oauth_signal.as_ref().unwrap();
     assert!(matches!(sig.kind, OAuthSignalKind::AccountBlocked));
+}
+
+#[test]
+fn upstream_401_with_oauth_yields_refresh_failed() {
+    let oc = DefaultClassifier.classify_upstream(&ctx_oauth(), 401, &H { rh: None }, None);
+    assert_eq!(
+        oc.class,
+        ErrorClass::AccountBlocked(AccountBlockReason::OAuthRefreshFailed)
+    );
+    assert_eq!(oc.retryable, Retryability::CrossKey);
+    let sig = oc.oauth_signal.as_ref().unwrap();
+    assert_eq!(sig.kind, OAuthSignalKind::RefreshFailed);
+    let cd = oc.cooldown.as_ref().unwrap();
+    assert_eq!(cd.reason_code, 12);
+    assert_eq!(cd.ttl_secs, 300);
+}
+
+#[test]
+fn upstream_401_with_oauth_respects_retry_after() {
+    let oc = DefaultClassifier.classify_upstream(&ctx_oauth(), 401, &H { rh: Some("60") }, None);
+    let cd = oc.cooldown.as_ref().unwrap();
+    assert_eq!(cd.ttl_secs, 60);
+    assert_eq!(cd.reason_code, 12);
 }
 
 #[test]
