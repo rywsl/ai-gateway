@@ -21,6 +21,7 @@ pub mod passthrough;
 pub mod stream_accumulator;
 pub mod stream_policy;
 pub mod trait_def;
+pub mod usage_extractor;
 pub mod wire;
 
 pub use any::AnyCodec;

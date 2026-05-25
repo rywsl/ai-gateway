@@ -67,3 +67,74 @@ fn no_duplicate_metric_names() {
     names.dedup();
     assert_eq!(names.len(), before, "duplicate metric name detected");
 }
+
+#[test]
+fn billing_w1_metrics_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(
+        names.contains(&"gw_billing_emit_total"),
+        "missing metric: gw_billing_emit_total"
+    );
+    assert!(
+        names.contains(&"gw_billing_provenance_total"),
+        "missing metric: gw_billing_provenance_total"
+    );
+}
+
+#[test]
+fn billing_w2_metrics_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_instance_heartbeat_renewals_total"));
+}
+
+#[test]
+fn billing_w2_t4_exposure_transitions_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_exposure_transitions_total"));
+}
+
+#[test]
+fn billing_w2_t6_inflight_register_failure_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(
+        names.contains(&"gw_billing_inflight_register_failure_total"),
+        "missing metric: gw_billing_inflight_register_failure_total"
+    );
+}
+
+#[test]
+fn billing_w2_t7_must_deliver_metrics_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(
+        names.contains(&"gw_billing_mpsc_bypass_total"),
+        "missing metric: gw_billing_mpsc_bypass_total"
+    );
+    assert!(
+        names.contains(&"gw_billing_emit_path_total"),
+        "missing metric: gw_billing_emit_path_total"
+    );
+}
+
+#[test]
+fn billing_w3_t1_upstream_cancellation_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_upstream_cancellation_total"));
+}
+
+#[test]
+fn billing_w3_t5_grace_metric_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_grace_yielded_final_usage_total"));
+}
+
+#[test]
+fn billing_w4_t3_emit_lag_t0_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_emit_lag_t0_total"));
+}
+
+#[test]
+fn billing_w4_t4_inflight_recovered_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    assert!(names.contains(&"gw_billing_inflight_recovered_total"));
+}

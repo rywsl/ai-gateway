@@ -1,8 +1,14 @@
 use fred::clients::RedisPool;
-use fred::interfaces::{ClientLike, HashesInterface, KeysInterface, LuaInterface, SortedSetsInterface};
-use fred::types::{ConnectionConfig, MultipleZaddValues, PerformanceConfig, ReconnectPolicy, RedisConfig};
+use fred::interfaces::{
+    ClientLike, HashesInterface, KeysInterface, LuaInterface, SortedSetsInterface,
+};
+use fred::types::{
+    ConnectionConfig, MultipleZaddValues, PerformanceConfig, ReconnectPolicy, RedisConfig,
+};
 use gw_core::ids::UserId;
-use gw_task_runtime::{ReleaseOutcome, RedisTaskFreezeRelease, TaskFreezeRelease, TASK_FREEZE_RELEASE_LUA};
+use gw_task_runtime::{
+    RedisTaskFreezeRelease, ReleaseOutcome, TaskFreezeRelease, TASK_FREEZE_RELEASE_LUA,
+};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
@@ -54,18 +60,37 @@ async fn normal_release_updates_lease_status_and_counter_atomically() {
 
     let _: () = pool
         .next()
-        .zadd(&leases_key, None, None, false, false, MultipleZaddValues::try_from((1_f64, task_id)).unwrap())
+        .zadd(
+            &leases_key,
+            None,
+            None,
+            false,
+            false,
+            MultipleZaddValues::try_from((1_f64, task_id)).unwrap(),
+        )
         .await
         .unwrap();
-    let _: () = pool.next().hset(&task_key, ("status", "running")).await.unwrap();
-    let _: () = pool.next().hset(&counter_key, ("frozen_micro", 5_000_i64)).await.unwrap();
+    let _: () = pool
+        .next()
+        .hset(&task_key, ("status", "running"))
+        .await
+        .unwrap();
+    let _: () = pool
+        .next()
+        .hset(&counter_key, ("frozen_micro", 5_000_i64))
+        .await
+        .unwrap();
 
     let outcome = releaser.release(&uid, task_id, 1_000).await.unwrap();
     assert_eq!(outcome, ReleaseOutcome::Released);
 
     let score: Option<i64> = pool.next().zscore(&leases_key, task_id).await.unwrap();
     let status: String = pool.next().hget(&task_key, "status").await.unwrap();
-    let counter: i64 = pool.next().hget(&counter_key, "frozen_micro").await.unwrap();
+    let counter: i64 = pool
+        .next()
+        .hget(&counter_key, "frozen_micro")
+        .await
+        .unwrap();
     assert_eq!(score, None);
     assert_eq!(status, "released");
     assert_eq!(counter, 4_000);
@@ -85,11 +110,26 @@ async fn double_release_is_idempotent_and_counter_changes_once() {
 
     let _: () = pool
         .next()
-        .zadd(&leases_key, None, None, false, false, MultipleZaddValues::try_from((1_f64, task_id)).unwrap())
+        .zadd(
+            &leases_key,
+            None,
+            None,
+            false,
+            false,
+            MultipleZaddValues::try_from((1_f64, task_id)).unwrap(),
+        )
         .await
         .unwrap();
-    let _: () = pool.next().hset(&task_key, ("status", "running")).await.unwrap();
-    let _: () = pool.next().hset(&counter_key, ("frozen_micro", 5_000_i64)).await.unwrap();
+    let _: () = pool
+        .next()
+        .hset(&task_key, ("status", "running"))
+        .await
+        .unwrap();
+    let _: () = pool
+        .next()
+        .hset(&counter_key, ("frozen_micro", 5_000_i64))
+        .await
+        .unwrap();
 
     assert_eq!(
         releaser.release(&uid, task_id, 1_000).await.unwrap(),
@@ -100,7 +140,11 @@ async fn double_release_is_idempotent_and_counter_changes_once() {
         ReleaseOutcome::AlreadyReleased
     );
 
-    let counter: i64 = pool.next().hget(&counter_key, "frozen_micro").await.unwrap();
+    let counter: i64 = pool
+        .next()
+        .hget(&counter_key, "frozen_micro")
+        .await
+        .unwrap();
     assert_eq!(counter, 4_000);
 }
 
@@ -115,12 +159,20 @@ async fn unknown_task_returns_already_released_and_leaves_counter_unchanged() {
     let uid = UserId::from("release-unknown");
     let task_id = "task-unknown";
     let (_, _, counter_key) = keys(&uid, task_id);
-    let _: () = pool.next().hset(&counter_key, ("frozen_micro", 5_000_i64)).await.unwrap();
+    let _: () = pool
+        .next()
+        .hset(&counter_key, ("frozen_micro", 5_000_i64))
+        .await
+        .unwrap();
 
     let outcome = releaser.release(&uid, task_id, 1_000).await.unwrap();
     assert_eq!(outcome, ReleaseOutcome::AlreadyReleased);
 
-    let counter: i64 = pool.next().hget(&counter_key, "frozen_micro").await.unwrap();
+    let counter: i64 = pool
+        .next()
+        .hget(&counter_key, "frozen_micro")
+        .await
+        .unwrap();
     assert_eq!(counter, 5_000);
 }
 
@@ -138,17 +190,36 @@ async fn script_executes_as_one_eval_for_all_or_nothing_release() {
 
     let _: () = pool
         .next()
-        .zadd(&leases_key, None, None, false, false, MultipleZaddValues::try_from((1_f64, task_id)).unwrap())
+        .zadd(
+            &leases_key,
+            None,
+            None,
+            false,
+            false,
+            MultipleZaddValues::try_from((1_f64, task_id)).unwrap(),
+        )
         .await
         .unwrap();
-    let _: () = pool.next().hset(&task_key, ("status", "running")).await.unwrap();
-    let _: () = pool.next().set(&wrong_type_counter_key, "not-a-hash", None, None, false).await.unwrap();
+    let _: () = pool
+        .next()
+        .hset(&task_key, ("status", "running"))
+        .await
+        .unwrap();
+    let _: () = pool
+        .next()
+        .set(&wrong_type_counter_key, "not-a-hash", None, None, false)
+        .await
+        .unwrap();
 
     let result: Result<String, _> = pool
         .next()
         .eval(
             TASK_FREEZE_RELEASE_LUA,
-            vec![leases_key.as_str(), task_key.as_str(), wrong_type_counter_key.as_str()],
+            vec![
+                leases_key.as_str(),
+                task_key.as_str(),
+                wrong_type_counter_key.as_str(),
+            ],
             vec![task_id, "1000"],
         )
         .await;

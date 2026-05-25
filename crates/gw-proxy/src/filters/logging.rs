@@ -6,7 +6,7 @@ use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
 use gw_health::{KeyHealthStore, OutcomeKind};
-use gw_ledger::usage::{UsageRecord, UsageSource, UsageStatus};
+use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::{FreezeGuard, Ledger};
 use gw_store::counter_store::daily_tokens_key;
 use gw_store::CounterStore;
@@ -64,6 +64,22 @@ pub async fn run(
     resilience: &crate::resilience::ResilienceState,
     ratelimit: &Arc<RateLimitGuard>,
 ) {
+    // W2-T4: force Terminated on any request that reached Sent or Streaming
+    // but didn't arrive at a terminal state (cancel, error, deadline, etc.).
+    // Idle requests (never dispatched to upstream) are left alone.
+    {
+        use crate::billing_lifecycle::{
+            is_terminal as exposure_is_terminal, transition_to, VendorExposure,
+        };
+        if matches!(
+            ctx.vendor_exposure,
+            VendorExposure::Sent | VendorExposure::Streaming
+        ) {
+            transition_to(ctx, VendorExposure::Terminated);
+        }
+        let _ = exposure_is_terminal; // silence unused-import warning
+    }
+
     let now = std::time::Instant::now();
     ctx.timing.end = Some(now);
 
@@ -205,18 +221,21 @@ pub async fn run(
                 input_tokens: ctx.usage.input_tokens,
                 output_tokens: ctx.usage.output_tokens,
                 cache_read_input_tokens: ctx.usage.cached_tokens,
-                // Phase 2 (codec S4 extract_usage_any) populates the
-                // remaining three fields directly from upstream wire.
-                cache_creation_input_tokens: None,
-                thinking_tokens: None,
-                multimodal_input_tokens: None,
+                cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
+                thinking_tokens: ctx.usage.thinking_tokens,
+                multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
             },
-            usage_source: if ctx.usage.output_tokens > 0 {
-                UsageSource::Upstream
-            } else {
-                UsageSource::Estimated
+            attempt_index: ctx.attempt_index,
+            vendor_exposure_state: match ctx.vendor_exposure {
+                crate::billing_lifecycle::VendorExposure::Settled => VendorExposureState::Settled,
+                crate::billing_lifecycle::VendorExposure::Terminated => {
+                    VendorExposureState::Terminated
+                }
+                // Idle / Sent / Streaming should not reach logging without
+                // transition_to(Terminated) above, but guard defensively.
+                _ => VendorExposureState::Terminated,
             },
-            retry_count: ctx.retry_count,
+            usage_provenance: ctx.usage_provenance,
             latency_ms,
             ttft_ms,
             is_stream: ctx.is_stream,
@@ -235,7 +254,37 @@ pub async fn run(
                 .unwrap_or_else(MarkupChainSnapshot::identity),
             operation_id: ctx.operation_id.clone(),
         };
-        let _ = ledger.try_send(rec);
+
+        // -----------------------------------------------------------------
+        // W1-T7: Emit billing metrics at UsageRecord emission.
+        // -----------------------------------------------------------------
+        metrics::counter!(
+            "gw_billing_emit_total",
+            "vendor_exposure_state" => format!("{:?}", rec.vendor_exposure_state).to_lowercase(),
+        )
+        .increment(1);
+
+        for (dim, present) in [
+            ("input", ctx.usage.input_tokens > 0),
+            ("output", ctx.usage.output_tokens > 0),
+            ("cache_read", ctx.usage.cached_tokens.is_some()),
+            ("cache_creation", ctx.usage.cache_creation_tokens.is_some()),
+            ("thinking", ctx.usage.thinking_tokens.is_some()),
+            (
+                "multimodal_input",
+                ctx.usage.multimodal_input_tokens.is_some(),
+            ),
+        ] {
+            let tag = if present { "upstream_final" } else { "unknown" };
+            metrics::counter!(
+                "gw_billing_provenance_total",
+                "dimension" => dim,
+                "tag" => tag,
+            )
+            .increment(1);
+        }
+
+        let _ = ledger.emit(rec).await;
 
         // -----------------------------------------------------------------
         // G3 (ADR-G3-2) — daily-quota post-increment. Bump

@@ -59,6 +59,18 @@ pub fn run(
             .fetch_add(b.len() as u64, Ordering::Relaxed);
     }
 
+    // W2-T4: on first non-empty body chunk, transition Sent -> Streaming.
+    if matches!(
+        ctx.vendor_exposure,
+        crate::billing_lifecycle::VendorExposure::Sent
+    ) && body.as_ref().map(|b| !b.is_empty()).unwrap_or(false)
+    {
+        crate::billing_lifecycle::transition_to(
+            ctx,
+            crate::billing_lifecycle::VendorExposure::Streaming,
+        );
+    }
+
     // Archive: capture raw upstream chunk before any codec rewrite. Empty
     // EOS chunks are fine; the accumulator simply doesn't grow.
     if let Some(b) = body.as_ref() {
@@ -70,9 +82,7 @@ pub fn run(
     // `upstream_codec.parse_response` so `ctx.usage` is populated from the
     // wire instead of leaving the logging filter to fall through to the
     // freeze-time estimate (ADR-B1-3 / T2-B). Decode failure increments
-    // `gw_codec_parse_response_failure_total` and leaves `ctx.usage` at zero;
-    // the logging filter already falls back to `UsageSource::Estimated` when
-    // `output_tokens == 0`.
+    // `gw_codec_parse_response_failure_total` and leaves `ctx.usage` at zero.
     //
     // Cross-protocol non-stream (S-codec T6): when the client wire form
     // differs from the upstream wire form, `handle_non_stream_chunk` also
@@ -287,6 +297,26 @@ fn handle_event(
         }
     }
 
+    // W1-T6: extract 3 new dims from the raw SSE event bytes. This is
+    // additive to the per-IR-event `StreamEventIR::Usage` accumulation above
+    // (which fills input/output/cached). The extractor adds cache_creation,
+    // thinking, and multimodal from the raw JSON that the IR doesn't carry.
+    if let Some(e) = extractor_for_kind(upstream_kind).extract_chunk(event_bytes) {
+        apply_extracted_to_ctx(&e, ctx);
+        // W2-T4: terminal chunk from extractor signals the stream is complete.
+        if e.is_terminal
+            && matches!(
+                ctx.vendor_exposure,
+                crate::billing_lifecycle::VendorExposure::Streaming
+            )
+        {
+            crate::billing_lifecycle::transition_to(
+                ctx,
+                crate::billing_lifecycle::VendorExposure::Settled,
+            );
+        }
+    }
+
     // Put the accumulator back so `run` can take+freeze it. Empty buffers are
     // not stashed: `run` would treat `Some(empty)` as a chunk substitution and
     // wrongly zero out the outbound body.
@@ -296,6 +326,83 @@ fn handle_event(
 
     // S-codec T2: restore the stream state for the next framed event.
     ctx.stream_state = Some(state);
+}
+
+/// Return a boxed `UsageExtractor` for the given upstream protocol kind.
+/// OpenAI Responses and OpenAI Chat share the same Chat extractor for W1;
+/// the routing to `::responses()` is deferred to a later wave.
+fn extractor_for_kind(kind: ProtocolKind) -> Box<dyn gw_codec::usage_extractor::UsageExtractor> {
+    match kind {
+        ProtocolKind::OpenAi => {
+            Box::new(gw_codec::openai::usage_extractor::OpenAiUsageExtractor::chat())
+        }
+        ProtocolKind::Anthropic => {
+            Box::new(gw_codec::anthropic::usage_extractor::AnthropicUsageExtractor)
+        }
+        ProtocolKind::Gemini => Box::new(gw_codec::gemini::usage_extractor::GeminiUsageExtractor),
+    }
+}
+
+/// Merge extracted 6-dim usage into `ctx.usage`. Fields from `parse_response`
+/// (input/output/cached) are only overridden when the extractor produced a
+/// non-zero / non-None value, so we never clobber wire-sourced data with zeros
+/// from a partial chunk.
+fn apply_extracted_to_ctx(e: &gw_codec::usage_extractor::ExtractedUsage, ctx: &mut ReqCtx) {
+    if e.values.input_tokens > 0 {
+        ctx.usage.input_tokens = e.values.input_tokens;
+    }
+    if e.values.output_tokens > 0 {
+        ctx.usage.output_tokens = e.values.output_tokens;
+    }
+    if e.values.cache_read_input_tokens.is_some() {
+        ctx.usage.cached_tokens = e.values.cache_read_input_tokens;
+    }
+    if e.values.cache_creation_input_tokens.is_some() {
+        ctx.usage.cache_creation_tokens = e.values.cache_creation_input_tokens;
+    }
+    if e.values.thinking_tokens.is_some() {
+        ctx.usage.thinking_tokens = e.values.thinking_tokens;
+    }
+    if e.values.multimodal_input_tokens.is_some() {
+        ctx.usage.multimodal_input_tokens = e.values.multimodal_input_tokens;
+    }
+    copy_provenance(e, ctx);
+}
+
+/// Promote per-dimension provenance: only advance if the incoming tag has
+/// higher confidence. Order: UpstreamFinal > UpstreamPartial > Estimated >
+/// CrashFallback > Unknown.
+fn copy_provenance(e: &gw_codec::usage_extractor::ExtractedUsage, ctx: &mut ReqCtx) {
+    use gw_core::usage::ProvenanceTag;
+    fn rank(t: ProvenanceTag) -> u8 {
+        match t {
+            ProvenanceTag::UpstreamFinal => 4,
+            ProvenanceTag::UpstreamPartial => 3,
+            ProvenanceTag::Estimated => 2,
+            ProvenanceTag::CrashFallback => 1,
+            ProvenanceTag::Unknown => 0,
+        }
+    }
+    fn promote(dst: &mut ProvenanceTag, src: ProvenanceTag) {
+        if rank(src) > rank(*dst) {
+            *dst = src;
+        }
+    }
+    promote(&mut ctx.usage_provenance.input, e.provenance.input);
+    promote(&mut ctx.usage_provenance.output, e.provenance.output);
+    promote(
+        &mut ctx.usage_provenance.cache_read,
+        e.provenance.cache_read,
+    );
+    promote(
+        &mut ctx.usage_provenance.cache_creation,
+        e.provenance.cache_creation,
+    );
+    promote(&mut ctx.usage_provenance.thinking, e.provenance.thinking);
+    promote(
+        &mut ctx.usage_provenance.multimodal_input,
+        e.provenance.multimodal_input,
+    );
 }
 
 /// True iff the non-stream response needs cross-protocol re-render — i.e.
@@ -331,9 +438,7 @@ fn is_cross_protocol(ctx: &ReqCtx) -> bool {
 ///
 /// Failure semantics for usage extraction: any error from `parse_response`
 /// increments the counter `gw_codec_parse_response_failure_total{codec,
-/// upstream_status}` and leaves `ctx.usage` at its default zero. The logging
-/// filter already maps `output_tokens == 0` to `UsageSource::Estimated`, so
-/// no extra plumbing is needed downstream.
+/// upstream_status}` and leaves `ctx.usage` at its default zero.
 pub(crate) fn handle_non_stream_chunk(
     chunk: Option<&Bytes>,
     end_of_stream: bool,
@@ -454,6 +559,30 @@ pub(crate) fn handle_non_stream_chunk(
             }
         }
     }
+    // W1-T6: extract the 3 new dims (cache_creation, thinking, multimodal)
+    // that `parse_response` / the IR don't surface. Always runs on EOS even
+    // when `parse_response` succeeded — the extractor is a second read over
+    // the same bytes and never fails fatally (parse errors return a default).
+    // We skip extraction when `return_body_to_accum` is true (i.e. either
+    // `parse_response` already failed, or cross-render failed but the usage
+    // was already written) — those cases kept the body in the accum for the
+    // caller to forward verbatim, and a second parse is wasteful.
+    if !return_body_to_accum {
+        let extracted = extractor_for_kind(codec_kind).extract_response(&body);
+        apply_extracted_to_ctx(&extracted, ctx);
+        // W2-T4: non-stream EOS with a successful parse is always terminal.
+        if extracted.is_terminal
+            && matches!(
+                ctx.vendor_exposure,
+                crate::billing_lifecycle::VendorExposure::Streaming
+            )
+        {
+            crate::billing_lifecycle::transition_to(
+                ctx,
+                crate::billing_lifecycle::VendorExposure::Settled,
+            );
+        }
+    }
     if return_body_to_accum {
         ctx.upstream_body_accum = Some(body);
     }
@@ -508,8 +637,8 @@ mod non_stream_branch_tests {
         let mut ctx = make_ctx_non_stream();
         let body = Bytes::from_static(b"not json");
         handle_non_stream_chunk(Some(&body), true, &mut ctx);
-        // usage stays at zero — the logging filter falls back to
-        // UsageSource::Estimated when output_tokens == 0.
+        // usage stays at zero — the logging filter emits Unknown provenance tags
+        // when no vendor-observed dim has a value.
         assert_eq!(ctx.usage.input_tokens, 0);
         assert_eq!(ctx.usage.output_tokens, 0);
         // S-codec T6: on parse failure the helper repopulates
@@ -540,6 +669,30 @@ mod non_stream_branch_tests {
         handle_non_stream_chunk(Some(&body), true, &mut ctx);
         assert_eq!(ctx.usage.output_tokens, 0);
     }
+
+    #[test]
+    fn anthropic_non_stream_eos_extracts_six_dims_into_ctx() {
+        let mut ctx = ReqCtx {
+            is_stream: false,
+            upstream_codec: Some(AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)),
+            ..ReqCtx::default()
+        };
+        let body = Bytes::from_static(
+            br#"{
+            "id":"msg_1","type":"message","role":"assistant","content":[],
+            "model":"claude-3-5-sonnet","stop_reason":"end_turn","stop_sequence":null,
+            "usage":{"input_tokens":50,"output_tokens":25,
+                     "cache_creation_input_tokens":1000,"cache_read_input_tokens":500}
+        }"#,
+        );
+        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+        assert_eq!(ctx.usage.input_tokens, 50);
+        assert_eq!(ctx.usage.output_tokens, 25);
+        assert_eq!(ctx.usage.cached_tokens, Some(500));
+        assert_eq!(ctx.usage.cache_creation_tokens, Some(1000));
+        assert!(ctx.usage.thinking_tokens.is_none());
+        assert!(ctx.usage.multimodal_input_tokens.is_none());
+    }
 }
 
 #[cfg(test)]
@@ -550,19 +703,26 @@ mod deadline_tests {
 
     #[test]
     fn deadline_exceeded_returns_error() {
-        let mut ctx = ReqCtx { is_stream: true, ..Default::default() };
+        let mut ctx = ReqCtx {
+            is_stream: true,
+            ..Default::default()
+        };
         ctx.timing.start = Some(Instant::now() - Duration::from_secs(700));
         ctx.response_deadline = Some(Duration::from_secs(600));
 
         let err = check_deadline(&ctx).unwrap_err();
-        assert!(
-            matches!(err.etype, pingora::ErrorType::Custom("GW_RESPONSE_DEADLINE_EXCEEDED")),
-        );
+        assert!(matches!(
+            err.etype,
+            pingora::ErrorType::Custom("GW_RESPONSE_DEADLINE_EXCEEDED")
+        ),);
     }
 
     #[test]
     fn deadline_not_exceeded_returns_ok() {
-        let mut ctx = ReqCtx { is_stream: true, ..Default::default() };
+        let mut ctx = ReqCtx {
+            is_stream: true,
+            ..Default::default()
+        };
         ctx.timing.start = Some(Instant::now());
         ctx.response_deadline = Some(Duration::from_secs(600));
 

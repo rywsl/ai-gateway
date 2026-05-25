@@ -91,6 +91,13 @@ struct Wired {
     resilience: Arc<ResilienceState>,
     /// Detailed-log archive (T10). Flusher pool started during bootstrap.
     detailed_archive: Arc<gw_ledger::detailed_archive::DetailedArchive>,
+    /// InflightLedger (W2-T6). Tracks in-flight requests in Redis for
+    /// crash-safety billing recovery (W4 reconciler reads the residuals).
+    inflight: Arc<gw_ledger::inflight::InflightLedger>,
+    /// Response deadline (W3-T3). From `cfg.billing.response_deadline_ms`.
+    response_deadline_ms: u64,
+    /// Cancel grace window (W3-T5). From `cfg.billing.cancel_grace_ms`.
+    cancel_grace_ms: u64,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -194,6 +201,9 @@ pub fn run() -> anyhow::Result<()> {
         #[cfg(feature = "tunnel")]
         wired.tunnel,
         wired.detailed_archive,
+        wired.inflight,
+        wired.response_deadline_ms,
+        wired.cancel_grace_ms,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -320,6 +330,68 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // The JoinHandle is intentionally dropped: the spawned task lives for the
     // life of the bootstrap runtime (which is parked on pending()).
     let _deduct_gc_handle = gw_ledger::DeductGc::start_default();
+
+    // 4d. Billing instance_id + InflightLedger (W2-T6).
+    // instance_id is stable across restarts on the same host (stored in Redis
+    // under `gateway:instance:<hostname>`). The heartbeat task keeps the TTL
+    // alive so the W4 reconciler knows the gateway is live.
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "localhost".to_string());
+    let instance_id = gw_ledger::instance_id::resolve(&redis.pool, &hostname)
+        .await
+        .context("billing instance_id resolve failed")?;
+    tracing::info!(
+        target: "gw_gateway",
+        %instance_id,
+        %hostname,
+        "billing instance_id resolved"
+    );
+    gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
+    gw_ledger::inflight_reaper::spawn(
+        (*redis.pool).clone(),
+        instance_id.clone(),
+        cfg.billing.reaper_interval_secs,
+        cfg.billing.emit_lag_t0_secs,
+    );
+    let inflight = Arc::new(gw_ledger::inflight::InflightLedger::new(
+        (*redis.pool).clone(),
+        instance_id.clone(),
+    ));
+
+    // W4-T4 — Startup reconciler: scan billing:inflight:<instance_id>:* for
+    // residuals from the previous boot and emit CrashFallback UsageRecords.
+    // Runs before traffic starts (bootstrap completes, then Pingora starts).
+    {
+        let pool_for_recon = (*redis.pool).clone();
+        let inst_for_recon = instance_id.clone();
+        let emit_ledger = ledger.clone();
+        let emit = move |r: gw_ledger::usage::UsageRecord| {
+            let l = emit_ledger.clone();
+            Box::pin(async move {
+                l.emit(r).await;
+                Ok(())
+            })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        };
+        match gw_ledger::inflight_reconciler::run(&pool_for_recon, &inst_for_recon, emit).await {
+            Ok(n) if n > 0 => tracing::warn!(
+                target: "gw_gateway",
+                recovered = n,
+                "InflightReconciler: emitted CrashFallback records from prior boot"
+            ),
+            Ok(_) => tracing::info!(
+                target: "gw_gateway",
+                "InflightReconciler: no residuals from prior boot"
+            ),
+            Err(e) => tracing::error!(
+                target: "gw_gateway",
+                error = ?e,
+                "InflightReconciler startup failed"
+            ),
+        }
+    }
 
     // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
     // The consumer's join handle is intentionally dropped: the task lives for
@@ -553,5 +625,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         mgmt_blacklist,
         resilience,
         detailed_archive,
+        inflight,
+        response_deadline_ms: cfg.billing.response_deadline_ms,
+        cancel_grace_ms: cfg.billing.cancel_grace_ms,
     })
 }

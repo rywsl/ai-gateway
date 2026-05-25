@@ -101,3 +101,11 @@ missed_pong_threshold = 3
 backoff_min_secs = 1
 backoff_max_secs = 60
 max_streams_per_conn = 256
+
+[billing]
+cancel_grace_ms = 200             # 上游 cancel 后等待 final usage frame 的窗口 (ms)
+response_deadline_ms = 300_000    # 上游响应总超时, 默认 5min
+reaper_interval_secs = 30         # InflightLedger T0 watchdog 周期
+emit_lag_t0_secs = 60             # ts_settled_ms 后未清 key 视为 T0 bug 的阈值
+heartbeat_interval_secs = 60      # instance heartbeat 续期周期
+heartbeat_ttl_secs = 600          # heartbeat key TTL (供 Go-side reaper 探活)

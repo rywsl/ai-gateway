@@ -63,7 +63,8 @@ fn tpm_under_limit_passes() {
         tpm_limit: 1000,
         ..perm(60)
     };
-    g.deduct_tpm(&uid, &p, 500).expect("500 of 1000 budget should pass");
+    g.deduct_tpm(&uid, &p, 500)
+        .expect("500 of 1000 budget should pass");
 }
 
 #[test]
@@ -85,5 +86,6 @@ fn tpm_zero_limit_disables_enforcement() {
     let g = RateLimitGuard::new();
     let uid = UserId::from("u1");
     let p = perm(60); // tpm_limit = 0
-    g.deduct_tpm(&uid, &p, 999_999).expect("tpm_limit=0 means enforcement off");
+    g.deduct_tpm(&uid, &p, 999_999)
+        .expect("tpm_limit=0 means enforcement off");
 }

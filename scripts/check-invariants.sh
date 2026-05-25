@@ -409,6 +409,19 @@ else
   ok "no detailed-archive truncation constants in gw-ledger/gw-proxy"
 fi
 
+# ---------------------------------------------------------------------------
+# no_legacy_usage_source — billing-robustness W4 retires usage_source field.
+# UsageRecord must use vendor_exposure_state + usage_provenance + attempt_index.
+# Spec: docs/superpowers/specs/2026-05-23-billing-robustness-w4-design.md §3
+# ---------------------------------------------------------------------------
+echo "[no_legacy_usage_source] legacy usage_source field must not appear in gw-ledger/gw-proxy"
+if grep -rn "usage_source\s*:" crates/gw-ledger/src crates/gw-proxy/src 2>/dev/null | grep -v test | grep -v "//" | grep -q .; then
+  grep -rn "usage_source\s*:" crates/gw-ledger/src crates/gw-proxy/src 2>/dev/null | grep -v test | grep -v "//"
+  bad "legacy usage_source field present (use vendor_exposure_state + usage_provenance + attempt_index)"
+else
+  ok "no legacy usage_source field"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "INVARIANT CHECK FAILED"
   exit 1

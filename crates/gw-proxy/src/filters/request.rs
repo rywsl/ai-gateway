@@ -266,7 +266,8 @@ pub async fn run(
                                 .get("x-timestamp")
                                 .and_then(|v| v.to_str().ok())
                                 .map(String::from);
-                            ctx.signature_secret = entry.value.signature_secret.clone().unwrap_or_default();
+                            ctx.signature_secret =
+                                entry.value.signature_secret.clone().unwrap_or_default();
                         }
                         // G2 — capture the per-key IP allowlist so the
                         // post-blocklist gate (below) can consult it after
@@ -455,7 +456,10 @@ pub async fn run(
         match crate::body_verify::verify_body(input) {
             Ok((SignatureCheckResult::Valid, decoded))
             | Ok((SignatureCheckResult::NotRequired, decoded)) => {
-                if !matches!(ctx.req_content_encoding, gw_codec::compression::Encoding::Identity) {
+                if !matches!(
+                    ctx.req_content_encoding,
+                    gw_codec::compression::Encoding::Identity
+                ) {
                     ctx.cached_body = Some(decoded.clone());
                 }
             }
@@ -559,9 +563,9 @@ pub async fn run(
     let (model_name, is_stream, est_input_tokens) = match parsed {
         Ok(ir) => {
             let values = (
-            ModelName::from(ir.model.as_ref()),
-            ir.stream,
-            codec.estimate_input_tokens(&ir),
+                ModelName::from(ir.model.as_ref()),
+                ir.stream,
+                codec.estimate_input_tokens(&ir),
             );
             values
         }

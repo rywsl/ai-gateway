@@ -50,13 +50,22 @@
     "input_tokens": 1234,
     "output_tokens": 567,
     "cache_read_input_tokens": 100,
-    "cache_creation_input_tokens": null,
+    "cache_creation_input_tokens": 50,
     "thinking_tokens": null,
-    "multimodal_input_tokens": null
+    "multimodal_input_tokens": 120
   },
-  "usage_source": "upstream",      // upstream | estimated | fallback_conservative | partial
 
-  "retry_count": 0,
+  "attempt_index": 0,              // 0 = 首次，多 key 路由时重试递增
+  "vendor_exposure_state": "settled",  // settled | terminated | crash_fallback
+  "usage_provenance": {
+    "input": "upstream_final",      // upstream_final | upstream_partial | estimated | crash_fallback | unknown
+    "output": "upstream_final",
+    "cache_read": "upstream_final",
+    "cache_creation": "upstream_final",
+    "thinking": "unknown",
+    "multimodal_input": "upstream_final"
+  },
+
   "latency_ms": 1820,
   "ttft_ms": 380,
   "is_stream": true,
@@ -145,6 +154,29 @@ Go 算 cost 失败（公式异常 / DB 挂 / network 抖）时：
 - 高 QPS 需多 consumer 并行（consumer group 内多 consumer name）。
 
 Rust **不**自动裁剪 stream，避免数据丢失。Go 消费 + XACK + XTRIM 由 Go 自决，建议保留 ack 过的部分 7 天用于排查。
+
+### 2.1.8 去重契约（新增，billing-robustness W4-T1）
+
+Rust 可能 emit **多条** `usage:records` 共享同一主键 `(request_id, attempt_index)`（例如崩溃恢复 reconciler 先 emit `CrashFallback`，后续真实 emit 又抵达）。Go settler **必须** 按主键去重，同主键多条按 `usage_provenance.output` 优先级择高：
+
+```
+优先级（从高到低）：
+  upstream_final > upstream_partial > estimated > crash_fallback > unknown
+```
+
+**算法**：
+1. 维护短期 dedup 表 `(request_id, attempt_index) → 已 settle 的 output provenance level`，TTL 24h（与 InflightLedger EXPIRE 对齐）。
+2. 收到一条 record：
+   - 主键不存在 → settle，记入 dedup 表。
+   - 主键存在 + 新 record 的 provenance 更高 → 应用 delta（新值 - 旧值）更新 balance，表更新到新 level。
+   - 主键存在 + 新 record 的 provenance ≤ 已存 → 丢弃。
+3. CrashFallback record 永远会被同主键的真实 emit 覆盖。Rust 侧不做幂等。
+
+### 2.1.9 Orphan instance 兜底（推荐 Go 侧能力，新增）
+
+Rust 启动期 reconciler 只扫自己 `instance_id` 的残留。被永久下线的 replica（`gateway:instance:<id>:heartbeat` 已 expire）的 inflight key 由 Rust 侧 24h `EXPIRE` 兜底，但在 expire 之前的窗口里不会被恢复。
+
+**推荐 Go 侧**实现 global reaper，周期扫 `billing:inflight:*` 与 `gateway:instance:*:heartbeat`，对 heartbeat 已 expire 的 `instance_id` 的 inflight key emit CrashFallback record（语义等同 Rust 的 §5.4.3 reconciler）。该 reaper 不强制，但对长期生产稳定性推荐。
 
 ## 2.2 `usage:records:dlq` Stream（G11 主路径兜底）
 

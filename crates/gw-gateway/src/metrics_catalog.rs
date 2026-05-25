@@ -243,6 +243,68 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "OAuthListener reverse XADDs to events:entity (op=status_change field=oauth_failed)",
     },
+    // --- Billing robustness W1 ---
+    MetricSpec {
+        name: "gw_billing_emit_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecord emit count, labelled by vendor_exposure_state (W4-T1)",
+    },
+    MetricSpec {
+        name: "gw_billing_provenance_total",
+        kind: MetricKind::Counter,
+        help: "Per-dimension provenance tag counts; locates which codec/dim has high Estimated rate",
+    },
+    // --- Billing robustness W2 ---
+    MetricSpec {
+        name: "gw_billing_instance_heartbeat_renewals_total",
+        kind: MetricKind::Counter,
+        help: "InstanceId heartbeat key renewal successes (Go-side reaper liveness signal)",
+    },
+    MetricSpec {
+        name: "gw_billing_exposure_transitions_total",
+        kind: MetricKind::Counter,
+        help: "VendorExposure state machine transitions; labels=from,to",
+    },
+    MetricSpec {
+        name: "gw_billing_inflight_register_failure_total",
+        kind: MetricKind::Counter,
+        help: "InflightLedger register() returned an error (Redis unreachable / write failed)",
+    },
+    // --- Billing robustness W2-T7 ---
+    MetricSpec {
+        name: "gw_billing_mpsc_bypass_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecord emits that bypassed mpsc via sync XADD (capacity-tuning signal)",
+    },
+    MetricSpec {
+        name: "gw_billing_emit_path_total",
+        kind: MetricKind::Counter,
+        help: "UsageRecord emit attempts by path (channel / closed)",
+    },
+    // --- Billing robustness W3-T1 ---
+    MetricSpec {
+        name: "gw_billing_upstream_cancellation_total",
+        kind: MetricKind::Counter,
+        help: "Upstream cancellation events labelled by cause (client_close/deadline/upstream_err/route_abort)",
+    },
+    // --- Billing robustness W3-T5 ---
+    MetricSpec {
+        name: "gw_billing_grace_yielded_final_usage_total",
+        kind: MetricKind::Counter,
+        help: "Whether the cancel grace window captured a final usage frame; label=yielded(true/false)",
+    },
+    // --- Billing robustness W4-T3 ---
+    MetricSpec {
+        name: "gw_billing_emit_lag_t0_total",
+        kind: MetricKind::Counter,
+        help: "T0 incident counter — ts_settled_ms exceeded emit_lag_t0_secs without DEL. ANY non-zero value = page on-call.",
+    },
+    // --- Billing robustness W4-T4 ---
+    MetricSpec {
+        name: "gw_billing_inflight_recovered_total",
+        kind: MetricKind::Counter,
+        help: "Number of CrashFallback UsageRecords emitted by the startup reconciler",
+    },
 ];
 
 pub fn describe_all() {

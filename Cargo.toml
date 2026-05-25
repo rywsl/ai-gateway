@@ -35,6 +35,7 @@ anyhow = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 time = { version = "0.3", features = ["serde", "macros"] }
 url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
 smallvec = { version = "1.13", features = ["serde"] }
 
 # 异步
@@ -92,11 +93,13 @@ metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 
 # 配置
-figment = { version = "0.10", features = ["toml", "env"] }
+figment = { version = "0.10", features = ["toml", "env", "test"] }
 
 # 内存
 tikv-jemallocator = "0.6"
 tikv-jemalloc-ctl = "0.6"
+
+hostname = "0.4"
 
 # 测试
 testcontainers = "0.23"

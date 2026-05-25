@@ -1304,8 +1304,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8cb01cd46b0cf372153850f4c6c272d9cbea2da513e07538405148f95bd789f3"
 dependencies = [
  "atomic",
+ "parking_lot",
  "pear",
  "serde",
+ "tempfile",
  "toml",
  "uncased",
  "version_check",
@@ -1766,6 +1768,7 @@ dependencies = [
  "gw-store",
  "gw-tunnel-client",
  "hex",
+ "hostname",
  "metrics",
  "metrics-exporter-prometheus",
  "pingora",
@@ -1781,6 +1784,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -1804,6 +1808,7 @@ dependencies = [
  "base64",
  "bytes",
  "fred",
+ "futures",
  "gw-core",
  "gw-store",
  "lz4_flex",
@@ -1815,6 +1820,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "uuid",
  "zstd",
 ]
 

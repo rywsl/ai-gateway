@@ -6,12 +6,18 @@ pub mod deduct_gc;
 pub mod encoding;
 pub mod flusher;
 pub mod freeze;
+pub mod inflight;
+pub mod inflight_reaper;
+pub mod inflight_reconciler;
+pub mod instance_id;
 pub mod usage;
 
 pub use deduct_gc::DeductGc;
 pub use flusher::Ledger;
-pub use freeze::{FreezeGuard, FreezeKind, ReleaseOutcome, RequestFreeze, TaskFreeze, TaskFreezeRelease};
+pub use freeze::{
+    FreezeGuard, FreezeKind, ReleaseOutcome, RequestFreeze, TaskFreeze, TaskFreezeRelease,
+};
 pub use gw_core::permissions::MarkupChainSnapshot;
-pub use usage::{UsageRecord, UsageSource, UsageStatus};
+pub use usage::{UsageRecord, UsageStatus, VendorExposureState};
 
 pub mod detailed_archive;

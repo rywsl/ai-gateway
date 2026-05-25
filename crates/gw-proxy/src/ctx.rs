@@ -50,10 +50,14 @@ pub struct ResponseMeta {
 /// Mutable accumulator for token-usage seen on either the unary-response path
 /// or in stream `Usage` events. The `logging` filter reads these counters
 /// into the `UsageRecord` emitted to the usage stream.
+#[derive(Default, Clone, Copy, Debug)]
 pub struct UsageAccumulator {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cached_tokens: Option<u32>,
+    pub cache_creation_tokens: Option<u32>,
+    pub thinking_tokens: Option<u32>,
+    pub multimodal_input_tokens: Option<u32>,
 }
 
 #[derive(Default)]
@@ -61,6 +65,8 @@ pub struct ReqTiming {
     pub start: Option<Instant>,
     pub ttft: Option<Instant>,
     pub end: Option<Instant>,
+    pub sent_ms: Option<i64>,
+    pub settled_ms: Option<i64>,
 }
 
 pub struct ReqCtx {
@@ -103,6 +109,23 @@ pub struct ReqCtx {
     // --- Lifecycle / ledger ---
     pub timing: ReqTiming,
     pub usage: UsageAccumulator,
+    pub vendor_exposure: crate::billing_lifecycle::VendorExposure,
+    pub attempt_index: u32,
+    /// Per-dimension provenance accumulator: promoted by each extraction pass
+    /// via `copy_provenance` in `filters/response.rs`. Frozen into the
+    /// `UsageRecord` at logging time.
+    pub usage_provenance: gw_ledger::usage::UsageProvenance,
+    pub cancel_observed_at_ms: Option<i64>,
+    pub cancel_cause: Option<crate::cancellation::CancelCause>,
+    /// W3-T5: set to `true` when the request enters the cancel grace window
+    /// (i.e. a cancel has been observed but the grace timer has not yet
+    /// expired). Cleared when grace expires or when no cancel has occurred.
+    pub cancel_grace_active: bool,
+    /// Token-count estimate from the request body (used by InflightLedger
+    /// register to record the predicted spend before upstream replies).
+    /// Populated by the freeze estimator when available; `None` otherwise.
+    /// The value is written as-is (or 0) to the inflight hash on `register`.
+    pub prompt_estimate_tokens: Option<u32>,
     pub freeze_guard: Option<RequestFreeze>,
     pub stream_slot: Option<StreamSlot>,
     pub bytes_sent_to_client: AtomicU64,
@@ -277,7 +300,17 @@ impl ReqCtx {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_tokens: None,
+                cache_creation_tokens: None,
+                thinking_tokens: None,
+                multimodal_input_tokens: None,
             },
+            vendor_exposure: crate::billing_lifecycle::VendorExposure::Idle,
+            attempt_index: 0,
+            usage_provenance: gw_ledger::usage::UsageProvenance::default(),
+            cancel_observed_at_ms: None,
+            cancel_cause: None,
+            cancel_grace_active: false,
+            prompt_estimate_tokens: None,
             freeze_guard: None,
             stream_slot: None,
             bytes_sent_to_client: AtomicU64::new(0),
@@ -340,5 +373,21 @@ impl ReqCtx {
             return Some(&p.effective_user_id);
         }
         self.user.as_ref().map(|u| &u.value.user_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_accumulator_default_has_six_dims() {
+        let u = UsageAccumulator::default();
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+        assert!(u.cached_tokens.is_none());
+        assert!(u.cache_creation_tokens.is_none());
+        assert!(u.thinking_tokens.is_none());
+        assert!(u.multimodal_input_tokens.is_none());
     }
 }

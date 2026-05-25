@@ -18,6 +18,24 @@ pub struct UsageSnapshot {
     pub multimodal_input_tokens: Option<u32>,
 }
 
+/// Per-dimension confidence level for a single usage value.
+/// Authoritative location: spec §5.2.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceTag {
+    /// Vendor sent terminal usage event/payload.
+    UpstreamFinal,
+    /// Parsed mid-stream; never saw final.
+    UpstreamPartial,
+    /// Fell back to tokenizer/estimate.
+    Estimated,
+    /// InflightLedger reconciler-emitted.
+    CrashFallback,
+    /// Upstream produced nothing or context is half-residual.
+    #[default]
+    Unknown,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

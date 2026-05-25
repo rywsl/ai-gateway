@@ -69,7 +69,9 @@ impl TaskFreezeRelease for RedisTaskFreezeRelease {
         match raw.as_str() {
             "ok" => Ok(ReleaseOutcome::Released),
             "already_released" => Ok(ReleaseOutcome::AlreadyReleased),
-            other => Err(anyhow!("unexpected task freeze release lua result: {other}")),
+            other => Err(anyhow!(
+                "unexpected task freeze release lua result: {other}"
+            )),
         }
     }
 }

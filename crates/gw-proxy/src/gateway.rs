@@ -16,6 +16,7 @@ use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::error::codes;
 use gw_core::ids::{RequestId, TraceId};
 use gw_health::KeyHealthStore;
+use gw_ledger::FreezeGuard;
 use gw_ledger::Ledger;
 use gw_routing::in_flight::InFlightStore;
 use gw_routing::latency::LatencyTracker;
@@ -139,6 +140,18 @@ pub struct LlmGateway {
     /// Detailed-log archive (T10). Sender handle for per-surface wire-fidelity
     /// capture. `try_send` is fire-and-forget; a full channel drops + metrics.
     pub(crate) detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
+    /// InflightLedger (W2-T6). Tracks in-flight request hashes in Redis so the
+    /// W4 crash-recovery reconciler can detect billing gaps after a restart.
+    pub(crate) inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
+    /// Response deadline (W3-T3). Maximum time from `Sent` to EOS before the
+    /// upstream stream is aborted and `CancelCause::Deadline` is recorded.
+    /// Populated from `cfg.billing.response_deadline_ms` at boot time.
+    pub(crate) response_deadline_ms: u64,
+    /// Cancel grace window (W3-T5). After a cancel trigger fires, the gateway
+    /// continues reading the upstream body for this many milliseconds to
+    /// capture a final usage frame the vendor may still be sending.
+    /// Populated from `cfg.billing.cancel_grace_ms` at boot time.
+    pub(crate) cancel_grace_ms: u64,
 }
 
 impl LlmGateway {
@@ -163,6 +176,9 @@ impl LlmGateway {
         resilience: Arc<ResilienceState>,
         #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
         detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
+        inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
+        response_deadline_ms: u64,
+        cancel_grace_ms: u64,
     ) -> Self {
         Self {
             store,
@@ -185,6 +201,9 @@ impl LlmGateway {
             #[cfg(feature = "tunnel")]
             tunnel,
             detailed_archive,
+            inflight,
+            response_deadline_ms,
+            cancel_grace_ms,
         }
     }
 
@@ -328,7 +347,11 @@ impl ProxyHttp for LlmGateway {
             let tls = match url.scheme() {
                 "http" => false,
                 "https" => true,
-                _ => return Err(Error::new(ErrorType::Custom("gw_admin_upstream_bad_scheme"))),
+                _ => {
+                    return Err(Error::new(ErrorType::Custom(
+                        "gw_admin_upstream_bad_scheme",
+                    )))
+                }
             };
             let peer = HttpPeer::new(format!("{host}:{port}"), tls, host.to_string());
             ctx.phase_end();
@@ -357,6 +380,41 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         filters::upstream::rewrite_request(session, upstream_request, ctx).await?;
+
+        // W2-T6: Register the in-flight billing entry now that the request is
+        // committed to being sent to the upstream. Best-effort — Redis errors
+        // are warned but never propagate to the client.
+        {
+            use gw_ledger::inflight::InflightRegistration;
+            let registration = InflightRegistration {
+                request_id: ctx.request_id.0.clone(),
+                attempt_index: ctx.attempt_index,
+                user_id: ctx
+                    .effective_user_id()
+                    .map(|u| u.to_string())
+                    .unwrap_or_default(),
+                vendor_key_id: ctx
+                    .picked_vendor_key
+                    .as_ref()
+                    .map(|vk| vk.key_id.to_string())
+                    .unwrap_or_default(),
+                freeze_amount: ctx
+                    .freeze_guard
+                    .as_ref()
+                    .map(|g| g.freeze_amount())
+                    .unwrap_or(0),
+                prompt_estimate_tokens: ctx.prompt_estimate_tokens.unwrap_or(0),
+            };
+            if let Err(e) = self.inflight.register(&registration).await {
+                tracing::warn!(
+                    error = ?e,
+                    request_id = %ctx.request_id,
+                    "inflight register failed; proceeding without crash-safety net"
+                );
+                metrics::counter!("gw_billing_inflight_register_failure_total").increment(1);
+            }
+        }
+
         if let (Some(body), Some(meta)) = (
             ctx.upstream_request_body.clone(),
             ctx.upstream_request_meta.clone(),
@@ -519,6 +577,42 @@ impl ProxyHttp for LlmGateway {
         if !ctx.body_started && body.is_some() {
             ctx.body_started = true;
         }
+
+        // W3-T3 / W3-T5: deadline check + grace window.
+        //
+        // 1. `check_response_deadline` fires `observe_cancel(Deadline)` on
+        //    first exceedance; first-writer-wins semantics ensure it records
+        //    exactly once.
+        // 2. `check_grace_status` reads `cancel_observed_at_ms` (set by any
+        //    cancel cause, not just Deadline) and decides:
+        //    - NotApplicable → normal path
+        //    - Active         → still in grace window; let this chunk through
+        //                       so the extractor can catch a final usage frame
+        //    - Expired        → grace window elapsed; record outcome + abort
+        let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+        let _deadline_just_fired =
+            crate::cancellation::check_response_deadline(ctx, self.response_deadline_ms, now_ms);
+
+        match crate::cancellation::check_grace_status(ctx, self.cancel_grace_ms, now_ms) {
+            crate::cancellation::GraceStatus::NotApplicable => {
+                // Normal path — no cancel observed; continue below.
+            }
+            crate::cancellation::GraceStatus::Active => {
+                // Within grace window — fall through to let the extractor see
+                // this chunk; do not abort yet.
+            }
+            crate::cancellation::GraceStatus::Expired => {
+                // Grace window elapsed. Heuristic: if VendorExposure reached
+                // Settled the extractor saw a terminal frame during grace.
+                let yielded = matches!(
+                    ctx.vendor_exposure,
+                    crate::billing_lifecycle::VendorExposure::Settled,
+                );
+                crate::cancellation::record_grace_outcome(yielded);
+                return Err(Error::new(ErrorType::Custom("cancel_grace_expired")));
+            }
+        }
+
         let res = filters::response::run(session, body, end_of_stream, ctx);
         if end_of_stream {
             self.emit_response_surfaces(ctx);
@@ -571,6 +665,44 @@ impl ProxyHttp for LlmGateway {
                     // Drop the in-flight guard for the failed key so the next
                     // pick is not counted against the previous key's quota.
                     ctx.inflight_guard = None;
+
+                    // Spec §5.6: emit a partial UsageRecord for the failed
+                    // attempt and bump attempt_index before the next pick.
+                    // `on_retry_sync` handles the synchronous state mutation
+                    // and returns a record; the async inflight+ledger work is
+                    // spawned on the current tokio runtime.
+                    let attempt_record = crate::billing_lifecycle::on_retry_sync(ctx);
+                    if let Some(rec) = attempt_record {
+                        let inflight = self.inflight.clone();
+                        let ledger = self.ledger.clone();
+                        // old attempt_index is now ctx.attempt_index - 1 (bumped by on_retry_sync)
+                        let old_attempt = ctx.attempt_index.saturating_sub(1);
+                        let request_id = ctx.request_id.0.clone();
+                        tokio::spawn(async move {
+                            use gw_ledger::inflight::SettleState;
+                            if let Err(e) = inflight
+                                .mark_settled(&request_id, old_attempt, SettleState::Terminated)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = ?e,
+                                    request_id = %request_id,
+                                    attempt = old_attempt,
+                                    "fail_to_connect on_retry: inflight mark_settled failed"
+                                );
+                            }
+                            ledger.emit(rec).await;
+                            if let Err(e) = inflight.clear(&request_id, old_attempt).await {
+                                tracing::warn!(
+                                    error = ?e,
+                                    request_id = %request_id,
+                                    attempt = old_attempt,
+                                    "fail_to_connect on_retry: inflight clear failed"
+                                );
+                            }
+                        });
+                    }
+
                     metrics::counter!(
                         "gw_retry_attempt_total",
                         "outcome" => "recovered",
@@ -597,6 +729,21 @@ impl ProxyHttp for LlmGateway {
         err: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
+        // W3-T2/T4: classify pingora errors for cancel attribution.
+        // Checks for both ClientClose (Downstream) and UpstreamErr (Upstream).
+        if let Some(e) = err {
+            use pingora::ErrorSource::*;
+            use pingora::ErrorType::*;
+            let is_relevant_etype = matches!(e.etype, ConnectionClosed | WriteError | ReadError);
+            let is_upstream = is_relevant_etype && matches!(e.esource, Upstream);
+            let is_client_close = is_relevant_etype && matches!(e.esource, Downstream);
+            if let Some(cause) =
+                crate::cancellation::pingora_error_to_cancel_cause(is_upstream, is_client_close)
+            {
+                crate::cancellation::observe_cancel(ctx, cause);
+            }
+        }
+
         filters::logging::run(
             session,
             err,
@@ -609,6 +756,44 @@ impl ProxyHttp for LlmGateway {
             &self.ratelimit,
         )
         .await;
+
+        // W2-T6: mark_settled + clear after the UsageRecord has been sent
+        // to the ledger. If the request never reached the upstream (short-circuit
+        // before rewrite_request), `picked_vendor_key` will be None and there is
+        // no inflight hash to update — so we gate on vendor_key being set.
+        if ctx.picked_vendor_key.is_some() {
+            use crate::billing_lifecycle::VendorExposure;
+            use gw_ledger::inflight::SettleState;
+            let settle_state = match ctx.vendor_exposure {
+                VendorExposure::Settled => SettleState::Settled,
+                _ => SettleState::Terminated,
+            };
+            if let Err(e) = self
+                .inflight
+                .mark_settled(&ctx.request_id.0, ctx.attempt_index, settle_state)
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    request_id = %ctx.request_id,
+                    "inflight mark_settled failed"
+                );
+            }
+            // Clear runs unconditionally here. If the UsageRecord emit was dropped due to
+            // mpsc-full (the current Ledger try_send drop-on-full behavior), the inflight
+            // key is lost too — W2-T7 closes that gap with the must-deliver sync bypass.
+            if let Err(e) = self
+                .inflight
+                .clear(&ctx.request_id.0, ctx.attempt_index)
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    request_id = %ctx.request_id,
+                    "inflight clear failed"
+                );
+            }
+        }
 
         // Emit summary surface (always, including error paths). Bodies were
         // emitted at their respective trigger points; this entry carries the
