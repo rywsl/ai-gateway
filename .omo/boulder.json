@@ -6,30 +6,126 @@
       "work_id": "e2e-coverage-gaps-0fe25ecd",
       "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/e2e-coverage-gaps.md",
       "plan_name": "e2e-coverage-gaps",
-      "status": "active",
+      "status": "completed",
       "started_at": "2026-05-25T14:06:40.560Z",
-      "updated_at": "2026-05-25T14:06:40.560Z",
+      "updated_at": "2026-05-25T14:53:48.508Z",
       "session_ids": [
-        "ses_1a100008dffeKqD6wcDnKwFF3q"
+        "ses_1a100008dffeKqD6wcDnKwFF3q",
+        "ses_1a060243cffeNOYll97EJW0HYL",
+        "ses_1a05fefedffeF1dms0m34BEHQD",
+        "ses_1a05fa1beffeeRCpO9MLOvjXS7"
       ],
       "session_origins": {
-        "ses_1a100008dffeKqD6wcDnKwFF3q": "direct"
+        "ses_1a100008dffeKqD6wcDnKwFF3q": "direct",
+        "ses_1a060243cffeNOYll97EJW0HYL": "appended",
+        "ses_1a05fefedffeF1dms0m34BEHQD": "appended",
+        "ses_1a05fa1beffeeRCpO9MLOvjXS7": "appended"
       },
       "agent": "atlas",
-      "task_sessions": {}
+      "task_sessions": {
+        "todo:1": {
+          "task_key": "todo:1",
+          "task_label": "1",
+          "task_title": "`docs/workflow.md` — §request_filter: document ReDoS budget check",
+          "session_id": "ses_1a06961efffebJaJqEHPrTPMZz",
+          "agent": "Sisyphus-Junior",
+          "category": "writing",
+          "started_at": "2026-05-25T14:16:44.333Z",
+          "ended_at": "2026-05-25T14:48:46.109Z",
+          "elapsed_ms": 1921776,
+          "status": "completed",
+          "updated_at": "2026-05-25T14:48:46.109Z"
+        },
+        "todo:4": {
+          "task_key": "todo:4",
+          "task_label": "4",
+          "task_title": "Wire ReDoS budget guard in `request_filter` model permission check",
+          "session_id": "ses_1a07adf7affeEh3WR1VQW0FhiF",
+          "agent": "Sisyphus-Junior",
+          "category": "deep",
+          "updated_at": "2026-05-25T14:40:10.495Z",
+          "started_at": "2026-05-25T14:36:56.558Z",
+          "status": "completed",
+          "ended_at": "2026-05-25T14:40:10.495Z",
+          "elapsed_ms": 193937
+        },
+        "todo:7": {
+          "task_key": "todo:7",
+          "task_label": "7",
+          "task_title": "Update e2e tests — remove xfail markers and fix assertions",
+          "session_id": "ses_1a069ca55ffeF37tNyD9MItKJg",
+          "agent": "Sisyphus-Junior",
+          "category": "unspecified-high",
+          "updated_at": "2026-05-25T14:50:24.685Z",
+          "started_at": "2026-05-25T14:47:18.800Z",
+          "status": "completed",
+          "ended_at": "2026-05-25T14:50:24.685Z",
+          "elapsed_ms": 185885
+        }
+      },
+      "ended_at": "2026-05-25T14:53:48.508Z",
+      "elapsed_ms": 2827948
     }
   },
   "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/e2e-coverage-gaps.md",
   "started_at": "2026-05-25T14:06:40.560Z",
-  "status": "active",
-  "updated_at": "2026-05-25T14:06:40.560Z",
+  "status": "completed",
+  "updated_at": "2026-05-25T14:53:48.508Z",
   "session_ids": [
-    "ses_1a100008dffeKqD6wcDnKwFF3q"
+    "ses_1a100008dffeKqD6wcDnKwFF3q",
+    "ses_1a060243cffeNOYll97EJW0HYL",
+    "ses_1a05fefedffeF1dms0m34BEHQD",
+    "ses_1a05fa1beffeeRCpO9MLOvjXS7"
   ],
   "session_origins": {
-    "ses_1a100008dffeKqD6wcDnKwFF3q": "direct"
+    "ses_1a100008dffeKqD6wcDnKwFF3q": "direct",
+    "ses_1a060243cffeNOYll97EJW0HYL": "appended",
+    "ses_1a05fefedffeF1dms0m34BEHQD": "appended",
+    "ses_1a05fa1beffeeRCpO9MLOvjXS7": "appended"
   },
   "plan_name": "e2e-coverage-gaps",
-  "task_sessions": {},
-  "agent": "atlas"
+  "task_sessions": {
+    "todo:1": {
+      "task_key": "todo:1",
+      "task_label": "1",
+      "task_title": "`docs/workflow.md` — §request_filter: document ReDoS budget check",
+      "session_id": "ses_1a06961efffebJaJqEHPrTPMZz",
+      "agent": "Sisyphus-Junior",
+      "category": "writing",
+      "started_at": "2026-05-25T14:16:44.333Z",
+      "ended_at": "2026-05-25T14:48:46.109Z",
+      "elapsed_ms": 1921776,
+      "status": "completed",
+      "updated_at": "2026-05-25T14:48:46.109Z"
+    },
+    "todo:4": {
+      "task_key": "todo:4",
+      "task_label": "4",
+      "task_title": "Wire ReDoS budget guard in `request_filter` model permission check",
+      "session_id": "ses_1a07adf7affeEh3WR1VQW0FhiF",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-05-25T14:40:10.495Z",
+      "started_at": "2026-05-25T14:36:56.558Z",
+      "status": "completed",
+      "ended_at": "2026-05-25T14:40:10.495Z",
+      "elapsed_ms": 193937
+    },
+    "todo:7": {
+      "task_key": "todo:7",
+      "task_label": "7",
+      "task_title": "Update e2e tests — remove xfail markers and fix assertions",
+      "session_id": "ses_1a069ca55ffeF37tNyD9MItKJg",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-05-25T14:50:24.685Z",
+      "started_at": "2026-05-25T14:47:18.800Z",
+      "status": "completed",
+      "ended_at": "2026-05-25T14:50:24.685Z",
+      "elapsed_ms": 185885
+    }
+  },
+  "agent": "atlas",
+  "ended_at": "2026-05-25T14:53:48.508Z",
+  "elapsed_ms": 2827948
 }

@@ -167,7 +167,7 @@ Max Concurrent: 3 (Waves 1 & 2)
 
 ## TODOs
 
-- [ ] 1. Add `model_whitelist_regex` to `ApiKeyEntry` + `model_whitelist_regex` to `MergedPermissions`
+- [x] 1. Add `model_whitelist_regex` to `ApiKeyEntry` + `model_whitelist_regex` to `MergedPermissions`
 
   **What to do**:
   - RED: Write unit test in `crates/gw-core/src/entity.rs` (or separate test module) that deserializes a JSON payload with `model_whitelist_regex: "(gpt-4|claude).*"` into `ApiKeyEntry` and asserts the field is `Some("(gpt-4|claude).*")`
@@ -245,7 +245,7 @@ Max Concurrent: 3 (Waves 1 & 2)
   - Files: `crates/gw-core/src/entity.rs`, `crates/gw-core/src/permissions.rs`
   - Pre-commit: `cargo test -p gw-core`
 
-- [ ] 2. Add `LatencyTracker` to `HealthState` struct
+- [x] 2. Add `LatencyTracker` to `HealthState` struct
 
   **What to do**:
   - RED: Write test that `HealthState` can be constructed with a `LatencyTracker` field
@@ -313,7 +313,7 @@ Max Concurrent: 3 (Waves 1 & 2)
   - Files: `crates/gw-gateway/src/health.rs`, `crates/gw-gateway/src/lib.rs`
   - Pre-commit: `cargo test -p gw-gateway`
 
-- [ ] 3. Add `sha2` dependency + body hash utility
+- [x] 3. Add `sha2` dependency + body hash utility
 
   **What to do**:
   - Add `sha2 = "0.10"` to `crates/gw-proxy/Cargo.toml` dependencies
@@ -383,7 +383,7 @@ Max Concurrent: 3 (Waves 1 & 2)
   - Files: `crates/gw-proxy/Cargo.toml`, `crates/gw-proxy/src/filters/upstream.rs`
   - Pre-commit: `cargo test -p gw-proxy`
 
-- [ ] 4. Wire ReDoS budget guard in `request_filter` model permission check
+- [x] 4. Wire ReDoS budget guard in `request_filter` model permission check
 
   **What to do**:
   - RED: Write integration test in `crates/gw-proxy/` that constructs a request with a model name, `MergedPermissions` containing `model_whitelist_regex: Some("gpt-4.*".into())`, compiles it to `ModelPermission` via `ModelPermission::new()`, and asserts the model is allowed via `check_with_budget()`
@@ -479,7 +479,7 @@ Max Concurrent: 3 (Waves 1 & 2)
   - Files: `crates/gw-proxy/src/filters/request.rs`, test files
   - Pre-commit: `cargo test --workspace`
 
-- [ ] 5. Implement `/healthz/strategies` endpoint
+- [x] 5. Implement `/healthz/strategies` endpoint
 
   **What to do**:
   - RED: Write test that `GET /healthz/strategies` with valid token returns 200 + JSON array of `{key_id, format, p50_ttft_ms}` objects
@@ -578,7 +578,7 @@ Max Concurrent: 3 (Waves 1 & 2)
   - Files: `crates/gw-gateway/src/health.rs`
   - Pre-commit: `cargo test -p gw-gateway`
 
-- [ ] 6. Wire `message_hash` in `upstream.rs` PickCtx construction
+- [x] 6. Wire `message_hash` in `upstream.rs` PickCtx construction
 
   **What to do**:
   - RED: Write test that when `cached_body` is `Some(Bytes::from("test body"))`, `PickCtx.message_hash` is `Some(expected_u64)` (use the same deterministic hash from Task 3)
@@ -654,7 +654,7 @@ Max Concurrent: 3 (Waves 1 & 2)
   - Files: `crates/gw-proxy/src/filters/upstream.rs`
   - Pre-commit: `cargo test -p gw-proxy`
 
-- [ ] 7. Update e2e tests — remove xfail markers and fix assertions
+- [x] 7. Update e2e tests — remove xfail markers and fix assertions
 
   **What to do**:
   - In `tests/e2e/client/scenarios/test_permissions.py`:
@@ -725,7 +725,7 @@ Max Concurrent: 3 (Waves 1 & 2)
   - Files: `tests/e2e/client/scenarios/test_permissions.py`, `tests/e2e/client/scenarios/test_routing_strategies.py`
   - Pre-commit: `pytest tests/e2e/client/scenarios/ -v`
 
-- [ ] 8. Update docs per Sync rule
+- [x] 8. Update docs per Sync rule
 
   **What to do**:
   - Update `docs/workflow.md` §request_filter:
@@ -795,7 +795,7 @@ Max Concurrent: 3 (Waves 1 & 2)
   - Files: `docs/workflow.md`, `docs/architecture.md`, `docs/issues/2026-05-25-e2e-coverage-known-gaps.md`
   - Pre-commit: `bash scripts/check-invariants.sh`
 
-- [ ] 9. Run soak smoke + invariant checks — final validation
+- [x] 9. Run soak smoke + invariant checks — final validation
 
   **What to do**:
   - Run `bash scripts/check-invariants.sh` → must exit 0
@@ -866,19 +866,19 @@ Max Concurrent: 3 (Waves 1 & 2)
 
 > 4 review agents run in PARALLEL. ALL must APPROVE. Present consolidated results to user and get explicit "okay" before completing.
 
-- [ ] F1. **Plan Compliance Audit** — `oracle`
+- [x] F1. **Plan Compliance Audit** — `oracle`
   Read the plan end-to-end. For each "Must Have": verify implementation exists (read file, curl endpoint, run command). For each "Must NOT Have": search codebase for forbidden patterns — reject with file:line if found. Check evidence files exist in .omo/evidence/. Compare deliverables against plan.
   Output: `Must Have [N/N] | Must NOT Have [N/N] | Tasks [N/N] | VERDICT: APPROVE/REJECT`
 
-- [ ] F2. **Code Quality Review** — `unspecified-high`
+- [x] F2. **Code Quality Review** — `unspecified-high`
   Run `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all -- --check` + `cargo test --workspace`. Review all changed files for: `as any` equivalent (`unsafe` blocks, `unwrap()` in non-test), empty catches, `println!` in prod, commented-out code, unused imports. Check AI slop: excessive comments, over-abstraction, generic names.
   Output: `Build [PASS/FAIL] | Clippy [PASS/FAIL] | Tests [N pass/N fail] | Files [N clean/N issues] | VERDICT`
 
-- [ ] F3. **Real Manual QA** — `unspecified-high`
+- [x] F3. **Real Manual QA** — `unspecified-high`
   Start gateway from clean state. Execute EVERY QA scenario from EVERY task — follow exact steps, capture evidence. Test cross-gap integration (all three features working together). Test edge cases: empty body, missing regex field, cold latency tracker. Save to `.omo/evidence/final-qa/`.
   Output: `Scenarios [N/N pass] | Integration [N/N] | Edge Cases [N tested] | VERDICT`
 
-- [ ] F4. **Scope Fidelity Check** — `deep`
+- [x] F4. **Scope Fidelity Check** — `deep`
   For each task: read "What to do", read actual diff (`git diff`). Verify 1:1 — everything in spec was built (no missing), nothing beyond spec was built (no creep). Check "Must NOT do" compliance: no RedosTracker refactor, no strategy logic changes, no JSON normalization, no TODO markers. Detect cross-task contamination.
   Output: `Tasks [N/N compliant] | Contamination [CLEAN/N issues] | Unaccounted [CLEAN/N files] | VERDICT`
 
