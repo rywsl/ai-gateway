@@ -10,9 +10,9 @@
 //! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
 use crate::loader::{
-    load_apikey, load_auth_config, load_jwks, load_mgmt_token, load_model, load_model_group,
-    load_pricing, load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
-    load_vendor_key, LoaderCtx,
+    load_apikey, load_auth_config, load_ipblock, load_jwks, load_mgmt_token, load_model,
+    load_model_group, load_pricing, load_proxy_node, load_proxy_nodes_list, load_user,
+    load_user_group, load_vendor, load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -202,6 +202,26 @@ impl EntityStore {
             .iter()
             .map(|(k, v)| ((*k).clone(), v))
             .collect()
+    }
+
+    pub async fn ipblock_or_load(&self, id: &str) -> Option<Arc<Versioned<IpBlockEntry>>> {
+        if let Some(hit) = self.ipblock.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.to_owned();
+        let deadline = self.cold_load_timeout;
+        self.ipblock
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("ipblock", deadline, async move {
+                    load_ipblock(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
     }
 
     pub async fn user_or_load(&self, id: &UserId) -> Option<Arc<Versioned<UserEntry>>> {

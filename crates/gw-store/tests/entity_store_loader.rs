@@ -74,3 +74,68 @@ async fn entity_store_user_or_load_cold_loads_from_pg() {
         .expect("second call hits cache");
     assert!(std::sync::Arc::ptr_eq(&v1, &v2));
 }
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers Redis + Postgres)"]
+async fn entity_store_ipblock_or_load_cold_loads_from_pg() {
+    let redis_node = Redis::default().start().await.unwrap();
+    let pg_node = Postgres::default().start().await.unwrap();
+    let redis_port = redis_node.get_host_port_ipv4(6379).await.unwrap();
+    let pg_port = pg_node.get_host_port_ipv4(5432).await.unwrap();
+
+    let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{redis_port}"), 4)
+        .await
+        .unwrap();
+    let pg = pg_client::connect(
+        &format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres"),
+        4,
+    )
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "CREATE TABLE ip_blocks (
+            id TEXT PRIMARY KEY,
+            payload JSONB NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            deleted_at TIMESTAMPTZ NULL
+        )",
+    )
+    .execute(&pg)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO ip_blocks (id, payload, version) VALUES ($1, $2::jsonb, 3)")
+        .bind("block-001")
+        .bind(
+            serde_json::json!({
+                "cidr": "203.0.113.0/24",
+                "scope": "global",
+                "reason": "manual",
+                "expires_at": null
+            })
+            .to_string(),
+        )
+        .execute(&pg)
+        .await
+        .unwrap();
+
+    let store = EntityStore::with_loader(LoaderCtx {
+        redis,
+        pg,
+        kek: KekCache::empty(),
+    });
+
+    let v1 = store
+        .ipblock_or_load("block-001")
+        .await
+        .expect("cold load should hit pg");
+    assert_eq!(v1.version, 3);
+    assert_eq!(v1.value.cidr, "203.0.113.0/24");
+
+    let v2 = store
+        .ipblock_or_load("block-001")
+        .await
+        .expect("second call hits cache");
+    assert!(std::sync::Arc::ptr_eq(&v1, &v2));
+}

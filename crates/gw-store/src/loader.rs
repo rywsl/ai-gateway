@@ -12,8 +12,8 @@ use secrecy::SecretString;
 use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
-    ApiKeyEntry, AuthConfig, JwksEntry, ManagementTokenEntry, Model, ModelGroup, OAuthCredentials,
-    Pricing, ProxyNode, UserEntry, UserGroup, Vendor, VendorKey,
+    ApiKeyEntry, AuthConfig, IpBlockEntry, JwksEntry, ManagementTokenEntry, Model, ModelGroup,
+    OAuthCredentials, Pricing, ProxyNode, UserEntry, UserGroup, Vendor, VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -167,6 +167,8 @@ const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND del
 const USER_GROUP_SQL: &str =
     "SELECT payload, version FROM user_groups WHERE id = $1 AND deleted_at IS NULL";
 const API_KEY_SQL: &str = "SELECT jsonb_set(payload, '{signature_secret}', to_jsonb(signature_secret), true) AS payload, version FROM api_keys WHERE id = $1 AND deleted_at IS NULL";
+const IP_BLOCK_SQL: &str =
+    "SELECT payload, version FROM ip_blocks WHERE id = $1 AND deleted_at IS NULL";
 const VENDOR_SQL: &str =
     "SELECT payload, version FROM vendors WHERE id = $1 AND deleted_at IS NULL";
 const VENDOR_KEY_SQL: &str =
@@ -210,6 +212,13 @@ pub async fn load_user_group(
 pub async fn load_apikey(ctx: &LoaderCtx, id: &ApiKeyId) -> anyhow::Result<Versioned<ApiKeyEntry>> {
     load_entity(ctx, "apikey", id.as_ref(), API_KEY_SQL, |v| {
         serde_json::from_value::<ApiKeyEntry>(v.clone()).map_err(Into::into)
+    })
+    .await
+}
+
+pub async fn load_ipblock(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versioned<IpBlockEntry>> {
+    load_entity(ctx, "ipblock", id, IP_BLOCK_SQL, |v| {
+        serde_json::from_value::<IpBlockEntry>(v.clone()).map_err(Into::into)
     })
     .await
 }
@@ -356,10 +365,6 @@ pub async fn load_mgmt_token(
     })
     .await
 }
-
-// Note: IpBlockEntry has no cold-loader-by-id; its consumer iterates the
-// whole snapshot via `EntityStore::ipblock_snapshot`. v1 accepts an empty
-// runtime list; preload-from-PG is a follow-up.
 
 #[cfg(test)]
 mod tunnel_pref_tests {
