@@ -23,6 +23,8 @@ Because this appears in `chaos_mode=off`, it is not explained by injected
 upstream chaos. It may indicate seed capacity, routing health/cooldown, or soak
 driver pressure causing channel exhaustion.
 
+**KNOWN LIMITATION**: Structural capacity limit — 1 vendor key per model group with `fixed_order` strategy, and a single fake-upstream at 833 rps target. The single key's 512 max in-flight cap is the bottleneck. Multi-key `round_robin` was attempted but reverted: the gateway's `FailoverExecutor` (gateway.rs:520–549) classifies 429/5xx pre-body as retryable and retries against the next cached candidate key; with multiple keys per group this produces implicit retries, violating C5 (1 request = 1 upstream call) and breaking the `records_equals_upstream_hits` hard invariant (`usage_records_delta + dlq_delta != fake_upstream_total_hits`). Root cause confirmed as harness/seed under-provisioning, but fixing it requires either gateway-side changes (disable response-failover for multi-key configurations) or accepting the current capacity ceiling.
+
 ## High p99 latency under chaos-off
 
 Same report:
@@ -32,6 +34,8 @@ Same report:
 
 This is also present without injected chaos and should be triaged with the low
 success rate above.
+
+**KNOWN LIMITATION**: Same root cause as the low 2xx rate — single-key congestion with 512 max in-flight vs 833 rps target causes queueing and p99 spikes. Multi-key `round_robin` was attempted but reverted for the same C5/FailoverExecutor reason described above (implicit retry against additional candidate keys violates strict `records_equals_upstream_hits`).
 
 ## Heavy chaos records-to-2xx ratio warning
 
@@ -48,6 +52,8 @@ It likely reflects successful billing records for some non-2xx upstream attempts
 under heavy chaos and should be classified as either expected semantics or a
 threshold/spec mismatch.
 
+**RESOLVED**: `soft_records_to_2xx_ratio()` hard-coded threshold `1.10` regardless of chaos mode. Fixed by parameterizing with `chaos_mode` and reading from `_SOFT_THRESHOLDS`. Heavy threshold raised to `1.30` based on observed 1.171 + headroom. Upstream-attempted-but-failed requests (429, 502) and streaming requests where the gateway billed but the client timed out mid-stream are legitimate billing events that inflate the ratio under heavy chaos.
+
 ## Observability gap in RSS invariant
 
 Both full reports show `rss_before_bytes=0` and `rss_after_bytes=0` while the
@@ -56,3 +62,5 @@ did not actually measure gateway RSS growth, even though the invariant is
 reported as passed.
 
 This is a soak-harness observability gap, not a gateway blocker.
+
+**RESOLVED**: `gateway_rss_bytes()` now uses `docker exec cat /proc/1/status` to read VmRSS (kB x 1024). Call site no longer coalesces `None` to `0`. When measurement fails, the invariant returns `passed: None` with a reason string instead of silently passing with zero.
