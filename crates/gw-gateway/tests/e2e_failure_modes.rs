@@ -193,6 +193,7 @@ fn rate_limit_guard_emits_429_when_over_budget() {
         tpm_limit: 0,
         max_concurrent_streams: 100,
         markup_chain: MarkupChainSnapshot::identity(),
+        model_whitelist_regex: None,
     };
     // Burst 120 immediate calls; the governor cell holds at most 60 tokens
     // and refills at 1/sec, so we must hit a `RateLimitError` somewhere

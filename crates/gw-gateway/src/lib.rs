@@ -605,11 +605,15 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         None
     };
 
-    // 6. Health server (positioned after TunnelStack so `tunnel` is in scope).
+    // 6. Latency tracker — extracted early to share with HealthState.
+    let latency_tracker = Arc::new(gw_routing::LatencyTracker::new());
+
+    // 7. Health server (positioned after TunnelStack so `tunnel` is in scope).
     let health_port = cfg.server.health_port;
     let health_state = health::HealthState {
         key_health: health.clone(),
         resilience: resilience.clone(),
+        latency_tracker: latency_tracker.clone(),
         tunnel_enabled: cfg.tunnel.enabled,
         #[cfg(feature = "tunnel")]
         tunnel_stack: tunnel.clone(),
@@ -633,7 +637,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         store,
         health,
         in_flight,
-        latency_tracker: Arc::new(gw_routing::LatencyTracker::new()),
+        latency_tracker,
         ratelimit,
         ledger,
         counters,

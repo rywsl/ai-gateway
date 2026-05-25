@@ -15,7 +15,7 @@
 //! - `/livez` — unconditional liveness ping.
 //! - `/readyz` — gated on [`READY`] (init complete).
 //! - `/healthz/circuits`, `/healthz/key/<id>`, `/healthz/resilience`,
-//!   `/healthz/tunnel` —
+//!   `/healthz/tunnel`, `/healthz/strategies` —
 //!   admin-only; require `Authorization: Mgmt <token>` validated by the
 //!   management-token verify chain (S-admin-tunnel). Unverified requests
 //!   receive 401.
@@ -50,6 +50,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct HealthState {
     pub key_health: Arc<gw_health::KeyHealthStore>,
     pub resilience: Arc<gw_proxy::resilience::ResilienceState>,
+    pub latency_tracker: Arc<gw_routing::LatencyTracker>,
     pub tunnel_enabled: bool,
     #[cfg(feature = "tunnel")]
     pub tunnel_stack: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
@@ -132,7 +133,8 @@ async fn handle_connection(
         path if path.starts_with("/healthz/circuits")
             || path.starts_with("/healthz/key/")
             || path == "/healthz/resilience"
-            || path == "/healthz/tunnel" =>
+            || path == "/healthz/tunnel"
+            || path == "/healthz/strategies" =>
         {
             // ADR-B2-3 + B2-5: mgmt-token gated admin endpoints. Verify
             // chain mirrors the proxy's request_filter mgmt branch
@@ -271,6 +273,8 @@ fn build_healthz_body(path: &str, state: &HealthState) -> String {
         state.resilience.snapshot_json()
     } else if path == "/healthz/tunnel" {
         build_tunnel_healthz_body(state)
+    } else if path == "/healthz/strategies" {
+        build_strategies_body(state)
     } else {
         String::from("{}")
     }
@@ -306,6 +310,30 @@ fn build_tunnel_healthz_body(state: &HealthState) -> String {
     }
 
     String::from(r#"{"enabled":true,"nodes":[]}"#)
+}
+
+fn build_strategies_body(state: &HealthState) -> String {
+    let mut buf = String::from("[");
+    let mut first = true;
+    for entry in state.latency_tracker.by_key_format.iter() {
+        let (key_id, format) = entry.key();
+        let p50 = match state.latency_tracker.p50_ttft_ms(key_id, *format) {
+            Some(v) => v,
+            None => continue,
+        };
+        if !first {
+            buf.push(',');
+        }
+        first = false;
+        buf.push_str(&format!(
+            r#"{{"key_id":"{}","format":"{}","p50_ttft_ms":{}}}"#,
+            key_id,
+            format.as_str(),
+            p50,
+        ));
+    }
+    buf.push(']');
+    buf
 }
 
 #[cfg(feature = "tunnel")]

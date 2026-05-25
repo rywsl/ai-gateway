@@ -33,6 +33,7 @@ async fn start_server() -> Option<(u16, tokio::task::JoinHandle<anyhow::Result<(
     let state = gw_gateway::health::HealthState {
         key_health: health,
         resilience,
+        latency_tracker: Arc::new(gw_routing::LatencyTracker::new()),
         tunnel_enabled: false,
         #[cfg(feature = "tunnel")]
         tunnel_stack: None,
