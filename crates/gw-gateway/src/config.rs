@@ -43,10 +43,8 @@ pub struct Config {
     pub detailed_log: DetailedLogCfg,
     #[serde(default)]
     pub billing: BillingCfg,
-    // TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
-    // `HardCapCfg` defaults. Once it accepts caller-supplied caps, reintroduce
-    // an `[auth]` section here and thread `hard_cap_max_input_tokens` /
-    // `hard_cap_max_cost_micro` into `LlmGateway` via `Wired`.
+    #[serde(default)]
+    pub auth: AuthCfg,
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,6 +380,33 @@ impl Default for TunnelCfg {
     }
 }
 
+/// Auth-layer knobs. Proxy hard-cap filter values are boot-time only.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthCfg {
+    /// Maximum estimated input tokens per single request (ADR-024).
+    #[serde(default = "default_hard_cap_max_input_tokens")]
+    pub hard_cap_max_input_tokens: u32,
+    /// Maximum estimated cost (micro-units) per single request (ADR-024).
+    #[serde(default = "default_hard_cap_max_cost_micro")]
+    pub hard_cap_max_cost_micro: u64,
+}
+
+fn default_hard_cap_max_input_tokens() -> u32 {
+    1_000_000
+}
+fn default_hard_cap_max_cost_micro() -> u64 {
+    5_000_000_000
+}
+
+impl Default for AuthCfg {
+    fn default() -> Self {
+        Self {
+            hard_cap_max_input_tokens: default_hard_cap_max_input_tokens(),
+            hard_cap_max_cost_micro: default_hard_cap_max_cost_micro(),
+        }
+    }
+}
+
 /// Billing-robustness knobs. Spec:
 /// [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`].
 #[derive(Debug, Clone, Deserialize)]
@@ -510,6 +535,13 @@ impl Config {
             if self.tunnel.missed_pong_threshold == 0 {
                 anyhow::bail!("invalid config: tunnel.missed_pong_threshold must be > 0");
             }
+        }
+
+        if self.auth.hard_cap_max_input_tokens == 0 {
+            anyhow::bail!("invalid config: auth.hard_cap_max_input_tokens must be > 0");
+        }
+        if self.auth.hard_cap_max_cost_micro == 0 {
+            anyhow::bail!("invalid config: auth.hard_cap_max_cost_micro must be > 0");
         }
 
         if self.billing.cancel_grace_ms == 0 {

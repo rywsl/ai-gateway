@@ -83,10 +83,9 @@ required = false
 # ADR-S4 (docs/superpowers/specs/2026-05-22-e2e-skip-closure-design.md).
 sticky_ttl_secs = 1800
 
-# TODO(phase4-wireup): the proxy hard-cap filter currently uses hardcoded
-# `HardCapCfg` defaults. When it accepts caller-supplied caps, reintroduce
-# an `[auth]` section here with `hard_cap_max_input_tokens` and
-# `hard_cap_max_cost_micro` and thread them into `LlmGateway`.
+[auth]
+hard_cap_max_input_tokens = 1_000_000
+hard_cap_max_cost_micro = 5_000_000_000
 
 [tunnel]
 # Tunnel subsystem (ADR-T-5). Default off — pick_peer uses the Direct path.

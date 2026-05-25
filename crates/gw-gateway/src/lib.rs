@@ -98,6 +98,8 @@ struct Wired {
     response_deadline_ms: u64,
     /// Cancel grace window (W3-T5). From `cfg.billing.cancel_grace_ms`.
     cancel_grace_ms: u64,
+    /// Hard-cap configuration (ADR-024). From `cfg.auth.*`.
+    hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -204,6 +206,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.inflight,
         wired.response_deadline_ms,
         wired.cancel_grace_ms,
+        wired.hard_cap_cfg,
     );
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
@@ -259,7 +262,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // fall through to Redis L1 -> PG L2 -> Redis write-back.
     let loader = gw_store::LoaderCtx {
         redis: redis.clone(),
-        pg,
+        pg: pg.clone(),
         kek: kek_cache,
     };
     let store = Arc::new(gw_store::EntityStore::with_loader_and_timeout(
@@ -273,6 +276,30 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let counters = Arc::new(CounterStore {
         redis: redis.clone(),
     });
+
+    let mut preloaded_ip_blocks = 0usize;
+    let mut ip_block_offset = 0i64;
+    loop {
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM ip_blocks WHERE deleted_at IS NULL ORDER BY id LIMIT 100 OFFSET $1",
+        )
+        .bind(ip_block_offset)
+        .fetch_all(&pg)
+        .await
+        .context("preloading ip_blocks from postgres")?;
+        if ids.is_empty() {
+            break;
+        }
+        for id in &ids {
+            store
+                .ipblock_or_load(id)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("ip_block preload failed for id {id}"))?;
+            preloaded_ip_blocks += 1;
+        }
+        ip_block_offset += ids.len() as i64;
+    }
+    tracing::info!("preloaded {} ip_block entries", preloaded_ip_blocks);
 
     // T3-Pre — build the mgmt-token / JWT blacklist on the same Redis pool
     // used by CounterStore and Ledger. Threaded onto Wired so both the
@@ -628,5 +655,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         inflight,
         response_deadline_ms: cfg.billing.response_deadline_ms,
         cancel_grace_ms: cfg.billing.cancel_grace_ms,
+        hard_cap_cfg: gw_auth::hard_cap::HardCapCfg {
+            max_input_tokens: cfg.auth.hard_cap_max_input_tokens,
+            max_cost_micro: cfg.auth.hard_cap_max_cost_micro,
+        },
     })
 }

@@ -152,6 +152,8 @@ pub struct LlmGateway {
     /// capture a final usage frame the vendor may still be sending.
     /// Populated from `cfg.billing.cancel_grace_ms` at boot time.
     pub(crate) cancel_grace_ms: u64,
+    /// Hard-cap configuration (ADR-024). Threaded from `cfg.auth.*` at boot.
+    pub(crate) hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
 }
 
 impl LlmGateway {
@@ -179,6 +181,7 @@ impl LlmGateway {
         inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
         response_deadline_ms: u64,
         cancel_grace_ms: u64,
+        hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
     ) -> Self {
         Self {
             store,
@@ -204,6 +207,7 @@ impl LlmGateway {
             inflight,
             response_deadline_ms,
             cancel_grace_ms,
+            hard_cap_cfg,
         }
     }
 
@@ -299,6 +303,7 @@ impl ProxyHttp for LlmGateway {
             self.jwt_validator.as_ref(),
             self.capability_resolver.as_ref(),
             &self.mgmt_blacklist,
+            &self.hard_cap_cfg,
         )
         .await?;
         // Emit downstream_request surface (only when process() actually read the
