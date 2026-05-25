@@ -1,35 +1,35 @@
 {
   "schema_version": 2,
-  "active_work_id": "soak-harness-fixes-6b8efc76",
+  "active_work_id": "e2e-coverage-gaps-0fe25ecd",
   "works": {
-    "soak-harness-fixes-6b8efc76": {
-      "work_id": "soak-harness-fixes-6b8efc76",
-      "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/soak-harness-fixes.md",
-      "plan_name": "soak-harness-fixes",
+    "e2e-coverage-gaps-0fe25ecd": {
+      "work_id": "e2e-coverage-gaps-0fe25ecd",
+      "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/e2e-coverage-gaps.md",
+      "plan_name": "e2e-coverage-gaps",
       "status": "active",
-      "started_at": "2026-05-25T09:47:30.149Z",
-      "updated_at": "2026-05-25T09:47:30.149Z",
+      "started_at": "2026-05-25T14:06:40.560Z",
+      "updated_at": "2026-05-25T14:06:40.560Z",
       "session_ids": [
-        "ses_1a1b5f1b0ffeCdF1Wnbx8VaLia"
+        "ses_1a100008dffeKqD6wcDnKwFF3q"
       ],
       "session_origins": {
-        "ses_1a1b5f1b0ffeCdF1Wnbx8VaLia": "direct"
+        "ses_1a100008dffeKqD6wcDnKwFF3q": "direct"
       },
       "agent": "atlas",
       "task_sessions": {}
     }
   },
-  "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/soak-harness-fixes.md",
-  "started_at": "2026-05-25T09:47:30.149Z",
+  "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/e2e-coverage-gaps.md",
+  "started_at": "2026-05-25T14:06:40.560Z",
   "status": "active",
-  "updated_at": "2026-05-25T09:47:30.149Z",
+  "updated_at": "2026-05-25T14:06:40.560Z",
   "session_ids": [
-    "ses_1a1b5f1b0ffeCdF1Wnbx8VaLia"
+    "ses_1a100008dffeKqD6wcDnKwFF3q"
   ],
   "session_origins": {
-    "ses_1a1b5f1b0ffeCdF1Wnbx8VaLia": "direct"
+    "ses_1a100008dffeKqD6wcDnKwFF3q": "direct"
   },
-  "plan_name": "soak-harness-fixes",
+  "plan_name": "e2e-coverage-gaps",
   "task_sessions": {},
   "agent": "atlas"
 }

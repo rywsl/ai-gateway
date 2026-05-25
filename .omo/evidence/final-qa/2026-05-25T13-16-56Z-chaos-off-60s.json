@@ -1,0 +1,385 @@
+{
+  "soak_run": {
+    "id": "2026-05-25T13:10:50Z-chaos-off-60s",
+    "config": {
+      "duration_s": 60,
+      "target_rps": 833,
+      "n_threads": 8,
+      "max_inflight_per_thread": 64,
+      "n_users": 20,
+      "chaos_mode": "off",
+      "git_sha": "fa79660",
+      "gateway_image_sha": "e2e-gateway"
+    },
+    "timeline": {
+      "t0_iso": "2026-05-25T13:10:50Z",
+      "driver_t1_iso": "2026-05-25T13:16:46Z",
+      "drain_quiescent_at_iso": "2026-05-25T13:16:56Z",
+      "drain_wall_ms": 364931
+    },
+    "results": {
+      "invariants": {},
+      "soft_warnings": {},
+      "spectra": {
+        "by_status": {
+          "source": "driver",
+          "raw": {
+            "200": 16702,
+            "503": 33278
+          }
+        },
+        "by_error_code": {
+          "source": "driver+fake_web",
+          "raw": {
+            "GW_ROUTING_NO_AVAILABLE_CHANNEL": 8120,
+            "HTTP_STATUS_503": 33278
+          }
+        },
+        "by_protocol": {
+          "source": "driver",
+          "raw": {
+            "gemini": 16863,
+            "open_ai": 16400,
+            "anthropic": 16717
+          }
+        },
+        "by_shape": {
+          "source": "driver",
+          "raw": {
+            "stream": 24894,
+            "non_stream": 25086
+          }
+        },
+        "by_cross_proto": {
+          "source": "driver",
+          "raw": {
+            "False": 44983,
+            "True": 4997
+          }
+        },
+        "fake_web_window": {
+          "source": "fake_web:/soak/window/report",
+          "raw": {
+            "snapshot_id": "19e5f427050-1",
+            "window_ms": 364931,
+            "drain_quiescent": true,
+            "drain_observation_series": [
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702
+            ],
+            "redis_streams": {
+              "usage_records_delta": 16702,
+              "usage_records_dlq_delta": 0,
+              "usage_detailed_delta": 23559,
+              "events_entity_delta": 0
+            },
+            "balance_decrement_micros": {
+              "u-soak-004": 0,
+              "u-soak-006": 0,
+              "u-soak-002": 0,
+              "u-soak-017": 0,
+              "u-soak-016": 0,
+              "u-soak-010": 0,
+              "u-soak-009": 0,
+              "u-soak-008": 0,
+              "u-soak-015": 0,
+              "u-soak-019": 0,
+              "u-soak-011": 0,
+              "u-soak-018": 0,
+              "u-soak-005": 0,
+              "u-soak-001": 0,
+              "u-soak-012": 0,
+              "u-soak-003": 0,
+              "u-soak-013": 0,
+              "u-soak-000": 0,
+              "u-soak-007": 0,
+              "u-soak-014": 0
+            },
+            "detailed_log_spectrum": {
+              "by_status": {},
+              "by_error_code": {},
+              "by_protocol": {},
+              "by_shape": {},
+              "by_cross_proto": {}
+            }
+          }
+        },
+        "fake_upstream_hits": {
+          "source": "fake_upstream:/admin/hits-total",
+          "raw": {
+            "refused_hit_sum": 0,
+            "routes_hit_sum": 16702,
+            "total": 16702
+          }
+        },
+        "fake_upstream_chaos": {
+          "source": "fake_upstream:/admin/chaos-stats",
+          "raw": {
+            "enabled": false,
+            "variants": []
+          }
+        },
+        "driver_summary": {
+          "source": "driver",
+          "raw": {
+            "duration_ms": 355664,
+            "requests_sent": 49980,
+            "requests_completed": 49980,
+            "requests_failed_client_side": 0,
+            "by_status": {
+              "200": 16702,
+              "503": 33278
+            },
+            "by_error_code": {
+              "GW_ROUTING_NO_AVAILABLE_CHANNEL": 8120
+            },
+            "by_protocol": {
+              "gemini": 16863,
+              "open_ai": 16400,
+              "anthropic": 16717
+            },
+            "by_shape": {
+              "stream": 24894,
+              "non_stream": 25086
+            },
+            "by_cross_proto": {
+              "False": 44983,
+              "True": 4997
+            },
+            "latency_ms": {
+              "p50": 3004.669832997024,
+              "p90": 4833.242167005665,
+              "p99": 57726.418999998714,
+              "max": 58496.47629199899
+            },
+            "bytes_received_total": 5209496
+          }
+        }
+      },
+      "verdict": {
+        "hard_invariants_total": 11,
+        "hard_invariants_passed": 11,
+        "hard_invariants_failed": 0,
+        "first_failure_path": null,
+        "all_failures": [],
+        "overall": "PASS"
+      }
+    }
+  },
+  "results": {
+    "invariants": {
+      "process_alive": {
+        "no_panic": {
+          "path": "results.invariants.process_alive.no_panic",
+          "kind": "hard",
+          "passed": true,
+          "source": "docker.compose_logs.gateway",
+          "raw": {
+            "scan_pattern": "panicked at|RUST_BACKTRACE|thread '.*' panicked|assertion failed|\\bfatal\\b",
+            "matched_lines": [],
+            "match_count": 0
+          }
+        },
+        "livez_200_throughout": {
+          "path": "results.invariants.process_alive.livez_200_throughout",
+          "kind": "hard",
+          "passed": true,
+          "source": "driver.livez_probe",
+          "raw": {
+            "probes": 6,
+            "non_200_count": 0
+          }
+        },
+        "readyz_200_throughout": {
+          "path": "results.invariants.process_alive.readyz_200_throughout",
+          "kind": "hard",
+          "passed": true,
+          "source": "driver.readyz_probe",
+          "raw": {
+            "probes": 6,
+            "non_200_count": 0
+          }
+        },
+        "no_container_restart": {
+          "path": "results.invariants.process_alive.no_container_restart",
+          "kind": "hard",
+          "passed": true,
+          "source": "docker.compose_ps.gateway",
+          "raw": {
+            "restart_count_before": 0,
+            "restart_count_after": 0,
+            "restart_count_delta": 0,
+            "state_after": "running"
+          }
+        }
+      },
+      "account_consistency": {
+        "records_equals_upstream_hits": {
+          "path": "results.invariants.account_consistency.records_equals_upstream_hits",
+          "kind": "hard",
+          "passed": true,
+          "source": "fake_web:/soak/window/report + fake_upstream:/admin/hits-total",
+          "raw": {
+            "records_delta": 16702,
+            "dlq_delta": 0,
+            "upstream_routes_hit_sum": 16702,
+            "upstream_refused_hit_sum": 0,
+            "upstream_hits_total": 16702,
+            "diff": 0,
+            "drain_observation_series": [
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702
+            ]
+          },
+          "threshold": "=="
+        },
+        "balance_monotonic_decreasing": {
+          "path": "results.invariants.account_consistency.balance_monotonic_decreasing",
+          "kind": "hard",
+          "passed": true,
+          "source": "fake_web:/soak/window/report.balance_decrement_micros",
+          "raw": {
+            "user_count": 20,
+            "negative_users": []
+          }
+        },
+        "drain_quiescence_reached": {
+          "path": "results.invariants.account_consistency.drain_quiescence_reached",
+          "kind": "hard",
+          "passed": true,
+          "source": "fake_web:/soak/window/report.drain_quiescent",
+          "raw": {
+            "drain_quiescent": true,
+            "drain_observation_series": [
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702,
+              16702
+            ]
+          }
+        }
+      },
+      "resource_release": {
+        "all_in_flight_gauges_zero": {
+          "path": "results.invariants.resource_release.all_in_flight_gauges_zero",
+          "kind": "hard",
+          "passed": true,
+          "source": "gateway:/metrics",
+          "raw": {
+            "scan_pattern": "^gw_*in_flight* series",
+            "non_zero_gauges": {}
+          }
+        },
+        "rss_growth_under_threshold": {
+          "path": "results.invariants.resource_release.rss_growth_under_threshold",
+          "kind": "hard",
+          "passed": true,
+          "source": "docker.stats.gateway",
+          "raw": {
+            "rss_before_bytes": 111190016,
+            "rss_after_bytes": 185085952,
+            "growth_bytes": 73895936,
+            "growth_mib": 70.47,
+            "threshold_mib": 100
+          }
+        }
+      },
+      "error_code_compliance": {
+        "all_codes_in_catalog": {
+          "path": "results.invariants.error_code_compliance.all_codes_in_catalog",
+          "kind": "hard",
+          "passed": true,
+          "source": "driver.by_error_code \u222a fake_web.detailed_log_spectrum vs codes.rs@fa79660",
+          "raw": {
+            "catalog_source": "codes.rs@fa79660",
+            "observed": [
+              "GW_ROUTING_NO_AVAILABLE_CHANNEL"
+            ],
+            "unknown": []
+          }
+        }
+      },
+      "min_completion": {
+        "at_least_half_completed": {
+          "path": "results.invariants.min_completion.at_least_half_completed",
+          "kind": "hard",
+          "passed": true,
+          "source": "driver.requests_completed",
+          "raw": {
+            "requests_completed": 49980,
+            "target_count": 49980,
+            "threshold_count": 24990
+          }
+        }
+      }
+    },
+    "soft_warnings": {
+      "success_rate_2xx_pct": {
+        "path": "results.soft_warnings.success_rate_2xx_pct",
+        "kind": "soft",
+        "status": "warn",
+        "source": "driver.by_status",
+        "raw": {
+          "actual_pct": 33.42,
+          "threshold_pct": 99.9,
+          "completed": 49980,
+          "count_2xx": 16702
+        }
+      },
+      "latency_p99_ms": {
+        "path": "results.soft_warnings.latency_p99_ms",
+        "kind": "soft",
+        "status": "warn",
+        "source": "driver.latency_ms_p99",
+        "raw": {
+          "actual_ms": 57726.418999998714,
+          "threshold_ms": 200
+        }
+      },
+      "completion_rate_pct": {
+        "path": "results.soft_warnings.completion_rate_pct",
+        "kind": "soft",
+        "status": "ok",
+        "source": "driver.requests_completed / target_count",
+        "raw": {
+          "actual_pct": 100.0,
+          "threshold_pct": 90
+        }
+      },
+      "records_to_2xx_ratio": {
+        "path": "results.soft_warnings.records_to_2xx_ratio",
+        "kind": "soft",
+        "status": "ok",
+        "source": "fake_web.usage_records_delta / driver.by_status[2xx]",
+        "raw": {
+          "ratio": 1.0,
+          "threshold_max": 1.1,
+          "records_delta": 16702,
+          "count_2xx": 16702
+        }
+      }
+    }
+  }
+}

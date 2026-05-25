@@ -163,7 +163,7 @@ Max Concurrent: 3 (Wave 1)
 
 ## TODOs
 
-- [ ] 1. Seed multi-key provisioning (8 keys per model group, round_robin)
+- [x] 1. Seed multi-key provisioning (8 keys per model group, round_robin)
 
   **What to do**:
   - In `tests/e2e/client/soak/seed.py`, modify each of the 4 `seed_vendor_key()` calls to provision **8 vendor keys** per model group instead of 1
@@ -245,7 +245,7 @@ Max Concurrent: 3 (Wave 1)
   - Files: `tests/e2e/client/soak/seed.py`
   - Pre-commit: `make e2e-soak-smoke`
 
-- [ ] 2. Parameterize `soft_records_to_2xx_ratio()` threshold from `_SOFT_THRESHOLDS`
+- [x] 2. Parameterize `soft_records_to_2xx_ratio()` threshold from `_SOFT_THRESHOLDS`
 
   **What to do**:
   - In `tests/e2e/client/soak/invariants.py`, add `chaos_mode: str` parameter to `soft_records_to_2xx_ratio()` function signature
@@ -351,7 +351,7 @@ Max Concurrent: 3 (Wave 1)
   - Files: `tests/e2e/client/soak/invariants.py`
   - Pre-commit: `make e2e-soak-smoke`
 
-- [ ] 3. RSS measurement: `/proc/1/status` VmRSS + tri-state invariant
+- [x] 3. RSS measurement: `/proc/1/status` VmRSS + tri-state invariant
 
   **What to do**:
   - In `tests/e2e/client/conftest.py`, replace the `docker stats --no-stream` parsing in `gateway_rss_bytes()` with:
@@ -477,7 +477,7 @@ Max Concurrent: 3 (Wave 1)
   - Files: `tests/e2e/client/conftest.py`, `tests/e2e/client/soak/invariants.py`
   - Pre-commit: `make e2e-soak-smoke`
 
-- [ ] 4. Orchestrator integration: wire chaos_mode + remove `or 0` in test_chaos_soak.py
+- [x] 4. Orchestrator integration: wire chaos_mode + remove `or 0` in test_chaos_soak.py
 
   **What to do**:
   - In `tests/e2e/client/scenarios/test_chaos_soak.py`:
@@ -559,7 +559,7 @@ Max Concurrent: 3 (Wave 1)
   - Files: `tests/e2e/client/scenarios/test_chaos_soak.py`
   - Pre-commit: `make e2e-soak-smoke` 
 
-- [ ] 5. Smoke verification run (post-integration gate)
+- [x] 5. Smoke verification run (post-integration gate)
 
   **What to do**:
   - Run `make e2e-soak-smoke` (100 rps × 10s) and verify exit 0
@@ -627,7 +627,7 @@ Max Concurrent: 3 (Wave 1)
 
   **Commit**: NO (verification only)
 
-- [ ] 6. Docs sync: resolution markers + spec updates
+- [x] 6. Docs sync: resolution markers + spec updates
 
   **What to do**:
   - In `docs/issues/2026-05-25-soak-soft-warnings.md`:
@@ -701,7 +701,7 @@ Max Concurrent: 3 (Wave 1)
 
 > 4 review agents run in PARALLEL. ALL must APPROVE. Present consolidated results to user and get explicit "okay" before completing.
 
-- [ ] F1. **Plan Compliance Audit** — `oracle`
+- [x] F1. **Plan Compliance Audit** — `oracle`
   Read the plan end-to-end. For each "Must Have": verify implementation exists (read file, grep for pattern). For each "Must NOT Have": search codebase for forbidden patterns — reject with file:line if found. Check evidence files exist in .omo/evidence/. Compare deliverables against plan.
   Output: `Must Have [N/N] | Must NOT Have [N/N] | Tasks [N/N] | VERDICT: APPROVE/REJECT`
 
@@ -711,7 +711,7 @@ Max Concurrent: 3 (Wave 1)
   - [ ] All evidence files from Tasks 1-6 exist in `.omo/evidence/`
   - [ ] VERDICT is APPROVE
 
-- [ ] F2. **Code Quality Review** — `unspecified-high`
+- [x] F2. **Code Quality Review** — `unspecified-high`
   Run `python -m py_compile` on all changed .py files. Review for: bare except clauses, unused imports, hardcoded magic numbers without comments, inconsistent parameter naming. Check AI slop: excessive comments, over-abstraction, generic variable names.
   Output: `Compile [PASS/FAIL] | Files [N clean/N issues] | VERDICT`
 
@@ -723,7 +723,7 @@ Max Concurrent: 3 (Wave 1)
   - [ ] Zero bare except clauses in changed files
   - [ ] VERDICT is APPROVE
 
-- [ ] F3. **Real Manual QA** — `unspecified-high`
+- [x] F3. **Real Manual QA** — `unspecified-high`
   Start from clean state (`make e2e-down && make e2e-up`). Run `make e2e-soak-smoke`. Verify all soft warnings in report JSON are `status: "ok"`. Run `make e2e-soak` (full). Capture complete report. Verify 4 previously-failing soft warnings now pass. Save to `.omo/evidence/final-qa/`.
   Output: `Smoke [PASS/FAIL] | Full Soak [PASS/FAIL] | Soft Warnings [N/4 resolved] | VERDICT`
 
@@ -735,7 +735,7 @@ Max Concurrent: 3 (Wave 1)
   - [ ] Complete report saved to `.omo/evidence/final-qa/`
   - [ ] VERDICT is APPROVE
 
-- [ ] F4. **Scope Fidelity Check** — `deep`
+- [x] F4. **Scope Fidelity Check** — `deep`
   For each task: read "What to do", read actual diff (git diff). Verify 1:1 — everything in spec was built, nothing beyond spec was built. Check "Must NOT do" compliance: zero changes under `crates/`, zero docker-compose changes, no SoakConfig changes. Flag unaccounted changes.
   Output: `Tasks [N/N compliant] | Scope [CLEAN/N violations] | VERDICT`
 
