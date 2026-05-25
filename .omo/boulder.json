@@ -1,141 +1,35 @@
 {
   "schema_version": 2,
-  "active_work_id": "v2-legacy-cleanup-902e8a92",
+  "active_work_id": "soak-harness-fixes-6b8efc76",
   "works": {
-    "v2-legacy-cleanup-902e8a92": {
-      "work_id": "v2-legacy-cleanup-902e8a92",
-      "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/v2-legacy-cleanup.md",
-      "plan_name": "v2-legacy-cleanup",
-      "status": "completed",
-      "started_at": "2026-05-25T03:46:46.222Z",
-      "updated_at": "2026-05-25T05:07:17.434Z",
+    "soak-harness-fixes-6b8efc76": {
+      "work_id": "soak-harness-fixes-6b8efc76",
+      "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/soak-harness-fixes.md",
+      "plan_name": "soak-harness-fixes",
+      "status": "active",
+      "started_at": "2026-05-25T09:47:30.149Z",
+      "updated_at": "2026-05-25T09:47:30.149Z",
       "session_ids": [
-        "ses_1a2f600acffeKkMSYXpjOipDTH"
+        "ses_1a1b5f1b0ffeCdF1Wnbx8VaLia"
       ],
       "session_origins": {
-        "ses_1a2f600acffeKkMSYXpjOipDTH": "direct"
+        "ses_1a1b5f1b0ffeCdF1Wnbx8VaLia": "direct"
       },
       "agent": "atlas",
-      "task_sessions": {
-        "todo:1": {
-          "task_key": "todo:1",
-          "task_label": "1",
-          "task_title": "Remove dead constant `GW_REQUEST_NONSTREAM_NOT_SUPPORTED`",
-          "session_id": "ses_1a2be33eaffeYdmsXkq1LOAeKX",
-          "agent": "Sisyphus-Junior",
-          "category": "quick",
-          "updated_at": "2026-05-25T04:04:26.423Z",
-          "started_at": "2026-05-25T03:52:25.331Z",
-          "status": "completed",
-          "ended_at": "2026-05-25T04:04:26.423Z",
-          "elapsed_ms": 721092
-        },
-        "todo:6": {
-          "task_key": "todo:6",
-          "task_label": "6",
-          "task_title": "P0: Replace 13 codec `panic!(\"expected X\")` with `Err(ErrorIR)` + regression tests",
-          "session_id": "ses_1a2affddeffek8f92GJgMxBFyV",
-          "agent": "Sisyphus-Junior",
-          "started_at": "2026-05-25T04:31:49.340Z",
-          "status": "completed",
-          "updated_at": "2026-05-25T04:42:21.078Z",
-          "ended_at": "2026-05-25T04:42:21.078Z",
-          "elapsed_ms": 631738
-        },
-        "todo:12": {
-          "task_key": "todo:12",
-          "task_label": "12",
-          "task_title": "Doc sync audit: verify all code commits included their doc updates, fix any gaps",
-          "session_id": "ses_1a28d3f4dffeV77aql4S1UYk6U",
-          "agent": "Sisyphus-Junior",
-          "category": "writing",
-          "updated_at": "2026-05-25T04:53:29.658Z",
-          "started_at": "2026-05-25T04:52:49.492Z",
-          "status": "completed",
-          "ended_at": "2026-05-25T04:53:29.658Z",
-          "elapsed_ms": 40166
-        },
-        "final-wave:f1": {
-          "task_key": "final-wave:f1",
-          "task_label": "F1",
-          "task_title": "**Plan Compliance Audit** — `oracle`",
-          "session_id": "ses_1a27f271dffewhCk63GjhWL1NC",
-          "agent": "oracle",
-          "updated_at": "2026-05-25T05:06:16.044Z",
-          "started_at": "2026-05-25T05:01:37.503Z",
-          "status": "completed",
-          "ended_at": "2026-05-25T05:06:16.044Z",
-          "elapsed_ms": 278541
-        }
-      },
-      "ended_at": "2026-05-25T05:07:17.434Z",
-      "elapsed_ms": 4831212
+      "task_sessions": {}
     }
   },
-  "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/v2-legacy-cleanup.md",
-  "started_at": "2026-05-25T03:46:46.222Z",
-  "status": "completed",
-  "updated_at": "2026-05-25T05:07:17.434Z",
+  "active_plan": "/Users/whereslow/Desktop/work/ailinkmax-gateway/.omo/plans/soak-harness-fixes.md",
+  "started_at": "2026-05-25T09:47:30.149Z",
+  "status": "active",
+  "updated_at": "2026-05-25T09:47:30.149Z",
   "session_ids": [
-    "ses_1a2f600acffeKkMSYXpjOipDTH"
+    "ses_1a1b5f1b0ffeCdF1Wnbx8VaLia"
   ],
   "session_origins": {
-    "ses_1a2f600acffeKkMSYXpjOipDTH": "direct"
+    "ses_1a1b5f1b0ffeCdF1Wnbx8VaLia": "direct"
   },
-  "plan_name": "v2-legacy-cleanup",
-  "task_sessions": {
-    "todo:1": {
-      "task_key": "todo:1",
-      "task_label": "1",
-      "task_title": "Remove dead constant `GW_REQUEST_NONSTREAM_NOT_SUPPORTED`",
-      "session_id": "ses_1a2be33eaffeYdmsXkq1LOAeKX",
-      "agent": "Sisyphus-Junior",
-      "category": "quick",
-      "updated_at": "2026-05-25T04:04:26.423Z",
-      "started_at": "2026-05-25T03:52:25.331Z",
-      "status": "completed",
-      "ended_at": "2026-05-25T04:04:26.423Z",
-      "elapsed_ms": 721092
-    },
-    "todo:6": {
-      "task_key": "todo:6",
-      "task_label": "6",
-      "task_title": "P0: Replace 13 codec `panic!(\"expected X\")` with `Err(ErrorIR)` + regression tests",
-      "session_id": "ses_1a2affddeffek8f92GJgMxBFyV",
-      "agent": "Sisyphus-Junior",
-      "started_at": "2026-05-25T04:31:49.340Z",
-      "status": "completed",
-      "updated_at": "2026-05-25T04:42:21.078Z",
-      "ended_at": "2026-05-25T04:42:21.078Z",
-      "elapsed_ms": 631738
-    },
-    "todo:12": {
-      "task_key": "todo:12",
-      "task_label": "12",
-      "task_title": "Doc sync audit: verify all code commits included their doc updates, fix any gaps",
-      "session_id": "ses_1a28d3f4dffeV77aql4S1UYk6U",
-      "agent": "Sisyphus-Junior",
-      "category": "writing",
-      "updated_at": "2026-05-25T04:53:29.658Z",
-      "started_at": "2026-05-25T04:52:49.492Z",
-      "status": "completed",
-      "ended_at": "2026-05-25T04:53:29.658Z",
-      "elapsed_ms": 40166
-    },
-    "final-wave:f1": {
-      "task_key": "final-wave:f1",
-      "task_label": "F1",
-      "task_title": "**Plan Compliance Audit** — `oracle`",
-      "session_id": "ses_1a27f271dffewhCk63GjhWL1NC",
-      "agent": "oracle",
-      "updated_at": "2026-05-25T05:06:16.044Z",
-      "started_at": "2026-05-25T05:01:37.503Z",
-      "status": "completed",
-      "ended_at": "2026-05-25T05:06:16.044Z",
-      "elapsed_ms": 278541
-    }
-  },
-  "agent": "atlas",
-  "ended_at": "2026-05-25T05:07:17.434Z",
-  "elapsed_ms": 4831212
+  "plan_name": "soak-harness-fixes",
+  "task_sessions": {},
+  "agent": "atlas"
 }
