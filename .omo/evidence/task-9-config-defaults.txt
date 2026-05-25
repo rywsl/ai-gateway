@@ -1,0 +1,15 @@
+Task 9: HardCapCfg config wireup - Mon May 25 12:32:46 CST 2026
+
+Files modified:
+- crates/gw-gateway/src/config.rs: Added AuthCfg struct with serde defaults (max_input_tokens=1_000_000, max_cost_micro=5_000_000_000), added to Config struct, validation in validate()
+- config/default.toml: Replaced TODO(phase4-wireup) with [auth] section
+- crates/gw-gateway/src/lib.rs: Added hard_cap_cfg to Wired struct, populated from cfg.auth in bootstrap(), threaded through LlmGateway::new()
+- crates/gw-proxy/src/gateway.rs: Added hard_cap_cfg field to LlmGateway struct + constructor, passed to filters::request::run
+- crates/gw-proxy/src/filters/request.rs: Added hard_cap_cfg param, replaced hardcoded HardCapCfg{} with config-driven value
+
+Verification:
+- cargo check -p gw-gateway -p gw-proxy: OK
+- cargo test -p gw-gateway -p gw-proxy -p gw-auth: All tests pass
+- cargo clippy -p gw-gateway -p gw-proxy --all-targets -- -D warnings: Clean
+- No TODO(phase4-wireup) comments remaining
+- Pre-existing gw-codec lifetime error in gemini/codec.rs:645 is from other in-flight changes, not this task

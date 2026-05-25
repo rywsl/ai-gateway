@@ -1,0 +1,16 @@
+Task 6 panics removed evidence
+
+$ grep -c 'panic!("expected' crates/gw-codec/src/
+0
+
+$ grep 'fn test_.*_ir_invariant' crates/gw-codec/src/ --include='*.rs'
+13 matches across openai/codec.rs, openai/via.rs, openai/responses/codec.rs, anthropic/codec.rs, gemini/codec.rs.
+
+$ cargo test -p gw-codec
+PASS: 50 unit tests + all gw-codec integration/doc tests passed.
+
+$ cargo clippy -p gw-codec -- -D warnings
+PASS
+
+$ lsp_diagnostics crates/gw-codec/src
+UNAVAILABLE: rust-analyzer is not installed in pinned 1.86.0 toolchain.

@@ -1,0 +1,29 @@
+Task: Remove dead WireAnyResponse and WireAnyStreamChunk enums
+
+Changes:
+1. crates/gw-codec/src/wire/any.rs
+   - Removed WireAnyResponse enum + impl (lines 35-53)
+   - Removed WireAnyStreamChunk enum + impl (lines 55-72)
+   - Removed `use std::marker::PhantomData`
+   - Updated module doc to remove Phase 1d / Phase 2 references
+   - Preserved WireAnyRequest enum + impl
+
+2. crates/gw-codec/src/wire/mod.rs
+   - Removed WireAnyResponse and WireAnyStreamChunk from re-exports
+   - Updated module doc
+
+3. crates/gw-codec/src/lib.rs
+   - Removed WireAnyResponse and WireAnyStreamChunk from pub use
+
+4. crates/gw-adapter/src/trait_def.rs
+   - Removed WireAnyResponse from import
+   - Removed `_wire: &mut WireAnyResponse<'_>` parameter from patch_response
+
+5. crates/gw-codec/tests/wire_any.rs
+   - Removed response_and_stream_chunk_surface_typechecks test
+   - Removed WireAnyResponse and WireAnyStreamChunk imports
+
+Verification:
+- grep '_Phantom' crates/gw-codec/src/wire/ → 0 matches
+- grep 'WireAnyResponse|WireAnyStreamChunk' crates/ → 0 matches
+- cargo check --workspace --all-targets → exit 0

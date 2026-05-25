@@ -1,0 +1,12 @@
+Task: Remove dead constant GW_REQUEST_NONSTREAM_NOT_SUPPORTED
+
+Changes:
+- Deleted lines 18-21 from crates/gw-core/src/error/codes.rs:
+  - Doc comment (3 lines) about "v1.0 only — parse_response not yet implemented"
+  - pub const GW_REQUEST_NONSTREAM_NOT_SUPPORTED definition
+
+Verification:
+1. grep -r 'GW_REQUEST_NONSTREAM_NOT_SUPPORTED' crates/ → 0 matches
+2. cargo check --workspace → exit 0 (Finished dev profile)
+
+Note: References remain in docs/ only (design specs, plans, architecture) — doc sync handled by Task 12.

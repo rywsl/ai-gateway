@@ -1,0 +1,50 @@
+Task 12: Doc Sync Audit
+========================
+Date: 2026-05-25
+
+Summary of changes:
+
+1. docs/architecture.md - Section 4.1 (Configuration):
+   Added [auth] table row documenting hard_cap_max_input_tokens (u32, default 1M)
+   and hard_cap_max_cost_micro (u64, default 5B). These are configurable via
+   config/default.toml [auth] section, no longer hardcoded.
+
+2. docs/architecture.md - Section 5.2 (Redis namespaces):
+   Added entity:ipblock:{id} row. Redis hash, 300s TTL, Moka L1 cache.
+   Preloaded at boot (100-row pages, fail-closed).
+
+3. docs/architecture.md - Section 8 (Deliberate behaviours):
+   Added bail! macro entry explaining: wraps emit_and_bail + unreachable!(),
+   centralizes the pattern across 26+ call sites, unreachable!() is never
+   reached because emit_and_bail always returns Err which ? propagates.
+
+4. docs/workflow.md - Section 6 (Observability):
+   Updated metrics count from "19 metric families" to "60 metric families"
+   with representative examples including gw_daily_quota_increment_error_total,
+   gw_billing_emit_total, gw_forced_params_applied_total, gw_deduct_gc_removed_total.
+
+5. docs/architecture.md - Section 10.5 (What this harness found):
+   Removed stale "HardCapCfg.max_input_tokens hardcoded" bullet since
+   HardCapCfg is now loaded from [auth] config (verified in config/default.toml
+   lines 86-88 and crates/gw-gateway/src/lib.rs line 658).
+
+6. docs/architecture.md - Section 6 (Bootstrap):
+   Added "ip_blocks preload (100-row pages, fail-closed)" to the bootstrap
+   sequence diagram. Verified in crates/gw-gateway/src/lib.rs lines 280-302.
+
+7. docs/workflow.md - Section 2.2 step 15:
+   Updated HardCapCfg description from hardcoded values to "loaded from [auth]
+   config" with defaults noted.
+
+Items verified as already absent (no action needed):
+- _Phantom scaffolding: not mentioned in architecture.md
+- Placeholder tests: not mentioned in architecture.md  
+- IpBlockEntry preload follow-up: not mentioned in architecture.md
+- GW_REQUEST_NONSTREAM_NOT_SUPPORTED known gap: properly marked as closed
+  in the e2e harness findings (line 367-368); no gap item exists for it
+  in Section 9.
+
+Verification:
+- cargo test --workspace: exit 0 (all tests pass)
+- grep for stale terms (HardCapCfg hardcoded, IpBlockEntry follow-up,
+  _Phantom, placeholder test) in docs/architecture.md: zero matches

@@ -1,0 +1,14 @@
+T13 Final Invariant Verification - Evidence
+============================================
+Date: 2026-05-25
+
+1. cargo build --release -p gw-gateway → exit 0 (3m 32s)
+2. cargo test --workspace → 150 test suites, all OK, 0 failures
+3. cargo clippy --workspace --all-targets -- -D warnings → exit 0
+4. cargo fmt --all -- --check → exit 0
+5. bash scripts/check-invariants.sh → "all active invariants hold"
+6. grep unimplemented!/todo!() in crates/ (excl tests/benches) → 0 matches
+7. grep TODO(v2)/for v1/wave-X in crates/ (excl tests/benches) → 2 matches (descriptive comments, not markers)
+8. make e2e-soak-smoke → SKIPPED (Docker not available in session)
+
+VERDICT: PASS (7/7 available checks green, 1 skipped due to infra)

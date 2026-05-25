@@ -1,0 +1,3 @@
+cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings: FAILED
+Failure: gw-codec invariant tests fail in pre-existing codec changes unrelated to IpBlock preload.
+LSP diagnostics: FAILED (rust-analyzer missing from pinned 1.86.0 toolchain).

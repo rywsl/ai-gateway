@@ -1,0 +1,32 @@
+Task 10: Register ~14 metrics into centralized metrics catalog + wire daily quota counter
+Date: 2026-05-25
+
+Files modified:
+  - crates/gw-gateway/src/metrics_catalog.rs  (14 MetricSpec entries added)
+  - crates/gw-gateway/tests/metrics_catalog.rs (runtime_operational_metrics_registered test added)
+  - crates/gw-proxy/src/filters/logging.rs     (emission wired + TODO(metrics) removed)
+
+Metrics registered:
+  1. gateway_started_total (Counter) - observability.rs:52
+  2. gateway_requests_total (Counter) - logging.rs:99
+  3. gateway_tpm_consumed_total (Counter) - logging.rs:328
+  4. gateway_freeze_leak_recovered_total (Counter) - freeze.rs:135
+  5. gateway_usage_records_lost_total (Counter) - flusher.rs:90,215,223
+  6. gateway_usage_channel_full_total (Counter) - flusher.rs:108
+  7. gateway_usage_serialize_errors_total (Counter) - flusher.rs:174
+  8. gateway_usage_queue_errors_total (Counter) - flusher.rs:199
+  9. gateway_usage_flush_errors_total (Counter) - flusher.rs:209
+  10. gw_deduct_gc_removed_total (Counter) - deduct_gc.rs:56
+  11. gw_forced_params_applied_total (Counter) - upstream.rs:561
+  12. gw_classifier_outcome_total (Counter) - listeners/metrics.rs:12
+  13. gw_error_handler_ledger_total (Counter) - listeners/ledger.rs:23
+  14. gw_daily_quota_increment_error_total (Counter) - logging.rs:315 (NEW emission)
+
+Verification:
+  cargo test -p gw-gateway --test metrics_catalog -> 14 passed, 0 failed
+  cargo clippy -p gw-gateway -- -D warnings -> clean (0 warnings, 0 errors)
+
+Note: Pre-existing compile errors in gw-proxy (response.rs:240,472 api_shape method,
+gateway.rs:294 arg count) and gw-codec (via.rs:289 non-exhaustive match) are from
+other in-progress work in the dirty tree, not from this task. The gw-codec match
+exhaustiveness was fixed with an unreachable!() arm to unblock compilation.

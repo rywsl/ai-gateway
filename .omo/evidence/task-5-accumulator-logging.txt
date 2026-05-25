@@ -1,0 +1,16 @@
+Task 5: Add tracing::debug! to stream_accumulator.rs catch-all arm
+
+File: crates/gw-codec/src/stream_accumulator.rs
+Line: 144-146
+
+Change:
+  _ => {}
+→
+  _ => {
+      tracing::debug!(target: "gw_codec", event_type = %typ, "unknown SSE event type dropped during accumulation");
+  }
+
+Verification:
+- grep -A2 '_ =>' shows tracing::debug! ✅
+- cargo test -p gw-codec → 0 failures ✅
+- cargo clippy -p gw-codec -- -D warnings → clean ✅

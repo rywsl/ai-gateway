@@ -1,0 +1,34 @@
+Task 4: Stale "v2 follow-up", "deferred", "remains deferred" comment cleanup
+=============================================================================
+
+All changes are comment-only — zero logic modifications.
+
+Files modified:
+1. crates/gw-proxy/src/filters/request.rs:909
+   - "support is a v2 follow-up" → "support requires Go billing coordination; tracked separately"
+
+2. crates/gw-proxy/src/gateway.rs:641
+   - "v1.5 scope: this hook handles **connect-only** retry. Response-side (5xx / 429) retry remains deferred to the routing-r-e `FailoverExecutor v2`."
+   → "Connect-only retry hook. Response-side (5xx / 429) retry is handled by `FailoverExecutor` in `response_filter` (see lines 515–556)."
+
+3. crates/gw-proxy/src/filters/early.rs:6
+   - "W3C parsing can be added in a follow-up" → "W3C trace-context parsing is not yet implemented"
+
+4. crates/gw-proxy/src/filters/request.rs:699
+   - "fast-path follow-up that catches users" → "fast-path short-circuit that catches users"
+
+5. crates/gw-gateway/src/lib.rs:73
+   - "// --- Wave 1+ placeholders (known-gaps closure) ---" → "// --- Fields wired during bootstrap ---"
+
+6. crates/gw-codec/src/openai/responses/codec.rs:8-10
+   - "The request side is deferred to T6 (S-codec proxy hookup): `parse_request` returns `bad_request_err` until then; `render_request` falls back to the Chat wire form so callers can still serialise an IR built elsewhere."
+   → "request side: `parse_request` returns `bad_request_err` (Responses wire parsing requires a zero-copy `OpenAiResponsesRequest` variant); `render_request` falls back to the Chat wire form so callers can still serialise an IR."
+   - Also updated error string on line 47: "(deferred to T6)" suffix removed.
+
+7. crates/gw-codec/src/openai/responses/conversion.rs:6
+   - "left to S2 / S4 follow-ups" → "left unimplemented"
+
+Verification:
+- grep for "v2 follow-up", "remains deferred", "deferred to v2", "deferred to T6", "Wave 1+ placeholder" → 0 matches
+- scripts/check-invariants.sh → all active invariants hold (including no_v1_markers_in_prod)
+- cargo build --workspace → Finished successfully

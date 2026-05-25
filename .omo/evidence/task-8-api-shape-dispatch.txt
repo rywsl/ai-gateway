@@ -1,0 +1,25 @@
+Task 8: Change extractor_for_kind to dispatch on ApiShape
+
+## Changes
+
+### 1. crates/gw-codec/src/any.rs
+- Added `api_shape()` method to `AnyCodec` returning `ApiShape` (4-way exhaustive mapping)
+- Added `use gw_core::protocol::{ApiShape, ProtocolKind}` (ApiShape import added)
+
+### 2. crates/gw-proxy/src/filters/response.rs
+- Changed import: `ProtocolKind` → `{ApiShape, ProtocolKind}` (ProtocolKind still used for codec_for/metrics)
+- Renamed `extractor_for_kind(kind: ProtocolKind)` → `extractor_for_shape(shape: ApiShape)`
+- Replaced 3-arm ProtocolKind match with 4-arm exhaustive ApiShape match:
+  - `ApiShape::OpenAiChat` → `OpenAiUsageExtractor::chat()`
+  - `ApiShape::OpenAiResponses` → `OpenAiUsageExtractor::responses()`
+  - `ApiShape::AnthropicMessages` → `AnthropicUsageExtractor`
+  - `ApiShape::GeminiGenerate` → `GeminiUsageExtractor`
+- Removed stale "deferred to a later wave" comment
+- Updated streaming call site: `codec.api_shape()` → `extractor_for_shape(upstream_shape)`
+- Updated non-stream call site: `codec.api_shape()` → `extractor_for_shape(codec_shape)`
+- No wildcard `_ =>` arm — match is exhaustive
+
+## Verification
+- `cargo check --lib -p gw-codec -p gw-proxy` → exit 0
+- `cargo clippy --lib -p gw-codec -p gw-proxy -- -D warnings` → exit 0, no warnings
+- Pre-existing errors in gateway.rs/request.rs and gw-codec tests are unrelated

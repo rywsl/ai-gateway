@@ -1,0 +1,14 @@
+Placeholder test files removed — covered by Python E2E tests
+
+Deleted files:
+  - crates/gw-gateway/tests/e2e_cross_protocol_response.rs  (S-codec T9 stub, covered by test_non_stream.py)
+  - crates/gw-gateway/tests/e2e_full_flow.rs                 (full e2e stub, covered by 30+ Python E2E scenarios)
+  - crates/gw-proxy/tests/end_to_end_openai.rs               (broken stub, build_test_gateway() always returns None, covered by test_happy_streaming.py)
+  - crates/gw-proxy/tests/connect_retry.rs                   (empty placeholder, covered by test_routing_retry.py)
+
+Kept:
+  - crates/gw-gateway/tests/e2e_tunnel.rs  (real test bodies, no Python equivalent)
+
+Cargo.toml: No [[test]] entries existed for any deleted file — Cargo auto-discovers tests/*.rs
+
+Verification: cargo test -p gw-gateway -p gw-proxy → exit 0, all tests pass

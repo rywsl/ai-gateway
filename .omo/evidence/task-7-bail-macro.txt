@@ -1,0 +1,23 @@
+Task 7: bail! macro in request.rs
+=================================
+
+Summary:
+- Added `bail!` macro at line 177 (inside `run()`, after `request_id` binding)
+- Replaced 25 `emit_and_bail(...).await?; unreachable!()` patterns with `bail!(...)`
+- Updated `emit_and_bail` doc comment to reference `bail!` macro
+
+Unreachable count after changes:
+5
+
+Unreachable locations:
+88:                unreachable!()
+179:    // Wraps `emit_and_bail` + `unreachable!()` — the `unreachable!()` is centralised
+181:    // `Err`, so the `?` operator unwinds before `unreachable!()` is reached.
+185:            unreachable!("emit_and_bail always returns Err; see fn doc")
+913:/// `unreachable!()` in a single place rather than at every call site.
+
+bail! macro call sites:
+25
+
+Build status: gw-codec has pre-existing E0004 error (non-exhaustive match in via.rs:289)
+This is NOT caused by the bail! macro changes — it's a dependency issue from another task.

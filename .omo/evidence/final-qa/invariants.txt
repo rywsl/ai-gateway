@@ -1,0 +1,47 @@
+[crate_layering] supporting-layer must not depend on business/execution crates
+  [32mok[0m   no forbidden supporting/execution edges
+[crate_layering] gw-capability is business; must not depend on routing/proxy/adapter/tunnel-client/gateway
+  [32mok[0m   gw-capability layering ok
+[crate_layering] gw-tunnel-client business; must not depend on execution layer
+  [32mok[0m   gw-tunnel-client layering ok
+[no_billing_crate] gw-billing must not be a workspace member or dependency
+  [32mok[0m   no gw-billing crate reference
+[no_proxy_worker_dep] gw-proxy must not depend on gw-task-runtime
+  [32mok[0m   gw-proxy does not depend on gw-task-runtime
+[no_worker_addr_config] gateway must not hardcode a worker host/port
+  [32mok[0m   gateway carries no worker address
+[no_cost_micro] no cost_micro field in workspace
+  [32mok[0m   no cost_micro field
+[no_billing_records_stream] billing:records stream name must not appear
+  [32mok[0m   no billing:records reference
+[no_cost_in_dlq] cost_micro must not appear in gw-ledger flusher source
+  [32mok[0m   no cost_micro in flusher.rs
+[no_global_hmac_force] workspace-global HMAC force flag must not appear
+  [32mok[0m   no workspace-global HMAC force flag
+[no_freezeguard_settle] FreezeGuard::settle must be absent
+  [32mok[0m   no FreezeGuard::settle reference
+[no_markup_product_scalar] markup_product scalar must be absent
+  [32mok[0m   no markup_product reference
+[no_legacy_breaker] BreakerState / BreakerStore must not appear
+  [32mok[0m   no breaker types remain
+[no_legacy_retry] gw-routing/src/retry.rs must not exist
+  [32mok[0m   no retry.rs
+[no_patch_body] patch_body / BodyPatch must not appear
+  [32mok[0m   no patch_body / BodyPatch references
+[e2e_fake_no_gw_codec_dep] e2e fake crates must not depend on gateway codec/auth/store/ledger/proxy/gateway
+  [32mok[0m   e2e fake crates carry no gateway codec/auth/store/ledger/proxy/gateway dep
+[no_dead_tunnel_use_alias] gw-tunnel-client re-export must align with TunnelStack use
+  [32mok[0m   tunnel re-export / TunnelStack alignment ok
+[tunnel_require_means_hard_fail] require_tunnel implies GW_TUNNEL_NO_NODE
+  [32mok[0m   require_tunnel always paired with GW_TUNNEL_NO_NODE
+[no_double_rustls] Cargo.lock must hold exactly one rustls version
+  [32mok[0m   single rustls version
+[no_v1_markers_in_prod] no v1 placeholder markers in crates/ (mode: error)
+  [32mok[0m   no v1 placeholder markers in crates/
+[no_detailed_redaction] redaction helpers must not appear in gw-ledger/gw-proxy
+  [32mok[0m   no detailed-archive redaction helpers in gw-ledger/gw-proxy
+[no_detailed_truncation] truncation constants must not appear in gw-ledger/gw-proxy
+  [32mok[0m   no detailed-archive truncation constants in gw-ledger/gw-proxy
+[no_legacy_usage_source] legacy usage_source field must not appear in gw-ledger/gw-proxy
+  [32mok[0m   no legacy usage_source field
+all active invariants hold
