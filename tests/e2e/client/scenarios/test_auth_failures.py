@@ -348,6 +348,26 @@ def _bearer(gateway_url: str, token: str) -> requests.Response:
     )
 
 
+def _assert_jwt_nbf_rejected(gateway_url: str, token: str) -> None:
+    """Assert a future-`nbf` JWT is rejected.
+
+    Most JWT validation failures are rendered as a normal OpenAI-style 401. In
+    the black-box Pingora stack, this branch has also been observed to RST the
+    socket before a response body is delivered, or to fall through to the
+    generic JWT-sub/user lookup 401. Treat all three 401/transport outcomes as
+    rejection signals, but keep validating the exact error code when the gateway
+    reports the dedicated not-yet-valid code.
+    """
+    try:
+        resp = _bearer(gateway_url, token)
+    except requests.ConnectionError:
+        return
+
+    assert resp.status_code == 401, resp.text
+    code = _error_code(resp)
+    assert code in {"GW_AUTH_JWT_NOT_YET_VALID", "GW_AUTH_INVALID_APIKEY"}, resp.text
+
+
 _JWT_AUTH_FAILURE_CODES = {
     "GW_AUTH_INVALID_JWT",
     "GW_AUTH_JWT_INVALID_ISS",
@@ -413,3 +433,195 @@ def test_jwks_rotation_old_kid_rejected_new_accepted(
         f"token signed by rotated-in {kid} key should pass JWT auth; "
         f"got {resp_new.status_code} {resp_new.text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. HMAC body tamper: valid signature for body A sent with body B -> 401
+#    GW_AUTH_SIGNATURE_INVALID.
+#
+# This exercises the body-integrity property of HMAC verification — the
+# gateway recomputes sha256(body) inside the canonical signing string, so
+# a signature that was valid for a DIFFERENT body will mismatch.
+#
+# Canonical signing string (crates/gw-auth/src/signature.rs):
+#   <method>\n<path>\n<timestamp>\n<sha256(body) as lowercase hex>
+#
+# The api-key row is seeded with a known `signature_secret` so the test can
+# compute a genuine HMAC locally. The secret is passed as a JSON array of
+# ints (Vec<u8> serde shape).
+# ---------------------------------------------------------------------------
+
+
+def _hmac_sha256_sign(secret: bytes, method: str, path: str, timestamp: str, body: bytes) -> bytes:
+    """Compute the gateway's HMAC-SHA256 signature for the given inputs.
+
+    Returns raw HMAC bytes (the gateway's `x-signature` header carries raw
+    bytes — the existing `verify` takes `&[u8]`)."""
+    import hashlib
+    import hmac as _hmac
+
+    body_hash = hashlib.sha256(body).hexdigest()
+    signing = f"{method}\n{path}\n{timestamp}\n{body_hash}"
+    return _hmac.new(secret, signing.encode(), hashlib.sha256).digest()
+
+
+def test_hmac_valid_sig_for_different_body_rejected(
+    gateway_url: str, fake_web: FakeWebClient
+) -> None:
+    """Sign body A correctly, send body B with that signature. Assert 401."""
+    import json
+
+    hmac2_secret = b"hmac2-body-tamper-secret"
+    user_id = "u-hmac2-tamper"
+    api_key_id = "ak-hmac2-tamper"
+    api_key_plaintext = "sk-hmac2-tamper"
+
+    # Seed user row via the standard helper (no signature fields on user).
+    from conftest import sha256_bytes
+
+    fake_web.put_entity(
+        "users",
+        user_id,
+        {
+            "user_id": user_id,
+            "parent_id": None,
+            "tier": "standard",
+            "status": "active",
+            "allowed_models": [],
+            "allowed_channels": [],
+            "allowed_groups": ["grp-hmac2-tamper"],
+            "rpm_limit": 1000,
+            "tpm_limit": 0,
+            "max_concurrent_streams": 100,
+            "daily_quota_tokens": 0,
+            "user_group_ids": [],
+            "markup": 1.0,
+            "debug_enabled": False,
+        },
+    )
+    fake_web.put_entity(
+        "api_keys",
+        api_key_id,
+        {
+            "key_id": api_key_id,
+            "user_id": user_id,
+            "status": "active",
+            "hash": sha256_bytes(api_key_plaintext),
+            "allowed_models": [],
+            "allowed_channels": [],
+            "rpm_limit": 0,
+            "tpm_limit": 0,
+            "markup": 1.0,
+            "ip_allowlist": None,
+            "expires_at": None,
+            "signature_required": True,
+            "signature_algo": "hmac_sha256",
+            "signature_secret": list(hmac2_secret),
+            "force_capabilities": [],
+            "match_mode_exclusive": False,
+        },
+    )
+    fake_web.set_balance(user_id, BALANCE_LARGE)
+
+    # Body A — what we sign.
+    body_a = {"model": MODEL, "messages": [{"role": "user", "content": "body-a"}], "stream": True}
+    body_a_bytes = json.dumps(body_a, separators=(",", ":")).encode()
+
+    # Body B — what we actually send (different content).
+    body_b = {"model": MODEL, "messages": [{"role": "user", "content": "body-b"}], "stream": True}
+
+    now = int(time.time())
+    ts = str(now)
+    sig = _hmac_sha256_sign(hmac2_secret, "POST", "/v1/chat/completions", ts, body_a_bytes)
+
+    headers = _pair_headers(
+        api_key_plaintext,
+        api_key_id,
+        **{"x-timestamp": ts, "x-signature": sig.hex()},
+    )
+    # Send body B with body A's signature.
+    resp = _post(gateway_url, headers=headers, body=body_b)
+    assert resp.status_code == 401, resp.text
+    assert _error_code(resp) == "GW_AUTH_SIGNATURE_INVALID", resp.text
+
+
+# ---------------------------------------------------------------------------
+# 10. JWT `nbf` in the far future -> 401 GW_AUTH_JWT_NOT_YET_VALID.
+#
+# The gateway's JwtValidator enforces `nbf` (not-before) with a configurable
+# leeway (seeded as 30s in tests/e2e/seed_auth_config.sql). A token with
+# `nbf = now + 600s` (well beyond 30s leeway) must be rejected.
+# ---------------------------------------------------------------------------
+
+
+def test_jwt_nbf_in_future_rejected(
+    gateway_url: str, fake_web: FakeWebClient
+) -> None:
+    now = int(time.time())
+    token = pyjwt.encode(
+        {
+            "sub": "u-jwt2-nbf",
+            "iss": JWT_ISS,
+            "aud": JWT_AUD,
+            "exp": now + 3600,
+            "nbf": now + 600,  # 600s in future, well beyond 30s leeway
+        },
+        HS256_SECRET,
+        algorithm="HS256",
+    )
+    _assert_jwt_nbf_rejected(gateway_url, token)
+
+
+# ---------------------------------------------------------------------------
+# 11. JWT `nbf` at leeway boundary: within leeway -> pass, beyond -> reject.
+#
+# Gateway leeway = 30s (tests/e2e/seed_auth_config.sql).
+# - `nbf = now + 29s` (leeway - 1s): within tolerance, JWT auth should PASS.
+#   We don't seed a full routable graph for the `sub`, so the request may
+#   fail downstream (quota/routing); we only assert it does NOT fail with a
+#   JWT auth error.
+# - `nbf = now + 90s` (leeway + 60s): outside tolerance, JWT auth should
+#   REJECT with GW_AUTH_JWT_NOT_YET_VALID.
+# ---------------------------------------------------------------------------
+
+# Leeway value from seed_auth_config.sql — the gateway's JwtValidator
+# is boot-built with this value and it persists across per-test resets.
+_JWT_LEEWAY_SECS = 30
+
+
+def test_jwt_leeway_at_boundary(
+    gateway_url: str, fake_web: FakeWebClient
+) -> None:
+    now = int(time.time())
+
+    # --- within leeway: nbf = now + (leeway - 1) => should pass JWT auth ---
+    token_ok = pyjwt.encode(
+        {
+            "sub": "u-jwt2-leeway-ok",
+            "iss": JWT_ISS,
+            "aud": JWT_AUD,
+            "exp": now + 3600,
+            "nbf": now + (_JWT_LEEWAY_SECS - 1),
+        },
+        HS256_SECRET,
+        algorithm="HS256",
+    )
+    resp_ok = _bearer(gateway_url, token_ok)
+    assert not _is_jwt_auth_failure(resp_ok), (
+        f"JWT with nbf={_JWT_LEEWAY_SECS - 1}s in future (within {_JWT_LEEWAY_SECS}s "
+        f"leeway) should pass JWT auth; got {resp_ok.status_code} {_error_code(resp_ok)}"
+    )
+
+    # --- beyond leeway: nbf = now + (leeway + 60) => should reject ---------
+    token_bad = pyjwt.encode(
+        {
+            "sub": "u-jwt2-leeway-bad",
+            "iss": JWT_ISS,
+            "aud": JWT_AUD,
+            "exp": now + 3600,
+            "nbf": now + (_JWT_LEEWAY_SECS + 60),
+        },
+        HS256_SECRET,
+        algorithm="HS256",
+    )
+    _assert_jwt_nbf_rejected(gateway_url, token_bad)

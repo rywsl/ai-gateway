@@ -45,10 +45,12 @@ from __future__ import annotations
 
 import base64
 import gzip
+import json
 import re
 
 import httpx
 import openai
+import pytest
 import requests
 
 from conftest import (
@@ -57,7 +59,12 @@ from conftest import (
     PROTO_OPENAI,
     FakeUpstreamClient,
     FakeWebClient,
+    label_delta,
+    make_anthropic_client,
+    make_gemini_client,
     make_openai_client,
+    metrics_snapshot,
+    pair_headers,
     seed_model_group,
     seed_pricing,
     seed_user_apikey,
@@ -703,4 +710,362 @@ def test_gzip_response_decoded_transparently(
     assert "".join(pieces) == "hi", (
         f"openai SDK should auto-decompress upstream gzip and yield 'hi'; "
         f"got pieces={pieces!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. Non-stream cross-protocol matrix — all 6 directional pairs.
+#
+# Each pair: client sends in `from` protocol via the matching SDK, the
+# vendor key advertises ONLY the `to` protocol with protocol_conversion=True,
+# fake_upstream returns the `to`-shaped non-stream JSON body. The gateway's
+# S-codec v2 CrossRender path parses the upstream body with the upstream
+# codec and re-renders into the client wire format.
+#
+# Metric label conventions (WireFormat::label):
+#   openai_chat, anthropic_messages, gemini_generate
+# These differ from both ProtocolKind::as_str ("openai"/"anthropic"/"gemini")
+# and the serde snake_case accessible_endpoints ("open_ai"/"anthropic"/"gemini").
+# ---------------------------------------------------------------------------
+
+
+# ── Per-vendor non-stream response bodies (shared with test 7) ─────────────
+
+_OPENAI_NS_BODY = json.dumps(
+    {
+        "id": "chatcmpl-cpn",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": MODEL,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 2,
+            "total_tokens": 7,
+        },
+    }
+)
+
+_ANTHROPIC_NS_BODY = json.dumps(
+    {
+        "id": "msg_cpn",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "hi"}],
+        "model": MODEL,
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 2,
+        },
+    }
+)
+
+_GEMINI_NS_BODY = json.dumps(
+    {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": "hi"}],
+                },
+                "finishReason": "STOP",
+                "index": 0,
+            }
+        ],
+        "modelVersion": MODEL,
+        "usageMetadata": {
+            "promptTokenCount": 5,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 7,
+        },
+    }
+)
+
+
+def _static_json_scenario(body: str) -> dict:
+    """Single-route fake_upstream scenario returning `body` as JSON 200."""
+    return {
+        "routes": [
+            {
+                "match": {"method": "POST"},
+                "response": {
+                    "kind": "static",
+                    "status": 200,
+                    "headers": {"content-type": "application/json"},
+                    "body": body,
+                    "delay_ms": 0,
+                },
+            }
+        ]
+    }
+
+
+# Maps protocol tag (accessible_endpoints value) → non-stream response body.
+_NS_BODY_MAP = {
+    PROTO_OPENAI: _OPENAI_NS_BODY,
+    PROTO_ANTHROPIC: _ANTHROPIC_NS_BODY,
+    PROTO_GEMINI: _GEMINI_NS_BODY,
+}
+
+# Maps (from_proto, to_proto) → expected metric label for
+# gw_codec_cross_render_nonstream_total. `from` = upstream wire format
+# (the format of the body the upstream returned), `to` = client wire format
+# (the format the client SDK speaks). WireFormat::label() form.
+_WIRE_LABEL = {
+    PROTO_OPENAI: "openai_chat",
+    PROTO_ANTHROPIC: "anthropic_messages",
+    PROTO_GEMINI: "gemini_generate",
+}
+
+# All 6 directional cross-protocol pairs.
+_CROSS_PAIRS = [
+    (PROTO_OPENAI, PROTO_ANTHROPIC),
+    (PROTO_OPENAI, PROTO_GEMINI),
+    (PROTO_ANTHROPIC, PROTO_OPENAI),
+    (PROTO_ANTHROPIC, PROTO_GEMINI),
+    (PROTO_GEMINI, PROTO_OPENAI),
+    (PROTO_GEMINI, PROTO_ANTHROPIC),
+]
+
+
+def _make_non_stream_request(
+    client_proto: str,
+    gateway_url: str,
+    api_key: str,
+    api_key_id: str,
+    model: str,
+) -> requests.Response:
+    """Fire a non-stream request using the appropriate client for `client_proto`.
+
+    Returns the raw `requests.Response` so the caller can assert status +
+    body without SDK-level validation (which would mask gateway errors).
+    """
+    headers = pair_headers(api_key, api_key_id)
+
+    if client_proto == PROTO_OPENAI:
+        return requests.post(
+            f"{gateway_url.rstrip('/')}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+                "max_tokens": 64,
+            },
+            headers=headers,
+            timeout=15,
+        )
+    elif client_proto == PROTO_ANTHROPIC:
+        headers["anthropic-version"] = "2023-06-01"
+        return requests.post(
+            f"{gateway_url.rstrip('/')}/v1/messages",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 64,
+                "stream": False,
+            },
+            headers=headers,
+            timeout=15,
+        )
+    elif client_proto == PROTO_GEMINI:
+        return requests.post(
+            f"{gateway_url.rstrip('/')}/v1beta/models/{model}:generateContent",
+            json={
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": "hi"}],
+                    }
+                ],
+            },
+            headers=headers,
+            timeout=15,
+        )
+    else:
+        raise ValueError(f"unknown client_proto: {client_proto}")
+
+
+@pytest.mark.parametrize(
+    "client_proto,upstream_proto",
+    _CROSS_PAIRS,
+    ids=[f"{f}->{t}" for f, t in _CROSS_PAIRS],
+)
+def test_cross_protocol_non_stream_matrix(
+    client_proto: str,
+    upstream_proto: str,
+    gateway_url: str,
+    fake_web: FakeWebClient,
+    fake_upstream: FakeUpstreamClient,
+    metrics_url: str,
+) -> None:
+    """Parametrized non-stream cross-protocol round-trip.
+
+    Each pair seeds entities with `cpn_` prefixed IDs, seeds a vendor key
+    that advertises ONLY `upstream_proto` + `protocol_conversion=True`,
+    then sends a non-stream request from `client_proto`. Asserts:
+    - HTTP 200 with valid content in the response.
+    - `gw_codec_cross_render_nonstream_total{from=X,to=Y}` incremented.
+    """
+    # Build unique entity IDs per pair.
+    tag = f"{client_proto[:3]}_{upstream_proto[:3]}"
+    user_id = f"cpn_u_{tag}"
+    api_key_id = f"cpn_ak_{tag}"
+    api_key_plaintext = f"cpn_sk_{tag}"
+    group = f"cpn_grp_{tag}"
+    vendor_id = f"cpn_v_{tag}"
+    key_id = f"cpn_vk_{tag}"
+
+    _seed_cross_protocol(
+        fake_web,
+        user_id=user_id,
+        api_key_id=api_key_id,
+        api_key_plaintext=api_key_plaintext,
+        group=group,
+        vendor_id=vendor_id,
+        key_id=key_id,
+        upstream_protocol=upstream_proto,
+    )
+    fake_upstream.set_scenario(
+        _static_json_scenario(_NS_BODY_MAP[upstream_proto])
+    )
+
+    # Snapshot the non-stream cross-render metric before the request.
+    from_label = _WIRE_LABEL[upstream_proto]
+    to_label = _WIRE_LABEL[client_proto]
+    metric_key = f'from="{from_label}",to="{to_label}"'
+    pre = metrics_snapshot("gw_codec_cross_render_nonstream_total", metrics_url)
+
+    resp = _make_non_stream_request(
+        client_proto, gateway_url, api_key_plaintext, api_key_id, MODEL,
+    )
+
+    assert resp.status_code == 200, (
+        f"[{client_proto}->{upstream_proto}] expected 200, "
+        f"got {resp.status_code}: {resp.text[:300]}"
+    )
+
+    # Verify the response body contains valid content. Different client
+    # protocols render "hi" in different JSON locations.
+    body = resp.json()
+    if client_proto == PROTO_OPENAI:
+        content = body["choices"][0]["message"]["content"]
+    elif client_proto == PROTO_ANTHROPIC:
+        content = body["content"][0]["text"]
+    elif client_proto == PROTO_GEMINI:
+        content = body["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+        content = None
+    assert content == "hi", (
+        f"[{client_proto}->{upstream_proto}] expected 'hi', got {content!r}"
+    )
+
+    # Metric tick.
+    post = metrics_snapshot("gw_codec_cross_render_nonstream_total", metrics_url)
+    delta = label_delta(pre, post, metric_key)
+    assert delta >= 1, (
+        f"[{client_proto}->{upstream_proto}] expected "
+        f"gw_codec_cross_render_nonstream_total{{{metric_key}}} to increment; "
+        f"pre={pre}, post={post}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. Lossy metric fires when a known vendor-specific field is dropped.
+#
+# Anthropic responses may carry `thinking` content blocks. When the CLIENT
+# protocol is OpenAI Chat (`supports_thinking=false`), the CrossRender
+# adapter strips thinking blocks and increments
+# `gw_codec_cross_render_lossy_total{from="anthropic_messages",
+# to="openai_chat",field="thinking"}`.
+#
+# We seed an openai client → anthropic upstream key, return an Anthropic
+# body WITH a `thinking` block, and assert the lossy metric fires.
+# ---------------------------------------------------------------------------
+
+
+_ANTHROPIC_NS_BODY_WITH_THINKING = json.dumps(
+    {
+        "id": "msg_lossy",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "thinking",
+                "thinking": "internal reasoning step",
+                "signature": "sig-test-123",
+            },
+            {"type": "text", "text": "hi"},
+        ],
+        "model": MODEL,
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 2,
+        },
+    }
+)
+
+
+def test_cross_protocol_lossy_metric_fires_on_known_drop(
+    gateway_url: str,
+    fake_web: FakeWebClient,
+    fake_upstream: FakeUpstreamClient,
+    metrics_url: str,
+) -> None:
+    """Anthropic `thinking` block → OpenAI Chat cross-render drops it.
+
+    The `CrossRender::adapt_lossy` method checks
+    `to_caps.supports_thinking` and calls `LossyField::drop(from, to,
+    "thinking")` when the target doesn't support it. OpenAI Chat does
+    not (`supports_thinking=false`). Assert:
+    - `gw_codec_cross_render_lossy_total{from="anthropic_messages",
+       to="openai_chat",field="thinking"}` increments by >= 1.
+    - The response is still 200 with the text content preserved (the
+      thinking block is dropped but the text block survives).
+    """
+    _seed_cross_protocol(
+        fake_web,
+        user_id="cpn_u_lossy",
+        api_key_id="cpn_ak_lossy",
+        api_key_plaintext="cpn_sk_lossy",
+        group="cpn_grp_lossy",
+        vendor_id="cpn_v_lossy",
+        key_id="cpn_vk_lossy",
+        upstream_protocol=PROTO_ANTHROPIC,
+    )
+    fake_upstream.set_scenario(
+        _static_json_scenario(_ANTHROPIC_NS_BODY_WITH_THINKING)
+    )
+
+    lossy_label = 'from="anthropic_messages",to="openai_chat",field="thinking"'
+    pre = metrics_snapshot("gw_codec_cross_render_lossy_total", metrics_url)
+
+    resp = _make_non_stream_request(
+        PROTO_OPENAI, gateway_url, "cpn_sk_lossy", "cpn_ak_lossy", MODEL,
+    )
+
+    assert resp.status_code == 200, (
+        f"expected 200, got {resp.status_code}: {resp.text[:300]}"
+    )
+    # Text content survived the lossy cross-render.
+    body = resp.json()
+    assert body["choices"][0]["message"]["content"] == "hi", (
+        f"expected 'hi' content after lossy cross-render, got {body!r}"
+    )
+
+    # Lossy metric fired.
+    post = metrics_snapshot("gw_codec_cross_render_lossy_total", metrics_url)
+    delta = label_delta(pre, post, lossy_label)
+    assert delta >= 1, (
+        "expected gw_codec_cross_render_lossy_total"
+        f'{{{lossy_label}}} to increment; pre={pre}, post={post}'
     )

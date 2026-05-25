@@ -23,7 +23,10 @@ Entity-ID prefix: `res_` (resilience).
 """
 from __future__ import annotations
 
+import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Event
 
 import requests
 
@@ -40,7 +43,39 @@ from conftest import (
     seed_user_apikey,
     seed_vendor,
     seed_vendor_key,
+    wait_for_records,
 )
+
+
+_COMPOSE_FILE = "../docker-compose.yml"
+
+
+def _compose_gateway(*args: str, timeout: float = 60) -> None:
+    proc = subprocess.run(
+        ["docker", "compose", "-f", _COMPOSE_FILE, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"docker compose {' '.join(args)} failed (rc={proc.returncode}): "
+            f"stderr={proc.stderr!r} stdout={proc.stdout!r}"
+        )
+
+
+def _wait_for_readyz(gateway_health_url: str, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            r = requests.get(f"{gateway_health_url.rstrip('/')}/readyz", timeout=2)
+            if r.status_code == 200:
+                time.sleep(1.0)
+                return
+        except requests.RequestException:
+            pass
+        time.sleep(0.25)
+    raise TimeoutError(f"/readyz did not return 200 within {timeout}s")
 
 
 # ---------------------------------------------------------------------------
@@ -217,3 +252,99 @@ def test_readyz_semantics_differ_from_livez(gateway_health_url: str) -> None:
     # Both endpoints are unauthenticated — no Authorization header needed.
     # This is a deliberate design choice: orchestrators (k8s probes) must
     # be able to reach these without token plumbing.
+
+
+def _graceful_shutdown_drains_inflight_impl(
+    fake_web,
+    fake_upstream,
+    gateway_url: str,
+    gateway_health_url: str,
+    redis_client,
+) -> None:
+    model = "gs-model"
+    group = "gs_group"
+
+    seed_user_apikey(
+        fake_web,
+        user_id="gs_user",
+        api_key_id="gs_key",
+        api_key_plaintext="gs_secret",
+        allowed_groups=[group],
+    )
+    fake_web.set_balance("gs_user", BALANCE_LARGE)
+    seed_vendor(fake_web, vendor_id="gs_vendor")
+    seed_vendor_key(
+        fake_web,
+        key_id="gs_vk",
+        vendor_id="gs_vendor",
+        model=model,
+        accessible_endpoints=["open_ai"],
+    )
+    seed_model_group(fake_web, group=group, vendor_key_ids=["gs_vk"])
+    seed_pricing(fake_web, model=model)
+
+    slow_body = "x" * 500
+    fake_upstream.set_scenario(
+        {
+            "routes": [
+                {
+                    "match": {
+                        "method": "POST",
+                        "path_regex": "^/v1/chat/completions$",
+                    },
+                    "response": {
+                        "kind": "slow_body_byte_per_second",
+                        "body": slow_body,
+                        "bps": 100,
+                    },
+                }
+            ]
+        }
+    )
+
+    headers = pair_headers("gs_secret", "gs_key")
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": "drain"}],
+        "stream": True,
+    }
+    started = [Event() for _ in range(3)]
+
+    def _stream_to_eof(idx: int) -> int:
+        started[idx].set()
+        with requests.post(
+            f"{gateway_url.rstrip('/')}/v1/chat/completions",
+            json=body,
+            headers=headers,
+            stream=True,
+            timeout=(5, 15),
+        ) as resp:
+            resp.raise_for_status()
+            total = 0
+            for chunk in resp.iter_content(chunk_size=32):
+                total += len(chunk)
+            return total
+
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(_stream_to_eof, i) for i in range(3)]
+            for i, event in enumerate(started):
+                assert event.wait(timeout=5), f"stream {i} did not start"
+            time.sleep(1.0)
+
+            _compose_gateway("kill", "-s", "SIGTERM", "gateway", timeout=30)
+
+            totals = [future.result(timeout=20) for future in as_completed(futures)]
+
+        assert totals == [len(slow_body)] * 3
+        assert wait_for_records(fake_web, min_xlen=3, timeout=5.0) >= 3
+
+        deadline = time.monotonic() + 5.0
+        inflight_keys = redis_client.keys("billing:inflight:*")
+        while inflight_keys and time.monotonic() < deadline:
+            time.sleep(0.1)
+            inflight_keys = redis_client.keys("billing:inflight:*")
+        assert inflight_keys == [], f"leftover billing inflight keys: {inflight_keys}"
+    finally:
+        _compose_gateway("up", "-d", "gateway", timeout=60)
+        _wait_for_readyz(gateway_health_url, timeout=30.0)

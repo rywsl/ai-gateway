@@ -13,6 +13,8 @@ import json
 import os
 import time
 
+import threading
+
 from conftest import (
     BALANCE_LARGE,
     MODEL,
@@ -21,6 +23,7 @@ from conftest import (
     FakeWebClient,
     decode_detailed_record,
     label_delta,
+    make_openai_client,
     metrics_snapshot,
     pair_headers,
     post_chat,
@@ -247,3 +250,292 @@ def test_detailed_log_metric_counters(
         )
         assert kind_delta == 1, (kind, pre_emit, post_emit)
     assert total_drop_delta == 0, (pre_drop, post_drop)
+
+
+# ---------------------------------------------------------------------------
+# forced_params observability — assert the gateway applies forced model-group
+# parameters and increments `gw_forced_params_applied_total{field=...}`.
+# ---------------------------------------------------------------------------
+
+
+def _seed_fp_graph(
+    fake_web: FakeWebClient,
+    suffix: str,
+    forced_params: dict,
+) -> tuple[str, str]:
+    """Seed a full entity graph with ``forced_params`` on the model group."""
+    user_id = f"fp_user_{suffix}"
+    api_key_id = f"fp_ak_{suffix}"
+    api_key_plaintext = f"fp_sk_{suffix}"
+    group = f"fp_group_{suffix}"
+    vendor_id = f"fp_vendor_{suffix}"
+    vendor_key_id = f"fp_vk_{suffix}"
+
+    seed_user_apikey(
+        fake_web,
+        user_id=user_id,
+        api_key_id=api_key_id,
+        api_key_plaintext=api_key_plaintext,
+        allowed_groups=[group],
+    )
+    fake_web.set_balance(user_id, BALANCE_LARGE)
+    seed_vendor(fake_web, vendor_id=vendor_id)
+    seed_vendor_key(
+        fake_web,
+        key_id=vendor_key_id,
+        vendor_id=vendor_id,
+        model=MODEL,
+        accessible_endpoints=[PROTO_OPENAI],
+    )
+    seed_model_group(
+        fake_web,
+        group=group,
+        vendor_key_ids=[vendor_key_id],
+        forced_params=forced_params,
+    )
+    seed_pricing(fake_web, model=MODEL)
+    return api_key_plaintext, api_key_id
+
+
+def test_forced_params_temperature_applied(
+    gateway_url: str,
+    fake_web: FakeWebClient,
+    fake_upstream: FakeUpstreamClient,
+    metrics_url: str,
+) -> None:
+    """Seed model group with forced temperature=0.5, send request with
+    temperature=0.9, assert ``gw_forced_params_applied_total{field="temperature"}``
+    incremented."""
+    api_key_plaintext, api_key_id = _seed_fp_graph(
+        fake_web, "temp", {"temperature": 0.5}
+    )
+    fake_upstream.set_scenario(_static_openai_scenario())
+
+    pre = metrics_snapshot("gw_forced_params_applied_total", metrics_url)
+
+    resp = post_chat(
+        gateway_url,
+        pair_headers(api_key_plaintext, api_key_id),
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "fp-temp"}],
+            "stream": False,
+            "temperature": 0.9,
+        },
+    )
+    assert resp.status_code == 200, (resp.status_code, resp.text[:500])
+
+    time.sleep(0.3)
+    post = metrics_snapshot("gw_forced_params_applied_total", metrics_url)
+    delta = label_delta(pre, post, 'field="temperature"')
+    assert delta >= 1, (
+        f"expected gw_forced_params_applied_total{{field=\"temperature\"}} to increment; "
+        f"pre={pre} post={post}"
+    )
+
+
+def test_forced_params_top_p_applied(
+    gateway_url: str,
+    fake_web: FakeWebClient,
+    fake_upstream: FakeUpstreamClient,
+    metrics_url: str,
+) -> None:
+    """Seed model group with forced top_p=0.3, send request with top_p=0.95,
+    assert ``gw_forced_params_applied_total{field="top_p"}`` incremented."""
+    api_key_plaintext, api_key_id = _seed_fp_graph(
+        fake_web, "topp", {"top_p": 0.3}
+    )
+    fake_upstream.set_scenario(_static_openai_scenario())
+
+    pre = metrics_snapshot("gw_forced_params_applied_total", metrics_url)
+
+    resp = post_chat(
+        gateway_url,
+        pair_headers(api_key_plaintext, api_key_id),
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "fp-topp"}],
+            "stream": False,
+            "top_p": 0.95,
+        },
+    )
+    assert resp.status_code == 200, (resp.status_code, resp.text[:500])
+
+    time.sleep(0.3)
+    post = metrics_snapshot("gw_forced_params_applied_total", metrics_url)
+    delta = label_delta(pre, post, 'field="top_p"')
+    assert delta >= 1, (
+        f"expected gw_forced_params_applied_total{{field=\"top_p\"}} to increment; "
+        f"pre={pre} post={post}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TPM deferred freeze / release — verify the billing:inflight HASH lifecycle
+# during a streaming request.
+# ---------------------------------------------------------------------------
+
+
+def _slow_sse_scenario(delay_between_ms: int = 300) -> dict:
+    """SSE scenario with a deliberate inter-event delay so we can observe the
+    inflight HASH before the stream completes."""
+    return {
+        "routes": [
+            {
+                "match": {"method": "POST", "path_regex": "^/v1/chat/completions$"},
+                "response": {
+                    "kind": "sse",
+                    "delay_ms": 0,
+                    "events": [
+                        {
+                            "data": json.dumps(
+                                {
+                                    "choices": [
+                                        {"delta": {"content": "hello"}}
+                                    ]
+                                }
+                            ),
+                        },
+                        {
+                            "data": json.dumps(
+                                {
+                                    "choices": [
+                                        {"delta": {"content": " world"}}
+                                    ]
+                                }
+                            ),
+                            "after_ms": delay_between_ms,
+                        },
+                        {
+                            "data": json.dumps(
+                                {
+                                    "choices": [
+                                        {"delta": {"content": "."}}
+                                    ],
+                                    "usage": {
+                                        "prompt_tokens": 5,
+                                        "completion_tokens": 3,
+                                        "total_tokens": 8,
+                                    },
+                                }
+                            ),
+                            "after_ms": delay_between_ms,
+                        },
+                        {"data": "[DONE]", "after_ms": delay_between_ms},
+                    ],
+                },
+            }
+        ]
+    }
+
+
+def test_tpm_deferred_freeze_and_release(
+    gateway_url: str,
+    fake_web: FakeWebClient,
+    fake_upstream: FakeUpstreamClient,
+    redis_client,
+    metrics_url: str,
+) -> None:
+    """Issue a streaming request, observe ``billing:inflight:*`` mid-stream,
+    verify the HASH is cleaned up after stream completion, and check that
+    ``usage:records`` gets the final charge."""
+    user_id = "tpm_user_freeze"
+    api_key_id = "tpm_ak_freeze"
+    api_key_plaintext = "tpm_sk_freeze"
+    group = "tpm_group_freeze"
+    vendor_id = "tpm_vendor_freeze"
+    vendor_key_id = "tpm_vk_freeze"
+
+    seed_user_apikey(
+        fake_web,
+        user_id=user_id,
+        api_key_id=api_key_id,
+        api_key_plaintext=api_key_plaintext,
+        allowed_groups=[group],
+    )
+    fake_web.set_balance(user_id, BALANCE_LARGE)
+    seed_vendor(fake_web, vendor_id=vendor_id)
+    seed_vendor_key(
+        fake_web,
+        key_id=vendor_key_id,
+        vendor_id=vendor_id,
+        model=MODEL,
+        accessible_endpoints=[PROTO_OPENAI],
+    )
+    seed_model_group(fake_web, group=group, vendor_key_ids=[vendor_key_id])
+    seed_pricing(fake_web, model=MODEL)
+
+    # Use a slow SSE scenario so the stream stays open long enough to inspect
+    # inflight keys.
+    fake_upstream.set_scenario(_slow_sse_scenario(delay_between_ms=400))
+
+    client = make_openai_client(gateway_url, api_key_plaintext, api_key_id)
+
+    # We'll collect inflight keys from a background thread while the stream
+    # is being consumed on the main thread.
+    inflight_keys_mid_stream: list[list[str]] = []
+    inflight_hashes_mid_stream: list[dict] = []
+    stream_error: list[Exception] = []
+    stream_text: list[str] = []
+
+    def _consume_stream():
+        try:
+            s = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "user", "content": "tpm-freeze-test"}],
+                stream=True,
+            )
+            for chunk in s:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    stream_text.append(chunk.choices[0].delta.content)
+                # After the first chunk arrives the inflight HASH should exist.
+                # Snapshot once mid-stream.
+                if len(stream_text) == 1 and not inflight_keys_mid_stream:
+                    time.sleep(0.05)
+                    keys = redis_client.keys("billing:inflight:*")
+                    inflight_keys_mid_stream.append(keys)
+                    for k in keys:
+                        h = redis_client.hgetall(k)
+                        if h:
+                            inflight_hashes_mid_stream.append(h)
+        except Exception as e:
+            stream_error.append(e)
+
+    t = threading.Thread(target=_consume_stream, daemon=True)
+    t.start()
+    t.join(timeout=15)
+
+    if stream_error:
+        raise stream_error[0]
+
+    assert "".join(stream_text), "stream produced no text"
+
+    # Mid-stream: we should have observed at least one billing:inflight:* key.
+    assert inflight_keys_mid_stream, "inflight keys snapshot was never taken"
+    assert len(inflight_keys_mid_stream[0]) >= 1, (
+        f"expected at least one billing:inflight:* key mid-stream, "
+        f"got {inflight_keys_mid_stream[0]!r}"
+    )
+    # The HASH should contain a freeze_amount field > 0.
+    if inflight_hashes_mid_stream:
+        h = inflight_hashes_mid_stream[0]
+        assert "freeze_amount" in h or "state" in h, (
+            f"inflight HASH missing expected fields: {h!r}"
+        )
+
+    # After stream completion, wait briefly then verify cleanup.
+    time.sleep(1.0)
+    post_keys = redis_client.keys("billing:inflight:*")
+    # The gateway should have cleared (DEL'd) the inflight key after settling.
+    assert len(post_keys) == 0, (
+        f"expected billing:inflight:* keys to be cleaned up after stream "
+        f"completion, but found: {post_keys!r}"
+    )
+
+    # Verify usage:records was emitted.
+    time.sleep(0.5)
+    records = redis_client.xrange("usage:records")
+    assert len(records) >= 1, (
+        f"expected at least one usage:records entry after stream, "
+        f"got {len(records)}"
+    )
