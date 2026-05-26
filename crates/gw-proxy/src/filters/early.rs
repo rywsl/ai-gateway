@@ -4,9 +4,9 @@
 //! 1. Stamp `ctx.trace_id` into a `traceparent`-ish header so downstream logs
 //!    correlate (we keep the auto-generated id from `new_ctx`; W3C
 //!    trace-context parsing is not yet implemented).
-//! 2. Run the unauthenticated portion of the IP blocklist (`Global` scope
-//!    entries only — scoped entries are re-checked in `request_filter` once
-//!    the user/api_key resolves).
+//! 2. Run the unauthenticated portion of unified IP filtering (`Global` scope
+//!    blocklist/allowlist plus per-IP RPM — scoped entries are re-checked in
+//!    `request_filter` once the user/api_key resolves).
 //! 3. Enforce the *global* concurrent-stream cap (`max_concurrent_streams`
 //!    via the shared `RateLimitGuard.total_streams`). The per-user cap
 //!    happens in `request_filter`.
@@ -18,7 +18,9 @@
 
 use crate::ctx::ReqCtx;
 use crate::error_emit;
-use gw_auth::ip_filter::check_blocklist;
+use gw_auth::ip_allowlist::{IpAllowlistGuard, IpAllowlistMode};
+use gw_auth::ip_filter::check_ip;
+use gw_auth::ip_ratelimit::IpRateLimitGuard;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_codec::trait_def::Headers;
 use gw_codec::AnyCodec;
@@ -48,12 +50,23 @@ pub(crate) fn short_circuit(status: u16) -> Box<Error> {
 /// to config is tracked under phase-5.
 const GLOBAL_STREAM_CAP: usize = 100_000;
 
-pub async fn run(
+pub struct EarlyFilterDeps<'a> {
+    pub store: &'a Arc<EntityStore>,
+    pub ratelimit: &'a Arc<RateLimitGuard>,
+    pub ip_allowlist: &'a Arc<IpAllowlistGuard>,
+    pub ip_ratelimit: &'a Arc<IpRateLimitGuard>,
+    pub ip_allowlist_mode: IpAllowlistMode,
+    pub trust_xff: bool,
+}
+
+pub async fn run(session: &mut Session, ctx: &mut ReqCtx, deps: EarlyFilterDeps<'_>) -> Result<()> {
+    run_impl(session, ctx, deps).await
+}
+
+async fn run_impl(
     session: &mut Session,
     ctx: &mut ReqCtx,
-    store: &Arc<EntityStore>,
-    ratelimit: &Arc<RateLimitGuard>,
-    trust_xff: bool,
+    deps: EarlyFilterDeps<'_>,
 ) -> Result<()> {
     ctx.phase_start("early_request_filter");
     // Snapshot the protocol detection inputs so we don't borrow the session
@@ -67,12 +80,18 @@ pub async fn run(
         .collect();
     let request_id = ctx.request_id.0.clone();
 
-    // -----------------------------------------------------------------
-    // 1. IP blocklist (Global scope only — User/ApiKey scoping happens
-    //    in `request_filter` once auth resolves the IDs).
-    // -----------------------------------------------------------------
-    if let Some(ip) = client_ip_from_session(session, trust_xff) {
-        if let Err(err) = check_blocklist(ip, None, None, store).await {
+    if let Some(ip) = client_ip_from_session(session, deps.trust_xff) {
+        if let Err(err) = check_ip(
+            ip,
+            None,
+            None,
+            deps.store,
+            deps.ip_allowlist,
+            deps.ip_ratelimit,
+            deps.ip_allowlist_mode,
+        )
+        .await
+        {
             let codec = pick_emit_codec(&ctx.client_codec);
             let scoped = with_request_id(&err, &request_id);
             error_emit::send_error(session, &codec, &scoped).await;
@@ -91,7 +110,7 @@ pub async fn run(
     //    the drop is bounded because per-user `check_stream_slot` is the
     //    only place the counter increments and is gated downstream.
     // -----------------------------------------------------------------
-    let total_inflight = ratelimit.total_streams.load(Ordering::Acquire);
+    let total_inflight = deps.ratelimit.total_streams.load(Ordering::Acquire);
     if total_inflight >= GLOBAL_STREAM_CAP {
         let err = ErrorIR {
             category: ErrorCategory::ClientQuota,
@@ -115,26 +134,35 @@ pub async fn run(
     //    in the caller's wire format.
     // -----------------------------------------------------------------
     let head_slice: &Headers = &headers_vec;
-    let codec = match AnyCodec::detect(&path, head_slice, &[]) {
-        Some(c) => c,
-        None => {
-            let err = ErrorIR {
-                category: ErrorCategory::ClientBadRequest,
-                status: 400,
-                upstream_status: None,
-                code: Cow::Borrowed(codes::GW_REQUEST_PROTOCOL_UNKNOWN),
-                message: Cow::Borrowed("unknown protocol"),
-                retryable: false,
-                upstream_raw: None,
-                request_id: request_id.as_str(),
-                retry_after_secs: None,
-            };
-            // Fall back to OpenAI-shaped error response since we have no
-            // codec preference yet.
-            let fallback = AnyCodec::OpenAi(gw_codec::openai::OpenAi);
-            error_emit::send_error(session, &fallback, &err).await;
-            ctx.phase_end();
-            return Err(short_circuit(err.status));
+    let cli_shape = gw_codec::cli::detect_cli(&path, head_slice);
+    let codec = if let Some(cli_shape) = cli_shape {
+        ctx.client_shape = Some(cli_shape);
+        codec_for_shape(cli_shape)
+    } else {
+        match AnyCodec::detect(&path, head_slice, &[]) {
+            Some(c) => {
+                ctx.client_shape = Some(c.api_shape());
+                c
+            }
+            None => {
+                let err = ErrorIR {
+                    category: ErrorCategory::ClientBadRequest,
+                    status: 400,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_REQUEST_PROTOCOL_UNKNOWN),
+                    message: Cow::Borrowed("unknown protocol"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: request_id.as_str(),
+                    retry_after_secs: None,
+                };
+                // Fall back to OpenAI-shaped error response since we have no
+                // codec preference yet.
+                let fallback = AnyCodec::OpenAi(gw_codec::openai::OpenAi);
+                error_emit::send_error(session, &fallback, &err).await;
+                ctx.phase_end();
+                return Err(short_circuit(err.status));
+            }
         }
     };
     ctx.client_codec = Some(codec);
@@ -200,6 +228,23 @@ fn header_lookup<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a 
         .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_str())
+}
+
+fn codec_for_shape(shape: gw_core::protocol::ApiShape) -> AnyCodec {
+    use gw_core::protocol::ApiShape;
+    match shape.protocol_kind() {
+        gw_core::protocol::ProtocolKind::OpenAi => {
+            if matches!(shape, ApiShape::OpenAiCli | ApiShape::OpenAiCompact) {
+                AnyCodec::OpenAiResponses(gw_codec::openai::responses::OpenAiResponsesCodec)
+            } else {
+                AnyCodec::OpenAi(gw_codec::openai::OpenAi)
+            }
+        }
+        gw_core::protocol::ProtocolKind::Anthropic => {
+            AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)
+        }
+        gw_core::protocol::ProtocolKind::Gemini => AnyCodec::Gemini(gw_codec::gemini::Gemini),
+    }
 }
 
 pub(crate) fn pick_emit_codec(c: &Option<AnyCodec>) -> AnyCodec {

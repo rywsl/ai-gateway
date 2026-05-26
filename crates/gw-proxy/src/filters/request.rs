@@ -14,18 +14,24 @@ use crate::filters::early::{
     client_ip_from_session, pick_emit_codec, short_circuit, with_request_id,
 };
 use gw_auth::apikey::verify_apikey;
-use gw_auth::ip_filter::check_blocklist;
+use gw_auth::ip_allowlist::{IpAllowlistGuard, IpAllowlistMode};
+use gw_auth::ip_filter::check_ip;
+use gw_auth::ip_ratelimit::IpRateLimitGuard;
 use gw_auth::jwt::{verify_jwt, JwtError, JwtValidator};
 use gw_auth::jwt_blacklist::RedisJwtBlacklist;
 use gw_auth::merge_permissions;
 use gw_auth::model_permissions::{
     check_with_budget, ModelPermission, PermissionEffect, RedosTracker,
 };
+use gw_auth::ratelimit::adaptive::AdaptiveRpmManager;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_auth::AuthCtx;
+use gw_billing::TaskBillingConfig;
+use gw_codec::cli::CliCodec;
 use gw_core::entity::ApiKeyEntry;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, ModelName, UserId};
+use gw_core::protocol::ApiShape;
 use gw_store::counter_store::daily_tokens_key;
 use gw_store::deduction::{UserCircuit, USER_CIRCUIT};
 use gw_store::{CounterStore, EntityStore};
@@ -43,10 +49,17 @@ pub async fn run(
     ctx: &mut ReqCtx,
     store: &Arc<EntityStore>,
     ratelimit: &Arc<RateLimitGuard>,
+    ip_allowlist: &Arc<IpAllowlistGuard>,
+    ip_ratelimit: &Arc<IpRateLimitGuard>,
+    adaptive_rpm: &Arc<AdaptiveRpmManager>,
+    ip_allowlist_mode: IpAllowlistMode,
     counters: &Arc<CounterStore>,
     global_rpm: u32,
     trust_xff: bool,
     signature_required: bool,
+    task_enabled: bool,
+    task_contract: Option<&gw_task::redis_contract::RedisTaskContract>,
+    task_billing_config: Option<TaskBillingConfig>,
     jwt_validator: Option<&Arc<JwtValidator>>,
     capability_resolver: Option<&Arc<gw_capability::CapabilityResolver>>,
     mgmt_blacklist: &Arc<RedisJwtBlacklist>,
@@ -65,6 +78,8 @@ pub async fn run(
     //    than mixing them with the business ApiKey/JWT code paths below.
     // ---------------------------------------------------------------------
     let req_path = session.req_header().uri.path().to_string();
+    let req_method = session.req_header().method.as_str().to_owned();
+    crate::filters::task::mark_task_context(ctx, task_enabled, &req_method, &req_path, None);
     if gw_auth::mgmt::is_management_path(&req_path) {
         ctx.mgmt = true;
         let req_id_for_mgmt = ctx.request_id.0.clone();
@@ -361,11 +376,21 @@ pub async fn run(
     ctx.req_content_encoding = gw_codec::compression::parse_content_encoding(enc_header);
 
     // ---------------------------------------------------------------------
-    // 2. Re-run IP blocklist with the resolved scope IDs.
+    // 2. Re-run unified IP filtering with the resolved scope IDs.
     // ---------------------------------------------------------------------
     let client_ip_v = client_ip_from_session(session, trust_xff);
     if let Some(ip) = client_ip_v {
-        if let Err(err) = check_blocklist(ip, Some(&user_id), api_key_id.as_ref(), store).await {
+        if let Err(err) = check_ip(
+            ip,
+            Some(&user_id),
+            api_key_id.as_ref(),
+            store,
+            ip_allowlist,
+            ip_ratelimit,
+            ip_allowlist_mode,
+        )
+        .await
+        {
             bail!(session, ctx, &err, &request_id)
         }
     }
@@ -417,6 +442,13 @@ pub async fn run(
     }
     let body_bytes = bytes::Bytes::from(body_buf);
     ctx.cached_body = Some(body_bytes.clone());
+    crate::filters::task::mark_task_context(
+        ctx,
+        task_enabled,
+        &req_method,
+        &req_path,
+        Some(&body_bytes),
+    );
 
     // Wire-fidelity archive: snapshot the raw downstream request. `cached_body`
     // is overwritten by `upstream::rewrite_request` on the cross-protocol path,
@@ -538,6 +570,7 @@ pub async fn run(
     //    inspected for model name + stream flag; we then drop the parsed
     //    IR (its borrows would conflict with mutating `ctx`).
     // ---------------------------------------------------------------------
+    let cli_shape = ctx.client_shape.filter(ApiShape::is_cli);
     let codec = match ctx.client_codec.as_ref() {
         Some(c) => c,
         None => {
@@ -561,36 +594,37 @@ pub async fn run(
         .as_ref()
         .cloned()
         .unwrap_or_else(|| body_bytes.clone());
-    let parsed = codec.parse_request(&parse_body);
-    let (model_name, is_stream, est_input_tokens) = match parsed {
-        Ok(ir) => {
-            let values = (
-                ModelName::from(ir.model.as_ref()),
-                ir.stream,
-                codec.estimate_input_tokens(&ir),
-            );
-            values
-        }
-        Err(err) => {
-            bail!(session, ctx, &err, &request_id)
-        }
-    };
-    // ADR-S1: some wire formats (Gemini) signal streaming via the URL path
-    // (`:streamGenerateContent`) rather than a body field. OR the codec's
-    // path-aware hook into `is_stream` so those requests are not rejected by
-    // the v1 non-stream gate below.
     let path_str = session.req_header().uri.path();
-    let is_stream = is_stream || codec.path_implies_stream(path_str);
-    // ADR-S1b: Gemini carries the model in the URL path (`/v1[beta]/models/<M>:<verb>`)
-    // and `GeminiRequest::model` is `#[serde(skip)]`. Fall back to the
-    // codec's path extractor when the body parse returned an empty model.
-    let model_name = if model_name.as_ref().is_empty() {
-        codec
-            .extract_path_model(path_str)
-            .map(ModelName::from)
-            .unwrap_or(model_name)
+    let (model_name, is_stream, est_input_tokens) = if let Some(shape) = cli_shape {
+        let hints = extract_cli_request_hints(shape, path_str, Some(&parse_body));
+        let model = hints.model.unwrap_or_default();
+        let is_stream = hints.stream.unwrap_or(false);
+        (ModelName::from(model.as_str()), is_stream, 1)
     } else {
-        model_name
+        let parsed = codec.parse_request(&parse_body);
+        let (model_name, is_stream, est_input_tokens) = match parsed {
+            Ok(ir) => {
+                let values = (
+                    ModelName::from(ir.model.as_ref()),
+                    ir.stream,
+                    codec.estimate_input_tokens(&ir),
+                );
+                values
+            }
+            Err(err) => {
+                bail!(session, ctx, &err, &request_id)
+            }
+        };
+        let is_stream = is_stream || codec.path_implies_stream(path_str);
+        let model_name = if model_name.as_ref().is_empty() {
+            codec
+                .extract_path_model(path_str)
+                .map(ModelName::from)
+                .unwrap_or(model_name)
+        } else {
+            model_name
+        };
+        (model_name, is_stream, est_input_tokens)
     };
     ctx.model = Some(model_name.clone());
     ctx.is_stream = is_stream;
@@ -733,6 +767,135 @@ pub async fn run(
         bail!(session, ctx, &err, &request_id)
     }
 
+    if ctx.is_task {
+        let Some(contract) = task_contract else {
+            let err = ErrorIR {
+                category: ErrorCategory::GatewayInternal,
+                status: 500,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_TASK_SUBMIT_FAILED),
+                message: Cow::Borrowed("task contract unavailable"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            bail!(session, ctx, &err, &request_id)
+        };
+        let task_result = match ctx.task_action {
+            Some(crate::filters::task::TaskAction::Submit) => {
+                crate::filters::task::submit_endpoint(
+                    contract,
+                    crate::filters::task::SubmitTaskRequest {
+                        body: ctx.cached_body.as_deref().unwrap_or(&body_bytes),
+                        user_id: user_id.as_ref(),
+                        api_key_id: api_key_id.as_ref().map(ApiKeyId::as_ref),
+                        client_protocol: ctx
+                            .client_shape
+                            .map(|shape| shape.format_id())
+                            .unwrap_or("unknown"),
+                        trace_id: ctx.trace_id.as_ref(),
+                        request_id: ctx.request_id.as_ref(),
+                        billing_config: task_billing_config,
+                        available_balance_micro: Some(balance),
+                    },
+                )
+                .await
+            }
+            Some(crate::filters::task::TaskAction::Load) => {
+                let Some(task_id) = task_id_from_path(&req_path, false) else {
+                    let err = ErrorIR {
+                        category: ErrorCategory::ClientBadRequest,
+                        status: 404,
+                        upstream_status: None,
+                        code: Cow::Borrowed(codes::GW_TASK_NOT_FOUND),
+                        message: Cow::Borrowed("task not found"),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &err, &request_id)
+                };
+                crate::filters::task::load_endpoint(contract, task_id).await
+            }
+            Some(crate::filters::task::TaskAction::Watch) => {
+                let Some(task_id) = task_id_from_path(&req_path, true) else {
+                    let err = ErrorIR {
+                        category: ErrorCategory::ClientBadRequest,
+                        status: 404,
+                        upstream_status: None,
+                        code: Cow::Borrowed(codes::GW_TASK_NOT_FOUND),
+                        message: Cow::Borrowed("task not found"),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &err, &request_id)
+                };
+                crate::filters::task::watch_endpoint(contract, task_id, task_wait_ms(session)).await
+            }
+            Some(crate::filters::task::TaskAction::Cancel) => {
+                let Some(task_id) = task_id_from_path(&req_path, true) else {
+                    let err = ErrorIR {
+                        category: ErrorCategory::ClientBadRequest,
+                        status: 404,
+                        upstream_status: None,
+                        code: Cow::Borrowed(codes::GW_TASK_NOT_FOUND),
+                        message: Cow::Borrowed("task not found"),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &err, &request_id)
+                };
+                crate::filters::task::cancel_endpoint(contract, task_id).await
+            }
+            None => {
+                let err = ErrorIR {
+                    category: ErrorCategory::GatewayInternal,
+                    status: 500,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
+                    message: Cow::Borrowed("task action missing"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                bail!(session, ctx, &err, &request_id)
+            }
+        };
+        match task_result {
+            Ok(response) => {
+                crate::filters::task::write_task_response(session, response).await?;
+                ctx.phase_end();
+                return Ok(true);
+            }
+            Err(err) => {
+                let category = match err.status {
+                    402 => ErrorCategory::ClientQuota,
+                    404 => ErrorCategory::ClientBadRequest,
+                    _ => ErrorCategory::GatewayInternal,
+                };
+                let error_ir = ErrorIR {
+                    category,
+                    status: err.status,
+                    upstream_status: None,
+                    code: Cow::Borrowed(err.code),
+                    message: err.message,
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------
     // 7a. G3 — daily token quota (ADR-G3-1/G3-2). `UserEntry.daily_quota_tokens`
     //     is the limit; `0` means unlimited. We GET the per-(user, UTC-day)
@@ -803,7 +966,13 @@ pub async fn run(
     // 8. RateLimitGuard (RPM check) + per-user stream-slot for streaming
     //    requests.
     // ---------------------------------------------------------------------
-    match ratelimit.check(&merged) {
+    let mut rate_limited = merged.clone();
+    if let Some(key) = ctx.picked_vendor_key.as_ref() {
+        if let Some(adaptive_limit) = adaptive_rpm.should_enforce(&key.key_id) {
+            rate_limited.rpm_limit = rate_limited.rpm_limit.min(adaptive_limit);
+        }
+    }
+    match ratelimit.check(&rate_limited) {
         Ok(_ticket) => { /* dropped at end of fn — RPM only checks once per request */ }
         Err(err) => {
             bail!(session, ctx, &err, &request_id)
@@ -906,6 +1075,47 @@ pub fn check_daily_quota(
 pub fn day_key_utc(now: OffsetDateTime) -> String {
     let d = now.date();
     format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+}
+
+fn task_id_from_path(path: &str, trailing_action: bool) -> Option<&str> {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (trailing_action, segments.as_slice()) {
+        (false, ["v1", "tasks", task_id]) if !task_id.is_empty() => Some(task_id),
+        (true, ["v1", "tasks", task_id, _]) if !task_id.is_empty() => Some(task_id),
+        _ => None,
+    }
+}
+
+fn task_wait_ms(session: &Session) -> u64 {
+    session
+        .req_header()
+        .uri
+        .query()
+        .and_then(|query| {
+            query.split('&').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (key == "wait").then_some(value)
+            })
+        })
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| seconds.saturating_mul(1_000))
+        .unwrap_or(30_000)
+}
+
+pub fn extract_cli_request_hints(
+    shape: ApiShape,
+    path: &str,
+    body: Option<&[u8]>,
+) -> gw_codec::cli::CliHints {
+    match shape {
+        ApiShape::ClaudeCli => gw_codec::cli::claude_cli::ClaudeCliCodec.extract_hints(path, body),
+        ApiShape::OpenAiCli => gw_codec::cli::openai_cli::OpenAiCliCodec.extract_hints(path, body),
+        ApiShape::OpenAiCompact => {
+            gw_codec::cli::openai_compact::OpenAiCompactCodec.extract_hints(path, body)
+        }
+        ApiShape::GeminiCli => gw_codec::cli::gemini_cli::GeminiCliCodec.extract_hints(path, body),
+        _ => gw_codec::cli::CliHints::default(),
+    }
 }
 
 /// Estimate a conservative freeze (in micro-units) before pricing is loaded.
