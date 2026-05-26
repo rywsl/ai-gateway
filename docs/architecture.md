@@ -387,17 +387,17 @@ The 13 gaps G1-G13 catalogued in [`docs/superpowers/specs/2026-05-21-known-gaps-
 | G12 | Sticky moka cache + shared `StrategySet` | T2-C | `8304097` | Bindings on `moka::sync::Cache` (TTL 30 min, cap 100_000); per-request `strategy_for` replaced by shared `LlmGateway.strategies.pick_for`. |
 | G13 | `CapabilityResolver` injection (EntityStore backend) | T3-C | `5a1f9d0` | `EntityStoreResolveBackend` threaded `Wired → LlmGateway → request_filter`; candidate filter applies `candidate_matches`; `503 GW_ROUTING_NO_CAPABILITY_MATCH`. |
 
-### 9.1 v2 follow-ups
+### 9.1 Open follow-ups
 
-- **G7**: workspace-global `signature_required` toggle (ADR-G7-2; out of scope for v1.5). Stash the decompressed body so the codec parse step reuses it (the compressed-body parse gap — see §8 Deliberate behaviours).
+- **G7**: workspace-global `signature_required` toggle (ADR-G7-2). Stash the decompressed body so the codec parse step reuses it (the compressed-body parse gap — see §8 Deliberate behaviours).
 - **G8**: direct wire-to-wire codegen (codec-s3 N²) replacing the IR round-trip; multi-event SSE buffering across Pingora chunk boundaries. *(Cross-protocol non-streaming response body re-render landed in S-codec v2, 2026-05-24; entry trimmed accordingly.)*
 - **G11**: three-layer fallback (in-memory + on-disk file + periodic drainer + startup recovery) → billing-c-delta.
-- **G3**: per-tenant timezone for the daily-quota day window (v1.5 is UTC-only).
+- **G3**: per-tenant timezone for the daily-quota day window (currently UTC-only).
 - **G13**: reconcile `ApiKeyEntry.force_capabilities` (SmallVec, singular `force_`) vs `VendorKey.forced_capabilities` (Vec, plural) into one breaking rename.
 
-The `e2e_full_flow.rs` Pingora+wiremock+reqwest harness is `#[ignore]`d; per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`. The docker-based black-box harness lands on `feature/e2e-blackbox` (see [`docs/superpowers/specs/2026-05-21-e2e-blackbox-design.md`](superpowers/specs/2026-05-21-e2e-blackbox-design.md)).
+Per-filter coverage that runs without Docker lives in `e2e_failure_modes.rs`. The docker-based black-box harness lands on `feature/e2e-blackbox` (see [`docs/superpowers/specs/2026-05-21-e2e-blackbox-design.md`](superpowers/specs/2026-05-21-e2e-blackbox-design.md)).
 
-- Tunnel data-path round-trip e2e test: T7-B currently covers storage + `TunnelStack::resolve` semantics via testcontainers. A full Pingora → tunnel-node → fake-upstream HTTP round-trip is deferred to a follow-up wave (matches the v2 scope marker on `e2e_full_flow.rs`).
+- Tunnel data-path round-trip e2e test: T7-B covers storage + `TunnelStack::resolve` semantics via testcontainers. A full Pingora → tunnel-node → fake-upstream HTTP round-trip is deferred to a follow-up wave.
 
 ## 10. End-to-end testing — the black-box harness
 

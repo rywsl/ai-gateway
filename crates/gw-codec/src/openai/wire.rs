@@ -1,8 +1,6 @@
 //! OpenAI wire-format structs.
 //!
-//! The actual `From` / `TryFrom` impls live in `via.rs` (hand-written for
-//! v1). Codec S1 v2 (`wire_convert_matrix!`, Phase 2) will reintroduce
-//! attribute-driven codegen at that boundary.
+//! The actual `From` / `TryFrom` impls live in `via.rs`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;

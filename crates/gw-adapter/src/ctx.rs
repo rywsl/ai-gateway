@@ -3,8 +3,7 @@
 //! Per A-T0 §ADR-AT0-2 the adapter sees only `dyn HeadersAccessor` and
 //! `dyn UrlAccessor` views of the outbound request. The proxy / task
 //! runtime implements these traits over their native types
-//! (pingora::http::RequestHeader, reqwest::RequestBuilder, …) at the
-//! call site.
+//! (pingora::http::RequestHeader, etc.) at the call site.
 
 use gw_core::entity::VendorKey;
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
