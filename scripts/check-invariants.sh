@@ -27,7 +27,7 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=1; }
 # Execution crates MUST NOT depend on each other.
 # ---------------------------------------------------------------------------
 echo "[crate_layering] supporting-layer must not depend on business/execution crates"
-SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-auth gw-ledger gw-task-runtime"
+SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-auth gw-ledger"
 FORBIDDEN_FOR_SUPPORTING="gw-adapter gw-health gw-task gw-task-runtime gw-proxy gw-billing gw-gateway gw-task-worker"
 if command -v cargo >/dev/null && command -v jq >/dev/null; then
   meta="$(cargo metadata --no-deps --format-version 1 2>/dev/null)"
@@ -81,14 +81,26 @@ if command -v cargo >/dev/null && command -v jq >/dev/null; then
   [ "$fail" -eq 0 ] && ok "gw-tunnel-client layering ok"
 fi
 
+echo "[crate_layering] gw-task-runtime business; must not depend on execution layer"
+if command -v cargo >/dev/null && command -v jq >/dev/null; then
+  task_runtime_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-task-runtime") | .dependencies[] | select(.kind == null) | .name')"
+  for forb in gw-proxy gw-gateway gw-task-worker; do
+    if echo "$task_runtime_deps" | grep -qx "$forb"; then
+      bad "gw-task-runtime depends on $forb (business → execution forbidden)"
+    fi
+  done
+  [ "$fail" -eq 0 ] && ok "gw-task-runtime layering ok"
+fi
+
 # ---------------------------------------------------------------------------
-# no_billing_crate (§5.2) — gw-billing must never exist as a crate.
+# no_billing_crate (§5.2) — gw-billing is allowed only as the task-level
+# formula crate. It must not become a dependency of supporting crates.
 # ---------------------------------------------------------------------------
-echo "[no_billing_crate] gw-billing must not be a workspace member or dependency"
-if grep -rn 'gw-billing' Cargo.toml crates/*/Cargo.toml 2>/dev/null; then
-  bad "gw-billing referenced in a Cargo.toml"
+echo "[no_billing_crate] gw-billing limited to workspace member and business deps"
+if grep -rn 'gw-billing' crates/{gw-core,gw-codec,gw-codec-macros,gw-store,gw-auth,gw-ledger}/Cargo.toml 2>/dev/null; then
+  bad "supporting crate references gw-billing"
 else
-  ok "no gw-billing crate reference"
+  ok "gw-billing not referenced by supporting crates"
 fi
 
 # ---------------------------------------------------------------------------
@@ -100,6 +112,13 @@ if grep -rn 'gw-task-runtime' crates/gw-proxy/Cargo.toml 2>/dev/null; then
   bad "gw-proxy/Cargo.toml references gw-task-runtime"
 else
   ok "gw-proxy does not depend on gw-task-runtime"
+fi
+
+echo "[no_task_runtime_imports_proxy] gw-task-runtime must not depend on gw-proxy"
+if grep -rn 'gw-proxy' crates/gw-task-runtime/Cargo.toml 2>/dev/null; then
+  bad "gw-task-runtime/Cargo.toml references gw-proxy"
+else
+  ok "gw-task-runtime does not depend on gw-proxy"
 fi
 
 # ---------------------------------------------------------------------------
@@ -131,6 +150,33 @@ then
   bad "cost_micro field remains"
 else
   ok "no cost_micro field"
+fi
+
+echo "[no_billing_cost_per_token] gw-billing must not contain cost_per_token or price_per_token"
+if grep -rnE '\bcost_per_token\b|\bprice_per_token\b' crates/gw-billing/src 2>/dev/null; then
+  bad "gw-billing contains per-token pricing fields"
+else
+  ok "gw-billing carries no per-token pricing fields"
+fi
+
+echo "[no_cli_auth_bypass] gw-codec CLI variants must not contain auth bypass markers"
+if grep -rnE 'skip_auth|bypass_auth' crates/gw-codec/src/cli/ 2>/dev/null; then
+  bad "gw-codec CLI variants contain auth bypass markers"
+else
+  ok "gw-codec CLI variants carry no auth bypass markers"
+fi
+
+echo "[task_crates_in_arch_doc] docs/architecture.md must list task crates"
+missing_task_crates=""
+for crate in gw-task gw-task-runtime gw-task-worker gw-billing; do
+  if ! grep -q "$crate" docs/architecture.md 2>/dev/null; then
+    missing_task_crates="${missing_task_crates}${crate} "
+  fi
+done
+if [ -n "$missing_task_crates" ]; then
+  bad "docs/architecture.md missing crate references: $missing_task_crates"
+else
+  ok "docs/architecture.md lists gw-task, gw-task-runtime, gw-task-worker, gw-billing"
 fi
 
 # ---------------------------------------------------------------------------
