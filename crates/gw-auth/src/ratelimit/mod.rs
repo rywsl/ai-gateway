@@ -22,6 +22,8 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+pub mod adaptive;
+
 pub struct RateLimitGuard {
     pub per_user: DashMap<UserId, Arc<DefaultDirectRateLimiter>>,
     pub per_user_tpm: DashMap<UserId, Arc<DefaultDirectRateLimiter>>,
