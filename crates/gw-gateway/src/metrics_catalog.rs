@@ -93,6 +93,71 @@ pub static METRICS: &[MetricSpec] = &[
         help: "regex match exceeded budget; label=api_key_id",
     },
     MetricSpec {
+        name: "gw_adaptive_rpm_observe_total",
+        kind: MetricKind::Counter,
+        help: "adaptive RPM 429 observations recorded",
+    },
+    MetricSpec {
+        name: "gw_adaptive_rpm_enforced_total",
+        kind: MetricKind::Counter,
+        help: "adaptive RPM enforcement decisions returned Some(...)",
+    },
+    MetricSpec {
+        name: "gw_adaptive_rpm_probe_total",
+        kind: MetricKind::Counter,
+        help: "adaptive RPM probe expansions after decay and quiet period",
+    },
+    MetricSpec {
+        name: "gw_adaptive_rpm_released_total",
+        kind: MetricKind::Counter,
+        help: "adaptive RPM enforcement releases after confidence drops below threshold",
+    },
+    MetricSpec {
+        name: "gw_adaptive_rpm_learned_value",
+        kind: MetricKind::Gauge,
+        help: "current learned adaptive RPM value for the most recently updated key context",
+    },
+    MetricSpec {
+        name: "gw_adaptive_rpm_confidence",
+        kind: MetricKind::Gauge,
+        help: "current adaptive RPM confidence for the most recently updated key context",
+    },
+    MetricSpec {
+        name: "gw_ip_blocklist_hit_total",
+        kind: MetricKind::Counter,
+        help: "IP blocklist deny matches",
+    },
+    MetricSpec {
+        name: "gw_ip_allowlist_check_total",
+        kind: MetricKind::Counter,
+        help: "IP allowlist checks executed",
+    },
+    MetricSpec {
+        name: "gw_ip_ratelimit_check_total",
+        kind: MetricKind::Counter,
+        help: "per-IP rate-limit checks executed",
+    },
+    MetricSpec {
+        name: "gw_ip_ratelimit_entries_active",
+        kind: MetricKind::Gauge,
+        help: "active in-memory per-IP rate-limit entries",
+    },
+    MetricSpec {
+        name: "gw_ip_ratelimit_sweep_total",
+        kind: MetricKind::Counter,
+        help: "per-IP rate-limit sweep passes executed",
+    },
+    MetricSpec {
+        name: "gw_ip_blocklist_entries",
+        kind: MetricKind::Gauge,
+        help: "current IP blocklist snapshot size",
+    },
+    MetricSpec {
+        name: "gw_ip_allowlist_entries",
+        kind: MetricKind::Gauge,
+        help: "current IP allowlist snapshot size",
+    },
+    MetricSpec {
         name: "gw_kms_state",
         kind: MetricKind::Gauge,
         help: "KMS state value; label=state (healthy/dual_read/reencrypting)",
@@ -196,6 +261,11 @@ pub static METRICS: &[MetricSpec] = &[
         name: "gw_retry_attempt_total",
         kind: MetricKind::Counter,
         help: "fail_to_connect retry decisions (G10); label=outcome (recovered/exhausted/tls_blocked)",
+    },
+    MetricSpec {
+        name: "gw_cli_cross_protocol_denied_total",
+        kind: MetricKind::Counter,
+        help: "CLI requests denied because no same-protocol upstream channel remained",
     },
     MetricSpec {
         name: "gw_tunnel_open_total",
@@ -380,6 +450,63 @@ pub static METRICS: &[MetricSpec] = &[
         name: "gw_daily_quota_increment_error_total",
         kind: MetricKind::Counter,
         help: "Redis INCRBY+EXPIRE failures when bumping per-user daily token counter",
+    },
+    // --- Task worker metrics (ADR-T9) ---
+    MetricSpec {
+        name: "gw_task_claimed_total",
+        kind: MetricKind::Counter,
+        help: "Tasks claimed from the queue by a worker",
+    },
+    MetricSpec {
+        name: "gw_task_settled_total",
+        kind: MetricKind::Counter,
+        help: "Tasks settled by a worker; label=status (succeeded/failed/cancelled)",
+    },
+    MetricSpec {
+        name: "gw_task_execution_duration_seconds",
+        kind: MetricKind::Histogram,
+        help: "Task execution wall-clock duration in seconds",
+    },
+    MetricSpec {
+        name: "gw_task_lease_recovered_total",
+        kind: MetricKind::Counter,
+        help: "Expired task leases recovered by the watchdog",
+    },
+    MetricSpec {
+        name: "gw_task_heartbeat_total",
+        kind: MetricKind::Counter,
+        help: "Task lease heartbeat renewals sent",
+    },
+    MetricSpec {
+        name: "gw_task_cancel_received_total",
+        kind: MetricKind::Counter,
+        help: "Cancel events received and processed by the cancel loop",
+    },
+    // --- Task gateway metrics (ADR-T9) ---
+    MetricSpec {
+        name: "gw_task_gw_submit_total",
+        kind: MetricKind::Counter,
+        help: "Task submit endpoint calls (successful enqueue)",
+    },
+    MetricSpec {
+        name: "gw_task_gw_freeze_total",
+        kind: MetricKind::Counter,
+        help: "Task freeze outcomes; label=result (ok/insufficient)",
+    },
+    MetricSpec {
+        name: "gw_task_gw_load_total",
+        kind: MetricKind::Counter,
+        help: "Task load endpoint calls",
+    },
+    MetricSpec {
+        name: "gw_task_gw_watch_total",
+        kind: MetricKind::Counter,
+        help: "Task watch endpoint calls",
+    },
+    MetricSpec {
+        name: "gw_task_gw_cancel_total",
+        kind: MetricKind::Counter,
+        help: "Task cancel endpoint calls",
     },
 ];
 
