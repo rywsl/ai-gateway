@@ -107,6 +107,12 @@ impl ProtocolCodec for OpenAi {
                     });
                 }
 
+                if let Some(refusal) = choice.delta.refusal.as_deref().filter(|s| !s.is_empty()) {
+                    events.push(StreamEventIR::RefusalDelta {
+                        text: Cow::Owned(refusal.to_owned()),
+                    });
+                }
+
                 if let Some(tcs) = choice.delta.tool_calls {
                     for tc in tcs {
                         let builder = st.pending_tool_calls.entry(tc.index).or_default();
@@ -159,7 +165,16 @@ impl ProtocolCodec for OpenAi {
                     input_tokens: usage.prompt_tokens,
                     output_tokens: usage.completion_tokens,
                     cached_tokens: usage.prompt_tokens_details.map(|d| d.cached_tokens),
-                    reasoning_tokens: None,
+                    audio_tokens_in: usage.prompt_tokens_details.and_then(|d| d.audio_tokens),
+                    reasoning_tokens: usage.completion_tokens_details.map(|d| d.reasoning_tokens),
+                    audio_tokens_out: usage.completion_tokens_details.and_then(|d| d.audio_tokens),
+                    accepted_prediction_tokens: usage
+                        .completion_tokens_details
+                        .and_then(|d| d.accepted_prediction_tokens),
+                    rejected_prediction_tokens: usage
+                        .completion_tokens_details
+                        .and_then(|d| d.rejected_prediction_tokens),
+                    ..Default::default()
                 }));
             }
         }
@@ -211,6 +226,22 @@ impl ProtocolCodec for OpenAi {
             StreamEventIR::ToolCallDelta { .. } => {
                 tracing::warn!("openai: StreamEventIR::ToolCallDelta dropped (no wire equivalent)");
             }
+            StreamEventIR::RefusalDelta { text } => {
+                let payload = serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "refusal": text.as_ref() },
+                    }]
+                });
+                buf.extend_from_slice(b"data: ");
+                let bytes = serde_json::to_vec(&payload)
+                    .map_err(|_| internal_err("serialize refusal delta"))?;
+                buf.extend_from_slice(&bytes);
+                buf.extend_from_slice(b"\n\n");
+            }
+            StreamEventIR::CitationsDelta { .. }
+            | StreamEventIR::ServerToolStart { .. }
+            | StreamEventIR::ServerToolDelta { .. } => {}
         }
         Ok(())
     }
@@ -293,6 +324,7 @@ impl ProtocolCodec for OpenAi {
             .iter()
             .map(|m| match m {
                 MessageIR::System { content }
+                | MessageIR::Developer { content }
                 | MessageIR::User { content }
                 | MessageIR::Tool { content, .. }
                 | MessageIR::Assistant { content, .. } => approx_tokens(content),
@@ -422,6 +454,7 @@ mod tests {
                 output_tokens: 3,
                 cached_tokens: None,
                 reasoning_tokens: None,
+                ..Default::default()
             }),
             ..ResponseIR::default()
         };
@@ -431,7 +464,7 @@ mod tests {
         let parsed: ResponseIR = OpenAi.parse_response(&buf).unwrap();
         assert_eq!(parsed.id, "chatcmpl-abc");
         assert!(matches!(parsed.finish_reason, Some(FinishReasonIR::Stop)));
-        let usage = parsed.usage.expect("usage round-tripped");
+        let usage = parsed.usage.as_ref().expect("usage round-tripped");
         assert_eq!(usage.input_tokens, 5);
         assert_eq!(usage.output_tokens, 3);
 
@@ -586,5 +619,97 @@ mod tests {
             Some(MessageIR::Assistant { .. }) => Err(internal_err("expected tool_calls")),
             _ => Err(internal_err("expected tool_calls")),
         }
+    }
+
+    #[test]
+    fn parse_response_extracts_refusal() {
+        let body = br#"{
+            "id":"chatcmpl-ref",
+            "object":"chat.completion",
+            "created":0,
+            "model":"gpt-4o",
+            "choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"I cannot help with that."},"finish_reason":"stop"}]
+        }"#;
+        let ir = OpenAi.parse_response(body).expect("parse ok");
+        assert_eq!(ir.refusal.as_deref(), Some("I cannot help with that."));
+    }
+
+    #[test]
+    fn parse_response_extracts_annotations() {
+        let body = br#"{
+            "id":"chatcmpl-ann",
+            "object":"chat.completion",
+            "created":0,
+            "model":"gpt-4o",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"See source.","annotations":[{"type":"url_citation","url_citation":{"start_index":4,"end_index":10,"title":"Source Title","url":"https://example.com"}}]},"finish_reason":"stop"}]
+        }"#;
+        let ir = OpenAi.parse_response(body).expect("parse ok");
+        let anns = ir.annotations.as_ref().expect("annotations present");
+        assert_eq!(anns.len(), 1);
+        assert_eq!(anns[0].kind.as_ref(), "url_citation");
+        assert_eq!(anns[0].url.as_deref(), Some("https://example.com"));
+        assert_eq!(anns[0].title.as_deref(), Some("Source Title"));
+        assert_eq!(anns[0].start_index, Some(4));
+        assert_eq!(anns[0].end_index, Some(10));
+    }
+
+    #[test]
+    fn refusal_annotations_round_trip() {
+        let ir = ResponseIR {
+            id: Cow::Borrowed("chatcmpl-rt"),
+            model: Cow::Borrowed("gpt-4o"),
+            messages: vec![MessageIR::Assistant {
+                content: ContentIR::Text(Cow::Borrowed("See source.")),
+                tool_calls: None,
+            }],
+            finish_reason: Some(FinishReasonIR::Stop),
+            refusal: Some(Cow::Borrowed("I cannot help.")),
+            annotations: Some(vec![gw_core::ir::AnnotationIR {
+                kind: Cow::Borrowed("url_citation"),
+                url: Some(Cow::Borrowed("https://example.com")),
+                title: Some(Cow::Borrowed("Example")),
+                start_index: Some(4),
+                end_index: Some(10),
+            }]),
+            ..ResponseIR::default()
+        };
+
+        let mut buf = BytesMut::new();
+        OpenAi.render_response(&ir, &mut buf).unwrap();
+        let parsed = OpenAi.parse_response(&buf).unwrap();
+        assert_eq!(parsed.refusal.as_deref(), Some("I cannot help."));
+        let anns = parsed
+            .annotations
+            .as_ref()
+            .expect("annotations round-tripped");
+        assert_eq!(anns.len(), 1);
+        assert_eq!(anns[0].url.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn parse_stream_chunk_refusal_delta() {
+        let codec = OpenAi;
+        let mut state: Box<dyn StreamState> = Box::new(OpenAiStreamState::default());
+
+        let chunk = b"data: {\"choices\":[{\"delta\":{\"refusal\":\"I cannot\"}}]}\n\n";
+        let events = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEventIR::RefusalDelta { text } => assert_eq!(text.as_ref(), "I cannot"),
+            other => panic!("expected RefusalDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_stream_chunk_refusal_delta() {
+        let event = StreamEventIR::RefusalDelta {
+            text: Cow::Borrowed("I cannot help"),
+        };
+        let mut buf = BytesMut::new();
+        OpenAi.render_stream_chunk(&event, &mut buf).unwrap();
+        let output = String::from_utf8(buf.to_vec()).unwrap();
+        assert!(output.starts_with("data: "));
+        assert!(output.contains("\"refusal\""));
+        assert!(output.contains("I cannot help"));
     }
 }

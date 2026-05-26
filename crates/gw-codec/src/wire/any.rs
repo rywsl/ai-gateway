@@ -9,7 +9,7 @@ use gw_core::protocol::ProtocolKind;
 
 /// Wire-level request, tagged by protocol.
 pub enum WireAnyRequest<'a> {
-    OpenAi(OpenAiRequest<'a>),
+    OpenAi(Box<OpenAiRequest<'a>>),
     Anthropic(AnthropicRequest<'a>),
     Gemini(GeminiRequest<'a>),
 }
