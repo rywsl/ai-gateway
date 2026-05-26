@@ -27,6 +27,8 @@ gw-routing = { path = "../gw-routing" }
 gw-capability = { path = "../gw-capability" }
 gw-ledger = { path = "../gw-ledger" }
 gw-codec = { path = "../gw-codec" }
+gw-billing = { path = "../gw-billing" }
+gw-task = { path = "../gw-task" }
 gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
 anyhow.workspace = true
 serde.workspace = true

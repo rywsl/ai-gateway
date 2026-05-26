@@ -22,6 +22,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
+pub type VendorKeyInvalidationHook = Arc<dyn Fn(&KeyId) + Send + Sync + 'static>;
+
 /// Default per-cold-load deadline. Bootstrap can override this via
 /// `EntityStore::with_loader_and_timeout` (wired from
 /// `gw-gateway` `LoaderCfg::cold_load_timeout_ms`, default 2000 ms).
@@ -110,6 +112,7 @@ pub struct EntityStore {
     /// duration, the miss returns `None` and bumps
     /// `gateway_cold_load_timeout_total{ns}`. Defaults to 2s.
     cold_load_timeout: Duration,
+    vendor_key_invalidation_hooks: Vec<VendorKeyInvalidationHook>,
 }
 
 impl Default for EntityStore {
@@ -191,6 +194,18 @@ impl EntityStore {
                 .build(),
             loader,
             cold_load_timeout,
+            vendor_key_invalidation_hooks: Vec::new(),
+        }
+    }
+
+    pub fn on_vendor_key_invalidate(&mut self, hook: VendorKeyInvalidationHook) {
+        self.vendor_key_invalidation_hooks.push(hook);
+    }
+
+    pub async fn invalidate_vendor_key(&self, key_id: &KeyId) {
+        self.vendor_key.invalidate(key_id).await;
+        for hook in &self.vendor_key_invalidation_hooks {
+            hook(key_id);
         }
     }
 

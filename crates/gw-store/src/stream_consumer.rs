@@ -192,7 +192,7 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "user_group" => store.user_group.invalidate(&UserGroupId::from(id)).await,
         "apikey" => store.apikey.invalidate(&ApiKeyId::from(id)).await,
         "vendor" => store.vendor.invalidate(&VendorId::from(id)).await,
-        "vendor_key" => store.vendor_key.invalidate(&KeyId::from(id)).await,
+        "vendor_key" => store.invalidate_vendor_key(&KeyId::from(id)).await,
         "model_group" => store.model_group.invalidate(&Group::from(id)).await,
         "pricing" => store.pricing.invalidate(&ModelName::from(id)).await,
         "jwks" => store.jwks.invalidate(&Kid::from(id)).await,
@@ -348,5 +348,30 @@ mod mgmt_token_tests {
             store.mgmt_token.get("tk-1").await.is_none(),
             "cache entry must be absent after invalidation"
         );
+    }
+}
+
+#[cfg(test)]
+mod vendor_key_hook_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_entity_store_invalidation_evicts() {
+        let mut store_inner = EntityStore::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        store_inner.on_vendor_key_invalidate(Arc::new(move |key| {
+            if key.as_ref() == "vk-evict-hook" {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let store = Arc::new(store_inner);
+
+        apply_inline_for_test_helper(&store, "vendor_key", "vk-evict-hook").await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

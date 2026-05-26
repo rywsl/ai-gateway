@@ -9,7 +9,10 @@ members = [
     "crates/gw-adapter",
     "crates/gw-routing",
     "crates/gw-ledger",
+    "crates/gw-billing",
+    "crates/gw-task",
     "crates/gw-task-runtime",
+    "crates/gw-task-worker",
     "crates/gw-health",
     "crates/gw-capability",
     "crates/gw-proxy",
@@ -84,6 +87,8 @@ regex = "1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 hickory-resolver = { version = "0.25", features = ["https-ring", "tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # 可观测
 tracing = "0.1"

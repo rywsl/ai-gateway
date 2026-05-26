@@ -44,7 +44,10 @@ pub mod observability;
 pub use gw_tunnel_client;
 
 use anyhow::Context;
+use gw_auth::ip_allowlist::{IpAllowlistGuard, IpAllowlistMode};
+use gw_auth::ip_ratelimit::IpRateLimitGuard;
 use gw_auth::jwt_blacklist::RedisJwtBlacklist;
+use gw_auth::ratelimit::adaptive::{AdaptiveCfg, AdaptiveRpmManager};
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
@@ -63,11 +66,18 @@ struct Wired {
     in_flight: Arc<InFlightStore>,
     latency_tracker: Arc<gw_routing::LatencyTracker>,
     ratelimit: Arc<RateLimitGuard>,
+    ip_allowlist: Arc<IpAllowlistGuard>,
+    ip_ratelimit: Arc<IpRateLimitGuard>,
+    adaptive_rpm: Arc<AdaptiveRpmManager>,
+    ip_allowlist_mode: IpAllowlistMode,
     ledger: Arc<Ledger>,
     counters: Arc<CounterStore>,
     global_rpm: u32,
     trust_xff: bool,
     signature_required: bool,
+    task_enabled: bool,
+    task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
+    task_billing_config: Option<gw_billing::TaskBillingConfig>,
     business_port: u16,
     admin_upstream_url: url::Url,
     // --- Fields wired during bootstrap ---
@@ -188,12 +198,19 @@ pub fn run() -> anyhow::Result<()> {
         wired.in_flight,
         wired.latency_tracker,
         wired.ratelimit,
+        wired.ip_allowlist,
+        wired.ip_ratelimit,
+        wired.adaptive_rpm,
+        wired.ip_allowlist_mode,
         wired.ledger,
         wired.counters,
         wired.global_rpm,
         wired.admin_upstream_url,
         wired.trust_xff,
         wired.signature_required,
+        wired.task_enabled,
+        wired.task_contract,
+        wired.task_billing_config,
         wired.jwt_validator,
         wired.strategies,
         gw_routing::FailoverExecutor::default(),
@@ -265,17 +282,40 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         pg: pg.clone(),
         kek: kek_cache,
     };
-    let store = Arc::new(gw_store::EntityStore::with_loader_and_timeout(
+    let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
+        &cfg.adaptive_rpm,
+    )));
+    spawn_decay_loop(
+        adaptive_rpm.clone(),
+        cfg.adaptive_rpm.probe_after_min.saturating_mul(60),
+    );
+
+    let mut store_inner = gw_store::EntityStore::with_loader_and_timeout(
         loader,
         std::time::Duration::from_millis(cfg.loader.cold_load_timeout_ms),
-    ));
+    );
+    {
+        let adaptive_for_evict = adaptive_rpm.clone();
+        store_inner.on_vendor_key_invalidate(Arc::new(move |key_id| {
+            adaptive_for_evict.evict(key_id);
+        }));
+    }
+    let store = Arc::new(store_inner);
     let health = Arc::new(KeyHealthStore::default());
     let in_flight = Arc::new(InFlightStore::default());
     let ratelimit = Arc::new(RateLimitGuard::new());
+    let ip_allowlist_mode = map_ip_allowlist_mode(cfg.ip_filter.allowlist_mode);
+    let ip_allowlist = Arc::new(IpAllowlistGuard::new(ip_allowlist_mode));
+    let ip_ratelimit = Arc::new(IpRateLimitGuard::new(
+        cfg.ip_ratelimit.global_per_ip_rpm,
+        cfg.ip_ratelimit.max_entries,
+    ));
 
     let counters = Arc::new(CounterStore {
         redis: redis.clone(),
     });
+
+    spawn_ip_ratelimit_sweep(ip_ratelimit.clone(), cfg.ip_ratelimit.sweep_interval_secs);
 
     let mut preloaded_ip_blocks = 0usize;
     let mut ip_block_offset = 0i64;
@@ -308,6 +348,15 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // so unwrapping the Arc with `(*pool).clone()` hands the blacklist its
     // own pool handle without an extra refcount layer.
     let mgmt_blacklist = Arc::new(RedisJwtBlacklist::new((*redis.pool).clone()));
+    let task_contract = if cfg.task.enabled {
+        Some(Arc::new(
+            gw_task::redis_contract::RedisTaskContract::new((*redis.pool).clone())
+                .await
+                .context("initializing task redis contract")?,
+        ))
+    } else {
+        None
+    };
 
     // T3-Pre — single shared ResilienceState. The proxy error fanout
     // (T3-A) and the /healthz/resilience snapshot (T3-C) must observe the
@@ -639,12 +688,23 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         in_flight,
         latency_tracker,
         ratelimit,
+        ip_allowlist,
+        ip_ratelimit,
+        adaptive_rpm,
+        ip_allowlist_mode,
         ledger,
         counters,
         global_rpm: cfg.ratelimit.global_rpm,
         admin_upstream_url,
         trust_xff: cfg.security.trust_xff,
         signature_required: cfg.signature.required,
+        task_enabled: cfg.task.enabled,
+        task_contract,
+        task_billing_config: Some(gw_billing::TaskBillingConfig {
+            base_micro: cfg.task.billing_base_micro,
+            vendor_multiplier: cfg.task.billing_vendor_multiplier,
+            estimated_duration_secs: cfg.task.billing_estimated_duration_secs,
+        }),
         business_port: cfg.server.business_port,
         jwt_validator,
         strategies: Arc::new(gw_routing::strategy::set::StrategySet::new(
@@ -664,4 +724,95 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             max_cost_micro: cfg.auth.hard_cap_max_cost_micro,
         },
     })
+}
+
+fn map_ip_allowlist_mode(mode: config::IpFilterAllowlistMode) -> IpAllowlistMode {
+    match mode {
+        config::IpFilterAllowlistMode::Off => IpAllowlistMode::Off,
+        config::IpFilterAllowlistMode::Enforce => IpAllowlistMode::Enforce,
+    }
+}
+
+fn map_adaptive_rpm_cfg(cfg: &config::AdaptiveRpmCfg) -> AdaptiveCfg {
+    AdaptiveCfg {
+        enforcement_threshold: cfg.enforcement_threshold as f32,
+        confidence_decay_per_min: cfg.confidence_decay_per_min as f32,
+        min_header_observations: cfg.min_header_observations,
+        min_no_header_observations: cfg.min_no_header_observations,
+        buffer_ratio: cfg.buffer_ratio as f32,
+        probe_after_min: cfg.probe_after_min,
+        probe_increment: cfg.probe_increment,
+        min_rpm: cfg.min_rpm,
+        max_rpm: cfg.max_rpm,
+    }
+}
+
+pub fn spawn_decay_loop(
+    manager: Arc<AdaptiveRpmManager>,
+    interval_secs: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        loop {
+            interval.tick().await;
+            manager.tick_decay();
+        }
+    })
+}
+
+fn spawn_ip_ratelimit_sweep(guard: Arc<IpRateLimitGuard>, sweep_interval_secs: u64) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(sweep_interval_secs));
+        loop {
+            interval.tick().await;
+            let removed = guard.sweep();
+            if removed > 0 {
+                tracing::info!(
+                    target: "gw_gateway",
+                    removed,
+                    active = guard.len(),
+                    "ip ratelimit sweep evicted idle entries"
+                );
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod adaptive_rpm_tests {
+    use super::*;
+    use gw_auth::ratelimit::adaptive::{
+        AdaptiveCfg, AdaptiveRpmManager, Confidence, KeyAdaptiveState,
+    };
+    use gw_core::ids::KeyId;
+
+    #[tokio::test(start_paused = true)]
+    async fn test_decay_loop_ticks() {
+        let manager = Arc::new(AdaptiveRpmManager::new(AdaptiveCfg {
+            confidence_decay_per_min: 0.5,
+            enforcement_threshold: 0.6,
+            probe_after_min: 30,
+            ..AdaptiveCfg::default()
+        }));
+        let key_id = KeyId::from("vk-decay-loop");
+        manager.state.insert(
+            key_id.clone(),
+            Arc::new(KeyAdaptiveState {
+                configured_rpm: 1_000,
+                learned_rpm: Some(100),
+                confidence: Confidence::new(1.0, 0),
+                last_429_at_ms: 0,
+                consistent_observations: 1,
+                last_observed_limit: Some(100),
+            }),
+        );
+
+        let handle = spawn_decay_loop(manager.clone(), 60);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        handle.abort();
+
+        let state = manager.state.get(&key_id).expect("state retained");
+        assert!(state.confidence.value < 1.0);
+    }
 }
