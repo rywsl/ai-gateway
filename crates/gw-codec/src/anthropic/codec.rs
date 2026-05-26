@@ -220,6 +220,10 @@ impl ProtocolCodec for Anthropic {
                     "anthropic: StreamEventIR::Start dropped (no wire equivalent in this codec)"
                 );
             }
+            StreamEventIR::RefusalDelta { .. }
+            | StreamEventIR::CitationsDelta { .. }
+            | StreamEventIR::ServerToolStart { .. }
+            | StreamEventIR::ServerToolDelta { .. } => {}
         }
         Ok(())
     }
@@ -302,6 +306,7 @@ impl ProtocolCodec for Anthropic {
             .iter()
             .map(|m| match m {
                 MessageIR::System { content }
+                | MessageIR::Developer { content }
                 | MessageIR::User { content }
                 | MessageIR::Tool { content, .. }
                 | MessageIR::Assistant { content, .. } => approx_tokens(content),
@@ -339,7 +344,21 @@ fn dispatch_payload<'a>(
                     input_tokens: u.input_tokens,
                     output_tokens: u.output_tokens,
                     cached_tokens: u.cache_read_input_tokens,
+                    cache_creation_tokens: u.cache_creation_input_tokens,
+                    cache_creation_1h_tokens: u
+                        .cache_creation
+                        .and_then(|c| c.ephemeral_1h_input_tokens),
+                    cache_creation_5m_tokens: u
+                        .cache_creation
+                        .and_then(|c| c.ephemeral_5m_input_tokens),
+                    server_tool_web_search_requests: u
+                        .server_tool_use
+                        .and_then(|s| s.web_search_requests),
+                    server_tool_web_fetch_requests: u
+                        .server_tool_use
+                        .and_then(|s| s.web_fetch_requests),
                     reasoning_tokens: None,
+                    ..Default::default()
                 }));
             }
         }
@@ -389,11 +408,32 @@ fn dispatch_payload<'a>(
                         name: Cow::Owned(name.into_owned()),
                     });
                 }
-                // Image / ToolResult are not assistant-output blocks.
-                AnthropicContent::Image { .. } | AnthropicContent::ToolResult { .. } => {}
+                AnthropicContent::Image { .. }
+                | AnthropicContent::ToolResult { .. }
+                | AnthropicContent::RedactedThinking { .. }
+                | AnthropicContent::ServerToolUse(_)
+                | AnthropicContent::WebSearchToolResult(_)
+                | AnthropicContent::WebFetchToolResult(_)
+                | AnthropicContent::CodeExecutionToolResult(_)
+                | AnthropicContent::BashCodeExecutionToolResult(_)
+                | AnthropicContent::TextEditorCodeExecutionToolResult(_)
+                | AnthropicContent::ToolSearchToolResult(_)
+                | AnthropicContent::McpToolUse(_)
+                | AnthropicContent::McpToolResult(_)
+                | AnthropicContent::ContainerUpload(_)
+                | AnthropicContent::Document { .. }
+                | AnthropicContent::SearchResult { .. }
+                | AnthropicContent::Unknown => {}
             }
         }
         AnthropicStreamEvent::ContentBlockDelta { index, delta } => {
+            if let AnthropicStreamDelta::CitationsDelta { citation } = &delta {
+                let json = serde_json::to_string(citation).unwrap_or_default();
+                events.push(StreamEventIR::CitationsDelta {
+                    data: Cow::Owned(json),
+                });
+                return;
+            }
             let Some(builder) = st.open_blocks.get_mut(&index) else {
                 tracing::warn!(
                     index,
@@ -478,7 +518,21 @@ fn dispatch_payload<'a>(
                     input_tokens: u.input_tokens,
                     output_tokens: u.output_tokens,
                     cached_tokens: u.cache_read_input_tokens,
+                    cache_creation_tokens: u.cache_creation_input_tokens,
+                    cache_creation_1h_tokens: u
+                        .cache_creation
+                        .and_then(|c| c.ephemeral_1h_input_tokens),
+                    cache_creation_5m_tokens: u
+                        .cache_creation
+                        .and_then(|c| c.ephemeral_5m_input_tokens),
+                    server_tool_web_search_requests: u
+                        .server_tool_use
+                        .and_then(|s| s.web_search_requests),
+                    server_tool_web_fetch_requests: u
+                        .server_tool_use
+                        .and_then(|s| s.web_fetch_requests),
                     reasoning_tokens: None,
+                    ..Default::default()
                 }));
             }
             if let Some(reason) = delta.stop_reason.as_deref() {
@@ -616,6 +670,7 @@ mod tests {
                 output_tokens: 3,
                 cached_tokens: None,
                 reasoning_tokens: None,
+                ..Default::default()
             }),
             ..ResponseIR::default()
         };
@@ -626,7 +681,7 @@ mod tests {
         assert_eq!(parsed.id, "msg_text");
         assert_eq!(parsed.model, "claude-3-5-sonnet");
         assert!(matches!(parsed.finish_reason, Some(FinishReasonIR::Stop)));
-        let usage = parsed.usage.expect("usage round-tripped");
+        let usage = parsed.usage.as_ref().expect("usage round-tripped");
         assert_eq!(usage.input_tokens, 5);
         assert_eq!(usage.output_tokens, 3);
         assert_anthropic_assistant_text(&parsed, "Hello, world!").unwrap();
@@ -776,5 +831,97 @@ data: {"type":"content_block_stop","index":0}
             Some(MessageIR::Assistant { .. }) => Err(internal_err("expected ContentIR::Text")),
             _ => Err(internal_err("expected Assistant")),
         }
+    }
+
+    #[test]
+    fn parse_stream_chunk_redacted_thinking_block_is_skipped() {
+        let codec = Anthropic;
+        let mut state: Box<dyn StreamState> = codec.new_stream_state();
+
+        let chunk = br#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque-b64"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+"#;
+        let events = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+        assert!(
+            events.is_empty(),
+            "redacted_thinking stream blocks should produce no IR events; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn parse_response_with_pause_turn_stop_reason() {
+        let body = br#"{"id":"msg_pt","type":"message","role":"assistant","content":[{"type":"text","text":"paused"}],
+            "model":"claude-3-5-sonnet","stop_reason":"pause_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let ir = Anthropic.parse_response(body).expect("parse ok");
+        match ir.finish_reason.as_ref() {
+            Some(FinishReasonIR::Other(s)) => assert_eq!(s.as_ref(), "pause_turn"),
+            other => panic!("expected Other(pause_turn), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_stream_end_with_refusal_stop_reason() {
+        let ir = StreamEventIR::End {
+            finish_reason: FinishReasonIR::Refusal,
+        };
+        let mut buf = BytesMut::new();
+        Anthropic.render_stream_chunk(&ir, &mut buf).unwrap();
+        let output = std::str::from_utf8(&buf).unwrap();
+        assert!(
+            output.contains("\"stop_reason\":\"refusal\""),
+            "expected refusal stop_reason in stream; got: {output}"
+        );
+    }
+
+    #[test]
+    fn parse_stream_chunk_citations_delta() {
+        let codec = Anthropic;
+        let mut state: Box<dyn StreamState> = codec.new_stream_state();
+
+        let start = br#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+"#;
+        codec.parse_stream_chunk(state.as_mut(), start).unwrap();
+
+        let chunk = br#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location","cited_text":"hello","document_index":0,"start_char_index":0,"end_char_index":5}}}
+
+"#;
+        let events = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+        let cit = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEventIR::CitationsDelta { data } => Some(data.clone()),
+                _ => None,
+            })
+            .expect("CitationsDelta emitted");
+        let parsed: serde_json::Value = serde_json::from_str(&cit).unwrap();
+        assert_eq!(parsed["type"].as_str(), Some("char_location"));
+        assert_eq!(parsed["cited_text"].as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn parse_stream_chunk_mcp_block_start_is_skipped() {
+        let codec = Anthropic;
+        let mut state: Box<dyn StreamState> = codec.new_stream_state();
+
+        let chunk = br#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"mcp_tool_use","id":"mcp_1","name":"read_file","input":{}}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+"#;
+        let events = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+        assert!(
+            events.is_empty(),
+            "mcp_tool_use stream blocks should produce no IR events; got {events:?}"
+        );
     }
 }
