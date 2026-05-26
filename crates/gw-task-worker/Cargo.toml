@@ -1,0 +1,39 @@
+[package]
+name = "gw-task-worker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gw-task-worker"
+path = "src/main.rs"
+
+[lib]
+name = "gw_task_worker"
+path = "src/lib.rs"
+
+[dependencies]
+gw-task = { path = "../gw-task" }
+gw-task-runtime = { path = "../gw-task-runtime" }
+gw-billing = { path = "../gw-billing" }
+tokio.workspace = true
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+fred.workspace = true
+figment.workspace = true
+serde.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+hostname.workspace = true
+
+[dev-dependencies]
+testcontainers.workspace = true
+testcontainers-modules.workspace = true

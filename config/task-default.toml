@@ -1,0 +1,47 @@
+# Worker-only support listeners. These ports are for local health/metrics
+# scraping and are not called by gw-gateway; gateway↔worker coordination stays
+# on Redis only.
+[server]
+health_port = 8081
+metrics_port = 9091
+
+[redis]
+# Shared coordination plane for every deployment shape: 1×1, 1×N, N×1, or N×M.
+# Point all gateways and all workers at the same Redis namespace to share
+# tasks:queue / tasks:cancel / entity:task:* state.
+url = "redis://localhost:6379"
+pool_size = 8
+
+[worker]
+# Stable worker identity defaults for local/dev. Real deployments can override
+# these with GW_TASK_WORKER__* env vars per replica; no gateway address belongs
+# here because workers never dial gateways directly.
+id = "task-worker"
+redis_prefix = ""
+
+[loops]
+# Lease/heartbeat timings are per-worker runtime knobs only. They do not require
+# matching changes on gateway replicas because handoff/recovery happens through
+# Redis leases and task entities.
+idle_sleep_ms = 100
+cancel_block_ms = 5000
+watchdog_interval_ms = 5000
+heartbeat_interval_ms = 15000
+lease_seconds = 60
+recover_limit = 100
+
+[concurrency]
+# Capacity is enforced inside each worker process. Scale out by starting more
+# gw-task-worker replicas against the same Redis namespace rather than by
+# teaching gateways about individual workers.
+global = 128
+per_vendor = 32
+per_model = 32
+per_key = 32
+
+[timeouts]
+# Provider-facing worker timeouts. Safe to tune independently from gateway
+# rollout because the gateway only observes queued/running/terminal task state
+# via Redis.
+total_ms = 120000
+submit_ms = 30000
