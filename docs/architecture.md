@@ -13,12 +13,13 @@ A Rust LLM gateway built on **Pingora 0.8**. It terminates OpenAI / Anthropic / 
 Three layers with strict one-way dependency (enforced by `scripts/check-invariants.sh`):
 
 ```
-┌────────── Execution ──────────┐  gw-gateway (bin), gw-proxy
+┌────────── Execution ──────────┐  gw-gateway (bin), gw-task-worker (bin), gw-proxy
 │   may depend on ↓ ↓ ↓         │
 ├────────── Business ───────────┤  gw-adapter, gw-health, gw-routing,
-│   may depend on ↓             │  gw-capability, gw-tunnel-client
+│   may depend on ↓             │  gw-capability, gw-tunnel-client, gw-billing,
+│                               │  gw-task-runtime
 ├────────── Supporting ─────────┤  gw-core, gw-codec, gw-codec-macros,
-│   type / mechanism only        │  gw-store, gw-auth, gw-ledger, gw-task-runtime
+│   type / mechanism only        │  gw-store, gw-auth, gw-ledger, gw-task
 └───────────────────────────────┘
 ```
 
@@ -30,17 +31,20 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 |-------|-------|----------------|
 | `gw-core` | Supporting | ID newtypes, entity structs, `RequestIR` / `ResponseIR` / `StreamEventIR`, `ErrorIR`, `ErrorClass`, `DefaultClassifier`, stable error-code dictionary. No I/O. |
 | `gw-codec-macros` | Supporting | Proc-macros driving codec boilerplate (Phase 2 `wire_convert_matrix!` scaffolding). |
-| `gw-codec` | Supporting | `ProtocolCodec` trait + OpenAI / Anthropic / Gemini codecs, same-protocol passthrough fast path, cross-protocol IR re-render, SSE accumulator, gzip/brotli compression, stream-policy truth table. |
-| `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (9 Moka caches with cold-load chain), `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
-| `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor RPM, ADR-024 hard caps, HMAC signature verify, IP allow/blocklist, model-permission regex w/ ReDoS budget, management-path detect. |
+| `gw-codec` | Supporting | `ProtocolCodec` trait + OpenAI / Anthropic / Gemini codecs, same-protocol passthrough fast path, cross-protocol IR re-render, SSE accumulator, gzip/brotli compression, stream-policy truth table. CLI variant codecs (`gw-codec::cli`) implement the narrower `CliCodec` trait for transparent body passthrough with usage extraction — see §3.1. |
+| `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (Moka caches with cold-load chain), vendor-key invalidation hooks, `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
+| `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor RPM plus `ratelimit::adaptive::AdaptiveRpmManager`, ADR-024 hard caps, HMAC signature verify, `ip_filter` / allowlist / blocklist / per-IP RPM, model-permission regex w/ ReDoS budget, management-path detect. |
+| `gw-task` | Supporting | Task contract crate: shared task DTOs, lifecycle/status enums, transition validation, and Redis/Lua protocol shapes for background work without pulling in store/runtime I/O. |
 | `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process request `frozen_micro`; task freezes delegate to its `TaskFreezeRelease` trait), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction. |
-| `gw-task-runtime` | Supporting | `RedisTaskFreezeRelease` implementation — Lua-driven atomic freeze/release for task-scoped deductions. |
+| `gw-task-runtime` | Business | Task runtime coordination used by the worker path: `RedisTaskFreezeRelease`, execution/cancel/watchdog/heartbeat loops, and task-level settlement helpers. Must not depend on `gw-proxy`. |
 | `gw-adapter` | Business | `UpstreamAdapter` trait (vendor-specific outbound rewrite hooks), `UpstreamErrorAnalyzer` trait, `ErrorOutcome`. |
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
 | `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
 | `gw-capability` | Business | Model-capability resolution: `Capability` enum, `RequiredCapabilities`, `ModelMapper`, `CapabilityResolver`, `AdapterCapabilityHook`, `CapabilityFilter`, `PricingReader`. |
 | `gw-tunnel-client` | Business | Tunnel transport to remote nodes: frame codec (magic `0xAE21`, 8 msg types), WebSocket transport w/ heartbeat / reconnect, DoH resolver, target-filter whitelist. Consumed by `gw-proxy::tunnel_stack::TunnelStack` (under `feature = "tunnel"`). Active when `cfg.tunnel.enabled = true`; otherwise `pick_peer` runs the byte-identical Direct path. |
+| `gw-billing` | Business | Task-level billing formulas: base micro amounts, vendor/task-kind multipliers, duration buckets. No per-token pricing, no `cost_micro` — the `no_cost_micro` invariant applies. Depends only on `gw-task` + `serde`. Supporting crates must not depend on it. |
 | `gw-proxy` | Execution | Pingora `ProxyHttp` impl. Filter chain, `ReqCtx`, error fanout, timeouts, body-verify hook, jemalloc sampling. |
+| `gw-task-worker` | Execution | Task worker binary. Figment config (`config/task-default.toml` + `GW_TASK_*` env), Redis pool, `ExecLoop` + `CancelLoop` + `WatchdogLoop` + `HeartbeatLoop`, worker registration (`entity:worker:<uuid>` HASH + heartbeat refresh), health HTTP (`/livez`, `/readyz` on port 8081), Prometheus `/metrics` on port 9091. No business HTTP endpoint, no `gw-proxy` dependency. |
 | `gw-gateway` | Execution | Binary entry. Figment config, observability, KMS init, bootstrap OS thread + tokio runtime, health HTTP server. |
 
 ### 2.2 Dependency DAG (path deps only)
@@ -54,7 +58,8 @@ Supporting:
   gw-store         ◄── gw-auth, gw-routing, gw-ledger, gw-capability,
                        gw-tunnel-client, gw-proxy, gw-gateway
   gw-auth          ◄── gw-capability, gw-proxy, gw-gateway
-  gw-ledger        ◄── gw-task-runtime, gw-proxy, gw-gateway
+  gw-task          ◄── gw-task-runtime, gw-gateway
+  gw-ledger        ◄── gw-proxy, gw-gateway
 
 Business:
   gw-health        ◄── gw-adapter, gw-routing, gw-proxy, gw-gateway
@@ -62,9 +67,12 @@ Business:
   gw-routing       ◄── gw-proxy, gw-gateway
   gw-capability    ◄── gw-proxy, gw-gateway
   gw-tunnel-client ◄── gw-gateway (feature="tunnel")
+  gw-billing       ◄── gw-gateway
+  gw-task-runtime  ◄── gw-task-worker
 
 Execution:
   gw-proxy ◄── gw-gateway (binary)
+  gw-task-worker (binary) ◄── gw-task, gw-task-runtime, gw-billing, gw-store
 ```
 
 ## 3. Public traits — extension surface
@@ -82,6 +90,25 @@ Execution:
 | `JwtBlacklist` | gw-auth | Token revocation check | `RedisJwtBlacklist` (with `FailMode`) |
 | `HeaderView` | gw-adapter | Borrow-friendly header access | (per-adapter) |
 | `ContentFilter` / `TokenEstimator` | gw-core | Pluggable scrubbing / sizing | `Noop*` |
+| `CliCodec` | gw-codec | CLI variant codec: shape identity, shallow body-hint extraction (model + stream), usage extractor access, TTFT event types. Narrower than `ProtocolCodec` — no parse/render (CLI body is passthrough). | `ClaudeCliCodec`, `OpenAiCliCodec`, `OpenAiCompactCodec`, `GeminiCliCodec` |
+| `CliUsageExtractor` | gw-codec | Extract token usage from raw CLI responses (SSE events or non-stream JSON) without IR conversion. | `ClaudeCliUsageExtractor`, `OpenAiCliUsageExtractor` (shared by `openai:cli` + `openai:compact`), `GeminiCliUsageExtractor` |
+
+### 3.1 Wire formats and `ApiShape` FORMAT_IDs
+
+`gw-core::protocol::ApiShape` (8 variants) provides the fine-grained wire-format identity used in codec detection, `UsageRecord` emission, and candidate filtering. `ProtocolKind` (3 variants: `OpenAi`, `Anthropic`, `Gemini`) remains the coarse bucket for key-health, routing strategy, and latency tracking.
+
+| `ApiShape` variant | FORMAT_ID string | Protocol Kind | CLI? | Detection signal |
+|--------------------|------------------|---------------|------|------------------|
+| `OpenAiChat` | `openai:chat` | `OpenAi` | no | `/v1/chat/completions` |
+| `OpenAiResponses` | `openai:responses` | `OpenAi` | no | `/v1/responses` (standard SDK) |
+| `AnthropicMessages` | `anthropic:messages` | `Anthropic` | no | `/v1/messages` + `x-api-key` present |
+| `GeminiGenerate` | `gemini:generate` | `Gemini` | no | Gemini path pattern, no CLI header |
+| `ClaudeCli` | `claude:cli` | `Anthropic` | yes | `/v1/messages` + `Authorization: Bearer` + no `x-api-key` |
+| `OpenAiCli` | `openai:cli` | `OpenAi` | yes | `/v1/responses` (CLI detection) |
+| `OpenAiCompact` | `openai:compact` | `OpenAi` | yes | `/v1/responses/compact` |
+| `GeminiCli` | `gemini:cli` | `Gemini` | yes | Gemini path + `x-app: cli` or UA `gemini-cli` |
+
+Standard shapes flow through `ProtocolCodec::parse_request → RequestIR → render_request`; CLI shapes bypass IR entirely (body passthrough) and use `CliCodec::extract_hints` for shallow model/stream extraction. See §8 "CLI transparent proxy" for the rationale and cross-protocol constraint.
 
 ## 4. Configuration
 
@@ -96,6 +123,10 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 | `[redis]` | URL, pool size | |
 | `[pgsql]` | URL, max connections | |
 | `[ratelimit]` | Workspace `global_rpm` ceiling (per-user lives in DB) | |
+| `[ip_filter]` | `allowlist_mode` (`Off`/`Enforce`, default `Off`) | Boot-time IP allowlist enforcement mode. |
+| `[ip_ratelimit]` | `global_per_ip_rpm` (600), `max_entries` (100000), `sweep_interval_secs` (300) | In-memory per-IP rate-limit guard sizing and sweep cadence. |
+| `[adaptive_rpm]` | `enforcement_threshold` (0.6), `confidence_decay_per_min` (0.02), `min_header_observations` (2), `min_no_header_observations` (3), `buffer_ratio` (0.85), `probe_after_min` (30), `probe_increment` (5), `min_rpm` (5), `max_rpm` (10000) | Adaptive RPM tuning knobs for confidence-based per-key throttling. |
+| `[task]` | `enabled` (false), `queue_stream` (`tasks:queue`), `cancel_stream` (`tasks:cancel`) | Background task worker toggle plus Redis stream names for queue/cancel traffic. |
 | `[ledger]` | `channel_capacity`, `batch_size`, `flush_interval_ms` for the billing flusher | |
 | `[kms]` | KEK identifier; secret is env-only | |
 | `[debug]` | Sampling rate + body-capture toggles for detailed logs | |
@@ -139,6 +170,7 @@ Migrations live at `crates/gw-store/migrations/`. **Not auto-applied** — run `
 | `0002_gemini_file_mapping.sql` | `gemini_file_mapping(sha256_hex, user_id) PK → file_uri, mime, size, expire_unix_s`. |
 | `0003_model_mapping.sql` | `model_mapping(user_alias, protocol) PK → default_upstream_model, vendor_key_overrides JSONB, availability, pricing_strategy_ref`. |
 | `0004_capabilities.sql` | New `models` table (canonical entity shape) for `Model.capabilities`; `vendor_keys` gains `forced_capabilities JSONB` + `exclusive_capability_match BOOLEAN`. Capability strings parsed by `gw-capability` at resolve time (see [`docs/superpowers/specs/2026-05-21-known-gaps-design.md`](superpowers/specs/2026-05-21-known-gaps-design.md) ADR-G13-1). |
+| `0004_task_worker.sql` | `task_records(task_id TEXT PK, user_id, api_key_id, status, kind, model, vendor_key_id, input_payload JSONB, output_payload JSONB, frozen_micro BIGINT, actual_micro BIGINT, provider_task_id, created_at, updated_at, settled_at TIMESTAMPTZ NULL)`. `worker_registrations(worker_id TEXT PK, hostname, status, start_time TIMESTAMPTZ, last_heartbeat TIMESTAMPTZ, metadata JSONB)`. Both additive, `IF NOT EXISTS`. |
 
 ### 5.2 Redis namespaces
 
@@ -152,6 +184,11 @@ Migrations live at `crates/gw-store/migrations/`. **Not auto-applied** — run `
 | `usage:records` | Billing records | `Ledger` flusher (XADD batched) | Go billing service |
 | `usage:detailed` | Wire-fidelity per-surface archive. 5 entries per request (downstream/upstream × request/response + summary). `encoding` ∈ {raw,lz4,zstd}+json picked by size. Headers + bodies stored raw (no redaction). XADD MAXLEN bounds Redis memory; Go drainer is mandatory consumer for 180d retention. Drop-on-outage (no DLQ). See [`detailed-log-complete-design`](superpowers/specs/2026-05-23-detailed-log-complete-design.md). | `DetailedFlusher` (async pool, per-surface XADD) | Go drainer (mandatory) |
 | `{user:<uid>}:tasks:leases`, `{user:<uid>}:entity:task:<task_id>`, `{user:<uid>}:counter:task_frozen_micro` | Task freeze release transaction. `RedisTaskFreezeRelease` runs one Lua `EVALSHA`/`EVAL`: `ZREM` lease; if present, `HSET status=released` and `HINCRBY frozen_micro -<frozen>`. The `{user:<uid>}` hash-tag keeps all keys in one Redis Cluster slot. | `gw-task-runtime` via `TaskFreeze::release()` | Gateway/task runtime task paths |
+| `entity:task:<id>` | Task record hash. Flat fields: `task_id`, `user_id`, `api_key_id`, `status`, `kind`, `model`, `vendor_key_id`, `input_payload` (JSON string), `output_payload`, `frozen_micro`, `actual_micro`, `provider_task_id`, lifecycle timestamps (`created_at_ms`, `updated_at_ms`, `settled_at_ms`, `lease_until_ms`). Written by `RedisTaskContract::submit`, updated by worker loops. | `gw-task` (`RedisTaskContract`), `gw-task-worker` | Gateway task endpoints (load/watch/cancel), worker exec/cancel/watchdog loops |
+| `tasks:queue` | Redis Stream. Task submissions (`XADD`). Each entry carries `task_id`; workers consume via `XREADGROUP` with a shared consumer group. | Gateway `request_filter` (task submit path) | `gw-task-worker` `ExecLoop::claim` |
+| `tasks:cancel` | Redis Stream. Cancellation fan-out (`XADD`). Each entry carries `task_id`; workers consume via `XREADGROUP` (`tasks-cancel-fanout` group). | Gateway cancel endpoint | `gw-task-worker` `CancelLoop` |
+| `tasks:leases` | Sorted set. Score = `lease_until_ms`. Workers `ZADD` on claim and heartbeat renewal; `WatchdogLoop` scans expired entries via `ZRANGEBYSCORE` and recovers them. | `gw-task-worker` (claim, heartbeat, watchdog) | `gw-task-worker` `WatchdogLoop` |
+| `entity:worker:<uuid>` | Worker registration hash. Fields: `worker_id`, `start_time_ms`, `status`, `hostname`, `last_heartbeat_ms`. **Observability only** — not used for routing or service discovery. Written at worker startup, refreshed by worker heartbeat loop. | `gw-task-worker` | Operators (Redis inspection) |
 | (in-process) | Sticky assignment | `Sticky` strategy | `Sticky` strategy. G12 (T2-C) moved bindings to an in-process `moka::sync::Cache` (`time_to_live = 30 min`, `max_capacity = 100_000`, LRU eviction on overflow); no Redis namespace is used. |
 | `jwt:blacklist:*` | JWT revocation (T1-C) | Control plane | `RedisJwtBlacklist` (with `FailMode::ClosedOnError` / `OpenOnError`) |
 | `lock:*`, `key_health:*`, `circuit:*`, `dedup:*` | Reserved for Phase 5+ | — | — |
@@ -167,7 +204,8 @@ load config                              build multi-thread tokio rt
 spawn bootstrap thread  ────────────►    KMS init
                                          Redis connect
                                          Postgres connect
-                                         EntityStore + Loader
+                                         AdaptiveRpmManager + decay loop
+                                         EntityStore + Loader (+ vendor_key evict hook)
                                          KeyHealthStore, InFlightStore,
                                           RateLimitGuard, CounterStore
                                          Ledger::start         (spawned task)
@@ -186,11 +224,20 @@ server.run_forever()    // never returns
 
 ### 6.1 Listeners
 
+**Gateway process (`gw-gateway`):**
+
 | Port | Server | Module |
 |------|--------|--------|
 | 8000 | Pingora business proxy | `gw-proxy::LlmGateway` |
 | 9090 | Prometheus `/metrics` | `gw-gateway::metrics_catalog` |
 | 8080 | Health HTTP — `/livez`, `/readyz`, `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience`, `/healthz/strategies` | `gw-gateway::health` |
+
+**Task worker process (`gw-task-worker`):**
+
+| Port | Server | Module |
+|------|--------|--------|
+| 9091 | Prometheus `/metrics` | `gw-task-worker::task_metrics` |
+| 8081 | Health HTTP — `/livez`, `/readyz` | `gw-task-worker` |
 
 The `/healthz/{circuits,key/<id>,resilience,strategies}` admin routes verify
 `Authorization: Mgmt mt_<id>.<secret>` against the same
@@ -205,17 +252,74 @@ by the Go control plane. On success the route returns the matching
 `[]`. `/livez` and `/readyz`
 remain unauthenticated.
 
+### 6.2 Task worker deployment model
+
+The task system is deployable as **N gateway processes + M worker processes** with
+**Redis-only coordination**. `gw-gateway` accepts client traffic, writes task
+submissions/cancellations to Redis, and reads task state back from Redis.
+`gw-task-worker` consumes the same Redis namespace and never exposes a business
+HTTP API to the gateway.
+
+| Topology | Supported | Why |
+|----------|-----------|-----|
+| 1 gateway × 1 worker | yes | Local/dev baseline. |
+| 1 gateway × N workers | yes | Redis Stream consumer-group fan-out distributes claims automatically. |
+| N gateways × 1 worker | yes | Multiple gateways can enqueue into the same `tasks:queue` stream. |
+| N gateways × M workers | yes | Default production shape. |
+| Cross-AZ / cross-network / cross-cluster | yes | Only shared requirement is reachability to the same Redis namespace (and compatible task schema version). |
+
+Hard constraints from the task-worker ADRs:
+
+- **No gateway ↔ worker direct communication.** No per-worker host/port, no HTTP
+  reverse proxy, no service-discovery table.
+- **Gateway/worker startup order is independent.** With `[task].enabled = false`
+  by default in `gw-gateway`, the gateway still boots normally without any task
+  worker present. When workers are absent, submitted tasks remain queued in
+  Redis until a worker appears. Conversely, `gw-task-worker` can start first and
+  idle against Redis until a gateway later enqueues work.
+- **Horizontal scaling is peer-blind.** Adding a gateway only adds another Redis
+  writer/reader. Adding a worker only adds another consumer-group member.
+  Neither side requires reconfiguration of the other.
+- **Rolling restarts are peer-blind.** Gateway restarts only affect client
+  connections. Worker restarts rely on lease expiry/recovery inside Redis; the
+  gateway does not track worker instance identity.
+
+Runtime coupling is limited to these Redis surfaces:
+
+- Streams: `tasks:queue`, `tasks:cancel`
+- Entities: `entity:task:*`, `entity:worker:*`
+- Counters/lease release keys: task freeze + lease bookkeeping
+
+The worker's `entity:worker:*` registration is **observability only**. It is not
+used for request routing or service discovery; task execution remains driven by
+Redis queue/lease state alone.
+
+### 6.3 Task error codes
+
+Task endpoints emit four dedicated error codes from `gw-core::error::codes`:
+
+| Code | HTTP | Trigger |
+|------|------|---------|
+| `GW_TASK_SUBMIT_FAILED` | 500 | `TaskContract::submit` Redis write failed (XADD or HSET). |
+| `GW_TASK_NOT_FOUND` | 404 | `TaskContract::load` or `watch` returns `None` for the requested task ID. |
+| `GW_TASK_FREEZE_FAILED` | 402 | Insufficient `balance_micro` to cover the task freeze estimate from `gw-billing::calculate_freeze_amount`. Checked after the shared balance gate in `request_filter`. |
+| `GW_TASK_CANCELLED` | 200 | Informational: task was cancelled (cancel endpoint returns the settled `TaskRecord` with `status=Cancelled`). |
+
 ## 7. Invariants (`scripts/check-invariants.sh`)
 
 Active lints (all green at HEAD):
 
 | Lint | Meaning |
 |------|---------|
-| `crate_layering` | Supporting must not depend on Business/Execution; gw-routing / gw-capability / gw-tunnel-client (Business) must not depend on Execution; gw-proxy ↮ gw-task-runtime. |
-| `no_billing_crate` | `gw-billing` is permanently retired — must not reappear. |
+| `crate_layering` | Supporting must not depend on Business/Execution; gw-routing / gw-capability / gw-tunnel-client / gw-task-runtime (Business) must not depend on Execution; gw-proxy ↮ gw-task-runtime. |
+| `no_billing_crate` | `gw-billing` exists as a task-level billing formula crate (§2.1) but supporting crates (`gw-core`, `gw-codec*`, `gw-store`, `gw-auth`, `gw-ledger`) must not depend on it. No per-token cost computation in Rust. |
 | `no_proxy_worker_dep` | gw-proxy must not depend on gw-task-runtime. |
+| `no_task_runtime_imports_proxy` | gw-task-runtime must not depend on gw-proxy (ADR-T1 forbidden supporting → execution edge). |
 | `no_worker_addr_config` | Gateway config/code must not embed worker host/port (ADR-T16). |
 | `no_cost_micro` | Rust must not carry `cost_micro` (cost computation lives in Go). |
+| `no_billing_cost_per_token` | gw-billing must not contain `cost_per_token` or `price_per_token`; task billing remains duration/base/multiplier only. |
+| `no_cli_auth_bypass` | CLI codecs may bypass IR conversion only; `skip_auth` / `bypass_auth` markers must not appear under `gw-codec/src/cli/`. |
+| `task_crates_in_arch_doc` | docs/architecture.md must list `gw-task`, `gw-task-runtime`, `gw-task-worker`, and `gw-billing` whenever task-worker boundaries are active. |
 | `no_billing_records_stream` | Use `usage:records`, not `billing:records`. |
 | `no_cost_in_dlq` | The G11 DLQ wrapper must not introduce `cost_micro` into `gw-ledger/src/flusher.rs` (cost lives in Go). |
 | `no_global_hmac_force` | HMAC signing is per-api-key; a workspace-global force flag (ADR-G7-2 v2 follow-up) must not appear. |
@@ -260,6 +364,8 @@ Pending lints (uncomment when target phase lands):
 | **T0 emit-lag watchdog does not self-heal.** When settled `UsageRecord` is not emitted within 60s, the watchdog increments `gw_billing_emit_lag_t0_total` and logs error but **does not auto-emit fallback**. | Self-healing would double-count with the eventual real emit; operator intervention to investigate root cause is preferable. Real account state is preserved in `InflightLedger` for 24h. | [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`](superpowers/specs/2026-05-24-billing-robustness-design.md) §12, item 4 |
 | **Deduplication of `UsageRecord` is delegated to Go.** Rust may emit multiple records for the same `(request_id, attempt_index)` (crash-recovery fallback + true emit coexisting), without idempotency check. Go settler deduplicates by provenance priority. | Rust-side idempotency requires cross-process coordination, higher complexity. Go-side dedup with provenance cascade is simpler and works correctly regardless of Rust emit ordering. | [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`](superpowers/specs/2026-05-24-billing-robustness-design.md) §12, item 5 |
 | **HMAC hard cutover**: `ApiKeyEntry.signature_secret` is the sole HMAC secret field. The v1 `hash-as-HMAC` path is removed. No dual-key fallback — existing deployments must populate `signature_secret` before enabling HMAC. Breaking change per overview §1.3. | `hash` served double duty (credential verify + HMAC), creating a covert channel where changing the API-key secret also rotated the HMAC key. `signature_secret` decouples the two concerns. Hard cutover avoids the complexity and risk of a dual-key transition period. | `crates/gw-proxy/src/filters/request.rs` step 3, `crates/gw-auth/src/signature.rs`, S-proxy-core H-1 |
+| **CLI transparent proxy (body passthrough, no IR conversion).** CLI variants (`claude:cli`, `openai:cli`, `openai:compact`, `gemini:cli`) bypass the `parse_request → RequestIR → render_request` and `parse_response → ResponseIR → render_response` codec paths. Request and response bodies are forwarded verbatim. The full filter chain (auth, permission merge, RPM, balance, freeze, billing) still executes; only the codec conversion is skipped. Model name and stream flag are extracted via a shallow JSON parse (`CliCodec::extract_hints`) or URL path inspection, not full IR deserialization. Token usage is extracted from raw SSE events or non-stream JSON by `CliUsageExtractor`. | CLI tools (Claude Code, OpenAI Codex, Gemini CLI) send vendor-proprietary fields (thinking signatures, cache TTL hints, tool definitions) that the IR cannot losslessly represent. Passthrough preserves wire fidelity. The zero-copy path is also faster. | `crates/gw-proxy/src/filters/request.rs` step 8 (CLI branch), `crates/gw-proxy/src/filters/upstream.rs` (CLI passthrough), `crates/gw-proxy/src/filters/response.rs` (CLI body filter). Spec: [`2026-05-26-cli-variants-design.md`](superpowers/specs/2026-05-26-cli-variants-design.md) ADR-CLI-2. |
+| **CLI cross-protocol requests are denied, not converted.** When a CLI request's `ApiShape` maps to a `ProtocolKind` that no available vendor key supports, the gateway returns `503 GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL` rather than attempting cross-protocol body conversion. Metric: `gw_cli_cross_protocol_denied_total`. | CLI bodies are not IR-parsed, so cross-protocol re-render is impossible. Silent fallback to a different protocol would produce responses the CLI tool cannot parse. | `crates/gw-proxy/src/filters/upstream.rs` candidate filter, `crates/gw-core/src/error/codes.rs`. Spec: ADR-CLI-8. |
 
 ## 9. Known gaps (closed by `feature/known-gaps-closure`)
 

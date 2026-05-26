@@ -16,15 +16,17 @@ spawn bootstrap thread  ──────────►  rt.block_on(async {
                                        1. kms::init_kek_cache(cfg.kms)
                                        2. RedisCtx::connect(cfg.redis)
                                        3. PgSQL::connect(cfg.pgsql)
-                                       4. EntityStore::new(redis, pg, loader)
-                                       5. KeyHealthStore, InFlightStore,
+                                       4. AdaptiveRpmManager + tick_decay loop
+                                       5. EntityStore::new(redis, pg, loader)
+                                          with vendor_key → adaptive_rpm.evict hook
+                                       6. KeyHealthStore, InFlightStore,
                                           RateLimitGuard, CounterStore
-                                       6. Ledger::start(redis, channel_capacity,
-                                                        batch_size, flush_interval)
-                                       7. StreamConsumer::start(redis,
-                                            "events:entity" + "events:counter")
-                                       8. health::run_health_server(8080)
-                                       9. metrics_exporter::install(9090)
+                                       7. Ledger::start(redis, channel_capacity,
+                                                         batch_size, flush_interval)
+                                       8. StreamConsumer::start(redis,
+                                             "events:entity" + "events:counter")
+                                       9. health::run_health_server(8080)
+                                      10. metrics_exporter::install(9090)
                                      });
                                      // Send Wired bundle via sync_channel
                                      pending::<()>().await   // park forever
@@ -44,7 +46,7 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 | # | Phase | Module | Role |
 |---|-------|--------|------|
 | 0 | `new_ctx` | `gateway.rs` | Initialise `ReqCtx` (request_id, trace_id, start time, atomic counters). |
-| 1 | `early_request_filter` | `filters::early` | Global IP blocklist, global stream cap, protocol detect, debug trigger. |
+| 1 | `early_request_filter` | `filters::early` | Global IP filter, global stream cap, protocol detect, debug trigger. |
 | 2 | `request_filter` | `filters::request` | Auth, IR parse, 5-tier permission merge, balance/circuit, RPM, hard caps, freeze. |
 | 3 | `upstream_peer` | `filters::upstream` | Candidate filter → strategy pick → `HttpPeer`. |
 | 4 | `upstream_request_filter` | `filters::upstream` | Codec rewrite → `ctx.cached_body`; vendor auth header injection. |
@@ -59,15 +61,16 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 
 `crates/gw-proxy/src/filters/early.rs`:
 
-1. **IP blocklist (Global scope)** — `client_ip_from_session()` reads either L4 peer or first XFF entry depending on `[security].trust_xff`. Global-scope hit short-circuits; User / ApiKey scope is checked later once auth resolves.
+1. **Unified IP filter (Global scope)** — `client_ip_from_session()` reads either L4 peer or first XFF entry depending on `[security].trust_xff`, then `check_ip(ip, None, None, ...)` applies deny-only blocklist → allowlist (when `[ip_filter].allowlist_mode = "enforce"`) → per-IP RPM. This is the first reject gate in the filter chain: global-scope deny / allowlist / IP-RPM failures short-circuit before auth, while User / ApiKey scope is intentionally checked later once auth resolves. Metrics emitted from this path include `gw_ip_blocklist_hit_total`, `gw_ip_allowlist_check_total`, `gw_ip_ratelimit_check_total`, and the snapshot gauges `gw_ip_blocklist_entries` / `gw_ip_allowlist_entries`.
 2. **Global concurrent-stream cap** (`GLOBAL_STREAM_CAP = 100_000`). Reads `ratelimit.total_streams` atomic. Over → `GW_QUOTA_CONCURRENT_EXCEEDED` 429.
-3. **Protocol detection** via `AnyCodec::detect(path, headers, [])` — branch-free, no-alloc. Stash on `ctx.client_codec`. No match → `GW_REQUEST_PROTOCOL_UNKNOWN` 400.
+3. **Protocol detection** first checks `detect_cli(path, headers)` for CLI variants, stashing the fine-grained `ApiShape` on `ctx.client_shape` while keeping `ctx.client_codec` on the base protocol codec for error envelopes. Non-CLI requests fall back to `AnyCodec::detect(path, headers, [])` and store the standard shape. No match → `GW_REQUEST_PROTOCOL_UNKNOWN` 400.
 4. **Debug trigger** — `X-Gw-Debug: 1` upgrades `ctx.debug` so later filters can opt-in to body capture (subject to debug sampling rate).
 
 ### 2.2 `request_filter`
 
 `crates/gw-proxy/src/filters/request.rs` — the longest filter. Order matters.
 
+0. **Task-shape detection** — when `cfg.task.enabled`, `detect_task_shape(method, path, body)` inspects the request for task endpoint patterns: `POST /v1/tasks` (Submit), `GET /v1/tasks/:id` (Load), `GET /v1/tasks/:id/watch` (Watch), `POST /v1/tasks/:id/cancel` (Cancel). A match sets `ctx.is_task = true` and `ctx.task_action` to the corresponding `TaskAction` variant. This runs before auth so the `is_task` flag is available to all subsequent steps. When `cfg.task.enabled = false` (the default), the detection is inert and no task routes are active.
 1. **Management-path branch** — `is_management_path(&path)` (e.g. `/admin/*`) runs the mgmt verify chain (T3-A/B/C, B2):
    1. `parse_mgmt_authorization` extracts `Authorization: Mgmt mt_<id>.<secret>`; missing or malformed → 401 `GW_AUTH_MGMT_TOKEN_MISSING`.
    2. `split_mgmt_token_payload` separates the `mt_<id>` and `<secret>` halves; bad format → 401 `GW_AUTH_MGMT_TOKEN_INVALID`.
@@ -82,7 +85,7 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 3. **Optional HMAC capture** — if the resolved entry sets `signature_required`, extract `x-signature` + `x-timestamp` into `ctx.signature_received` / `ctx.signature_timestamp`, stash the algo on `ctx.signature_algo`, and clone `ApiKeyEntry.signature_secret` onto `ctx.signature_secret`. The actual verification fires in step 7b after the body is buffered.
 4. **User entry** — `store.user_or_load(&user_id)` stashed on `ctx.user`.
 5. **Content-Encoding parse** — detect gzip / br so a later signature-verify or audit step sees the right payload.
-6. **IP blocklist re-check (User/ApiKey scope)** — `check_blocklist(ip, Some(&user_id), api_key_id, store)` now that scope IDs are resolved.
+6. **Unified IP filter re-check (User/ApiKey scope)** — `check_ip(ip, Some(&user_id), api_key_id, ...)` now that scope IDs are resolved. This is the second and final IP-filter position in the chain: it catches scoped deny / allowlist rows after auth and reuses the same per-IP RPM guard, preserving the same order of blocklist → allowlist → per-IP RPM in both passes.
 7. **Body read** — chunked `session.read_request_body()` with 16 MiB cap, frozen onto `ctx.cached_body`.
 7b. **HMAC body-verify (G7, T1-D)** — if `ctx.signature_required`, build `BodyVerifyInput` (using `ctx.req_content_encoding` for the Content-Encoding parse, `ctx.signature_secret` for the secret, `ctx.signature_received`/`ctx.signature_timestamp` for the headers) and call `gw_proxy::body_verify::verify_body`. Internally decompresses gzip/brotli before HMAC comparison. Outcomes from the 5-variant `gw_auth::signature::SignatureCheckResult`:
    - `NotRequired` / `Valid` → continue.
@@ -91,7 +94,7 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
    - `Invalid` (HMAC mismatch OR body decompression failure) → 401 `GW_AUTH_SIGNATURE_INVALID`.
 
    Fail-closed: an unverifiable body cannot reach codec parse. `ctx.cached_body` is *not* replaced by the decompressed plaintext (codec parse paths are still expected to consume the on-wire body — see [`docs/architecture.md`](architecture.md) §Deliberate behaviours for the known compressed-body parse gap, deferred to a follow-up).
-8. **Parse to IR** — `codec.parse_request(&body_bytes)` produces `RequestIR` carrying model name, stream flag, estimated input tokens. Stash `ctx.model`, `ctx.is_stream`, `ctx.idempotent = !is_stream`.
+8. **Request shape extraction** — standard requests call `codec.parse_request(&body_bytes)` to produce `RequestIR` carrying model name, stream flag, and estimated input tokens. CLI requests do not enter IR: `extract_cli_request_hints(ctx.client_shape, path, body)` shallow-reads model / stream from the raw body or path, leaves `ctx.cached_body` unchanged, and uses a conservative prompt estimate. Both branches stash `ctx.model`, `ctx.is_stream`, `ctx.idempotent = !is_stream` before permission, quota, RPM, hard-cap, and freeze gates.
 9. **Cross-protocol non-stream** — cross-protocol non-stream requests now round-trip end-to-end: `upstream_peer` lets the request through, the upstream body is accumulated in `response_body_filter` (§2.6), `parse_response` produces the IR, and `CrossRender` re-renders into `ctx.pending_client_body` (`gw_codec_cross_render_nonstream_total{from,to}`). The pre-S-codec-v2 `503 GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` short-circuit is gone. Same-protocol non-stream stays zero-copy on the response side (body is forwarded as-is; only `parse_response` runs to populate `ctx.usage`).
 10. **5-tier permission merge** — `merge_permissions(AuthCtx, store, global_rpm)` produces a `MarkupChainSnapshot`. Tier order: global → user-group → user → sub-account → api-key; intersection on lists, min-positive on `rpm`/`tpm`, product on markup. Sets `forced_model_group` + `effective_user_id` (parent on sub-accounts).
 11. **Model permission** — `merged.allowed_models.contains(&model_name)`; deny → `GW_REQUEST_MODEL_NOT_FOUND` 403. When the resolved `ApiKeyEntry` carries a `model_whitelist_regex`, `check_model_whitelist_regex()` runs after the static list check: the pattern is compiled into a `ModelPermission` via `ModelPermission::new(pattern, PermissionEffect::Allow)`, then evaluated with `check_with_budget(model_name)` under a 100 ms per-call ReDoS budget (`BUDGET_MS=100`). Outcomes: `None` regex → skip (static list governs). Compile error → `GW_REQUEST_MODEL_NOT_FOUND` 403. Match → allow. No match → `GW_REQUEST_MODEL_NOT_FOUND` 403. Budget timeout → counted by `RedosTracker` (per-key `OnceLock` singleton); after `TIMEOUT_THRESHOLD=10` consecutive timeouts the key's regex is auto-disabled and all subsequent requests are denied with 403 (fail-closed, not silently skipped).
@@ -99,9 +102,15 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 12. **Balance check** — `counters.get("user", effective_user_id, "balance_micro")`. `<= 0` → `GW_QUOTA_BALANCE_ZERO` 402. Redis error fails open.
 12b. **Daily token quota (G3, ADR-G3-2)** — when `user.daily_quota_tokens > 0`, GET `counter:user:{effective_user_id}:daily_tokens:{YYYY-MM-DD}` (UTC) via `CounterStore::get_str_key`, then `check_daily_quota(consumed, freeze_estimate, quota)` rejects with `403 GW_QUOTA_DAILY_TOKENS_EXCEEDED` when `consumed + freeze_estimate > quota`. `quota == 0` is unlimited and short-circuits before the Redis read. Redis error fails open (consistent with the balance check above — daily quota is observational, not billing). The post-increment of actual `input + output` tokens with a 48 h TTL lives in §2.8 `logging`.
 13. **User circuit** — `USER_CIRCUIT.get(&effective_user_id)`. `Open { until, .. }` and `now < until` → 402 short-circuit. The flusher (Phase 5) populates this when balance flips negative.
-14. **Rate limit** — `RateLimitGuard::check(&merged)` (governor RPM). If streaming, `check_stream_slot()` returns a RAII ticket on `ctx.stream_slot`.
+14. **Rate limit** — `RateLimitGuard::check(&merged)` (governor RPM). When the picked vendor key has learned adaptive RPM state, `AdaptiveRpmManager::should_enforce(key_id)` lowers the effective RPM ceiling before the governor check. If streaming, `check_stream_slot()` returns a RAII ticket on `ctx.stream_slot`.
 15. **Hard caps (ADR-024)** — `HardCapCfg` loaded from `[auth]` config (`hard_cap_max_input_tokens`, default 1,000,000; `hard_cap_max_cost_micro`, default 5,000,000,000). `check_input_tokens` and `check_cost(freeze_estimate)` enforce single-request ceilings.
 16. **Freeze** — `RequestFreeze::new(effective_user_id, freeze_estimate_micro)` atomically increments `DEDUCT[uid].frozen_micro`. Stashed on `ctx.freeze_guard` as `Box<dyn FreezeGuard>`.
+17. **Task endpoint short-circuit** — when `ctx.is_task`, the request exits the normal proxy path and dispatches to `filters::task` based on `ctx.task_action`:
+    - **Submit** — `gw_billing::calculate_freeze_amount(kind, cfg)` computes the freeze estimate. If `balance_micro < freeze`, return `402 GW_TASK_FREEZE_FAILED`. Otherwise `TaskContract::submit(record)` writes `entity:task:<id>` + XADD `tasks:queue`. Return `201 {task_id, status, expires_at}`. Metric: `gw_task_gw_submit_total`, `gw_task_gw_freeze_total{result}`.
+    - **Load** — `TaskContract::load(task_id)`. `None` returns `404 GW_TASK_NOT_FOUND`. Success returns the serialized `TaskRecord`.
+    - **Watch** — `TaskContract::watch(task_id)`. Returns a single SSE `status` event with the current task state.
+    - **Cancel** — `TaskContract::settle(task_id, Cancelled, actual_micro=0)`. Returns the settled `TaskRecord`.
+    The short-circuit bypasses `upstream_peer`, `upstream_request_filter`, and all response filters. The freeze guard is released in the same filter invocation (no logging-phase release needed).
 
 ### 2.3 `upstream_peer`
 
@@ -109,7 +118,7 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 
 1. **Pick model group** — first from `merged.forced_model_group`, else first allowed group; load `ModelGroup` (carries vendor key list + strategy).
 2. **Resolve pricing** — `pricing_or_load(model)` cached on ctx (used by `CostFirst`, timeouts, and the eventual logging emit).
-3. **Candidates** — `get_candidate_keys(group, merged, health, in_flight, .., ctx.required_caps.as_ref())` filters by vendor capability (does this key accept `client_codec.kind()`?), key health (not cooldown), per-key in-flight (`PER_KEY_INFLIGHT_CAP = 1024`), permission channel allow-list, the G10 retry blacklist, and — when `ctx.required_caps` is set (G13) — `gw_capability::candidate_matches(required, parse(VendorKey.forced_capabilities), VendorKey.exclusive_capability_match)`: a channel with no advertised caps is non-restrictive; an exclusive channel must match the requirement set exactly. Empty result → `GW_ROUTING_NO_AVAILABLE_CHANNEL` 503, unless a re-run of the filter *without* the capability constraint yields candidates — i.e. the capability filter is what emptied the set — in which case the distinct `GW_ROUTING_NO_CAPABILITY_MATCH` 503 is emitted. The first successful candidate list is cached on `ctx.picked_candidates` so response-side failover can walk the original list without rerunning the original health / cooldown query.
+3. **Candidates** — `get_candidate_keys(group, merged, health, in_flight, .., ctx.required_caps.as_ref())` filters by vendor capability (does this key accept `client_codec.kind()`?), key health (not cooldown), per-key in-flight (`PER_KEY_INFLIGHT_CAP = 1024`), permission channel allow-list, the G10 retry blacklist, and — when `ctx.required_caps` is set (G13) — `gw_capability::candidate_matches(required, parse(VendorKey.forced_capabilities), VendorKey.exclusive_capability_match)`: a channel with no advertised caps is non-restrictive; an exclusive channel must match the requirement set exactly. CLI requests then retain only keys whose `accessible_endpoints` contain `ctx.client_shape.protocol_kind()`; an empty set returns `GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL` 503 and increments `gw_cli_cross_protocol_denied_total`. Other empty results → `GW_ROUTING_NO_AVAILABLE_CHANNEL` 503, unless a re-run of the filter *without* the capability constraint yields candidates — i.e. the capability filter is what emptied the set — in which case the distinct `GW_ROUTING_NO_CAPABILITY_MATCH` 503 is emitted. The first successful candidate list is cached on `ctx.picked_candidates` so response-side failover can walk the original list without rerunning the original health / cooldown query.
 4. **Strategy dispatch** — `strategy_for(group.strategy)` returns one of the 8 strategies; `pick(candidates, &KeyHealthStore, &InFlightStore, &PickCtx)` selects one Arc-cloned `VendorKey`. `PickCtx.message_hash` is populated from a SHA-256 of the raw `ctx.cached_body` bytes (first 8 bytes as `u64` LE via `body_hash_u64()`); an empty body produces `None`. `CacheAffinity` uses `model_name || ":" || message_hash` to pin content-identical requests to the same key. During response-side failover, `FailoverExecutor` preselects `ctx.picked_vendor_key`; the retry pass through `pick_peer` uses that key directly and only rebuilds the peer/vendor/in-flight state.
 
 If `feature = "tunnel"` is built AND `LlmGateway::tunnel = Some(_)`, `TunnelStack::resolve(provider, key, pref)` runs before HttpPeer construction. `TunnelResolution::Direct` keeps the existing path. `TunnelResolution::Use(node_id)` replaces the peer with `TunnelStack::peer_for_node(node_id, host, port)`, whose socket lands at the node's WS endpoint; the real upstream target travels as a `MsgType::Open` frame payload. `ctx.tunnel_resolution` is stamped with `"direct"` or the node_id and surfaces in detailed logs.
@@ -122,7 +131,7 @@ When `pref.require_tunnel = true` and resolution is `Direct`, `pick_peer` short-
 
 Same module. The phase has two responsibilities:
 
-1. **Body rewrite** — if `picked.accessible_endpoints.contains(&client_codec.kind())`, take the fast path `same_protocol_passthrough(client_codec, cached_body, &mutations)` which returns a `Cow<[u8]>` (zero-copy when `Mutations::NONE`). Otherwise pick the first accessible endpoint, `client_codec.parse_request` → IR → `upstream_codec.render_request`. Frozen result lands on `ctx.cached_body`.
+1. **Body rewrite** — CLI requests call the matching `CliCodec::passthrough_request`, preserve raw bytes in `ctx.cached_body`, set `ctx.upstream_shape` to the CLI shape, and never parse/render IR. Standard requests: if `picked.accessible_endpoints.contains(&client_codec.kind())`, take the fast path `same_protocol_passthrough(client_codec, cached_body, &mutations)` which returns a `Cow<[u8]>` (zero-copy when `Mutations::NONE`). Otherwise pick the first accessible endpoint, `client_codec.parse_request` → IR → `upstream_codec.render_request`. Frozen result lands on `ctx.cached_body`.
 2. **Header injection** — strip `authorization`, `x-api-key`, `x-api-key-id` from the outbound request; inject `vendor.auth_template.replace("{api_key}", picked.api_key.expose_secret())`; set `Host` from the vendor base URL; emit a W3C `traceparent`; rewrite `Content-Length`.
 
 ### 2.5 `request_body_filter` (in `gateway.rs`)
@@ -131,8 +140,9 @@ Pingora streams the request body. We discard every chunk **until** `end_of_strea
 
 ### 2.6 `response_filter` & `response_body_filter`
 
-- `response_filter` captures the upstream HTTP status on `ctx.upstream_status`. For 5xx / 429 while `ctx.body_started == false`, it calls `FailoverExecutor::next_candidate` over the cached `ctx.picked_candidates`, pushes the failed key into `ctx.retry_blacklist`, drops the current `InFlightGuard`, stamps the chosen next key on `ctx.picked_vendor_key`, and returns an upstream `HTTPStatus` error with `set_retry(true)`. Pingora then re-enters `upstream_peer` without rerunning auth, RPM, quota, or freeze deduction. Exhausted / non-retryable cases fall through to the classifier. After failover resolution (retry returned, or exhausted/not-retryable), for any final upstream status ≥ 400 the filter constructs a `ClassifyCtx` from the picked vendor key (including `has_oauth` from `VendorKey.oauth.is_some()`) and calls `DefaultClassifier::classify_upstream`. The resulting `ClassifierOutcome` is stored in `ctx.error_outcome` so the logging filter's `ErrorHandler` fanout (§2.8 item 7) fires. OAuth keys receiving a 401 produce `OAuthSignalKind::RefreshFailed` (reason_code 12, 300 s default cooldown); non-OAuth 401s produce `OAuthSignalKind::AccountBlocked` (reason_code 2, 3600 s). Metric: `gw_routing_failover_total{reason,strategy}`.
+- `response_filter` captures the upstream HTTP status on `ctx.upstream_status`. On 429, it feeds the picked key into `AdaptiveRpmManager::observe_429`, using `x-ratelimit-limit` when present and falling back to the configured key RPM as the local observation; this path updates `gw_adaptive_rpm_observe_total`, `gw_adaptive_rpm_learned_value`, and `gw_adaptive_rpm_confidence`. Later request-side enforcement reads `AdaptiveRpmManager::should_enforce`, which increments `gw_adaptive_rpm_enforced_total` on `Some`, while the background decay loop emits `gw_adaptive_rpm_probe_total` on probe expansions and `gw_adaptive_rpm_released_total` when confidence decay drops a previously enforced key below threshold. For 5xx / 429 while `ctx.body_started == false`, it calls `FailoverExecutor::next_candidate` over the cached `ctx.picked_candidates`, pushes the failed key into `ctx.retry_blacklist`, drops the current `InFlightGuard`, stamps the chosen next key on `ctx.picked_vendor_key`, and returns an upstream `HTTPStatus` error with `set_retry(true)`. Pingora then re-enters `upstream_peer` without rerunning auth, RPM, quota, or freeze deduction. Exhausted / non-retryable cases fall through to the classifier. After failover resolution (retry returned, or exhausted/not-retryable), for any final upstream status ≥ 400 the filter constructs a `ClassifyCtx` from the picked vendor key (including `has_oauth` from `VendorKey.oauth.is_some()`) and calls `DefaultClassifier::classify_upstream`. The resulting `ClassifierOutcome` is stored in `ctx.error_outcome` so the logging filter's `ErrorHandler` fanout (§2.8 item 7) fires. OAuth keys receiving a 401 produce `OAuthSignalKind::RefreshFailed` (reason_code 12, 300 s default cooldown); non-OAuth 401s produce `OAuthSignalKind::AccountBlocked` (reason_code 2, 3600 s). Metric: `gw_routing_failover_total{reason,strategy}`.
 - `response_body_filter` (`crates/gw-proxy/src/filters/response.rs`) first sets `ctx.body_started = true` on the first non-empty body callback so later response-side failover is prohibited. It then checks `ctx.response_deadline` — if `Instant::now()` exceeds the deadline (derived from `Timeouts.stream_total` or `Timeouts.total` stashed in `upstream_peer`), the response is truncated with a `GW_RESPONSE_DEADLINE_EXCEEDED` error and the upstream read is cancelled. After the deadline check, two branches follow:
+  - **CLI** — chunks pass through `CliCodec::passthrough_response_chunk` unchanged. Non-stream responses accumulate until EOS and run `CliUsageExtractor::extract_response_usage`; streaming responses scan SSE event frames and run `extract_stream_usage` / TTFT event matching. Response bytes are not IR-rendered.
   - **Non-stream (`!ctx.is_stream`, B1 / T2-B)** — each chunk is appended to `ctx.upstream_body_accum: Option<BytesMut>`. On `end_of_stream`, the buffer is taken and `upstream_codec.parse_response(&body)` is called to extract `UsageIR` into `ctx.usage`. A parse error (codec-emitted `GW_UPSTREAM_PROTOCOL_DECODE_ERROR`) increments `gw_codec_parse_response_failure_total{codec,upstream_status}` and leaves `ctx.usage` at zero; the logging filter (§2.8) then stamps `UsageSource::Estimated` and falls back to the freeze-time estimate. Same-protocol non-stream bytes are forwarded verbatim — accumulation only feeds the usage extractor, not the outbound body.
   - **Streaming** — each chunk is appended to `ctx.sse_leftover`, the loop scans for `\n\n` event boundaries, and for each complete event calls `codec.parse_stream_chunk(event)`:
     - `Usage` events accumulate `input_tokens`, `output_tokens`, `cache_read_input_tokens` on `ctx.usage_accum`.
@@ -195,7 +205,7 @@ After parsing, the loop decides how to forward the chunk to the client. If `ctx.
 
 Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 key `entity:{ns}:{id}` (G6) so multi-pod deployments do not retain stale entries up to the L1 TTL. The DEL failure path only warns (`tracing::warn!`), it does not block the Moka invalidate.
 
-- `user`, `apikey`, `user_group`, `vendor`, `vendor_key`, `model_group`, `pricing`, `jwks`, `ipblock` → the corresponding Moka cache eviction.
+- `user`, `apikey`, `user_group`, `vendor`, `vendor_key`, `model_group`, `pricing`, `jwks`, `ipblock` → the corresponding Moka cache eviction. `vendor_key` invalidation also runs registered hooks; gateway bootstrap registers `adaptive_rpm.evict(key_id)` so learned RPM state is cleared when a key rotates or its configured RPM changes.
 - `gemini_file_mapping`, `model_mapping` → file-mapping / model-alias cache eviction (entity loaders pending — T6-E + A-T2).
 
 `events:counter` is consumed and ACKed in v1 but its payload is observability-only until Phase 5 wires balance echo-back.
@@ -215,9 +225,98 @@ Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 ke
 |---------|------|--------|
 | `usage:records` Redis stream | `gw-ledger::flusher` (XADD batched, configurable batch / interval) | `filters::logging` builds `UsageRecord`, calls `ledger.try_send` |
 | `usage:detailed` Redis stream | `gw-ledger::detailed_archive::DetailedArchive` (workers XADD per-surface encoding) | `filters::*` and `filters::logging` call `archive.try_send(CapturedSurface)` |
-| Prometheus `/metrics` | `metrics-exporter-prometheus` | `gw-gateway::metrics_catalog` defines 60 metric families across codec, freeze, auth, capability, resilience, detailed-log, billing, routing, tunnel, and quota surfaces (e.g. `gw_codec_cross_render_total`, `gw_billing_emit_total`, `gw_daily_quota_increment_error_total`, `gw_forced_params_applied_total`, `gw_deduct_gc_removed_total`). The catalog is the single source of truth for metric names and help text. |
+| Prometheus `/metrics` | `metrics-exporter-prometheus` | `gw-gateway::metrics_catalog` defines metric families across codec, freeze, auth, adaptive/IP rate-limit, capability, resilience, detailed-log, billing, routing, tunnel, quota, CLI, and task surfaces (e.g. `gw_adaptive_rpm_observe_total`, `gw_adaptive_rpm_confidence`, `gw_ip_ratelimit_check_total`, `gw_ip_blocklist_hit_total`, `gw_codec_cross_render_total`, `gw_billing_emit_total`, `gw_cli_cross_protocol_denied_total`, `gw_cli_usage_extract_total`). The catalog is the single source of truth for metric names and help text. |
 | Health `/livez` | always 200 | — |
 | Health `/readyz` | 200 once `READY=true` (flipped after `Wired` handoff) | `gw-gateway::health` |
 | Health `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience`, `/healthz/strategies` | Mgmt-verified (`Authorization: Mgmt mt_<id>.<secret>`, scope ≥ `AdminRead`, FailClosed blacklist). 200 returns the `snapshot_json` body; verify failures map to `GW_AUTH_MGMT_TOKEN_*`. `/healthz/strategies` returns per-(key, format) p50 TTFT for `LatencyFirst` debugging. | `gw-gateway::health` |
 
 `FreezeGuard::release` (in logging) is the *only* point where Rust mutates `frozen_micro` downward. Go (the billing service) writes `deducted_micro` / `balance_micro` based on `usage:records`. Rust never computes cost — enforced by the `no_cost_micro` invariant.
+
+### 6.1 Task metrics
+
+Two metric families cover the task system. Gateway-side metrics (prefix `gw_task_gw_`) are emitted from `gw-proxy::filters::task` and registered in `gw-gateway::metrics_catalog`. Worker-side metrics (prefix `gw_task_`) are emitted from the loop modules in `gw-task-runtime` and registered by `gw-task-worker::task_metrics::describe_worker_metrics()`.
+
+**Gateway-side (`:9090`):**
+
+| Metric | Type | Labels | Emitted at |
+|--------|------|--------|------------|
+| `gw_task_gw_submit_total` | counter | — | Successful task enqueue in `request_filter` task submit path |
+| `gw_task_gw_freeze_total` | counter | `result` (`ok`, `insufficient`) | Task freeze success or insufficient-balance rejection |
+| `gw_task_gw_load_total` | counter | — | `GET /v1/tasks/:id` entry |
+| `gw_task_gw_watch_total` | counter | — | `GET /v1/tasks/:id/watch` entry |
+| `gw_task_gw_cancel_total` | counter | — | `POST /v1/tasks/:id/cancel` entry |
+
+**Worker-side (`:9091`):**
+
+| Metric | Type | Labels | Emitted at |
+|--------|------|--------|------------|
+| `gw_task_claimed_total` | counter | — | After successful claim + permit acquisition in `ExecLoop` |
+| `gw_task_settled_total` | counter | `status` (`succeeded`, `failed`) | Each settle outcome |
+| `gw_task_execution_duration_seconds` | histogram | — | Full upstream call + timeout window |
+| `gw_task_lease_recovered_total` | counter | — | Per watchdog recovery in `WatchdogLoop` |
+| `gw_task_heartbeat_total` | counter | — | Per successful lease renewal in `HeartbeatLoop` |
+| `gw_task_cancel_received_total` | counter | — | Per cancel event processed in `CancelLoop` |
+
+## 7. Task lifecycle
+
+Background tasks follow a split-process lifecycle: the gateway accepts and enqueues, Redis coordinates, and a separate `gw-task-worker` process executes and settles.
+
+```
+Client                    Gateway (gw-proxy)           Redis                    Worker (gw-task-worker)
+  │                           │                          │                          │
+  │ POST /v1/tasks            │                          │                          │
+  ├──────────────────────────►│                          │                          │
+  │                           │ auth, balance, freeze    │                          │
+  │                           │ calculate_freeze_amount  │                          │
+  │                           │ HSET entity:task:<id>    │                          │
+  │                           ├─────────────────────────►│                          │
+  │                           │ XADD tasks:queue         │                          │
+  │                           ├─────────────────────────►│                          │
+  │ 201 {task_id, queued}     │                          │                          │
+  │◄──────────────────────────┤                          │                          │
+  │                           │                          │ XREADGROUP claim         │
+  │                           │                          │◄─────────────────────────┤
+  │                           │                          │ ZADD tasks:leases        │
+  │                           │                          │◄─────────────────────────┤
+  │                           │                          │ HSET status=running      │
+  │                           │                          │◄─────────────────────────┤
+  │                           │                          │                          │
+  │                           │                          │   upstream HTTP call     │
+  │                           │                          │   (reqwest, with timeout)│
+  │                           │                          │                          │
+  │                           │                          │ settle(succeeded/failed) │
+  │                           │                          │◄─────────────────────────┤
+  │                           │                          │ HSET status + output     │
+  │                           │                          │ ZREM tasks:leases        │
+  │                           │                          │ release frozen_micro     │
+  │                           │                          │                          │
+  │ GET /v1/tasks/:id         │                          │                          │
+  ├──────────────────────────►│                          │                          │
+  │                           │ HGETALL entity:task:<id> │                          │
+  │                           ├─────────────────────────►│                          │
+  │ 200 {task record}         │                          │                          │
+  │◄──────────────────────────┤                          │                          │
+```
+
+### 7.1 Worker internal loops
+
+`gw-task-worker` runs four concurrent loops on a single tokio runtime:
+
+| Loop | Module | Cadence | Purpose |
+|------|--------|---------|---------|
+| `ExecLoop` | `gw-task-runtime::exec_loop` | Continuous `XREADGROUP` block | Claim tasks from `tasks:queue`, acquire concurrency permit (global/vendor/model/key semaphores), execute upstream HTTP call via `reqwest`, settle as succeeded or failed. |
+| `CancelLoop` | `gw-task-runtime::cancel_loop` | Continuous `XREADGROUP` block on `tasks:cancel` | Read cancel events, look up the task's in-flight `CancellationToken` in the shared `RunningTaskRegistry`, cancel the token, then settle as `Cancelled` with `actual_micro=0`. |
+| `WatchdogLoop` | `gw-task-runtime::watchdog_loop` | Periodic (configurable interval) | `ZRANGEBYSCORE tasks:leases 0 <now_ms>` to find expired leases, then `TaskContract::recover_lease` per expired ID. Recovered tasks re-enter the queue. |
+| `HeartbeatLoop` | `gw-task-runtime::heartbeat_loop` | Periodic (`loops.heartbeat_interval_ms`) | Renew `lease_until_ms` on all in-flight tasks via `TaskContract::update_running`. Also refreshes the worker registration hash `entity:worker:<uuid>.last_heartbeat_ms`. |
+
+### 7.2 Task state machine
+
+```
+Pending ──► Queued ──► Running ──► Succeeded
+                          │   └──► Failed
+                          │
+                          └──► Cancelling ──► Cancelled
+                                    └──► Succeeded  (race: provider returns 2xx before cancel wins)
+```
+
+Transitions are validated by `gw-task::transition::validate_transition`. Invalid transitions return `Err` without mutating Redis state.
