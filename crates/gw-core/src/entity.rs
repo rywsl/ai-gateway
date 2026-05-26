@@ -291,9 +291,19 @@ pub struct JwksEntry {
 #[derive(Clone, Debug, Deserialize)]
 pub struct IpBlockEntry {
     pub cidr: String,
+    #[serde(default)]
+    pub mode: IpBlockMode,
     pub scope: IpBlockScope,
     pub reason: IpBlockReason,
     pub expires_at: Option<OffsetDateTime>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IpBlockMode {
+    #[default]
+    Deny,
+    Allow,
 }
 
 #[derive(Clone, Debug, Deserialize)]
