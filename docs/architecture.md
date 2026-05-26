@@ -29,7 +29,7 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 
 | Crate | Layer | Responsibility |
 |-------|-------|----------------|
-| `gw-core` | Supporting | ID newtypes, entity structs, `RequestIR` / `ResponseIR` / `StreamEventIR`, `ErrorIR`, `ErrorClass`, `DefaultClassifier`, stable error-code dictionary. No I/O. |
+| `gw-core` | Supporting | ID newtypes, entity structs, `RequestIR` / `ResponseIR` / `StreamEventIR`, `ErrorIR`, `ErrorClass`, `DefaultClassifier`, stable error-code dictionary. No I/O. The IR carries full v2 response surface: `ResponseIR.{refusal, annotations, server_tool_blocks, redacted_thinking, service_tier}`, `MessageIR::Developer`, `FinishReasonIR::Refusal`, `UsageIR` with 14 optional detail fields (audio/prediction/cache-creation/thoughts/server-tool-requests/service-tier/inference-geo), `StreamEventIR::{RefusalDelta, CitationsDelta, ServerToolStart, ServerToolDelta, ThinkingDelta, ToolCallStart, ToolCallDelta}`, plus `ReasoningConfig`, `AudioConfig`, `AnnotationIR`, `ServerToolBlockIR`, `RedactedThinkingIR` structs. |
 | `gw-codec-macros` | Supporting | Proc-macros driving codec boilerplate (Phase 2 `wire_convert_matrix!` scaffolding). |
 | `gw-codec` | Supporting | `ProtocolCodec` trait + OpenAI / Anthropic / Gemini codecs, same-protocol passthrough fast path, cross-protocol IR re-render, SSE accumulator, gzip/brotli compression, stream-policy truth table. CLI variant codecs (`gw-codec::cli`) implement the narrower `CliCodec` trait for transparent body passthrough with usage extraction — see §3.1. |
 | `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (Moka caches with cold-load chain), vendor-key invalidation hooks, `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
@@ -366,6 +366,10 @@ Pending lints (uncomment when target phase lands):
 | **HMAC hard cutover**: `ApiKeyEntry.signature_secret` is the sole HMAC secret field. The v1 `hash-as-HMAC` path is removed. No dual-key fallback — existing deployments must populate `signature_secret` before enabling HMAC. Breaking change per overview §1.3. | `hash` served double duty (credential verify + HMAC), creating a covert channel where changing the API-key secret also rotated the HMAC key. `signature_secret` decouples the two concerns. Hard cutover avoids the complexity and risk of a dual-key transition period. | `crates/gw-proxy/src/filters/request.rs` step 3, `crates/gw-auth/src/signature.rs`, S-proxy-core H-1 |
 | **CLI transparent proxy (body passthrough, no IR conversion).** CLI variants (`claude:cli`, `openai:cli`, `openai:compact`, `gemini:cli`) bypass the `parse_request → RequestIR → render_request` and `parse_response → ResponseIR → render_response` codec paths. Request and response bodies are forwarded verbatim. The full filter chain (auth, permission merge, RPM, balance, freeze, billing) still executes; only the codec conversion is skipped. Model name and stream flag are extracted via a shallow JSON parse (`CliCodec::extract_hints`) or URL path inspection, not full IR deserialization. Token usage is extracted from raw SSE events or non-stream JSON by `CliUsageExtractor`. | CLI tools (Claude Code, OpenAI Codex, Gemini CLI) send vendor-proprietary fields (thinking signatures, cache TTL hints, tool definitions) that the IR cannot losslessly represent. Passthrough preserves wire fidelity. The zero-copy path is also faster. | `crates/gw-proxy/src/filters/request.rs` step 8 (CLI branch), `crates/gw-proxy/src/filters/upstream.rs` (CLI passthrough), `crates/gw-proxy/src/filters/response.rs` (CLI body filter). Spec: [`2026-05-26-cli-variants-design.md`](superpowers/specs/2026-05-26-cli-variants-design.md) ADR-CLI-2. |
 | **CLI cross-protocol requests are denied, not converted.** When a CLI request's `ApiShape` maps to a `ProtocolKind` that no available vendor key supports, the gateway returns `503 GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL` rather than attempting cross-protocol body conversion. Metric: `gw_cli_cross_protocol_denied_total`. | CLI bodies are not IR-parsed, so cross-protocol re-render is impossible. Silent fallback to a different protocol would produce responses the CLI tool cannot parse. | `crates/gw-proxy/src/filters/upstream.rs` candidate filter, `crates/gw-core/src/error/codes.rs`. Spec: ADR-CLI-8. |
+| **`ServerToolBlockIR` uses typed wrapper with opaque `extra: serde_json::Map`.** Server tool blocks (Anthropic `server_tool_use`, `server_tool_result`, `mcp_tool_use`, `mcp_tool_result`; OpenAI Responses server-tool output items; Gemini `executableCode` / `codeExecutionResult`) carry typed `kind`, `id`, `name`, `input: Box<RawValue>` plus an opaque `extra: Map<String, Value>` for vendor-specific keys. The `input` field is `RawValue`, not `Value`, because Anthropic `#[serde(tag = "type")]` internally-tagged enums cannot directly deserialize `Box<RawValue>` fields, so a small `with` adapter buffers through `Value` and reconstitutes `RawValue`. | Full `Value` passthrough would lose the ability to distinguish "no input" from "empty object". Typed wrapper + opaque `extra` preserves known fields for cross-render gating while forwarding vendor-proprietary keys losslessly on same-protocol round-trips. | `crates/gw-core/src/ir.rs:270-276`, `crates/gw-codec/src/anthropic/via.rs`, `crates/gw-codec/src/gemini/via.rs`, `crates/gw-codec/src/openai/responses/via.rs` |
+| **Anthropic `#[serde(other)] Unknown` content block variant.** The `AnthropicContent` enum carries an `Unknown` variant via `#[serde(other)]`. When Anthropic adds new block types the gateway doesn't yet model, deserialization succeeds (no parse error), the block is skipped in IR conversion with a `tracing::warn!`, and same-protocol passthrough preserves it through the `#[serde(flatten)] extra` map. | Hard-failing on unknown block types would break forward compatibility when Anthropic ships new content types. Warn-and-skip matches the "fail open for unknown extensions, fail closed for security" principle. | `crates/gw-codec/src/anthropic/wire.rs` (`AnthropicContent` enum) |
+| **Gemini `grounding_metadata` stored in `ResponseIR.metadata.extensions["grounding_metadata"]`.** Gemini's `groundingMetadata` response field is an opaque `serde_json::Value` passed through `MetadataIR.extensions` rather than a dedicated IR struct. Cross-render drops it when the target lacks `supports_grounding` (only Gemini has it). | The `groundingMetadata` shape is complex and Gemini-specific (search queries, search results, web segments, support chunks). Modelling it as a typed struct would couple the IR to a single vendor's evolving schema. Opaque passthrough is correct for same-protocol, and cross-render gating handles the rest. | `crates/gw-codec/src/gemini/via.rs`, `crates/gw-codec/src/cross_render.rs` |
+| **OpenAI audio response stored in `metadata.extensions["openai_audio"]`.** When OpenAI returns an audio response object (`message.audio: { id, data, expires_at, transcript }`), it is projected into `MetadataIR.extensions["openai_audio"]` as a JSON object rather than a dedicated `ResponseIR` field. Cross-render drops it (and `UsageIR.audio_tokens_in/out`) when the target lacks `supports_audio`. | Audio responses are OpenAI-specific and carry binary-encoded audio data. A dedicated IR field would force all protocols to acknowledge a concept only one vendor supports. The extensions map keeps the IR protocol-neutral. | `crates/gw-codec/src/openai/via.rs`, `crates/gw-codec/src/cross_render.rs` |
 
 ## 9. Known gaps (closed by `feature/known-gaps-closure`)
 
@@ -488,3 +492,40 @@ Building the black-box harness surfaced real gateway behaviours and gaps that th
 - **Malformed SSE silently dropped.** `crates/gw-proxy/src/filters/response.rs:121` — a `parse_stream_chunk` error only emits `tracing::warn!`; there is no metric, no error envelope, and no status flip. "Upstream sent garbage" is unobservable to operators.
 - **`ProtocolKind` has two wire spellings.** `crates/gw-core/src/protocol.rs` — `as_str()` returns `"openai"` (used in metric labels) while `#[serde(rename_all = "snake_case")]` serializes to `"open_ai"` (used in entity payloads' `accessible_endpoints`). Same enum, two strings — a footgun for anyone matching on the value.
 - **`fake_web /usage/stats` 500s on a corrupted `usage:records`.** Minor — when `usage:records` is deliberately corrupted as a string key, the fake's stats endpoint 500s. This is a harness-side limitation, not a gateway issue.
+
+## 11. Cross-render `WireCapabilities` matrix
+
+Cross-protocol response re-render (`crates/gw-codec/src/cross_render.rs`) gates field preservation on per-wire-format capability flags. When the target format lacks a capability, the corresponding IR field is dropped and a lossy metric (`gw_codec_cross_render_lossy_total{from,to,field}`) fires. Same-protocol render never hits this path.
+
+Source of truth: `WireFormat::capabilities()` in `cross_render.rs`.
+
+| Capability | OpenAI Chat | OpenAI Responses | Anthropic Messages | Gemini Generate |
+|------------|:-----------:|:----------------:|:------------------:|:---------------:|
+| `supports_thinking` | | ✓ | ✓ | ✓ |
+| `supports_reasoning` | | ✓ | | |
+| `supports_tool_use_blocks` | | | ✓ | |
+| `supports_tool_calls_flat` | ✓ | ✓ | | |
+| `supports_function_call_parts` | | | | ✓ |
+| `supports_reasoning_tokens` | | ✓ | | |
+| `supports_refusal` | ✓ | ✓ | | |
+| `supports_annotations` | ✓ | | | |
+| `supports_server_tool_blocks` | | | ✓ | |
+| `supports_redacted_thinking` | | | ✓ | |
+| `supports_audio` | ✓ | | | |
+| `supports_document_blocks` | | | ✓ | |
+| `supports_service_tier` | ✓ | ✓ | ✓ | |
+| `supports_reasoning_config` | ✓ | ✓ | ✓ | ✓ |
+| `supports_grounding` | | | | ✓ |
+| `supports_citations` | | | ✓ | |
+| `supports_mcp` | | | ✓ | |
+
+Notable cross-render drop paths:
+
+- **Refusal**: `ResponseIR.refusal` + `FinishReasonIR::Refusal` are lossy-degraded to `Stop` when the target lacks `supports_refusal` (Anthropic, Gemini).
+- **Annotations**: `ResponseIR.annotations` dropped for all targets except OpenAI Chat.
+- **Server tool blocks**: `ResponseIR.server_tool_blocks` dropped for all targets except Anthropic Messages.
+- **Redacted thinking**: `ResponseIR.redacted_thinking` dropped for all targets except Anthropic Messages.
+- **Audio**: `metadata.extensions["openai_audio"]` and `UsageIR.audio_tokens_in/out` dropped for all targets except OpenAI Chat.
+- **Grounding**: `metadata.extensions["grounding_metadata"]` dropped for all targets except Gemini Generate.
+- **Service tier**: `ResponseIR.service_tier` and `UsageIR.service_tier` dropped only for Gemini Generate.
+- **Gemini finish reasons**: Gemini-specific `Other("BLOCKLIST")`, `Other("PROHIBITED_CONTENT")`, `Other("SPII")`, `Other("MODEL_ARMOR")` map to `ContentFilter`; other unknowns degrade to `Stop`.
