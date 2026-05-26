@@ -61,6 +61,7 @@ fn source_ir_for(from: WireFormat) -> ResponseIR<'static> {
             output_tokens: 3,
             cached_tokens: None,
             reasoning_tokens: None,
+            ..Default::default()
         }),
         ..ResponseIR::default()
     };

@@ -12,8 +12,9 @@ use gw_codec::cross_render::{CrossRender, WireFormat};
 use gw_codec::trait_def::ProtocolCodec;
 use gw_codec::{anthropic::Anthropic, openai::OpenAi};
 use gw_core::ir::{
-    ContentIR, FinishReasonIR, MessageIR, ReasoningBlockIR, ResponseIR, ResponseThinkingIR,
-    ThinkingBlockIR, UsageIR,
+    AnnotationIR, ContentIR, FinishReasonIR, MessageIR, MetadataIR, ReasoningBlockIR,
+    RedactedThinkingIR, ResponseIR, ResponseThinkingIR, ServerToolBlockIR, ThinkingBlockIR,
+    UsageIR,
 };
 use std::borrow::Cow;
 
@@ -42,6 +43,7 @@ fn anthropic_thinking_to_openai_chat_drops_thinking_from_wire() {
             output_tokens: 3,
             cached_tokens: None,
             reasoning_tokens: None,
+            ..Default::default()
         }),
         ..ResponseIR::default()
     };
@@ -86,6 +88,7 @@ fn openai_responses_reasoning_to_anthropic_drops_reasoning_from_wire() {
             output_tokens: 5,
             cached_tokens: None,
             reasoning_tokens: Some(20),
+            ..Default::default()
         }),
         ..ResponseIR::default()
     };
@@ -122,6 +125,7 @@ fn openai_responses_reasoning_tokens_to_anthropic_drops_from_usage() {
             output_tokens: 5,
             cached_tokens: None,
             reasoning_tokens: Some(20),
+            ..Default::default()
         }),
         ..ResponseIR::default()
     };
@@ -161,6 +165,7 @@ fn anthropic_finish_reason_other_to_openai_chat_degrades_to_stop() {
             output_tokens: 3,
             cached_tokens: None,
             reasoning_tokens: None,
+            ..Default::default()
         }),
         ..ResponseIR::default()
     };
@@ -183,4 +188,110 @@ fn anthropic_finish_reason_other_to_openai_chat_degrades_to_stop() {
         !wire.contains("pause_turn"),
         "OpenAI Chat wire should not carry Anthropic-specific stop_reason: {wire}"
     );
+}
+
+#[test]
+fn openai_rich_response_to_gemini_drops_unsupported_lossy_fields() {
+    let mut extensions = serde_json::Map::new();
+    extensions.insert(
+        "openai_audio".to_owned(),
+        serde_json::json!({"id":"aud","data":"DROPPED_AUDIO_DATA_MARKER","expires_at":1,"transcript":"audio"}),
+    );
+    let ir = ResponseIR {
+        id: Cow::Borrowed("chatcmpl_lossy"),
+        model: Cow::Borrowed("gpt-4o"),
+        messages: vec![MessageIR::Assistant {
+            content: ContentIR::Text(Cow::Borrowed("answer")),
+            tool_calls: None,
+        }],
+        refusal: Some(Cow::Borrowed("DROPPED_REFUSAL_MARKER")),
+        annotations: Some(vec![AnnotationIR {
+            kind: Cow::Borrowed("url_citation"),
+            url: Some(Cow::Borrowed("https://dropped.example")),
+            title: Some(Cow::Borrowed("DROPPED_ANNOTATION_MARKER")),
+            start_index: Some(0),
+            end_index: Some(1),
+        }]),
+        service_tier: Some(Cow::Borrowed("DROPPED_SERVICE_TIER_MARKER")),
+        metadata: MetadataIR {
+            extensions: Some(extensions),
+            ..Default::default()
+        },
+        usage: Some(UsageIR {
+            input_tokens: 4,
+            output_tokens: 2,
+            audio_tokens_in: Some(9),
+            audio_tokens_out: Some(10),
+            service_tier: Some(Cow::Borrowed("DROPPED_USAGE_TIER")),
+            ..Default::default()
+        }),
+        finish_reason: Some(FinishReasonIR::Refusal),
+        ..ResponseIR::default()
+    };
+
+    let mut buf = BytesMut::new();
+    CrossRender {
+        from: WireFormat::OpenAiChat,
+        to: WireFormat::GeminiGenerate,
+        source: ir,
+    }
+    .run(&gw_codec::gemini::Gemini, &mut buf)
+    .expect("cross-render succeeds");
+
+    let wire = wire_string(&buf);
+    assert!(!wire.contains("DROPPED_REFUSAL_MARKER"));
+    assert!(!wire.contains("DROPPED_ANNOTATION_MARKER"));
+    assert!(!wire.contains("DROPPED_AUDIO_DATA_MARKER"));
+    assert!(!wire.contains("DROPPED_SERVICE_TIER_MARKER"));
+    let parsed = gw_codec::gemini::Gemini.parse_response(&buf).unwrap();
+    assert!(parsed.refusal.is_none());
+    assert!(parsed.annotations.is_none());
+    assert!(parsed.service_tier.is_none());
+    assert!(parsed.usage.as_ref().unwrap().audio_tokens_in.is_none());
+}
+
+#[test]
+fn anthropic_private_blocks_to_openai_chat_are_dropped_from_wire() {
+    let ir = ResponseIR {
+        id: Cow::Borrowed("msg_private"),
+        model: Cow::Borrowed("claude-3-7-sonnet"),
+        messages: vec![MessageIR::Assistant {
+            content: ContentIR::Text(Cow::Borrowed("visible answer")),
+            tool_calls: None,
+        }],
+        server_tool_blocks: Some(vec![ServerToolBlockIR {
+            kind: Cow::Borrowed("mcp_tool_use"),
+            id: Cow::Borrowed("mcp_1"),
+            name: Cow::Borrowed("read_file"),
+            input: serde_json::value::RawValue::from_string(
+                r#"{"path":"DROPPED_MCP_INPUT"}"#.to_owned(),
+            )
+            .unwrap(),
+            extra: serde_json::Map::new(),
+        }]),
+        redacted_thinking: Some(vec![RedactedThinkingIR {
+            data: Cow::Borrowed("DROPPED_REDACTED_THINKING"),
+        }]),
+        finish_reason: Some(FinishReasonIR::Stop),
+        usage: Some(UsageIR {
+            input_tokens: 2,
+            output_tokens: 1,
+            ..Default::default()
+        }),
+        ..ResponseIR::default()
+    };
+
+    let mut buf = BytesMut::new();
+    CrossRender {
+        from: WireFormat::AnthropicMessages,
+        to: WireFormat::OpenAiChat,
+        source: ir,
+    }
+    .run(&OpenAi, &mut buf)
+    .expect("cross-render succeeds");
+
+    let wire = wire_string(&buf);
+    assert!(wire.contains("visible answer"));
+    assert!(!wire.contains("DROPPED_MCP_INPUT"));
+    assert!(!wire.contains("DROPPED_REDACTED_THINKING"));
 }

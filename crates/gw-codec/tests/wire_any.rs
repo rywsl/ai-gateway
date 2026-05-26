@@ -8,6 +8,6 @@ fn request_variant_tag_matches_protocol() {
     let openai_body = br#"{"model":"gpt-4","messages":[]}"#;
     let parsed: gw_codec::openai::wire::OpenAiRequest<'_> =
         serde_json::from_slice(openai_body).expect("parse");
-    let wire = WireAnyRequest::OpenAi(parsed);
+    let wire = WireAnyRequest::OpenAi(Box::new(parsed));
     assert_eq!(wire.kind(), ProtocolKind::OpenAi);
 }
