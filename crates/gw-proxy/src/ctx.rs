@@ -10,6 +10,7 @@
 //! ADR-004 freeze-rollback and ADR-024 stream-slot-release contracts even on
 //! cancellation paths.
 
+use crate::filters::task::TaskAction;
 use bytes::{Bytes, BytesMut};
 use gw_auth::ratelimit::StreamSlot;
 use gw_codec::AnyCodec;
@@ -18,6 +19,7 @@ use gw_core::entity::{ForcedParams, Pricing, UserEntry, Vendor, VendorKey};
 use gw_core::ids::{ApiKeyId, KeyId, ModelName, RequestId, TraceId, UserId};
 use gw_core::ir::ForcedMutations;
 use gw_core::permissions::MergedPermissions;
+use gw_core::protocol::ApiShape;
 use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
 use gw_routing::in_flight::InFlightGuard;
@@ -75,6 +77,8 @@ pub struct ReqCtx {
     pub request_id: RequestId,
     pub client_codec: Option<AnyCodec>,
     pub upstream_codec: Option<AnyCodec>,
+    pub client_shape: Option<ApiShape>,
+    pub upstream_shape: Option<ApiShape>,
 
     // --- Auth / permissions ---
     pub user: Option<Arc<Versioned<UserEntry>>>,
@@ -84,6 +88,8 @@ pub struct ReqCtx {
     // --- Request shape ---
     pub model: Option<ModelName>,
     pub is_stream: bool,
+    pub is_task: bool,
+    pub task_action: Option<TaskAction>,
     pub idempotent: bool,
     pub cached_body: Option<Bytes>,
     /// ADR-S3: optional client-supplied conversation identifier read from the
@@ -280,11 +286,15 @@ impl ReqCtx {
             request_id,
             client_codec: None,
             upstream_codec: None,
+            client_shape: None,
+            upstream_shape: None,
             user: None,
             api_key_id: None,
             merged_perm: None,
             model: None,
             is_stream: false,
+            is_task: false,
+            task_action: None,
             idempotent: true,
             cached_body: None,
             conversation_id: None,

@@ -19,6 +19,7 @@ use crate::error_emit;
 use crate::filters::early::{pick_emit_codec, short_circuit, with_request_id};
 use crate::timeouts::Timeouts;
 use bytes::BytesMut;
+use gw_codec::cli::CliCodec;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
 use gw_core::entity::{ForcedParams, ModelGroup, Pricing, TimeoutSpec, Vendor};
@@ -164,7 +165,7 @@ pub async fn pick_peer(
     // -------------------------------------------------------------
     // Candidate filter.
     // -------------------------------------------------------------
-    let candidates = get_candidate_keys(
+    let mut candidates = get_candidate_keys(
         &group.value,
         &model,
         client_codec_kind,
@@ -176,6 +177,28 @@ pub async fn pick_peer(
         ctx.required_caps.as_ref(),
     )
     .await;
+    if let Some(client_shape) = ctx.client_shape.filter(gw_core::protocol::ApiShape::is_cli) {
+        let required_kind = client_shape.protocol_kind();
+        candidates.retain(|key| key.accessible_endpoints.contains(&required_kind));
+        if candidates.is_empty() {
+            metrics::counter!(
+                "gw_cli_cross_protocol_denied_total",
+                "client_shape" => client_shape.format_id(),
+                "required_kind" => required_kind.as_str(),
+            )
+            .increment(1);
+            return emit_envelope_and_bail(
+                session,
+                ctx,
+                envelope_for(
+                    codes::GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL,
+                    "CLI request requires a same-protocol upstream channel",
+                    503,
+                ),
+            )
+            .await;
+        }
+    }
     if candidates.is_empty() {
         // G13 — distinguish "no channel at all" from "channels exist but none
         // satisfy the resolved capability requirements". Re-run the filter
@@ -518,6 +541,25 @@ pub async fn rewrite_request(
     };
     let upstream_codec = codec_for(upstream_kind);
 
+    if let Some(client_shape) = ctx.client_shape.filter(gw_core::protocol::ApiShape::is_cli) {
+        let outbound = cli_passthrough_body(ctx, upstream_kind)?;
+        ctx.upstream_codec = Some(upstream_codec);
+        ctx.upstream_shape = Some(client_shape);
+        if ctx.is_stream {
+            if let Some(codec) = ctx.upstream_codec.as_ref() {
+                ctx.stream_state = Some(codec.new_stream_state());
+            }
+        }
+        archive_upstream_request(ctx, upstream_request, outbound.clone());
+        inject_vendor_headers(ctx, upstream_request, &picked, &vendor, outbound.len());
+        crate::billing_lifecycle::transition_to(
+            ctx,
+            crate::billing_lifecycle::VendorExposure::Sent,
+        );
+        ctx.phase_end();
+        return Ok(());
+    }
+
     // Render the outbound body. Same-protocol passthrough avoids a
     // parse+render round trip when the IR was not mutated.
     let (mutations, forced_mutations) = apply_forced_params_mutations(&ctx.forced_params);
@@ -567,6 +609,7 @@ pub async fn rewrite_request(
     ctx.forced_mutations = forced_mutations;
     ctx.cached_body = Some(outbound.clone());
     ctx.upstream_codec = Some(upstream_codec);
+    ctx.upstream_shape = ctx.upstream_codec.as_ref().map(AnyCodec::api_shape);
 
     // S-codec T2: initialise the codec-internal SSE accumulator now that the
     // upstream codec is known. Done here (rather than in `request_filter`)
@@ -579,26 +622,77 @@ pub async fn rewrite_request(
         }
     }
 
-    // Archive: snapshot the upstream-bound request now that `outbound` is the
-    // wire form. `upstream_request` headers have already been mutated by this
-    // point (Authorization injected etc.) so the archive sees what vendor sees.
-    ctx.upstream_request_body = Some(std::sync::Arc::new(outbound.clone()));
-    {
-        use crate::ctx::UpstreamRequestMeta;
-        ctx.upstream_request_meta = Some(UpstreamRequestMeta {
-            method: upstream_request.method.as_str().to_owned(),
-            url: upstream_request.uri.to_string(),
-            http_version: format!("{:?}", upstream_request.version),
-            headers: upstream_request
-                .headers
-                .iter()
-                .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
-                .collect(),
-        });
-    }
+    archive_upstream_request(ctx, upstream_request, outbound.clone());
+    inject_vendor_headers(ctx, upstream_request, &picked, &vendor, outbound.len());
 
-    // Headers: rewrite Authorization per the vendor's auth_template, drop
-    // the inbound auth headers, set Host, propagate traceparent.
+    // W2-T4: mark the request as dispatched to the upstream vendor.
+    crate::billing_lifecycle::transition_to(ctx, crate::billing_lifecycle::VendorExposure::Sent);
+
+    ctx.phase_end();
+    Ok(())
+}
+
+pub fn cli_passthrough_body(
+    ctx: &mut ReqCtx,
+    upstream_kind: gw_core::protocol::ProtocolKind,
+) -> Result<bytes::Bytes> {
+    let client_shape = ctx
+        .client_shape
+        .filter(gw_core::protocol::ApiShape::is_cli)
+        .ok_or_else(|| Error::new(ErrorType::Custom("gw_not_cli_request")))?;
+    if client_shape.protocol_kind() != upstream_kind {
+        return Err(Error::new(ErrorType::Custom("gw_cli_cross_protocol")));
+    }
+    let cached_body = ctx
+        .cached_body
+        .as_ref()
+        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_cached_body")))?;
+    let passthrough = match client_shape {
+        gw_core::protocol::ApiShape::ClaudeCli => {
+            gw_codec::cli::claude_cli::ClaudeCliCodec.passthrough_request(cached_body)
+        }
+        gw_core::protocol::ApiShape::OpenAiCli => {
+            gw_codec::cli::openai_cli::OpenAiCliCodec.passthrough_request(cached_body)
+        }
+        gw_core::protocol::ApiShape::OpenAiCompact => {
+            gw_codec::cli::openai_compact::OpenAiCompactCodec.passthrough_request(cached_body)
+        }
+        gw_core::protocol::ApiShape::GeminiCli => {
+            gw_codec::cli::gemini_cli::GeminiCliCodec.passthrough_request(cached_body)
+        }
+        _ => std::borrow::Cow::Borrowed(cached_body.as_ref()),
+    };
+    let outbound = bytes::Bytes::copy_from_slice(passthrough.as_ref());
+    ctx.cached_body = Some(outbound.clone());
+    Ok(outbound)
+}
+
+fn archive_upstream_request(
+    ctx: &mut ReqCtx,
+    upstream_request: &RequestHeader,
+    outbound: bytes::Bytes,
+) {
+    ctx.upstream_request_body = Some(std::sync::Arc::new(outbound));
+    use crate::ctx::UpstreamRequestMeta;
+    ctx.upstream_request_meta = Some(UpstreamRequestMeta {
+        method: upstream_request.method.as_str().to_owned(),
+        url: upstream_request.uri.to_string(),
+        http_version: format!("{:?}", upstream_request.version),
+        headers: upstream_request
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+            .collect(),
+    });
+}
+
+fn inject_vendor_headers(
+    ctx: &mut ReqCtx,
+    upstream_request: &mut RequestHeader,
+    picked: &gw_core::entity::VendorKey,
+    vendor: &gw_core::versioned::Versioned<Vendor>,
+    content_len: usize,
+) {
     let _ = upstream_request.remove_header("authorization");
     let _ = upstream_request.remove_header("x-api-key");
     let _ = upstream_request.remove_header("x-api-key-id");
@@ -643,13 +737,7 @@ pub async fn rewrite_request(
     let _ = upstream_request.insert_header("traceparent", traceparent);
 
     // Rewrite Content-Length: the body may have changed.
-    let _ = upstream_request.insert_header("content-length", outbound.len().to_string());
-
-    // W2-T4: mark the request as dispatched to the upstream vendor.
-    crate::billing_lifecycle::transition_to(ctx, crate::billing_lifecycle::VendorExposure::Sent);
-
-    ctx.phase_end();
-    Ok(())
+    let _ = upstream_request.insert_header("content-length", content_len.to_string());
 }
 
 /// Wire-format-stateless codec constructors (`AnyCodec` variants are

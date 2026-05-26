@@ -36,6 +36,7 @@
 
 use crate::ctx::ReqCtx;
 use bytes::{Bytes, BytesMut};
+use gw_codec::cli::CliCodec;
 use gw_codec::cross_render::{CrossRender, WireFormat};
 use gw_codec::AnyCodec;
 use gw_core::ir::StreamEventIR;
@@ -75,6 +76,11 @@ pub fn run(
     // EOS chunks are fine; the accumulator simply doesn't grow.
     if let Some(b) = body.as_ref() {
         ctx.archive_upstream_response_body.extend_from_slice(b);
+    }
+
+    if ctx.client_shape.is_some_and(|shape| shape.is_cli()) {
+        run_cli_body_filter(body, end_of_stream, ctx)?;
+        return Ok(None);
     }
 
     // Non-stream path: accumulate the upstream body into
@@ -180,6 +186,145 @@ pub fn run(
     }
 
     Ok(None)
+}
+
+pub fn run_cli_body_filter(
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    ctx: &mut ReqCtx,
+) -> Result<()> {
+    if let Some(chunk) = body.as_ref() {
+        let shape = ctx
+            .client_shape
+            .filter(ApiShape::is_cli)
+            .ok_or_else(|| pingora::Error::new(pingora::ErrorType::Custom("gw_not_cli_request")))?;
+        let passthrough = cli_passthrough_response_chunk(shape, chunk).into_owned();
+        if passthrough.as_slice() != chunk.as_ref() {
+            *body = Some(Bytes::copy_from_slice(&passthrough));
+        }
+        if ctx.is_stream {
+            scan_cli_stream_chunk(shape, &passthrough, ctx);
+        } else {
+            ctx.upstream_body_accum
+                .get_or_insert_with(BytesMut::new)
+                .extend_from_slice(&passthrough);
+        }
+        ctx.archive_downstream_response_body
+            .extend_from_slice(&passthrough);
+    }
+    if end_of_stream && !ctx.is_stream {
+        if let Some(buf) = ctx.upstream_body_accum.take() {
+            apply_cli_full_usage(ctx.client_shape.unwrap(), &buf, ctx);
+        }
+    }
+    Ok(())
+}
+
+fn cli_passthrough_response_chunk(shape: ApiShape, chunk: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    match shape {
+        ApiShape::ClaudeCli => {
+            gw_codec::cli::claude_cli::ClaudeCliCodec.passthrough_response_chunk(chunk)
+        }
+        ApiShape::OpenAiCli => {
+            gw_codec::cli::openai_cli::OpenAiCliCodec.passthrough_response_chunk(chunk)
+        }
+        ApiShape::OpenAiCompact => {
+            gw_codec::cli::openai_compact::OpenAiCompactCodec.passthrough_response_chunk(chunk)
+        }
+        ApiShape::GeminiCli => {
+            gw_codec::cli::gemini_cli::GeminiCliCodec.passthrough_response_chunk(chunk)
+        }
+        _ => std::borrow::Cow::Borrowed(chunk),
+    }
+}
+
+fn scan_cli_stream_chunk(shape: ApiShape, chunk: &[u8], ctx: &mut ReqCtx) {
+    ctx.sse_leftover.extend_from_slice(chunk);
+    loop {
+        let Some(idx) = find_event_boundary(&ctx.sse_leftover) else {
+            break;
+        };
+        let event_bytes: Vec<u8> = ctx.sse_leftover.drain(..idx).collect();
+        ctx.sse_leftover.drain(..2);
+        handle_cli_event(shape, &event_bytes, ctx);
+    }
+}
+
+fn handle_cli_event(shape: ApiShape, event_bytes: &[u8], ctx: &mut ReqCtx) {
+    let (event_type, data) = split_sse_event(event_bytes);
+    if cli_ttft_event_types(shape).contains(&event_type) && ctx.timing.ttft.is_none() {
+        ctx.timing.ttft = Some(std::time::Instant::now());
+    }
+    if let Some(delta) = cli_usage_extractor(shape).extract_stream_usage(event_type, data) {
+        apply_cli_delta(delta, ctx);
+    }
+}
+
+fn split_sse_event(event_bytes: &[u8]) -> (&str, &[u8]) {
+    let Ok(s) = std::str::from_utf8(event_bytes) else {
+        return ("", event_bytes);
+    };
+    let mut event_type = "";
+    let mut data_start = None;
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_type = rest.trim();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            let offset = rest.as_ptr() as usize - s.as_ptr() as usize;
+            data_start = Some(offset + rest.len() - rest.trim_start().len());
+            break;
+        }
+    }
+    let data = data_start.map_or(event_bytes, |start| s[start..].trim_end().as_bytes());
+    (event_type, data)
+}
+
+fn apply_cli_full_usage(shape: ApiShape, body: &[u8], ctx: &mut ReqCtx) {
+    if let Some(full) = cli_usage_extractor(shape).extract_response_usage(body) {
+        ctx.usage.input_tokens = full.input_tokens as u32;
+        ctx.usage.output_tokens = full.output_tokens as u32;
+        ctx.usage.cached_tokens = Some(full.cache_read_input_tokens as u32);
+        ctx.usage.cache_creation_tokens = Some(full.cache_creation_input_tokens as u32);
+    }
+}
+
+fn apply_cli_delta(delta: gw_codec::cli::CliUsageDelta, ctx: &mut ReqCtx) {
+    if let Some(v) = delta.input_tokens {
+        ctx.usage.input_tokens = v as u32;
+    }
+    if let Some(v) = delta.output_tokens {
+        ctx.usage.output_tokens = v as u32;
+    }
+    if let Some(v) = delta.cache_read_input_tokens {
+        ctx.usage.cached_tokens = Some(v as u32);
+    }
+    if let Some(v) = delta.cache_creation_input_tokens {
+        ctx.usage.cache_creation_tokens = Some(v as u32);
+    }
+}
+
+fn cli_usage_extractor(shape: ApiShape) -> &'static dyn gw_codec::cli::CliUsageExtractor {
+    match shape {
+        ApiShape::ClaudeCli => gw_codec::cli::claude_cli::ClaudeCliCodec.usage_extractor(),
+        ApiShape::OpenAiCli => gw_codec::cli::openai_cli::OpenAiCliCodec.usage_extractor(),
+        ApiShape::OpenAiCompact => {
+            gw_codec::cli::openai_compact::OpenAiCompactCodec.usage_extractor()
+        }
+        ApiShape::GeminiCli => gw_codec::cli::gemini_cli::GeminiCliCodec.usage_extractor(),
+        _ => gw_codec::cli::openai_cli::OpenAiCliCodec.usage_extractor(),
+    }
+}
+
+fn cli_ttft_event_types(shape: ApiShape) -> &'static [&'static str] {
+    match shape {
+        ApiShape::ClaudeCli => gw_codec::cli::claude_cli::ClaudeCliCodec.ttft_event_types(),
+        ApiShape::OpenAiCli => gw_codec::cli::openai_cli::OpenAiCliCodec.ttft_event_types(),
+        ApiShape::OpenAiCompact => {
+            gw_codec::cli::openai_compact::OpenAiCompactCodec.ttft_event_types()
+        }
+        ApiShape::GeminiCli => gw_codec::cli::gemini_cli::GeminiCliCodec.ttft_event_types(),
+        _ => &[],
+    }
 }
 
 fn check_deadline(ctx: &ReqCtx) -> Result<()> {
@@ -343,6 +488,17 @@ fn extractor_for_shape(shape: ApiShape) -> Box<dyn gw_codec::usage_extractor::Us
         ApiShape::GeminiGenerate => {
             Box::new(gw_codec::gemini::usage_extractor::GeminiUsageExtractor)
         }
+        // CLI variants use CliUsageExtractor (separate path), not UsageExtractor.
+        // This arm is unreachable on CLI shapes because the caller branches on
+        // `is_cli()` before reaching here. Delegate to the base protocol as a
+        // safe fallback.
+        ApiShape::ClaudeCli => {
+            Box::new(gw_codec::anthropic::usage_extractor::AnthropicUsageExtractor)
+        }
+        ApiShape::OpenAiCli | ApiShape::OpenAiCompact => {
+            Box::new(gw_codec::openai::usage_extractor::OpenAiUsageExtractor::responses())
+        }
+        ApiShape::GeminiCli => Box::new(gw_codec::gemini::usage_extractor::GeminiUsageExtractor),
     }
 }
 

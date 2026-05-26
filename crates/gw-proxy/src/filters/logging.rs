@@ -198,14 +198,22 @@ pub async fn run(
             },
             api_key_id: ctx.api_key_id.clone(),
             client_protocol: ctx
-                .client_codec
-                .as_ref()
-                .map(|c| c.kind().as_str().to_owned())
+                .client_shape
+                .map(|s| s.format_id().to_owned())
+                .or_else(|| {
+                    ctx.client_codec
+                        .as_ref()
+                        .map(|c| c.kind().as_str().to_owned())
+                })
                 .unwrap_or_default(),
             upstream_protocol: ctx
-                .upstream_codec
-                .as_ref()
-                .map(|c| c.kind().as_str().to_owned())
+                .upstream_shape
+                .map(|s| s.format_id().to_owned())
+                .or_else(|| {
+                    ctx.upstream_codec
+                        .as_ref()
+                        .map(|c| c.kind().as_str().to_owned())
+                })
                 .unwrap_or_default(),
             model: model.clone(),
             vendor_id: picked.vendor_id.clone(),
