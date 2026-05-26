@@ -39,6 +39,9 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
 | [parts/02-go-as-consumer.md](parts/02-go-as-consumer.md) | **Rust → Go** | Rust 主动写、Go 消费。涵盖：`usage:records`（吸收原 C-ε §2）、`usage:records:dlq`、`usage:detailed`、Rust 反向 `events:entity`（`vendor_key.rate_limited` / `ipblock` 自动封禁）、`counter:*:frozen_micro` / `daily_tokens` 读路径 |
 | [parts/03-shared-schema.md](parts/03-shared-schema.md) | **共享 schema** | 双方都接触的 PgSQL 表清单、entity payload JSONB shape、`version BIGINT` 协议、AES-256-GCM 加密 payload、KEK 轮换 |
 | [parts/04-proxy-nodes.md](parts/04-proxy-nodes.md) | **Proxy Nodes** | Rust tunnel client ↔ Go Hub 契约;节点 entity / 心跳分工 / status 状态机 |
+| [parts/05-wallet-payment.md](parts/05-wallet-payment.md) | **Wallet / Payment** | 钱包余额计数器、`wallets` / `payments` 表、支付状态枚举、webhook 归一化 payload、`usage:records` 与冻结/解冻衔接 |
+| [parts/06-subscription-video.md](parts/06-subscription-video.md) | **Subscription / Video** | 订阅套餐、用户订阅、视频任务状态机、`operation_id` 关联、订阅 entitlement 到 Rust permission merge 的投影规则 |
+| [parts/07-oauth-ldap.md](parts/07-oauth-ldap.md) | **OAuth / LDAP** | OAuth provider 配置、token exchange / refresh cache、LDAP bind 配置、group→permission mapping、`auth_configs` seed 机制 |
 | [contract-change/](contract-change/) | **契约变更日志** | 每次跨进程契约改动的索引记录(触发 spec + parts 落点 + Go 模块) |
 
 ## 3. 通用约定（所有 part 共享）
