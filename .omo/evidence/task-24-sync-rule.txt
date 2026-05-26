@@ -1,0 +1,44 @@
+Task 24: docs/architecture.md + docs/go-contracts/ sync rule update
+=====================================================================
+
+Date: 2026-05-27
+Trigger: AGENTS.md sync rule - IR types, cross-render capabilities, deliberate behaviours changed
+
+Files changed by this task:
+- docs/architecture.md
+
+Files NOT changed (checked, no update needed):
+- docs/go-contracts/main.md (no cross-process contract change)
+- docs/go-contracts/parts/02-go-as-consumer.md (UsageSnapshot unchanged, usage:detailed stores raw wire bytes)
+
+Summary of docs/architecture.md updates:
+
+1. §2.1 gw-core crate description: Extended to document full v2 IR surface:
+   - ResponseIR new fields: refusal, annotations, server_tool_blocks, redacted_thinking, service_tier
+   - MessageIR::Developer variant
+   - FinishReasonIR::Refusal variant
+   - UsageIR 14 optional detail fields
+   - StreamEventIR new variants: RefusalDelta, CitationsDelta, ServerToolStart, ServerToolDelta, ThinkingDelta, ToolCallStart, ToolCallDelta
+   - New structs: ReasoningConfig, AudioConfig, AnnotationIR, ServerToolBlockIR, RedactedThinkingIR
+
+2. §8 Deliberate behaviours: Added 4 new entries:
+   - ServerToolBlockIR typed wrapper with opaque extra Map (not Value passthrough)
+   - Anthropic #[serde(other)] Unknown content block variant (skip with warn)
+   - Gemini grounding_metadata stored in ResponseIR.metadata.extensions (opaque passthrough)
+   - OpenAI audio response stored in metadata.extensions["openai_audio"]
+
+3. §11 WireCapabilities cross-render matrix: New section documenting:
+   - 17 capability flags with per-wire-format truth table (4 formats)
+   - Notable cross-render drop paths for each field category
+   - Gemini finish-reason mapping rules
+
+Why go-contracts/ was NOT updated:
+- UsageSnapshot (the struct serialized into usage:records) has NOT changed - it still carries the original 6 dimensions (input, output, cache_read, cache_creation, thinking, multimodal_input)
+- The new UsageIR fields (audio_tokens, prediction_tokens, etc.) exist only at the codec/IR level for cross-render gating and are NOT emitted to any Redis stream
+- usage:detailed stores raw wire bytes (body_b64), not parsed IR fields
+
+Changed files in repo (full git diff --name-only):
+- docs/architecture.md (this task)
+- crates/gw-core/src/ir.rs (prior tasks T1-T22)
+- crates/gw-codec/src/* (prior tasks T1-T22)
+- crates/gw-proxy/src/filters/response.rs (prior tasks)

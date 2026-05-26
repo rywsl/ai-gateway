@@ -1,0 +1,412 @@
+   Compiling gw-codec v0.1.0 (/Users/whereslow/Desktop/work/ailinkmax-gateway/crates/gw-codec)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.85s
+     Running unittests src/lib.rs (target/debug/deps/gw_codec-22bc56793b34fe75)
+
+running 139 tests
+test anthropic::codec::tests::parse_response_returns_protocol_decode_error_on_garbage ... ok
+test anthropic::codec::tests::parse_response_no_cache_fields ... ok
+test anthropic::codec::tests::parse_response_extracts_usage ... ok
+test anthropic::codec::tests::parse_response_with_pause_turn_stop_reason ... ok
+test anthropic::codec::tests::parse_stream_chunk_redacted_thinking_block_is_skipped ... ok
+test anthropic::codec::tests::test_anthropic_ir_invariant_assistant_role_returns_err ... ok
+test anthropic::codec::tests::render_stream_end_with_refusal_stop_reason ... ok
+test anthropic::codec::tests::parse_stream_chunk_mcp_block_start_is_skipped ... ok
+test anthropic::codec::tests::test_anthropic_ir_invariant_text_content_returns_err ... ok
+test anthropic::codec::tests::parse_stream_chunk_thinking_block_accumulates_signature ... ok
+test anthropic::codec::tests::parse_stream_chunk_citations_delta ... ok
+test anthropic::codec::tests::render_response_with_thinking_and_tool_use ... ok
+test anthropic::codec::tests::render_response_text_only_round_trip ... ok
+test anthropic::via::tests::document_base64_parses_to_file_ir ... ok
+test anthropic::via::tests::document_text_source_parses_to_text_ir ... ok
+test anthropic::via::tests::document_url_parses_to_file_ir ... ok
+test anthropic::via::tests::document_with_cache_control_round_trips ... ok
+test anthropic::via::tests::mcp_tool_use_response_block_round_trips_through_ir ... ok
+test anthropic::via::tests::file_ir_renders_to_document_block ... ok
+test anthropic::via::tests::server_tool_use_response_block_round_trips_through_ir ... ok
+test anthropic::via::tests::redacted_thinking_response_round_trip ... ok
+test anthropic::via::tests::stop_reason_model_context_window_exceeded_maps_to_other ... ok
+test anthropic::via::tests::stop_reason_pause_turn_maps_to_other ... ok
+test anthropic::via::tests::stop_reason_refusal_maps_to_ir_refusal ... ok
+test anthropic::via::tests::renders_each_server_tool_block_kind_to_matching_anthropic_variant ... ok
+test anthropic::via::tests::unknown_response_block_is_skipped ... ok
+test cli::tests::test_api_shape_is_cli ... ok
+test cli::tests::test_api_shape_protocol_kind ... ok
+test anthropic::via::tests::search_result_parses_to_text_ir ... ok
+test cli::tests::test_claude_cli_usage_extraction ... ok
+test cli::tests::test_claude_cli_passthrough ... ok
+test cli::tests::test_cli_format_id_registration ... ok
+test cli::tests::test_cli_codec_trait_surface ... ok
+test cli::tests::test_cli_hints_default ... ok
+test cli::tests::test_cli_hints_partial ... ok
+test cli::tests::test_cli_preserves_headers ... ok
+test cli::tests::test_detect_anthropic_apikey_only ... ok
+test cli::tests::test_cli_hints_deserialize ... ok
+test cli::tests::test_detect_anthropic_standard ... ok
+test cli::tests::test_detect_claude_cli ... ok
+test cli::tests::test_detect_gemini_cli_ua ... ok
+test cli::tests::test_detect_gemini_cli_xapp ... ok
+test cli::tests::test_detect_gemini_standard ... ok
+test cli::tests::test_detect_openai_cli ... ok
+test cli::tests::test_detect_openai_compact ... ok
+test cli::tests::test_detect_unrelated_path ... ok
+test cli::tests::test_openai_cli_responses_api ... ok
+test cli::tests::test_openai_cli_passthrough ... ok
+test cross_render::tests::adapt_lossy_keeps_thinking_when_target_supports ... ok
+test cross_render::tests::adapt_lossy_drops_thinking_when_target_unsupports ... ok
+test cli::tests::test_openai_cli_usage_extraction ... ok
+test cross_render::tests::adapt_lossy_matrix_annotations_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_reasoning_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_reasoning_tokens_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_redacted_thinking_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_audio_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_refusal_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_service_tier_drop_decisions ... ok
+test cross_render::tests::capabilities_openai_chat_lacks_thinking_and_reasoning ... ok
+test cross_render::tests::adapt_lossy_matrix_thinking_drop_decisions ... ok
+test cross_render::tests::finish_reason_gemini_malformed_function_call_degrades_to_stop ... ok
+test cross_render::tests::finish_reason_content_filter_degrades_to_stop_for_anthropic ... ok
+test cross_render::tests::finish_reason_gemini_specific_content_filter_degrades_for_anthropic ... ok
+test cross_render::tests::adapt_lossy_matrix_server_tool_blocks_drop_decisions ... ok
+test cross_render::tests::finish_reason_gemini_specific_content_filters_map_to_content_filter ... ok
+test cross_render::tests::finish_reason_other_degrades_to_stop_with_lossy ... ok
+test cross_render::tests::finish_reason_refusal_degrades_when_target_lacks_support ... ok
+test cross_render::tests::finish_reason_same_wire_identity ... ok
+test cross_render::tests::finish_reason_refusal_keeps_when_target_supports ... ok
+test gemini::codec::tests::parse_response_extracts_operation_id_when_present ... ok
+test gemini::codec::tests::parse_response_returns_protocol_decode_error_on_garbage ... ok
+test gemini::codec::tests::parse_response_safety_finish_reason_maps_to_content_filter ... ok
+test gemini::codec::tests::parse_response_normal_chat_id_unchanged ... ok
+test gemini::codec::tests::parse_response_extracts_usage_metadata ... ok
+test gemini::codec::tests::parse_response_without_cached_field ... ok
+test gemini::codec::tests::test_gemini_ir_invariant_assistant_role_returns_err ... ok
+test gemini::codec::tests::test_gemini_ir_invariant_end_last_returns_err ... ok
+test gemini::codec::tests::render_response_with_function_call_round_trip ... ok
+test gemini::codec::tests::test_gemini_ir_invariant_tool_call_delta_second_returns_err ... ok
+test gemini::codec::tests::parse_stream_chunk_emits_function_call_events ... ok
+test gemini::codec::tests::test_gemini_ir_invariant_tool_call_start_first_returns_err ... ok
+test gemini::via::usage_detail_tests::tool_use_prompt_token_count_absent_omitted ... ok
+test gemini::via::usage_detail_tests::tool_use_prompt_token_count_serde_round_trip ... ok
+test openai::codec::tests::parse_response_returns_protocol_decode_error_on_garbage ... ok
+test openai::codec::tests::parse_stream_chunk_refusal_delta ... ok
+test openai::codec::tests::parse_response_extracts_usage ... ok
+test openai::codec::tests::parse_response_without_cached_tokens_field ... ok
+test openai::codec::tests::parse_response_extracts_refusal ... ok
+test openai::codec::tests::render_response_text_only_round_trip ... ok
+test openai::codec::tests::parse_stream_chunk_accumulates_tool_call_arguments ... ok
+test openai::codec::tests::refusal_annotations_round_trip ... ok
+test openai::codec::tests::parse_response_extracts_annotations ... ok
+test openai::codec::tests::test_openai_chat_ir_invariant_assistant_role_returns_err ... ok
+test openai::codec::tests::render_stream_chunk_refusal_delta ... ok
+test openai::codec::tests::render_response_with_tool_calls_round_trip ... ok
+test openai::codec::tests::test_openai_chat_ir_invariant_text_content_returns_err ... ok
+test openai::codec::tests::test_openai_chat_ir_invariant_tool_calls_present_returns_err ... ok
+test openai::responses::codec::tests::parse_response_returns_protocol_decode_error_on_garbage ... ok
+test openai::responses::codec::tests::parse_stream_chunk_reasoning_text_delta_emits_thinking_delta ... ok
+test openai::responses::codec::tests::parse_stream_chunk_unknown_event_skips_without_error ... ok
+test openai::responses::codec::tests::parse_stream_chunk_accumulates_reasoning_summary ... ok
+test openai::responses::codec::tests::parse_stream_chunk_refusal_delta ... ok
+test openai::responses::codec::tests::test_openai_responses_ir_invariant_assistant_role_returns_err ... ok
+test openai::responses::codec::tests::test_openai_responses_ir_invariant_text_content_returns_err ... ok
+test openai::responses::codec::tests::render_response_with_function_call_status_is_completed_with_tool_calls_reason ... ok
+test openai::responses::codec::tests::render_response_with_reasoning_round_trip ... ok
+test openai::responses::codec::tests::test_openai_responses_ir_invariant_tool_call_assistant_returns_err ... ok
+test openai::via::audio_tests::ir_audio_config_renders_modalities_when_missing ... ok
+test openai::via::audio_tests::audio_config_absent_when_not_set ... ok
+test openai::via::audio_tests::audio_config_request_round_trip ... ok
+test openai::via::reasoning_service_tier_tests::absent_reasoning_effort_and_service_tier_omitted_from_json ... ok
+test openai::via::reasoning_service_tier_tests::ir_with_budget_tokens_renders_only_effort ... ok
+test openai::via::reasoning_service_tier_tests::reasoning_effort_with_service_tier_combined ... ok
+test openai::via::audio_tests::response_without_audio_omits_field ... ok
+test openai::via::reasoning_service_tier_tests::reasoning_effort_request_round_trip ... ok
+test openai::via::reasoning_service_tier_tests::service_tier_response_round_trip ... ok
+test openai::via::tool_choice_tests::test_openai_tool_choice_ir_invariant_function_returns_err ... ok
+test openai::via::tool_choice_tests::tool_choice_auto_round_trip ... ok
+test openai::via::tool_choice_tests::tool_choice_none_round_trip ... ok
+test openai::via::reasoning_service_tier_tests::service_tier_request_round_trip ... ok
+test openai::via::tool_choice_tests::tool_choice_function_object_round_trip ... ok
+test openai::via::tool_choice_tests::tool_choice_required_round_trip ... ok
+test openai::via::audio_tests::response_audio_parse_and_round_trip ... ok
+test openai::via::usage_detail_tests::absent_detail_fields_stay_none ... ok
+test openai::via::usage_detail_tests::audio_tokens_round_trip ... ok
+test openai::via::user_multimodal_tests::developer_role_round_trip_stays_developer ... ok
+test openai::via::usage_detail_tests::prediction_tokens_round_trip ... ok
+test openai::via::user_multimodal_tests::user_input_audio_parses ... ok
+test openai::via::user_multimodal_tests::user_multimodal_image_url_parses ... ok
+test openai::via::user_multimodal_tests::user_string_content_backward_compat ... ok
+test openai::via::user_multimodal_tests::user_multimodal_round_trip ... ok
+test openai::via::user_multimodal_tests::user_string_content_render_stays_string ... ok
+test openai::via::web_search_prediction_custom_tool_tests::custom_tool_skipped_in_ir_function_tools_preserved ... ok
+test openai::via::web_search_prediction_custom_tool_tests::custom_tool_parses_without_panic ... ok
+test openai::via::web_search_prediction_custom_tool_tests::prediction_absent_when_not_set ... ok
+test openai::via::web_search_prediction_custom_tool_tests::prediction_round_trip ... ok
+test openai::via::web_search_prediction_custom_tool_tests::custom_tool_wire_round_trip ... ok
+test openai::via::web_search_prediction_custom_tool_tests::web_search_options_absent_when_not_set ... ok
+test openai::via::web_search_prediction_custom_tool_tests::web_search_options_round_trip ... ok
+
+test result: ok. 139 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/anthropic_roundtrip.rs (target/debug/deps/anthropic_roundtrip-8cafaca3739a4215)
+
+running 15 tests
+test parse_error_400 ... ok
+test parse_request_adaptive_thinking_display_and_effort ... ok
+test parse_basic_request ... ok
+test estimate_input_tokens_nonzero ... ok
+test absent_usage_details_omitted_from_wire ... ok
+test parse_stream_chunk_delta ... ok
+test inference_geo_service_tier_round_trips_through_ir ... ok
+test cache_ttl_usage_round_trips_through_ir ... ok
+test parse_stream_message_stop ... ok
+test render_request_preserves_enabled_thinking_display_and_effort ... ok
+test document_and_search_result_request_roundtrip ... ok
+test render_stream_chunk_delta_has_event_prefix ... ok
+test redacted_thinking_stop_reason_server_tool_and_mcp_roundtrip ... ok
+test render_roundtrip_preserves_fields ... ok
+test request_service_tier_round_trips ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_variants.rs (target/debug/deps/cli_variants-5e339c6c98886f66)
+
+running 5 tests
+test test_gemini_cli_streaming ... ok
+test test_gemini_cli_passthrough ... ok
+test test_openai_compact_passthrough ... ok
+test test_gemini_cli_usage_extraction ... ok
+test test_openai_compact_usage_extraction ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/compression.rs (target/debug/deps/compression-98d673ca88e2284d)
+
+running 7 tests
+test identity_passthrough ... ok
+test parse_content_encoding_cases ... ok
+test negotiate_prefers_br_over_gzip_when_both_listed ... ok
+test malformed_gzip_returns_error ... ok
+test gzip_roundtrip ... ok
+test empty_body_roundtrip ... ok
+test brotli_roundtrip ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_protocol.rs (target/debug/deps/cross_protocol-2312d3a938377606)
+
+running 4 tests
+test anthropic_to_openai_via_ir ... ok
+test openai_to_anthropic_via_ir ... ok
+test openai_to_gemini_via_ir ... ok
+test openai_json_schema_response_format_cross_renders_to_gemini ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_protocol_matrix.rs (target/debug/deps/cross_protocol_matrix-4e41234fc0903b7a)
+
+running 16 tests
+test gemini_to_gemini ... ok
+test anthropic_to_openai_responses ... ok
+test anthropic_to_gemini ... ok
+test gemini_to_openai_responses ... ok
+test anthropic_to_openai_chat ... ok
+test gemini_to_openai_chat ... ok
+test anthropic_to_anthropic ... ok
+test gemini_to_anthropic ... ok
+test openai_chat_to_anthropic ... ok
+test openai_chat_to_gemini ... ok
+test openai_chat_to_openai_chat ... ok
+test openai_responses_to_openai_chat ... ok
+test openai_chat_to_openai_responses ... ok
+test openai_responses_to_anthropic ... ok
+test openai_responses_to_openai_responses ... ok
+test openai_responses_to_gemini ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_protocol_stream.rs (target/debug/deps/cross_protocol_stream-e367ac7e1e463865)
+
+running 3 tests
+test same_protocol_openai_round_trips_unchanged ... ok
+test gemini_combined_chunk_renders_all_events_to_openai_client ... ok
+test anthropic_chunk_rendered_as_openai_for_client ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_passthrough.rs (target/debug/deps/error_passthrough-9cf0680678583df1)
+
+running 5 tests
+test sse_error_emits_event_error_frame ... ok
+test anthropic_error_renders_to_openai_with_type ... ok
+test openai_401_renders_to_anthropic_authentication_error ... ok
+test missing_message_falls_back_to_default ... ok
+test gemini_429_renders_with_status_field ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemini_files.rs (target/debug/deps/gemini_files-997bb756cdb050c2)
+
+running 5 tests
+test ref_carries_mime_and_size ... ok
+test different_bytes_upload_independently ... ok
+test dedup_same_sha_only_once ... ok
+test file_uri_format_is_files_prefix ... ok
+test different_user_uploads_independently ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemini_roundtrip.rs (target/debug/deps/gemini_roundtrip-a486386d50092a9a)
+
+running 16 tests
+test parse_error_400 ... ok
+test estimate_input_tokens_nonzero ... ok
+test parse_basic_request ... ok
+test parse_response_executable_code_and_result ... ok
+test extended_generation_config_roundtrip ... ok
+test ir_with_extended_fields_renders_to_gemini ... ok
+test executable_code_roundtrip ... ok
+test parse_response_thinking_parts ... ok
+test parse_stream_finish_reason ... ok
+test grounding_metadata_roundtrip ... ok
+test parse_stream_chunk_delta ... ok
+test parse_stream_thinking_delta ... ok
+test render_stream_chunk_delta ... ok
+test render_roundtrip_preserves_fields ... ok
+test finish_reasons_and_tool_use_prompt_usage_roundtrip ... ok
+test thinking_response_roundtrip ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lossy_paths.rs (target/debug/deps/lossy_paths-f4f2b84b16cadeb1)
+
+running 6 tests
+test anthropic_thinking_to_openai_chat_drops_thinking_from_wire ... ok
+test anthropic_private_blocks_to_openai_chat_are_dropped_from_wire ... ok
+test openai_responses_reasoning_to_anthropic_drops_reasoning_from_wire ... ok
+test openai_responses_reasoning_tokens_to_anthropic_drops_from_usage ... ok
+test anthropic_finish_reason_other_to_openai_chat_degrades_to_stop ... ok
+test openai_rich_response_to_gemini_drops_unsupported_lossy_fields ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/multi_event_chunk.rs (target/debug/deps/multi_event_chunk-a6a85562a92d9891)
+
+running 5 tests
+test openai_single_delta_does_not_spill ... ok
+test gemini_finish_only_returns_single_end ... ok
+test gemini_text_only_returns_single_delta ... ok
+test gemini_combined_final_event_splits_into_two ... ok
+test anthropic_single_delta_does_not_spill ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/openai_responses_wire.rs (target/debug/deps/openai_responses_wire-d1a10518a0293eee)
+
+running 12 tests
+test deserialize_optional_fields ... ok
+test deserialize_request_preserves_extras ... ok
+test deserialize_stream_chunk_with_type ... ok
+test deserialize_response_object ... ok
+test deserialize_minimal_request ... ok
+test serialize_request_round_trip ... ok
+test responses_stream_gap_events_parse_to_ir ... ok
+test parse_response_maps_new_items_to_server_tool_blocks ... ok
+test existing_message_function_call_and_reasoning_behavior_survives ... ok
+test deserialize_new_output_item_types ... ok
+test render_response_maps_server_tool_blocks_to_output_items ... ok
+test responses_new_item_types_roundtrip_through_ir ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/openai_roundtrip.rs (target/debug/deps/openai_roundtrip-58d05d73a00dffbe)
+
+running 10 tests
+test parse_stream_done ... ok
+test parse_stream_chunk_delta ... ok
+test parse_error_400 ... ok
+test parse_basic_request ... ok
+test estimate_input_tokens_nonzero ... ok
+test render_stream_chunk_delta ... ok
+test render_roundtrip_preserves_fields ... ok
+test parse_json_schema_response_format ... ok
+test comprehensive_response_gap_roundtrip ... ok
+test comprehensive_request_gap_roundtrip ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/passthrough_bench.rs (target/debug/deps/passthrough_bench-acac46ecb82d25e9)
+
+running 2 tests
+test empty_mutation_returns_borrowed ... ok
+test non_empty_mutation_returns_owned ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/responses_conversion.rs (target/debug/deps/responses_conversion-195899f068ee10aa)
+
+running 8 tests
+test chat_to_responses_lifts_system_to_instructions ... ok
+test responses_to_anthropic_lifts_instructions_to_system ... ok
+test responses_to_gemini_minimal ... ok
+test responses_to_anthropic_minimal ... ok
+test responses_to_chat_with_instructions_prepends_system ... ok
+test chat_to_responses_round_trip_preserves_text ... ok
+test responses_to_chat_lifts_input_to_messages ... ok
+test responses_to_gemini_with_instructions_uses_system_instruction ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stream_accumulator.rs (target/debug/deps/stream_accumulator-2f87417befe67414)
+
+running 7 tests
+test openai_malformed_chunk_returns_error ... ok
+test anthropic_malformed_event_returns_error ... ok
+test empty_streams_return_default_shape ... ok
+test openai_chat_chunks_concat_into_message ... ok
+test anthropic_multiple_text_blocks ... ok
+test anthropic_event_stream_concat_into_message ... ok
+test openai_tool_calls_collected ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stream_policy.rs (target/debug/deps/stream_policy-5bd79cdbe91424c3)
+
+running 6 tests
+test accumulate_when_client_sync_but_upstream_only_streams ... ok
+test passthrough_stream_when_client_stream_and_upstream_only_streams ... ok
+test passthrough_stream_when_client_stream_and_upstream_supports_both ... ok
+test simulate_when_client_stream_but_upstream_only_sync ... ok
+test upstream_with_no_capability_falls_through_to_sync ... ok
+test passthrough_sync_when_client_sync_and_upstream_supports_both ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/usage_extractor_matrix.rs (target/debug/deps/usage_extractor_matrix-afb0cfbadf97458f)
+
+running 12 tests
+test extracted_usage_default_is_zero_unknown_nonterminal ... ok
+test extractor_trait_object_safe ... ok
+test openai_missing_usage_returns_unknown_provenance ... ok
+test gemini_missing_usage_metadata_returns_default ... ok
+test anthropic_extracts_cache_creation_and_read ... ok
+test openai_chat_extracts_six_dims ... ok
+test anthropic_message_start_with_usage_is_not_terminal ... ok
+test gemini_pure_text_yields_none_multimodal ... ok
+test anthropic_message_delta_with_usage_is_terminal ... ok
+test gemini_extracts_multimodal_sum ... ok
+test openai_responses_extracts_six_dims ... ok
+test provenance_default_is_unknown ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wire_any.rs (target/debug/deps/wire_any-396c78f336e806c5)
+
+running 1 test
+test request_variant_tag_matches_protocol ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_codec
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

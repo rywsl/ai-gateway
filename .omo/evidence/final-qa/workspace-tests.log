@@ -1,0 +1,1917 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src/lib.rs (target/debug/deps/e2e_fake_upstream-6ee98d6a4b40f4b7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/fake_upstream-73dc5ae09087479a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hits_admin.rs (target/debug/deps/hits_admin-d821485b6143418b)
+
+running 2 tests
+test hits_total_sums_routes_and_refused ... ok
+test chaos_stats_counts_variants ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/inject.rs (target/debug/deps/inject-67663b64a99b8d97)
+
+running 7 tests
+test happy_path_sse_through_new_accept_loop ... ok
+test partial_sse_event ... ok
+test status_with_retry_after ... ok
+test connection_refused_first_n ... ok
+test tcp_reset_after_headers ... ok
+test tcp_reset_mid_body ... ok
+test slow_body_byte_per_second ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/weighted.rs (target/debug/deps/weighted-c82f1b6b2e0e0bd0)
+
+running 4 tests
+test validate_rejects_empty_variants ... ok
+test validate_rejects_nested_weighted ... ok
+test weighted_variant_round_trips ... ok
+test chaos_off_always_picks_first_variant ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/e2e_fake_web-2dc40b58bf9d301b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/fake_web-33c968c03faf7c72)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/soak_window.rs (target/debug/deps/soak_window-03e485a1f4d4669b)
+
+running 6 tests
+test quiescence_check_empty_or_short_rejects ... ok
+test quiescence_check_accepts_consecutive_match ... ok
+test quiescence_check_rejects_recent_drift ... ok
+test window_start_req_round_trips ... ok
+test spectrum_buckets_observed_fields_and_marks_absent ... ok
+test snapshot_serialises_with_required_fields ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_adapter-72dcbe19795e22c4)
+
+running 1 test
+test trait_def::trait_surface_tests::dummy_compiles_and_defaults_patch_hooks_to_noop ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/analyzer_outcome.rs (target/debug/deps/analyzer_outcome-27332c963c349d4b)
+
+running 3 tests
+test outcome_has_cooldown_enhanced_body_oauth_signal ... ok
+test default_analyzer_401_yields_oauth_signal_none_until_vendor ... ok
+test test_error_analyzer_calls_observe_429 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/headers_url_roundtrip.rs (target/debug/deps/headers_url_roundtrip-ababdd6b27cadecb)
+
+running 2 tests
+test url_mutation_visible_through_view ... ok
+test headers_set_get_remove_roundtrip ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/noop_behavior.rs (target/debug/deps/noop_behavior-0b0ff42f55a7887e)
+
+running 1 test
+test noop_injects_x_api_key_and_removes_authorization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/registry_lookup.rs (target/debug/deps/registry_lookup-9f3ac7e5a7e30cdf)
+
+running 4 tests
+test lookup_returns_noop_when_unregistered ... ok
+test lookup_returns_registered_adapter ... ok
+test analyzer_lookup_falls_back_to_default ... ok
+test registered_analyzer_overrides_default ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_auth-847d4bf88487434a)
+
+running 10 tests
+test mgmt::verify_tests::parse_rejects_missing_dot ... ok
+test mgmt::verify_tests::parse_rejects_missing_prefix ... ok
+test mgmt::verify_tests::parse_token_splits_id_and_secret ... ok
+test jwt_blacklist::mgmt_namespace_tests::mgmt_methods_exist_in_source ... ok
+test mgmt::verify_tests::parse_rejects_empty_secret ... ok
+test mgmt::verify_tests::verify_constant_time_succeeds_on_match ... ok
+test mgmt::verify_tests::verify_disabled ... ok
+test mgmt::verify_tests::verify_expired ... ok
+test mgmt::verify_tests::verify_fails_on_mismatch ... ok
+test mgmt::verify_tests::verify_scope_denied ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/adaptive_rpm.rs (target/debug/deps/adaptive_rpm-fca318006f31552e)
+
+running 15 tests
+test test_adaptive_cfg_defaults ... ok
+test test_confidence_clamp ... ok
+test test_enforcement_above_threshold_enforces ... ok
+test test_aimd_multiplicative_decrease ... ok
+test test_evict_removes_key ... ok
+test test_manager_new_empty ... ok
+test test_enforcement_below_threshold_skips ... ok
+test test_key_adaptive_state_initial ... ok
+test test_observe_429_inconsistent_resets ... ok
+test test_observe_429_with_header_learns_after_2 ... ok
+test test_observe_429_without_header_learns_after_3 ... ok
+test test_probe_respects_max_rpm ... ok
+test test_tick_decay_below_zero_clamps ... ok
+test test_tick_decay_probe_expansion ... ok
+test test_tick_decay_reduces_confidence ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hard_cap.rs (target/debug/deps/hard_cap-fc69c8831ffb30f3)
+
+running 3 tests
+test cost_over_cap_fails_413 ... ok
+test input_tokens_over_cap_fails_413 ... ok
+test input_tokens_under_cap_pass ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ip_allowlist.rs (target/debug/deps/ip_allowlist-badcc797868150f2)
+
+running 6 tests
+test allowlist_enforce_blocks_unlisted_ip ... ok
+test allowlist_off_passes_all ... ok
+test deny_takes_priority_over_allow ... ok
+test blocklist_deny_still_works ... ok
+test scoped_allowlist_only_applies_to_matching_identity ... ok
+test allowlist_enforce_passes_listed_ip ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ip_filter.rs (target/debug/deps/ip_filter-50ed2f1ba26b696c)
+
+running 11 tests
+test empty_allowlist_returns_false ... ok
+test ipv4_prefix_match ... ok
+test ipv4_no_match ... ok
+test ipv4_single_host_match ... ok
+test ipv6_prefix_match ... ok
+test malformed_cidr_excluded_silently ... ok
+test mixed_valid_and_malformed_still_matches_valid ... ok
+test test_check_ip_deny_first ... ok
+test test_check_ip_redis_outage_failopen ... ok
+test test_check_ip_scoped_check ... ok
+test test_check_ip_allow_then_ratelimit ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/ip_ratelimit.rs (target/debug/deps/ip_ratelimit-87ceeec4918dd806)
+
+running 6 tests
+test check_allows_requests_within_per_ip_rpm_budget ... ok
+test zero_rpm_is_clamped_to_one_request_per_minute ... ok
+test check_rejects_when_per_ip_rpm_budget_is_exhausted ... ok
+test sweep_evicts_oldest_entries_when_cap_is_exceeded ... ok
+test ipv4_and_ipv6_addresses_have_separate_buckets ... ok
+test limits_are_tracked_independently_per_ip ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/jwt_blacklist.rs (target/debug/deps/jwt_blacklist-e096ba82b7b241cd)
+
+running 4 tests
+test fail_open_treats_redis_down_as_clean ... ok
+test fail_closed_treats_redis_down_as_revoked ... ok
+test hit_means_revoked_regardless_of_mode ... ok
+test miss_means_not_revoked ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/jwt_validation.rs (target/debug/deps/jwt_validation-dac1041996943b40)
+
+running 5 tests
+test reason_does_not_contain_token ... ok
+test rejects_aud_mismatch ... ok
+test rejects_nbf_in_future ... ok
+test accepts_valid_with_leeway ... ok
+test rejects_iss_mismatch ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/jwt_validator_hybrid.rs (target/debug/deps/jwt_validator_hybrid-b372c9b6bd56f9f6)
+
+running 12 tests
+test hs256_no_static_secret_rejects ... ok
+test hs256_static_secret_happy ... ok
+test iss_mismatch_rejects ... ok
+test nbf_future_rejects ... ok
+test expired_rejects ... ok
+test reason_does_not_leak_token ... ok
+test nbf_within_leeway_passes ... ok
+test aud_mismatch_rejects ... ok
+test jwks_resolver_miss_falls_back_to_static_pem ... ok
+test rs256_no_jwks_no_static_pem_rejects ... ok
+test rs256_jwks_kid_lookup_happy ... ok
+test rs256_no_kid_uses_static_pem ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/merge.rs (target/debug/deps/merge-2b9944c35f178d48)
+
+running 4 tests
+test three_way_model_intersection ... ok
+test sub_account_effective_user_id_is_parent ... ok
+test rpm_takes_min_across_tiers ... ok
+test markup_is_product_of_tiers ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/merge_model_markup.rs (target/debug/deps/merge_model_markup-bc4d677ff4332cd4)
+
+running 2 tests
+test no_pricing_defaults_to_one ... ok
+test pricing_model_markup_lands_in_chain ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mgmt_path.rs (target/debug/deps/mgmt_path-0fe6511724156435)
+
+running 4 tests
+test admin_path_routed ... ok
+test parse_trims_whitespace ... ok
+test parses_mgmt_header ... ok
+test rejects_business_authorization ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/model_permissions.rs (target/debug/deps/model_permissions-696342b455a84401)
+
+running 7 tests
+test empty_perms_default_deny ... ok
+test compile_rejects_overlong_pattern ... ok
+test compile_rejects_invalid_regex ... ok
+test no_match_default_deny ... ok
+test compile_accepts_normal_patterns ... ok
+test deny_wins_when_both_match ... ok
+test allow_then_deny_specific ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ratelimit.rs (target/debug/deps/ratelimit-3abe9ea9876d4eff)
+
+running 6 tests
+test stream_slot_rai_decrements_on_drop ... ok
+test tpm_zero_limit_disables_enforcement ... ok
+test unlimited_max_allows_many_slots ... ok
+test tpm_over_limit_rejects_with_correct_code ... ok
+test tpm_under_limit_passes ... ok
+test rpm_within_limit_passes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/redos_runtime.rs (target/debug/deps/redos_runtime-7b24e7c890d6c157)
+
+running 6 tests
+test budget_constant_is_100ms ... ok
+test timeouts_disable_after_threshold ... ok
+test separate_keys_isolated ... ok
+test timeouts_below_threshold_do_not_disable ... ok
+test deny_within_budget_returns_false ... ok
+test match_within_budget_returns_normal ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/signature.rs (target/debug/deps/signature-ef06abe283994c51)
+
+running 9 tests
+test signature_mismatch_with_tampered_body ... ok
+test signature_match ... ok
+test verify_required_malformed_timestamp_returns_invalid ... ok
+test verify_required_drifted_timestamp_returns_timestamp_drift ... ok
+test verify_required_missing_sig_header_returns_missing ... ok
+test verify_required_missing_timestamp_returns_missing ... ok
+test verify_required_off_returns_not_required ... ok
+test verify_required_bad_hmac_returns_invalid ... ok
+test verify_required_valid_sig_returns_valid ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/signature_required.rs (target/debug/deps/signature_required-bf37d1b6f3ff9624)
+
+running 5 tests
+test required_false_passes_without_header ... ok
+test required_true_missing_header_fails ... ok
+test required_true_stale_timestamp_fails ... ok
+test required_true_bad_sig_fails ... ok
+test required_true_valid_passes ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_billing-5e73388688159641)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/formulas.rs (target/debug/deps/formulas-2ca19cbf7cffae7e)
+
+running 3 tests
+test test_freeze_amount_calculation ... ok
+test test_settle_amount_calculation ... ok
+test test_no_cost_per_token ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_capability-1263d2a232dccc75)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/adapter_hook.rs (target/debug/deps/adapter_hook-4a296b6585df0b9b)
+
+running 3 tests
+test match_when_all_caps_present ... ok
+test match_when_required_is_empty ... ok
+test missing_when_cap_absent ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/filter.rs (target/debug/deps/filter-bd4cdb3a4f33c65a)
+
+running 6 tests
+test exclusive_mode_rejects_superset ... ok
+test compatible_mode_accepts_superset ... ok
+test empty_required_matches_anything ... ok
+test key_disabled_by_redos_returns_unavailable ... ok
+test missing_required_cap_returns_missing ... ok
+test exclusive_mode_with_empty_required_rejects_anything_present ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mapper.rs (target/debug/deps/mapper-ec2949b8bd14baf8)
+
+running 5 tests
+test entity_row_returns_default_upstream ... ok
+test map_for_dispatch_uses_override_when_key_match ... ok
+test identity_when_no_mapping ... ok
+test disabled_returns_error ... ok
+test per_key_when_vendor_overrides_present ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/pricing.rs (target/debug/deps/pricing-c156aae46f63733d)
+
+running 3 tests
+test in_memory_reader_round_trip ... ok
+test missing_returns_none ... ok
+test multiple_vendors_isolated ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/resolver.rs (target/debug/deps/resolver-999068c8c522d701)
+
+running 5 tests
+test model_caps_merge_with_header_require ... ok
+test empty_request_returns_empty_set ... ok
+test exclusive_mode_inherits_from_key ... ok
+test key_forced_caps_take_origin ... ok
+test retry_upgrade_adds_thinking ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/responses_capability.rs (target/debug/deps/responses_capability-9024bf517b8ca97a)
+
+running 4 tests
+test anthropic_shape_does_not_add_responses_cap ... ok
+test responses_shape_with_existing_caps_preserves_them ... ok
+test responses_shape_auto_adds_cap ... ok
+test chat_shape_does_not_add_responses_cap ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/types.rs (target/debug/deps/types-6b8ef7c0089cfb72)
+
+running 4 tests
+test add_dedups_capability_but_appends_origin ... ok
+test match_mode_default_is_compatible ... ok
+test required_capabilities_default_compatible ... ok
+test required_capabilities_provenance_logs_origin ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_codec-f702bff08e039d09)
+
+running 139 tests
+test anthropic::codec::tests::parse_response_returns_protocol_decode_error_on_garbage ... ok
+test anthropic::codec::tests::parse_response_no_cache_fields ... ok
+test anthropic::codec::tests::parse_response_extracts_usage ... ok
+test anthropic::codec::tests::parse_response_with_pause_turn_stop_reason ... ok
+test anthropic::codec::tests::parse_stream_chunk_redacted_thinking_block_is_skipped ... ok
+test anthropic::codec::tests::parse_stream_chunk_mcp_block_start_is_skipped ... ok
+test anthropic::codec::tests::render_stream_end_with_refusal_stop_reason ... ok
+test anthropic::codec::tests::render_response_text_only_round_trip ... ok
+test anthropic::codec::tests::test_anthropic_ir_invariant_assistant_role_returns_err ... ok
+test anthropic::codec::tests::test_anthropic_ir_invariant_text_content_returns_err ... ok
+test anthropic::codec::tests::parse_stream_chunk_thinking_block_accumulates_signature ... ok
+test anthropic::codec::tests::render_response_with_thinking_and_tool_use ... ok
+test anthropic::codec::tests::parse_stream_chunk_citations_delta ... ok
+test anthropic::via::tests::document_url_parses_to_file_ir ... ok
+test anthropic::via::tests::document_base64_parses_to_file_ir ... ok
+test anthropic::via::tests::document_text_source_parses_to_text_ir ... ok
+test anthropic::via::tests::file_ir_renders_to_document_block ... ok
+test anthropic::via::tests::document_with_cache_control_round_trips ... ok
+test anthropic::via::tests::mcp_tool_use_response_block_round_trips_through_ir ... ok
+test anthropic::via::tests::redacted_thinking_response_round_trip ... ok
+test anthropic::via::tests::stop_reason_model_context_window_exceeded_maps_to_other ... ok
+test anthropic::via::tests::server_tool_use_response_block_round_trips_through_ir ... ok
+test anthropic::via::tests::search_result_parses_to_text_ir ... ok
+test anthropic::via::tests::renders_each_server_tool_block_kind_to_matching_anthropic_variant ... ok
+test anthropic::via::tests::stop_reason_pause_turn_maps_to_other ... ok
+test anthropic::via::tests::stop_reason_refusal_maps_to_ir_refusal ... ok
+test anthropic::via::tests::unknown_response_block_is_skipped ... ok
+test cli::tests::test_api_shape_is_cli ... ok
+test cli::tests::test_api_shape_protocol_kind ... ok
+test cli::tests::test_claude_cli_passthrough ... ok
+test cli::tests::test_cli_codec_trait_surface ... ok
+test cli::tests::test_claude_cli_usage_extraction ... ok
+test cli::tests::test_cli_format_id_registration ... ok
+test cli::tests::test_cli_hints_default ... ok
+test cli::tests::test_cli_hints_deserialize ... ok
+test cli::tests::test_cli_hints_partial ... ok
+test cli::tests::test_cli_preserves_headers ... ok
+test cli::tests::test_detect_anthropic_standard ... ok
+test cli::tests::test_detect_anthropic_apikey_only ... ok
+test cli::tests::test_detect_claude_cli ... ok
+test cli::tests::test_detect_gemini_cli_ua ... ok
+test cli::tests::test_detect_gemini_standard ... ok
+test cli::tests::test_detect_gemini_cli_xapp ... ok
+test cli::tests::test_detect_openai_cli ... ok
+test cli::tests::test_detect_openai_compact ... ok
+test cli::tests::test_detect_unrelated_path ... ok
+test cli::tests::test_openai_cli_passthrough ... ok
+test cli::tests::test_openai_cli_responses_api ... ok
+test cli::tests::test_openai_cli_usage_extraction ... ok
+test cross_render::tests::adapt_lossy_keeps_thinking_when_target_supports ... ok
+test cross_render::tests::adapt_lossy_drops_thinking_when_target_unsupports ... ok
+test cross_render::tests::adapt_lossy_matrix_annotations_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_reasoning_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_redacted_thinking_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_reasoning_tokens_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_service_tier_drop_decisions ... ok
+test cross_render::tests::capabilities_openai_chat_lacks_thinking_and_reasoning ... ok
+test cross_render::tests::adapt_lossy_matrix_thinking_drop_decisions ... ok
+test cross_render::tests::finish_reason_content_filter_degrades_to_stop_for_anthropic ... ok
+test cross_render::tests::adapt_lossy_matrix_audio_drop_decisions ... ok
+test cross_render::tests::finish_reason_gemini_specific_content_filter_degrades_for_anthropic ... ok
+test cross_render::tests::finish_reason_gemini_malformed_function_call_degrades_to_stop ... ok
+test cross_render::tests::finish_reason_gemini_specific_content_filters_map_to_content_filter ... ok
+test cross_render::tests::adapt_lossy_matrix_refusal_drop_decisions ... ok
+test cross_render::tests::adapt_lossy_matrix_server_tool_blocks_drop_decisions ... ok
+test cross_render::tests::finish_reason_refusal_degrades_when_target_lacks_support ... ok
+test cross_render::tests::finish_reason_other_degrades_to_stop_with_lossy ... ok
+test cross_render::tests::finish_reason_refusal_keeps_when_target_supports ... ok
+test cross_render::tests::finish_reason_same_wire_identity ... ok
+test gemini::codec::tests::parse_response_extracts_operation_id_when_present ... ok
+test gemini::codec::tests::parse_response_normal_chat_id_unchanged ... ok
+test gemini::codec::tests::parse_response_returns_protocol_decode_error_on_garbage ... ok
+test gemini::codec::tests::parse_response_safety_finish_reason_maps_to_content_filter ... ok
+test gemini::codec::tests::parse_response_without_cached_field ... ok
+test gemini::codec::tests::test_gemini_ir_invariant_assistant_role_returns_err ... ok
+test gemini::codec::tests::test_gemini_ir_invariant_end_last_returns_err ... ok
+test gemini::codec::tests::parse_response_extracts_usage_metadata ... ok
+test gemini::codec::tests::render_response_with_function_call_round_trip ... ok
+test gemini::codec::tests::test_gemini_ir_invariant_tool_call_start_first_returns_err ... ok
+test gemini::codec::tests::test_gemini_ir_invariant_tool_call_delta_second_returns_err ... ok
+test gemini::codec::tests::parse_stream_chunk_emits_function_call_events ... ok
+test gemini::via::usage_detail_tests::tool_use_prompt_token_count_absent_omitted ... ok
+test openai::codec::tests::parse_response_extracts_refusal ... ok
+test openai::codec::tests::parse_response_extracts_annotations ... ok
+test openai::codec::tests::parse_response_returns_protocol_decode_error_on_garbage ... ok
+test openai::codec::tests::parse_response_extracts_usage ... ok
+test gemini::via::usage_detail_tests::tool_use_prompt_token_count_serde_round_trip ... ok
+test openai::codec::tests::parse_response_without_cached_tokens_field ... ok
+test openai::codec::tests::parse_stream_chunk_refusal_delta ... ok
+test openai::codec::tests::render_response_text_only_round_trip ... ok
+test openai::codec::tests::test_openai_chat_ir_invariant_assistant_role_returns_err ... ok
+test openai::codec::tests::render_stream_chunk_refusal_delta ... ok
+test openai::codec::tests::refusal_annotations_round_trip ... ok
+test openai::codec::tests::test_openai_chat_ir_invariant_text_content_returns_err ... ok
+test openai::codec::tests::parse_stream_chunk_accumulates_tool_call_arguments ... ok
+test openai::codec::tests::test_openai_chat_ir_invariant_tool_calls_present_returns_err ... ok
+test openai::responses::codec::tests::parse_response_returns_protocol_decode_error_on_garbage ... ok
+test openai::responses::codec::tests::parse_stream_chunk_refusal_delta ... ok
+test openai::responses::codec::tests::parse_stream_chunk_accumulates_reasoning_summary ... ok
+test openai::codec::tests::render_response_with_tool_calls_round_trip ... ok
+test openai::responses::codec::tests::parse_stream_chunk_reasoning_text_delta_emits_thinking_delta ... ok
+test openai::responses::codec::tests::parse_stream_chunk_unknown_event_skips_without_error ... ok
+test openai::responses::codec::tests::test_openai_responses_ir_invariant_assistant_role_returns_err ... ok
+test openai::responses::codec::tests::test_openai_responses_ir_invariant_text_content_returns_err ... ok
+test openai::responses::codec::tests::test_openai_responses_ir_invariant_tool_call_assistant_returns_err ... ok
+test openai::responses::codec::tests::render_response_with_function_call_status_is_completed_with_tool_calls_reason ... ok
+test openai::responses::codec::tests::render_response_with_reasoning_round_trip ... ok
+test openai::via::audio_tests::audio_config_absent_when_not_set ... ok
+test openai::via::audio_tests::audio_config_request_round_trip ... ok
+test openai::via::audio_tests::ir_audio_config_renders_modalities_when_missing ... ok
+test openai::via::audio_tests::response_audio_parse_and_round_trip ... ok
+test openai::via::reasoning_service_tier_tests::absent_reasoning_effort_and_service_tier_omitted_from_json ... ok
+test openai::via::audio_tests::response_without_audio_omits_field ... ok
+test openai::via::reasoning_service_tier_tests::reasoning_effort_with_service_tier_combined ... ok
+test openai::via::reasoning_service_tier_tests::ir_with_budget_tokens_renders_only_effort ... ok
+test openai::via::reasoning_service_tier_tests::service_tier_request_round_trip ... ok
+test openai::via::reasoning_service_tier_tests::reasoning_effort_request_round_trip ... ok
+test openai::via::tool_choice_tests::test_openai_tool_choice_ir_invariant_function_returns_err ... ok
+test openai::via::reasoning_service_tier_tests::service_tier_response_round_trip ... ok
+test openai::via::tool_choice_tests::tool_choice_auto_round_trip ... ok
+test openai::via::tool_choice_tests::tool_choice_none_round_trip ... ok
+test openai::via::tool_choice_tests::tool_choice_function_object_round_trip ... ok
+test openai::via::usage_detail_tests::absent_detail_fields_stay_none ... ok
+test openai::via::usage_detail_tests::audio_tokens_round_trip ... ok
+test openai::via::usage_detail_tests::prediction_tokens_round_trip ... ok
+test openai::via::tool_choice_tests::tool_choice_required_round_trip ... ok
+test openai::via::user_multimodal_tests::developer_role_round_trip_stays_developer ... ok
+test openai::via::user_multimodal_tests::user_string_content_backward_compat ... ok
+test openai::via::user_multimodal_tests::user_input_audio_parses ... ok
+test openai::via::user_multimodal_tests::user_multimodal_round_trip ... ok
+test openai::via::user_multimodal_tests::user_string_content_render_stays_string ... ok
+test openai::via::user_multimodal_tests::user_multimodal_image_url_parses ... ok
+test openai::via::web_search_prediction_custom_tool_tests::custom_tool_skipped_in_ir_function_tools_preserved ... ok
+test openai::via::web_search_prediction_custom_tool_tests::custom_tool_wire_round_trip ... ok
+test openai::via::web_search_prediction_custom_tool_tests::custom_tool_parses_without_panic ... ok
+test openai::via::web_search_prediction_custom_tool_tests::prediction_round_trip ... ok
+test openai::via::web_search_prediction_custom_tool_tests::web_search_options_absent_when_not_set ... ok
+test openai::via::web_search_prediction_custom_tool_tests::prediction_absent_when_not_set ... ok
+test openai::via::web_search_prediction_custom_tool_tests::web_search_options_round_trip ... ok
+
+test result: ok. 139 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/anthropic_roundtrip.rs (target/debug/deps/anthropic_roundtrip-40f863367fcfc9b9)
+
+running 15 tests
+test parse_basic_request ... ok
+test parse_error_400 ... ok
+test absent_usage_details_omitted_from_wire ... ok
+test cache_ttl_usage_round_trips_through_ir ... ok
+test document_and_search_result_request_roundtrip ... ok
+test parse_request_adaptive_thinking_display_and_effort ... ok
+test estimate_input_tokens_nonzero ... ok
+test inference_geo_service_tier_round_trips_through_ir ... ok
+test parse_stream_chunk_delta ... ok
+test parse_stream_message_stop ... ok
+test render_request_preserves_enabled_thinking_display_and_effort ... ok
+test render_roundtrip_preserves_fields ... ok
+test render_stream_chunk_delta_has_event_prefix ... ok
+test request_service_tier_round_trips ... ok
+test redacted_thinking_stop_reason_server_tool_and_mcp_roundtrip ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_variants.rs (target/debug/deps/cli_variants-7efedb9e2a3f2afb)
+
+running 5 tests
+test test_gemini_cli_passthrough ... ok
+test test_gemini_cli_streaming ... ok
+test test_openai_compact_passthrough ... ok
+test test_gemini_cli_usage_extraction ... ok
+test test_openai_compact_usage_extraction ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/compression.rs (target/debug/deps/compression-6451825f88e5b3a7)
+
+running 7 tests
+test negotiate_prefers_br_over_gzip_when_both_listed ... ok
+test identity_passthrough ... ok
+test parse_content_encoding_cases ... ok
+test gzip_roundtrip ... ok
+test malformed_gzip_returns_error ... ok
+test empty_body_roundtrip ... ok
+test brotli_roundtrip ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_protocol.rs (target/debug/deps/cross_protocol-ef2786ba2b2d611e)
+
+running 4 tests
+test anthropic_to_openai_via_ir ... ok
+test openai_to_gemini_via_ir ... ok
+test openai_to_anthropic_via_ir ... ok
+test openai_json_schema_response_format_cross_renders_to_gemini ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_protocol_matrix.rs (target/debug/deps/cross_protocol_matrix-b5f71973775bf308)
+
+running 16 tests
+test anthropic_to_openai_chat ... ok
+test gemini_to_openai_responses ... ok
+test anthropic_to_anthropic ... ok
+test anthropic_to_gemini ... ok
+test gemini_to_gemini ... ok
+test gemini_to_anthropic ... ok
+test gemini_to_openai_chat ... ok
+test anthropic_to_openai_responses ... ok
+test openai_chat_to_anthropic ... ok
+test openai_chat_to_openai_chat ... ok
+test openai_chat_to_gemini ... ok
+test openai_responses_to_gemini ... ok
+test openai_responses_to_openai_responses ... ok
+test openai_chat_to_openai_responses ... ok
+test openai_responses_to_openai_chat ... ok
+test openai_responses_to_anthropic ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_protocol_stream.rs (target/debug/deps/cross_protocol_stream-94d74d5a815487e1)
+
+running 3 tests
+test same_protocol_openai_round_trips_unchanged ... ok
+test gemini_combined_chunk_renders_all_events_to_openai_client ... ok
+test anthropic_chunk_rendered_as_openai_for_client ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_passthrough.rs (target/debug/deps/error_passthrough-071cf4da058525eb)
+
+running 5 tests
+test sse_error_emits_event_error_frame ... ok
+test anthropic_error_renders_to_openai_with_type ... ok
+test missing_message_falls_back_to_default ... ok
+test gemini_429_renders_with_status_field ... ok
+test openai_401_renders_to_anthropic_authentication_error ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemini_files.rs (target/debug/deps/gemini_files-4af8028b551e2d1d)
+
+running 5 tests
+test ref_carries_mime_and_size ... ok
+test dedup_same_sha_only_once ... ok
+test different_user_uploads_independently ... ok
+test different_bytes_upload_independently ... ok
+test file_uri_format_is_files_prefix ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemini_roundtrip.rs (target/debug/deps/gemini_roundtrip-d5f97aa335329676)
+
+running 16 tests
+test estimate_input_tokens_nonzero ... ok
+test extended_generation_config_roundtrip ... ok
+test executable_code_roundtrip ... ok
+test parse_error_400 ... ok
+test parse_response_executable_code_and_result ... ok
+test parse_basic_request ... ok
+test parse_response_thinking_parts ... ok
+test parse_stream_chunk_delta ... ok
+test parse_stream_finish_reason ... ok
+test parse_stream_thinking_delta ... ok
+test render_stream_chunk_delta ... ok
+test grounding_metadata_roundtrip ... ok
+test render_roundtrip_preserves_fields ... ok
+test finish_reasons_and_tool_use_prompt_usage_roundtrip ... ok
+test thinking_response_roundtrip ... ok
+test ir_with_extended_fields_renders_to_gemini ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lossy_paths.rs (target/debug/deps/lossy_paths-3776f9af949a27e6)
+
+running 6 tests
+test anthropic_thinking_to_openai_chat_drops_thinking_from_wire ... ok
+test anthropic_private_blocks_to_openai_chat_are_dropped_from_wire ... ok
+test openai_responses_reasoning_to_anthropic_drops_reasoning_from_wire ... ok
+test anthropic_finish_reason_other_to_openai_chat_degrades_to_stop ... ok
+test openai_responses_reasoning_tokens_to_anthropic_drops_from_usage ... ok
+test openai_rich_response_to_gemini_drops_unsupported_lossy_fields ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/multi_event_chunk.rs (target/debug/deps/multi_event_chunk-596e99dbf45de8d7)
+
+running 5 tests
+test gemini_finish_only_returns_single_end ... ok
+test openai_single_delta_does_not_spill ... ok
+test gemini_combined_final_event_splits_into_two ... ok
+test anthropic_single_delta_does_not_spill ... ok
+test gemini_text_only_returns_single_delta ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/openai_responses_wire.rs (target/debug/deps/openai_responses_wire-90ee0ecda60051cd)
+
+running 12 tests
+test deserialize_optional_fields ... ok
+test deserialize_minimal_request ... ok
+test deserialize_response_object ... ok
+test deserialize_stream_chunk_with_type ... ok
+test deserialize_request_preserves_extras ... ok
+test deserialize_new_output_item_types ... ok
+test existing_message_function_call_and_reasoning_behavior_survives ... ok
+test parse_response_maps_new_items_to_server_tool_blocks ... ok
+test render_response_maps_server_tool_blocks_to_output_items ... ok
+test responses_stream_gap_events_parse_to_ir ... ok
+test serialize_request_round_trip ... ok
+test responses_new_item_types_roundtrip_through_ir ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/openai_roundtrip.rs (target/debug/deps/openai_roundtrip-76c65b5c77e0cea4)
+
+running 10 tests
+test parse_stream_chunk_delta ... ok
+test parse_stream_done ... ok
+test estimate_input_tokens_nonzero ... ok
+test parse_basic_request ... ok
+test parse_error_400 ... ok
+test render_roundtrip_preserves_fields ... ok
+test render_stream_chunk_delta ... ok
+test comprehensive_response_gap_roundtrip ... ok
+test comprehensive_request_gap_roundtrip ... ok
+test parse_json_schema_response_format ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/passthrough_bench.rs (target/debug/deps/passthrough_bench-ed4433504333c48e)
+
+running 2 tests
+test empty_mutation_returns_borrowed ... ok
+test non_empty_mutation_returns_owned ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/responses_conversion.rs (target/debug/deps/responses_conversion-3cc3cafdc52ce5f6)
+
+running 8 tests
+test chat_to_responses_round_trip_preserves_text ... ok
+test chat_to_responses_lifts_system_to_instructions ... ok
+test responses_to_anthropic_lifts_instructions_to_system ... ok
+test responses_to_gemini_minimal ... ok
+test responses_to_anthropic_minimal ... ok
+test responses_to_chat_lifts_input_to_messages ... ok
+test responses_to_chat_with_instructions_prepends_system ... ok
+test responses_to_gemini_with_instructions_uses_system_instruction ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stream_accumulator.rs (target/debug/deps/stream_accumulator-18d9ff914f196a8f)
+
+running 7 tests
+test anthropic_malformed_event_returns_error ... ok
+test openai_malformed_chunk_returns_error ... ok
+test empty_streams_return_default_shape ... ok
+test anthropic_event_stream_concat_into_message ... ok
+test openai_tool_calls_collected ... ok
+test anthropic_multiple_text_blocks ... ok
+test openai_chat_chunks_concat_into_message ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stream_policy.rs (target/debug/deps/stream_policy-09a666f8c7458fa3)
+
+running 6 tests
+test accumulate_when_client_sync_but_upstream_only_streams ... ok
+test passthrough_stream_when_client_stream_and_upstream_only_streams ... ok
+test passthrough_stream_when_client_stream_and_upstream_supports_both ... ok
+test passthrough_sync_when_client_sync_and_upstream_supports_both ... ok
+test simulate_when_client_stream_but_upstream_only_sync ... ok
+test upstream_with_no_capability_falls_through_to_sync ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/usage_extractor_matrix.rs (target/debug/deps/usage_extractor_matrix-1aeb7b8584a02d8f)
+
+running 12 tests
+test anthropic_message_delta_with_usage_is_terminal ... ok
+test anthropic_extracts_cache_creation_and_read ... ok
+test gemini_missing_usage_metadata_returns_default ... ok
+test anthropic_message_start_with_usage_is_not_terminal ... ok
+test extractor_trait_object_safe ... ok
+test extracted_usage_default_is_zero_unknown_nonterminal ... ok
+test gemini_pure_text_yields_none_multimodal ... ok
+test openai_chat_extracts_six_dims ... ok
+test gemini_extracts_multimodal_sum ... ok
+test openai_missing_usage_returns_unknown_provenance ... ok
+test openai_responses_extracts_six_dims ... ok
+test provenance_default_is_unknown ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wire_any.rs (target/debug/deps/wire_any-d3abcce7f7bae713)
+
+running 1 test
+test request_variant_tag_matches_protocol ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_codec_macros-c7ac39f6de952066)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wire_convert_matrix.rs (target/debug/deps/wire_convert_matrix-74a15811a4f299ac)
+
+running 1 test
+test macro_emits_nothing_runtime_visible ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_core-62fc0fb1384dd4ff)
+
+running 24 tests
+test entity::mgmt_scope_tests::admin_full_covers_all ... ok
+test entity::mgmt_scope_tests::admin_read_covers_admin_read_and_user_self ... ok
+test entity::mgmt_scope_tests::user_self_covers_only_self ... ok
+test entity::tests::api_key_entry_deser_without_model_whitelist_regex ... ok
+test entity::tests::api_key_entry_deser_with_model_whitelist_regex ... ok
+test entity::tests::encrypted_blob_serde_roundtrip ... ok
+test ir::forced_mutations_bits_tests::empty_by_default ... ok
+test ir::forced_mutations_bits_tests::field_names_empty_when_none ... ok
+test ir::forced_mutations_bits_tests::field_names_returns_set_fields ... ok
+test ir::forced_mutations_bits_tests::each_setter_uses_a_distinct_bit ... ok
+test ir::forced_mutations_bits_tests::none_const_is_empty ... ok
+test ir::forced_mutations_bits_tests::setters_are_idempotent ... ok
+test ir::ir_v2_tests::finish_reason_other_carries_payload ... ok
+test ir::ir_v2_tests::finish_reason_refusal_variant_constructs ... ok
+test ir::ir_v2_tests::response_ir_extension_fields_default_none ... ok
+test ir::ir_v2_tests::stream_event_ir_new_variants_compile ... ok
+test ir::ir_v2_tests::usage_ir_default_zero_with_optional_reasoning ... ok
+test ir::mutations_bits_tests::each_setter_uses_a_distinct_bit ... ok
+test ir::mutations_bits_tests::empty_by_default ... ok
+test ir::mutations_bits_tests::setters_are_idempotent ... ok
+test permissions::tests::merged_permissions_model_whitelist_regex_from_api_key ... ok
+test permissions::tests::merged_permissions_model_whitelist_regex_none_when_no_api_key ... ok
+test usage::tests::default_is_all_zero_none ... ok
+test usage::tests::serde_roundtrip_preserves_optional_none ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/capabilities.rs (target/debug/deps/capabilities-e1315ca08f9fa310)
+
+running 3 tests
+test model_capabilities_defaults_empty ... ok
+test vendor_key_capability_fields_default_construction ... ok
+test model_capabilities_round_trip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/classifier_default.rs (target/debug/deps/classifier_default-9cbcd5dd721ef7ef)
+
+running 12 tests
+test unknown_status_protocol_error ... ok
+test unused_param_rate_limit_kind_present ... ok
+test upstream_401_with_oauth_respects_retry_after ... ok
+test upstream_401_with_oauth_yields_refresh_failed ... ok
+test upstream_401_yields_account_blocked_with_oauth_signal ... ok
+test upstream_402_long_cooldown ... ok
+test upstream_403_medium_cooldown ... ok
+test upstream_408_transient_short_cooldown ... ok
+test upstream_429_with_retry_after_yields_rl_hint ... ok
+test upstream_429_without_retry_after_uses_default_60s ... ok
+test upstream_503_transient ... ok
+test upstream_529_overloaded ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/debug.rs (target/debug/deps/debug-ddaa6217a00cf87d)
+
+running 3 tests
+test phase_end_without_start_is_noop ... ok
+test phase_overflow_truncates_silently ... ok
+test phase_start_end_records_alloc_and_time ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_class.rs (target/debug/deps/error_class-6819bfe5df74c13c)
+
+running 3 tests
+test error_class_account_blocked_carries_reason ... ok
+test error_class_default_is_internal ... ok
+test rate_limit_kind_use_only_no_redefine ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ids.rs (target/debug/deps/ids-8b8f60c5b3b1c5f3)
+
+running 2 tests
+test debug_format_includes_type_name ... ok
+test user_id_roundtrip_json ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/versioned.rs (target/debug/deps/versioned-40c53e3d2cbdef3c)
+
+running 4 tests
+test empty_cur_accepts ... ok
+test equal_version_rejected ... ok
+test newer_version_overwrites ... ok
+test older_version_rejected ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_gateway-029befef8053ef47)
+
+running 12 tests
+test adaptive_rpm_tests::test_decay_loop_ticks ... ok
+test config::tunnel_cfg_tests::tunnel_disabled_by_default ... ok
+test config::billing_cfg_tests::billing_validate_rejects_zero_cancel_grace ... ok
+test config::tunnel_cfg_tests::tunnel_rejects_min_greater_than_max ... ok
+test config::billing_cfg_tests::billing_env_override ... ok
+test config::tunnel_cfg_tests::tunnel_rejects_unknown_doh_provider ... ok
+test config::billing_cfg_tests::billing_section_defaults_match_spec ... ok
+test config::tunnel_cfg_tests::tunnel_rejects_zero_missed_pong ... ok
+test config::tunnel_cfg_tests::tunnel_validates_when_enabled_with_defaults ... ok
+test config::tunnel_cfg_tests::tunnel_rejects_zero_backoff_min ... ok
+test config::billing_cfg_tests::billing_validate_rejects_heartbeat_interval_too_close_to_ttl ... ok
+test config::billing_cfg_tests::billing_validate_rejects_zero_response_deadline ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/gw_gateway-3bd503f8bc740697)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bootstrap_loader.rs (target/debug/deps/bootstrap_loader-b72830a6ff280869)
+
+running 2 tests
+test entity_store_resolves_user_after_bootstrap ... ignored, requires Docker (testcontainers Redis + Postgres)
+test missing_auth_configs_row_does_not_fail_bootstrap ... ignored, requires Docker (testcontainers Redis + Postgres)
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/e2e_failure_modes.rs (target/debug/deps/e2e_failure_modes-22436ee1bb457c3c)
+
+running 11 tests
+test auth_ctx_struct_signature_smoke ... ok
+test codec_parse_error_429_maps_to_upstream_overloaded ... ok
+test hard_cap_input_tokens_passes_at_exact_cap ... ok
+test hard_cap_input_tokens_413_at_boundary ... ok
+test codec_parse_error_502_classifies_upstream_and_retryable ... ok
+test codec_parse_error_400_invalid_request_normalised ... ok
+test error_renderer_round_trip_openai_400 ... ok
+test freeze_guard_drop_without_release_rolls_back ... ok
+test freeze_guard_double_release_idempotent_no_deducted_write ... ok
+test merge_permissions_returns_401_when_user_missing ... ok
+test rate_limit_guard_emits_429_when_over_budget ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/e2e_tunnel.rs (target/debug/deps/e2e_tunnel-349a0191876efd18)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/feature_gate.rs (target/debug/deps/feature_gate-6ad67d3f65129a0a)
+
+running 1 test
+test tunnel_feature_optional ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/health_endpoint.rs (target/debug/deps/health_endpoint-f55582e7ba66097c)
+
+running 4 tests
+test admin_required_for_circuits ... ignored, needs redis; T3-Pre widened the server signature
+test admin_required_for_key ... ignored, needs redis; T3-Pre widened the server signature
+test admin_required_for_resilience ... ignored, needs redis; T3-Pre widened the server signature
+test livez_still_works ... ignored, needs redis; T3-Pre widened the server signature
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/metrics_catalog.rs (target/debug/deps/metrics_catalog-b1d2b7d6c295c26e)
+
+running 14 tests
+test billing_w1_metrics_registered ... ok
+test billing_w2_metrics_registered ... ok
+test billing_w2_t4_exposure_transitions_registered ... ok
+test billing_w2_t7_must_deliver_metrics_registered ... ok
+test billing_w3_t1_upstream_cancellation_registered ... ok
+test billing_w3_t5_grace_metric_registered ... ok
+test billing_w4_t3_emit_lag_t0_registered ... ok
+test billing_w2_t6_inflight_register_failure_registered ... ok
+test billing_w4_t4_inflight_recovered_registered ... ok
+test catalog_includes_required_families ... ok
+test catalog_kind_distribution_sane ... ok
+test describe_all_runs_clean ... ok
+test runtime_operational_metrics_registered ... ok
+test no_duplicate_metric_names ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_health-642cf6e43f527d9c)
+
+running 8 tests
+test cooldown::tests::circuit_state_roundtrips ... ok
+test cooldown::tests::cooldown_reason_roundtrips_through_u16 ... ok
+test cooldown::tests::unknown_u16_decodes_as_none ... ok
+test sliding_window::tests::empty_window_zero_rate ... ok
+test sliding_window::tests::evicts_samples_older_than_30s ... ok
+test store::snapshot_tests::empty_snapshot_returns_valid_json ... ok
+test sliding_window::tests::mixed_record_yields_correct_rate ... ok
+test store::snapshot_tests::key_snapshot_filters_by_key_id ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/key_health.rs (target/debug/deps/key_health-2f7d0db904d7ed0b)
+
+running 9 tests
+test consecutive_failures_resets_on_success ... ok
+test cooldown_isolated_across_api_formats ... ok
+test apply_cooldown_is_monotonic ... ok
+test half_open_admits_exactly_one_probe ... ok
+test record_over_floor_trips_circuit_to_open ... ok
+test clear_cooldown_restores_availability ... ok
+test fresh_store_is_available_for_unknown_key ... ok
+test cooldown_overrides_closed_circuit ... ok
+test record_under_floor_does_not_trip_circuit ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_ledger-42e45453b4e01858)
+
+running 4 tests
+test deduct_gc::tests::gc_on_empty_map ... ok
+test deduct_gc::tests::gc_reinsert_after_removal ... ok
+test usage::tests::usage_record_json_shape ... ok
+test deduct_gc::tests::gc_removes_zero_state_entries ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/detailed_archive.rs (target/debug/deps/detailed_archive-47b957a17cc3b636)
+
+running 1 test
+test try_send_drops_when_channel_full ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/detailed_archive_redis.rs (target/debug/deps/detailed_archive_redis-fa62684fb803564c)
+
+running 1 test
+test five_surfaces_round_trip_through_redis ... ignored, needs Redis
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/dlq.rs (target/debug/deps/dlq-bacd8231435c9cd8)
+
+running 1 test
+test primary_xadd_failure_routes_to_dlq_stream ... ignored, requires Docker (testcontainers Redis)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/encoding.rs (target/debug/deps/encoding-3dbebb131a438082)
+
+running 10 tests
+test encode_raw_passthrough ... ok
+test picks_lz4_at_small_threshold_inclusive ... ok
+test encoding_str_matches_spec ... ok
+test picks_raw_below_small_threshold ... ok
+test picks_zstd_at_medium_threshold_inclusive ... ok
+test round_trip_raw ... ok
+test round_trip_lz4 ... ok
+test encode_lz4_shrinks_repetitive ... ok
+test encode_zstd_shrinks_large_repetitive ... ok
+test round_trip_zstd ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flusher.rs (target/debug/deps/flusher-2ff1bf04fb58636c)
+
+running 2 tests
+test batch_flush_writes_usage_stream_no_balance_decr ... ignored, requires Docker (testcontainers Redis)
+test emit_bypasses_to_sync_xadd_when_channel_full ... ignored, requires Docker (testcontainers Redis)
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/freeze.rs (target/debug/deps/freeze-2a22f1739ced182d)
+
+running 6 tests
+test release_then_drop_does_not_double_rollback ... ok
+test double_release_is_idempotent ... ok
+test freeze_then_release_zeroes_frozen ... ok
+test trait_object_release_dispatches ... ok
+test drop_without_release_rolls_back_frozen ... ok
+test task_freeze_without_releaser_is_idempotent_for_tests ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/inflight.rs (target/debug/deps/inflight-177b0831b3b5519e)
+
+running 6 tests
+test clear_removes_key ... ignored, requires Redis
+test mark_settled_sets_state_and_ts ... ignored, requires Redis
+test mark_terminated_state_label_is_terminated ... ignored, requires Redis
+test register_writes_hash_with_expected_fields ... ignored, requires Redis (GW_TEST_REDIS_URL)
+test key_format ... ok
+test settle_state_string_labels ... ok
+
+test result: ok. 2 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/inflight_reaper.rs (target/debug/deps/inflight_reaper-ff9ba50c1a87db7c)
+
+running 2 tests
+test reaper_fires_metric_on_stale_settled_key ... ignored, requires Redis
+test reaper_skips_unsettled_keys ... ignored, requires Redis
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/inflight_reconciler.rs (target/debug/deps/inflight_reconciler-65472d7ab7096ef1)
+
+running 2 tests
+test reconciler_does_not_touch_other_instances ... ignored, requires Redis
+test reconciler_emits_and_deletes_own_residuals ... ignored, requires Redis
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/instance_id.rs (target/debug/deps/instance_id-39921e1718bfffbf)
+
+running 4 tests
+test cold_l2_generates_and_persists_uuid ... ignored, requires Redis (GW_TEST_REDIS_URL)
+test env_var_overrides_l2 ... ignored, requires Redis
+test l2_load_returns_existing ... ignored, requires Redis
+test heartbeat_key_format ... ok
+
+test result: ok. 1 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/usage_schema.rs (target/debug/deps/usage_schema-32f94f6ab4b8d823)
+
+running 3 tests
+test exposure_state_serializes_snake_case ... ok
+test provenance_tag_serializes_snake_case ... ok
+test schema_serializes_new_fields ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_proxy-9adfb84583a60adf)
+
+running 31 tests
+test ctx::tests::usage_accumulator_default_has_six_dims ... ok
+test error::listeners::oauth::tests::account_blocked_does_not_enter_xadd_branch ... ok
+test error::listeners::oauth::tests::refresh_failed_with_stub_ctx_is_noop ... ok
+test error::listeners::oauth::tests::oauth_listener_emits_reverse_xadd_on_refresh_failed ... ok
+test filters::request::model_whitelist_regex_tests::none_regex_skips_check_even_when_tracker_disabled ... ok
+test filters::request::mgmt_path_branch_tests::mgmt_branch_calls_verify_helper ... ok
+test filters::response::deadline_tests::deadline_exceeded_returns_error ... ok
+test filters::response::deadline_tests::no_deadline_set_returns_ok ... ok
+test filters::response::deadline_tests::deadline_not_exceeded_returns_ok ... ok
+test filters::response::deadline_tests::no_start_time_returns_ok ... ok
+test filters::request::non_stream_unit::non_stream_guard_removed_from_source ... ok
+test filters::response::non_stream_branch_tests::non_stream_decode_error_increments_metric ... ok
+test filters::response::non_stream_branch_tests::non_stream_eos_without_chunk_is_noop ... ok
+test filters::response::non_stream_branch_tests::non_stream_missing_codec_is_noop ... ok
+test filters::response::non_stream_branch_tests::non_stream_eos_parses_usage_into_ctx ... ok
+test filters::upstream::body_hash_tests::empty_input_returns_none ... ok
+test filters::response::non_stream_branch_tests::anthropic_non_stream_eos_extracts_six_dims_into_ctx ... ok
+test filters::upstream::body_hash_tests::deterministic_across_calls ... ok
+test filters::upstream::body_hash_tests::non_empty_returns_deterministic_value ... ok
+test gateway::tests::classify_connect_error_plain_connect ... ok
+test gateway::tests::classify_connect_error_tls_in_root_cause ... ok
+test gateway::tests::does_not_suppress_bare_http_status ... ok
+test gateway::tests::classify_connect_error_tls_outer ... ok
+test gateway::tests::does_not_suppress_upstream_failure ... ok
+test gateway::tests::suppresses_gateway_short_circuit ... ok
+test resilience::resilience_snapshot_tests::snapshot_json_emits_required_fields ... ok
+test resilience::resilience_snapshot_tests::snapshot_reflects_recorded_redis_error ... ok
+test filters::upstream::oauth_injection_tests::oauth_injection_present_in_source ... ok
+test filters::request::model_whitelist_regex_tests::regex_auto_disabled_tracker_denies_fail_closed ... ok
+test filters::request::model_whitelist_regex_tests::regex_allows_matching_model ... ok
+test filters::request::model_whitelist_regex_tests::regex_denies_non_matching_model_with_model_not_found_code ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/billing_lifecycle.rs (target/debug/deps/billing_lifecycle-2ed09d176ec9a802)
+
+running 12 tests
+test invalid_transitions_rejected ... ok
+test on_retry_sync_attempt_index_saturates ... ok
+test on_retry_sync_idle_bumps_attempt_no_record ... ok
+test on_retry_sync_consecutive_retries_increment ... ok
+test terminal_states_identified ... ok
+test transition_to_records_sent_ms ... ok
+test on_retry_sync_sent_without_vendor_key_resets_state ... ok
+test transition_to_does_not_overwrite_existing_timestamps ... ok
+test transition_to_records_settled_ms_for_terminated ... ok
+test transition_to_records_settled_ms_for_terminal ... ok
+test vendor_exposure_default_is_idle ... ok
+test valid_transitions_pass ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cancellation.rs (target/debug/deps/cancellation-485d70e341c6469b)
+
+running 13 tests
+test cancel_cause_metric_labels ... ok
+test client_close_error_kinds_map_to_client_close ... ok
+test deadline_helper_does_not_mark_when_within_budget ... ok
+test deadline_helper_no_sent_ms_is_noop ... ok
+test grace_enters_after_deadline_cancel ... ok
+test grace_expires_after_window ... ok
+test grace_no_cancel_returns_none ... ok
+test non_client_close_kind_does_not_observe_cancel ... ok
+test deadline_helper_marks_when_exceeded ... ok
+test observe_cancel_records_first_cause ... ok
+test observe_cancel_is_idempotent_first_writer_wins ... ok
+test observe_client_close_records_cause ... ok
+test upstream_error_kinds_recognized ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/capability_filter.rs (target/debug/deps/capability_filter-bcbc279864bb2827)
+
+running 6 tests
+test resolve_header_forces_extra_cap ... ok
+test resolve_key_exclusive_sets_mode ... ok
+test resolve_pulls_model_caps ... ok
+test exclusive_channel_requires_exact_match ... ok
+test none_caps_admits_all ... ok
+test vision_required_filters_non_vision_keys ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_filter_chain.rs (target/debug/deps/cli_filter_chain-79ab9631ce41ae17)
+
+running 4 tests
+test test_cli_request_body_not_ir_converted ... ok
+test test_cli_request_passes_auth ... ok
+test test_cli_request_billing_recorded ... ok
+test test_cli_request_passes_ratelimit ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/daily_quota.rs (target/debug/deps/daily_quota-a8a1fbaca23c6003)
+
+running 5 tests
+test exactly_at_quota_passes ... ok
+test over_quota_rejects ... ok
+test saturating_add_does_not_panic ... ok
+test zero_means_unlimited ... ok
+test under_quota_passes ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_emit.rs (target/debug/deps/error_emit-316e0e2e8d3fb5d7)
+
+running 4 tests
+test anthropic_render_error_is_non_empty_json ... ok
+test any_codec_dispatches_through_render_error ... ok
+test openai_render_error_is_non_empty_json ... ok
+test gemini_render_error_is_non_empty_json ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_handler.rs (target/debug/deps/error_handler-f9c0364783050648)
+
+running 3 tests
+test empty_handler_is_noop ... ok
+test fanout_invokes_listeners_in_registered_order ... ok
+test each_default_listener_compiles_and_runs ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/expires_at.rs (target/debug/deps/expires_at-5362b0414a645a9b)
+
+running 4 tests
+test exact_moment_rejects ... ok
+test future_passes ... ok
+test none_means_unlimited ... ok
+test past_rejects ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/filter_chain_order.rs (target/debug/deps/filter_chain_order-358d259886175ad0)
+
+running 3 tests
+test test_blocked_ip_never_reaches_auth ... ok
+test test_ratelimited_ip_never_reaches_auth ... ok
+test test_filter_chain_order ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/filters_logging_handler.rs (target/debug/deps/filters_logging_handler-89d30ebf70ba047b)
+
+running 1 test
+test six_listeners_default_construct_and_fanout_no_panic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/filters_request_mgmt.rs (target/debug/deps/filters_request_mgmt-857286f18e8de7e0)
+
+running 1 test
+test mgmt_path_combined ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/freeze_lifecycle.rs (target/debug/deps/freeze_lifecycle-e72574fe12c13b47)
+
+running 4 tests
+test double_release_is_idempotent ... ok
+test trait_object_release_dispatches ... ok
+test release_zeros_frozen_and_leaves_deducted_alone ... ok
+test drop_without_release_rolls_back_frozen ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hmac_required_e2e.rs (target/debug/deps/hmac_required_e2e-9e4d00e9808b9b91)
+
+running 9 tests
+test bad_signature_rejected ... ok
+test required_missing_signature_returns_missing_but_optional_missing_passes ... ok
+test replay_outside_300_seconds_returns_timestamp_drift ... ok
+test not_required_skips_verification ... ok
+test malformed_gzip_returns_decode_error ... ok
+test compressed_body_rejects_decoded_payload_over_limit ... ok
+test gzipped_body_decompressed_then_verified ... ok
+test wrong_signature_returns_invalid_result ... ok
+test identity_body_with_valid_signature_passes ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ip_allowlist.rs (target/debug/deps/ip_allowlist-1d6a9a506dae7b44)
+
+running 4 tests
+test empty_list_means_unrestricted ... ok
+test matching_cidr_passes ... ok
+test none_means_unrestricted ... ok
+test nonmatching_cidr_rejects ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/listeners_wire.rs (target/debug/deps/listeners_wire-865117723d7f3d42)
+
+running 2 tests
+test ctx_carries_optional_real_fields ... ok
+test fanout_with_real_ctx_does_not_panic ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/logging_status_class.rs (target/debug/deps/logging_status_class-f48c38dd48e1cada)
+
+running 5 tests
+test no_err_no_upstream_is_early ... ok
+test short_circuit_401_buckets_as_4xx ... ok
+test short_circuit_413_buckets_as_4xx ... ok
+test unknown_error_no_status_falls_back_to_err ... ok
+test upstream_200_buckets_as_2xx ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/resilience.rs (target/debug/deps/resilience-6e4effa79661cb4a)
+
+running 4 tests
+test default_is_healthy ... ok
+test fallback_counters_increment ... ok
+test record_redis_error_degrades ... ok
+test record_redis_ok_recovers ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/task_detector.rs (target/debug/deps/task_detector-6fdbea20af7b1ec5)
+
+running 3 tests
+test test_task_request_filter_sets_context ... ok
+test test_non_task_request_passes_through ... ok
+test test_task_shape_detector_identifies_task ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/task_endpoints.rs (target/debug/deps/task_endpoints-fd5415c3618389a1)
+
+running 6 tests
+test test_load_nonexistent_task ... ok
+test test_submit_endpoint_creates_task ... ok
+test test_cancel_endpoint_requests_cancel ... ok
+test test_load_endpoint_returns_task ... ok
+test test_freeze_guard_freezes_on_submit ... ok
+test test_freeze_guard_insufficient_balance ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/thinking_signature.rs (target/debug/deps/thinking_signature-54e59b3e317bcc7a)
+
+running 4 tests
+test after_first_chunk_does_not_failover ... ok
+test flow_state_default_is_pre_first ... ok
+test non_thinking_class_ignored ... ok
+test pre_first_chunk_marks_failover ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/timeouts.rs (target/debug/deps/timeouts-08b544a156b308f6)
+
+running 5 tests
+test neither_means_none ... ok
+test pricing_overrides_vendor_field_by_field ... ok
+test pricing_total_overlays_when_set ... ok
+test vendor_fills_when_pricing_absent ... ok
+test pricing_wins_over_vendor_when_both_set ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/upstream_envelope.rs (target/debug/deps/upstream_envelope-305f43dc601da42e)
+
+running 2 tests
+test no_model_group_maps_to_backend_unavailable_503 ... ok
+test routing_no_channel_maps_to_503 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wave0_scaffold.rs (target/debug/deps/wave0_scaffold-01a8e451d7ef1a50)
+
+running 3 tests
+test entity_store_has_auth_config_cache ... ok
+test error_codes_are_defined ... ok
+test reqctx_has_wave0_fields ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_routing-5c0a4aa1cdb09d5c)
+
+running 23 tests
+test failover::tests::test_classify_429 ... ok
+test failover::tests::test_classify_5xx ... ok
+test failover::tests::test_classify_body_started ... ok
+test failover::tests::test_classify_not_retryable ... ok
+test failover::tests::test_next_candidate_exhausted_no_candidates ... ok
+test failover::tests::test_next_candidate_exhausted_by_attempts ... ok
+test failover::tests::test_next_candidate_success ... ok
+test latency::tests::test_error_rate ... ok
+test latency::tests::test_cache_recompute ... ok
+test latency::tests::test_evict_stale ... ok
+test latency::tests::test_stale_window_returns_none ... ok
+test strategy::cost_first::tests::test_fallback_without_pricing ... ok
+test strategy::latency_first::tests::test_cold_start_fallback ... ok
+test latency::tests::test_p50_accuracy ... ok
+test latency::tests::test_min_samples ... ok
+test strategy::cost_first::tests::test_picks_lowest_cost_with_pricing ... ok
+test strategy::latency_first::tests::test_picks_lowest_p50 ... ok
+test strategy::cost_first::tests::test_skips_unavailable ... ok
+test strategy::latency_first::tests::test_tie_break_by_priority ... ok
+test strategy::latency_first::tests::test_skips_unavailable ... ok
+test strategy::load_balance::tests::test_empty_candidates ... ok
+test strategy::load_balance::tests::test_all_neutral ... ok
+test strategy::load_balance::tests::test_three_dim_scoring ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/candidates_blacklist.rs (target/debug/deps/candidates_blacklist-f6fe5c192db1f514)
+
+running 3 tests
+test empty_blacklist_no_op ... ok
+test blacklisted_key_filtered ... ok
+test all_blacklisted_returns_empty ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/in_flight.rs (target/debug/deps/in_flight-59a8b7bd868a34f7)
+
+running 4 tests
+test counter_starts_at_zero ... ok
+test concurrent_guards_sum_correctly ... ok
+test counter_is_a_proper_arc_handle ... ok
+test guard_bumps_then_releases_on_drop ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sticky_ttl.rs (target/debug/deps/sticky_ttl-c2baf3d8e4cde8e3)
+
+running 5 tests
+test default_ttl_is_30_min ... ok
+test rebinds_when_bound_key_disappears ... ok
+test bindings_active_grows_on_insert ... ok
+test shared_instance_across_threads ... ok
+test evicts_after_ttl ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/strategies.rs (target/debug/deps/strategies-5fd41e2a300c4b76)
+
+running 3 tests
+test fixed_order_picks_highest_priority ... ok
+test cost_first_picks_highest_priority_proxy ... ok
+test round_robin_rotates_through_three_keys ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/strategy_set.rs (target/debug/deps/strategy_set-452484e5ad6e46e9)
+
+running 2 tests
+test strategy_set_dispatches_each_kind ... ok
+test placeholder_equivalent_to_default ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_store-0061738ebe64c5b6)
+
+running 7 tests
+test loader::tunnel_pref_tests::vendor_key_row_decodes_tunnel_pref_when_absent ... ok
+test loader::tunnel_pref_tests::vendor_key_row_decodes_tunnel_pref_when_present ... ok
+test loader::oauth_row_tests::vendor_key_row_oauth_omitted_defaults_to_none ... ok
+test loader::oauth_row_tests::vendor_key_row_oauth_field_roundtrip ... ok
+test stream_consumer::mgmt_token_tests::apply_entity_event_invalidates_mgmt_token ... ok
+test stream_consumer::vendor_key_hook_tests::test_entity_store_invalidation_evicts ... ok
+test stream_consumer::proxy_node_tests::proxy_node_invalidation_removes_cache_entry ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cold_load_timeout.rs (target/debug/deps/cold_load_timeout-178f19e78817a948)
+
+running 3 tests
+test timeout_passes_through_ok_value ... ok
+test timeout_passes_through_err_as_none ... ok
+test timeout_returns_none_on_stall ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/counter_store.rs (target/debug/deps/counter_store-57ad9c7d3ba9b88c)
+
+running 1 test
+test incrby_returns_new_value ... ignored, requires Docker (testcontainers Redis)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/daily_tokens.rs (target/debug/deps/daily_tokens-8436a89b44ee307c)
+
+running 2 tests
+test key_handles_alternative_user_id ... ok
+test key_shape ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/deduction.rs (target/debug/deps/deduction-64136b272eb323a5)
+
+running 2 tests
+test real_balance_can_go_negative ... ok
+test real_balance_is_base_minus_deducted_minus_frozen ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/encrypt_dual_read.rs (target/debug/deps/encrypt_dual_read-227cbfdce539367a)
+
+running 5 tests
+test empty_cache_active_kid_is_blank ... ok
+test cannot_enter_dual_read_twice ... ok
+test cannot_drop_last_kek ... ok
+test drop_old_kek_returns_to_healthy ... ok
+test dual_read_can_decrypt_old_and_new ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/encrypt_roundtrip.rs (target/debug/deps/encrypt_roundtrip-8b7f0bd946d64ac1)
+
+running 3 tests
+test missing_kek_kid_fails ... ok
+test wrong_kek_fails_auth ... ok
+test aes_gcm_encrypt_decrypt_roundtrip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/entity_loader.rs (target/debug/deps/entity_loader-4833a7a3bcb94456)
+
+running 1 test
+test cold_load_from_pgsql_writes_back_to_redis ... ignored, requires Docker (testcontainers Redis + Postgres)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/entity_store_loader.rs (target/debug/deps/entity_store_loader-6127aadb628b54a3)
+
+running 2 tests
+test entity_store_ipblock_or_load_cold_loads_from_pg ... ignored, requires Docker (testcontainers Redis + Postgres)
+test entity_store_user_or_load_cold_loads_from_pg ... ignored, requires Docker (testcontainers Redis + Postgres)
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/events_entity_model_mapping.rs (target/debug/deps/events_entity_model_mapping-08aa525afa82bbb5)
+
+running 5 tests
+test unknown_ns_is_no_op ... ok
+test unknown_protocol_is_no_op ... ok
+test invalidates_model_mapping_on_event ... ok
+test invalidates_each_supported_protocol ... ok
+test malformed_id_without_separator_does_not_panic ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stream_consumer_empty_reply.rs (target/debug/deps/stream_consumer_empty_reply-bcb585b86a50a10e)
+
+running 1 test
+test empty_streams_produce_zero_warn_logs_over_1s ... ignored, requires Docker (testcontainers Redis)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stream_consumer_invalidate.rs (target/debug/deps/stream_consumer_invalidate-a3382b4d1bf4c9dd)
+
+running 1 test
+test entity_event_invalidates_cache_entry ... ignored, requires Docker (testcontainers Redis)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stream_consumer_redis_l1_del.rs (target/debug/deps/stream_consumer_redis_l1_del-874816206b0a5c14)
+
+running 1 test
+test apply_entity_event_deletes_redis_l1 ... ignored, requires Docker (testcontainers Redis + Postgres)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_task-29f760a7eb9858ec)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/redis_contract.rs (target/debug/deps/redis_contract-f574fc5f30114123)
+
+running 4 tests
+test test_claim_xreadgroup ... ignored, requires Docker (testcontainers Redis)
+test test_load_returns_task_record ... ignored, requires Docker (testcontainers Redis)
+test test_request_cancel_xadd ... ignored, requires Docker (testcontainers Redis)
+test test_submit_stores_and_queues ... ignored, requires Docker (testcontainers Redis)
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scripts.rs (target/debug/deps/scripts-ba13f321da47f848)
+
+running 3 tests
+test test_recover_lease_lua_reclaims_expired ... ok
+test test_settle_lua_atomic_state_transition ... ok
+test test_submit_lua_creates_hash_and_xadd ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/types.rs (target/debug/deps/types-661e9cb6ed00779b)
+
+running 4 tests
+test test_task_id_display_roundtrip ... ok
+test test_task_kind_enum ... ok
+test test_task_status_transitions ... ok
+test test_task_record_serialize ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_task_runtime-0a5af1f972af9772)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/exec_loop.rs (target/debug/deps/exec_loop-938cb591ff3bf139)
+
+running 6 tests
+test test_exec_loop_settles_on_failure ... ok
+test test_exec_loop_claims_and_executes ... ok
+test test_settle_releases_freeze ... ok
+test test_exec_loop_updates_running_state ... ok
+test test_exec_loop_settles_on_success ... ok
+test test_exec_loop_respects_timeout ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/task_freeze_release.rs (target/debug/deps/task_freeze_release-28e377faf20b23d8)
+
+running 5 tests
+test double_release_is_idempotent_and_counter_changes_once ... ignored, requires Docker (testcontainers Redis)
+test normal_release_updates_lease_status_and_counter_atomically ... ignored, requires Docker (testcontainers Redis)
+test script_executes_as_one_eval_for_all_or_nothing_release ... ignored, requires Docker (testcontainers Redis)
+test unknown_task_returns_already_released_and_leaves_counter_unchanged ... ignored, requires Docker (testcontainers Redis)
+test lua_script_contains_single_atomic_release_sequence ... ok
+
+test result: ok. 1 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/task_loops.rs (target/debug/deps/task_loops-fdaff25ce8bd249a)
+
+running 5 tests
+test test_watchdog_recovers_expired_lease ... ok
+test test_cancel_loop_receives_cancel ... ok
+test test_heartbeat_updates_lease ... ok
+test test_cancel_releases_freeze ... ok
+test test_cancel_loop_aborts_running ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_task_worker-4a5fcd178678f486)
+
+running 4 tests
+test tests::test_worker_heartbeat_updates ... ignored, requires Docker (testcontainers Redis)
+test tests::test_worker_registers_on_startup ... ignored, requires Docker (testcontainers Redis)
+test tests::config_struct_defaults_match_adr_t10_ports ... ok
+test tests::test_worker_config_deserialize ... ok
+
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/gw_task_worker-7a5baf07c1d077b6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gw_tunnel_client-0603903b19889d74)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/frame.rs (target/debug/deps/frame-4386be5c767574ba)
+
+running 7 tests
+test bad_magic_errors ... ok
+test empty_payload_roundtrip ... ok
+test payload_length_check ... ok
+test open_data_close_ping_roundtrip ... ok
+test truncated_returns_need_more ... ok
+test unknown_msg_type_errors ... ok
+test truncated_partial_header_returns_need_more ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/pool.rs (target/debug/deps/pool-f6c045943c73670c)
+
+running 2 tests
+test default_pool_config_has_reasonable_values ... ok
+test backoff_grows_exponentially_capped_at_max ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/resolver.rs (target/debug/deps/resolver-07174ffd7b2a319a)
+
+running 7 tests
+test disabled_nodes_skipped ... ok
+test prefer_low_latency_sorts_nodes ... ok
+test picks_first_matching_without_latency_sort ... ok
+test vendor_key_whitelist_filters ... ok
+test preferred_node_ids_none_match_returns_direct ... ok
+test preferred_node_ids_filters_to_subset ... ok
+test returns_direct_when_no_match ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/safe_dns.rs (target/debug/deps/safe_dns-8d4f25e03fa49935)
+
+running 3 tests
+test private_v4_blocked ... ok
+test private_v6_blocked ... ok
+test public_ips_allowed ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/safe_dns_doh.rs (target/debug/deps/safe_dns_doh-eb378c6447de2ae1)
+
+running 4 tests
+test resolves_public_host_via_doh ... ignored
+test override_with_blocked_ip_errors ... ok
+test override_guard_restores_state ... ok
+test override_redirects_to_specified_ip ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/target_filter.rs (target/debug/deps/target_filter-ce15fabbb1fef88d)
+
+running 4 tests
+test http_80_denied_unless_in_whitelist ... ok
+test http_80_passes_when_explicitly_whitelisted ... ok
+test non_whitelisted_denied ... ok
+test whitelisted_443_passes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/transport.rs (target/debug/deps/transport-d127019d022d9bcb)
+
+running 3 tests
+test send_open_increments_stream_id ... ok
+test ping_round_trip_keeps_alive ... ok
+test missed_pongs_mark_dead ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+   Doc-tests e2e_fake_upstream
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests e2e_fake_web
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_adapter
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_auth
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_billing
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_capability
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_codec
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_codec_macros
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_gateway
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_health
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_ledger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_proxy
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_routing
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_task
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_task_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_task_worker
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_tunnel_client
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

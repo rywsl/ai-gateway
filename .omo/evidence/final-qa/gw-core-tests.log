@@ -1,0 +1,101 @@
+   Compiling gw-core v0.1.0 (/Users/whereslow/Desktop/work/ailinkmax-gateway/crates/gw-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.56s
+     Running unittests src/lib.rs (target/debug/deps/gw_core-fb4a15227d3c8c88)
+
+running 24 tests
+test entity::mgmt_scope_tests::admin_full_covers_all ... ok
+test entity::mgmt_scope_tests::admin_read_covers_admin_read_and_user_self ... ok
+test entity::mgmt_scope_tests::user_self_covers_only_self ... ok
+test ir::forced_mutations_bits_tests::empty_by_default ... ok
+test ir::forced_mutations_bits_tests::none_const_is_empty ... ok
+test ir::forced_mutations_bits_tests::field_names_empty_when_none ... ok
+test ir::forced_mutations_bits_tests::field_names_returns_set_fields ... ok
+test ir::forced_mutations_bits_tests::each_setter_uses_a_distinct_bit ... ok
+test ir::forced_mutations_bits_tests::setters_are_idempotent ... ok
+test entity::tests::api_key_entry_deser_without_model_whitelist_regex ... ok
+test entity::tests::api_key_entry_deser_with_model_whitelist_regex ... ok
+test ir::ir_v2_tests::finish_reason_other_carries_payload ... ok
+test entity::tests::encrypted_blob_serde_roundtrip ... ok
+test ir::ir_v2_tests::finish_reason_refusal_variant_constructs ... ok
+test ir::ir_v2_tests::response_ir_extension_fields_default_none ... ok
+test ir::ir_v2_tests::usage_ir_default_zero_with_optional_reasoning ... ok
+test ir::ir_v2_tests::stream_event_ir_new_variants_compile ... ok
+test ir::mutations_bits_tests::each_setter_uses_a_distinct_bit ... ok
+test ir::mutations_bits_tests::setters_are_idempotent ... ok
+test ir::mutations_bits_tests::empty_by_default ... ok
+test permissions::tests::merged_permissions_model_whitelist_regex_from_api_key ... ok
+test permissions::tests::merged_permissions_model_whitelist_regex_none_when_no_api_key ... ok
+test usage::tests::default_is_all_zero_none ... ok
+test usage::tests::serde_roundtrip_preserves_optional_none ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/capabilities.rs (target/debug/deps/capabilities-6ced2e1aa661eaf3)
+
+running 3 tests
+test vendor_key_capability_fields_default_construction ... ok
+test model_capabilities_defaults_empty ... ok
+test model_capabilities_round_trip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/classifier_default.rs (target/debug/deps/classifier_default-ded174b56d7952ed)
+
+running 12 tests
+test unknown_status_protocol_error ... ok
+test unused_param_rate_limit_kind_present ... ok
+test upstream_401_with_oauth_respects_retry_after ... ok
+test upstream_402_long_cooldown ... ok
+test upstream_403_medium_cooldown ... ok
+test upstream_401_with_oauth_yields_refresh_failed ... ok
+test upstream_401_yields_account_blocked_with_oauth_signal ... ok
+test upstream_429_with_retry_after_yields_rl_hint ... ok
+test upstream_408_transient_short_cooldown ... ok
+test upstream_429_without_retry_after_uses_default_60s ... ok
+test upstream_503_transient ... ok
+test upstream_529_overloaded ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/debug.rs (target/debug/deps/debug-db1e2e4480162cc7)
+
+running 3 tests
+test phase_end_without_start_is_noop ... ok
+test phase_overflow_truncates_silently ... ok
+test phase_start_end_records_alloc_and_time ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_class.rs (target/debug/deps/error_class-43e324f78ed6465f)
+
+running 3 tests
+test error_class_account_blocked_carries_reason ... ok
+test rate_limit_kind_use_only_no_redefine ... ok
+test error_class_default_is_internal ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ids.rs (target/debug/deps/ids-a89bd40539ce14b2)
+
+running 2 tests
+test debug_format_includes_type_name ... ok
+test user_id_roundtrip_json ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/versioned.rs (target/debug/deps/versioned-0231789149256534)
+
+running 4 tests
+test empty_cur_accepts ... ok
+test older_version_rejected ... ok
+test equal_version_rejected ... ok
+test newer_version_overwrites ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gw_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

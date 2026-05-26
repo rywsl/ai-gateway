@@ -1,0 +1,64 @@
+Task 23 full codec round-trip/integration evidence
+Command: cargo test --workspace 2>&1 | tee /tmp/task-23-output.txt
+Result: PASS (all reported test result lines are ok; 0 failed).
+
+Coverage audit:
+- T1-T22 already supplied tests for all 30 referenced gaps in gw-codec source/unit/integration coverage.
+- Task 23 added integration round-trip consolidation tests in openai_roundtrip.rs, anthropic_roundtrip.rs, gemini_roundtrip.rs, openai_responses_wire.rs, and lossy_paths.rs.
+- Cross-protocol lossy matrix already exists in src/cross_render.rs unit tests and cross_protocol_matrix.rs; Task 23 added wire-visible lossy assertions for OpenAI-rich -> Gemini and Anthropic private blocks -> OpenAI Chat.
+
+Selected final-run excerpts:
+     Running tests/anthropic_roundtrip.rs (target/debug/deps/anthropic_roundtrip-40f863367fcfc9b9)
+
+running 15 tests
+test parse_error_400 ... ok
+test parse_basic_request ... ok
+test estimate_input_tokens_nonzero ... ok
+test parse_stream_message_stop ... ok
+test parse_request_adaptive_thinking_display_and_effort ... ok
+
+     Running tests/cross_protocol_matrix.rs (target/debug/deps/cross_protocol_matrix-b5f71973775bf308)
+
+running 16 tests
+test anthropic_to_openai_responses ... ok
+test anthropic_to_gemini ... ok
+test gemini_to_openai_responses ... ok
+test anthropic_to_anthropic ... ok
+test gemini_to_gemini ... ok
+
+     Running tests/gemini_roundtrip.rs (target/debug/deps/gemini_roundtrip-d5f97aa335329676)
+
+running 16 tests
+test parse_error_400 ... ok
+test parse_response_executable_code_and_result ... ok
+test estimate_input_tokens_nonzero ... ok
+test parse_basic_request ... ok
+test extended_generation_config_roundtrip ... ok
+
+     Running tests/lossy_paths.rs (target/debug/deps/lossy_paths-3776f9af949a27e6)
+
+running 6 tests
+test anthropic_thinking_to_openai_chat_drops_thinking_from_wire ... ok
+test anthropic_private_blocks_to_openai_chat_are_dropped_from_wire ... ok
+test openai_responses_reasoning_to_anthropic_drops_reasoning_from_wire ... ok
+test openai_responses_reasoning_tokens_to_anthropic_drops_from_usage ... ok
+test anthropic_finish_reason_other_to_openai_chat_degrades_to_stop ... ok
+
+     Running tests/openai_responses_wire.rs (target/debug/deps/openai_responses_wire-90ee0ecda60051cd)
+
+running 12 tests
+test deserialize_optional_fields ... ok
+test deserialize_response_object ... ok
+test deserialize_minimal_request ... ok
+test deserialize_stream_chunk_with_type ... ok
+test deserialize_request_preserves_extras ... ok
+
+     Running tests/openai_roundtrip.rs (target/debug/deps/openai_roundtrip-76c65b5c77e0cea4)
+
+running 10 tests
+test parse_stream_done ... ok
+test parse_error_400 ... ok
+test parse_stream_chunk_delta ... ok
+test parse_basic_request ... ok
+test estimate_input_tokens_nonzero ... ok
+
