@@ -11,6 +11,7 @@
 
 pub mod anthropic;
 pub mod any;
+pub mod cli;
 pub(crate) mod common;
 pub mod compression;
 pub mod cross_render;
