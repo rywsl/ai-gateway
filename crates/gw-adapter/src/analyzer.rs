@@ -7,7 +7,10 @@
 //! …) and the rate-limit info extraction.
 
 use bytes::Bytes;
+use gw_auth::ratelimit::adaptive::AdaptiveRpmManager;
 use gw_core::error::{CooldownDirective, OAuthSignal};
+use gw_core::ids::KeyId;
+use std::sync::Arc;
 
 /// Outcome of analyzing an upstream HTTP response.
 ///
@@ -64,6 +67,42 @@ pub trait HeaderView {
 }
 
 pub struct DefaultErrorAnalyzer;
+
+impl DefaultErrorAnalyzer {
+    #[allow(clippy::too_many_arguments)]
+    pub fn analyze_with_adaptive_rpm(
+        &self,
+        status: u16,
+        body_head: &[u8],
+        headers: &dyn HeaderView,
+        adaptive_rpm: Arc<AdaptiveRpmManager>,
+        key_id: &KeyId,
+        configured_rpm: u32,
+        current_local_rpm: u32,
+    ) -> ErrorOutcome {
+        let outcome = self.analyze(status, body_head, headers);
+        if status == 429 {
+            let header_limit = rate_limit_header(headers);
+            adaptive_rpm.observe_429(key_id, configured_rpm, header_limit, current_local_rpm);
+        }
+        outcome
+    }
+}
+
+fn rate_limit_header(headers: &dyn HeaderView) -> Option<u32> {
+    [
+        "x-ratelimit-limit",
+        "x-rate-limit-limit",
+        "ratelimit-limit",
+        "rate-limit-limit",
+    ]
+    .into_iter()
+    .find_map(|name| {
+        headers
+            .get(name)
+            .and_then(|value| value.parse::<u32>().ok())
+    })
+}
 
 impl UpstreamErrorAnalyzer for DefaultErrorAnalyzer {
     fn analyze(&self, status: u16, _body_head: &[u8], headers: &dyn HeaderView) -> ErrorOutcome {
