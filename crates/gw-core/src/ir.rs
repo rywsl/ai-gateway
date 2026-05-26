@@ -29,6 +29,11 @@ pub struct RequestIR<'a> {
     pub response_format: Option<ResponseFormatIR>,
     pub cache_control: Option<CacheControlIR>,
     pub metadata: MetadataIR<'a>,
+    pub reasoning_config: Option<ReasoningConfig<'a>>,
+    pub audio_config: Option<AudioConfig<'a>>,
+    pub service_tier: Option<Cow<'a, str>>,
+    pub web_search: Option<Box<RawValue>>,
+    pub prediction: Option<Box<RawValue>>,
     pub extensions: Option<HashMap<Cow<'a, str>, Box<RawValue>>>,
     pub untouched: UntouchedFlags,
 }
@@ -52,6 +57,11 @@ impl Default for RequestIR<'_> {
             response_format: None,
             cache_control: None,
             metadata: MetadataIR::default(),
+            reasoning_config: None,
+            audio_config: None,
+            service_tier: None,
+            web_search: None,
+            prediction: None,
             extensions: None,
             untouched: UntouchedFlags::default(),
         }
@@ -61,6 +71,9 @@ impl Default for RequestIR<'_> {
 #[derive(Clone, Debug)]
 pub enum MessageIR<'a> {
     System {
+        content: ContentIR<'a>,
+    },
+    Developer {
         content: ContentIR<'a>,
     },
     User {
@@ -144,17 +157,33 @@ pub struct CacheControlIR {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct ReasoningConfig<'a> {
+    pub effort: Option<Cow<'a, str>>,
+    pub budget_tokens: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AudioConfig<'a> {
+    pub voice: Option<Cow<'a, str>>,
+    pub format: Option<Cow<'a, str>>,
+    pub modalities: Option<Vec<Cow<'a, str>>>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct MetadataIR<'a> {
     pub openai_logit_bias: Option<HashMap<Cow<'a, str>, f32>>,
     pub openai_logprobs: Option<bool>,
     pub anthropic_thinking: Option<AnthropicThinking<'a>>,
     pub gemini_safety_settings: Option<Vec<GeminiSafetySetting<'a>>>,
+    pub extensions: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct AnthropicThinking<'a> {
     pub kind: Cow<'a, str>,
     pub budget_tokens: Option<u32>,
+    pub display: Option<Cow<'a, str>>,
+    pub adaptive: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +229,11 @@ pub struct ResponseIR<'a> {
     pub thinking: Option<ResponseThinkingIR<'a>>,
     pub reasoning: Option<ReasoningBlockIR<'a>>,
     pub tool_use_blocks: Option<Vec<ToolUseBlockIR<'a>>>,
+    pub refusal: Option<Cow<'a, str>>,
+    pub annotations: Option<Vec<AnnotationIR<'a>>>,
+    pub server_tool_blocks: Option<Vec<ServerToolBlockIR<'a>>>,
+    pub redacted_thinking: Option<Vec<RedactedThinkingIR<'a>>>,
+    pub service_tier: Option<Cow<'a, str>>,
 }
 
 impl Default for ResponseIR<'_> {
@@ -214,8 +248,36 @@ impl Default for ResponseIR<'_> {
             thinking: None,
             reasoning: None,
             tool_use_blocks: None,
+            refusal: None,
+            annotations: None,
+            server_tool_blocks: None,
+            redacted_thinking: None,
+            service_tier: None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct AnnotationIR<'a> {
+    pub kind: Cow<'a, str>,
+    pub url: Option<Cow<'a, str>>,
+    pub title: Option<Cow<'a, str>>,
+    pub start_index: Option<u32>,
+    pub end_index: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerToolBlockIR<'a> {
+    pub kind: Cow<'a, str>,
+    pub id: Cow<'a, str>,
+    pub name: Cow<'a, str>,
+    pub input: Box<RawValue>,
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RedactedThinkingIR<'a> {
+    pub data: Cow<'a, str>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -225,18 +287,31 @@ pub enum FinishReasonIR {
     Length,
     ToolCalls,
     ContentFilter,
+    Refusal,
     /// 载荷为 vendor 原始字符串（如 "pause_turn", "RECITATION"）；
     /// 跨协议 re-render 时由 cross_render::map_finish_reason 决定降级 + lossy log。
     Other(Cow<'static, str>),
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UsageIR {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cached_tokens: Option<u32>,
     /// OpenAI Responses completion_tokens_details.reasoning_tokens; Anthropic 无对等，保持 None。
     pub reasoning_tokens: Option<u32>,
+    pub audio_tokens_in: Option<u32>,
+    pub audio_tokens_out: Option<u32>,
+    pub accepted_prediction_tokens: Option<u32>,
+    pub rejected_prediction_tokens: Option<u32>,
+    pub thoughts_tokens: Option<u32>,
+    pub cache_creation_tokens: Option<u32>,
+    pub cache_creation_1h_tokens: Option<u32>,
+    pub cache_creation_5m_tokens: Option<u32>,
+    pub server_tool_web_search_requests: Option<u32>,
+    pub server_tool_web_fetch_requests: Option<u32>,
+    pub service_tier: Option<Cow<'static, str>>,
+    pub inference_geo: Option<Cow<'static, str>>,
 }
 
 #[derive(Clone, Debug)]
@@ -270,6 +345,22 @@ pub enum StreamEventIR<'a> {
         finish_reason: FinishReasonIR,
     },
     Error(ErrorIR<'a>),
+    RefusalDelta {
+        text: Cow<'a, str>,
+    },
+    CitationsDelta {
+        data: Cow<'a, str>,
+    },
+    ServerToolStart {
+        index: u32,
+        kind: Cow<'a, str>,
+        id: Cow<'a, str>,
+        name: Cow<'a, str>,
+    },
+    ServerToolDelta {
+        index: u32,
+        data: Cow<'a, str>,
+    },
 }
 
 /// 收集业务层对 IR 的改动（max_tokens cap、forced_params 等），用于同协议透传判定空 mutation。
@@ -522,6 +613,11 @@ mod ir_v2_tests {
         assert!(r.thinking.is_none());
         assert!(r.reasoning.is_none());
         assert!(r.tool_use_blocks.is_none());
+        assert!(r.refusal.is_none());
+        assert!(r.annotations.is_none());
+        assert!(r.server_tool_blocks.is_none());
+        assert!(r.redacted_thinking.is_none());
+        assert!(r.service_tier.is_none());
     }
 
     #[test]
@@ -540,6 +636,27 @@ mod ir_v2_tests {
         assert_eq!(u.output_tokens, 0);
         assert!(u.cached_tokens.is_none());
         assert!(u.reasoning_tokens.is_none());
+        assert!(u.audio_tokens_in.is_none());
+        assert!(u.audio_tokens_out.is_none());
+        assert!(u.accepted_prediction_tokens.is_none());
+        assert!(u.rejected_prediction_tokens.is_none());
+        assert!(u.thoughts_tokens.is_none());
+        assert!(u.cache_creation_tokens.is_none());
+        assert!(u.cache_creation_1h_tokens.is_none());
+        assert!(u.cache_creation_5m_tokens.is_none());
+        assert!(u.server_tool_web_search_requests.is_none());
+        assert!(u.server_tool_web_fetch_requests.is_none());
+        assert!(u.service_tier.is_none());
+        assert!(u.inference_geo.is_none());
+    }
+
+    #[test]
+    fn finish_reason_refusal_variant_constructs() {
+        let r = FinishReasonIR::Refusal;
+        match r {
+            FinishReasonIR::Refusal => {}
+            _ => panic!("expected Refusal"),
+        }
     }
 
     #[test]
@@ -556,6 +673,22 @@ mod ir_v2_tests {
         let _ = StreamEventIR::ToolCallDelta {
             index: 0,
             arguments_chunk: Cow::Borrowed("{\"loc"),
+        };
+        let _ = StreamEventIR::RefusalDelta {
+            text: Cow::Borrowed("no"),
+        };
+        let _ = StreamEventIR::CitationsDelta {
+            data: Cow::Borrowed("citation"),
+        };
+        let _ = StreamEventIR::ServerToolStart {
+            index: 0,
+            kind: Cow::Borrowed("web_search"),
+            id: Cow::Borrowed("srv_1"),
+            name: Cow::Borrowed("web_search_preview"),
+        };
+        let _ = StreamEventIR::ServerToolDelta {
+            index: 0,
+            data: Cow::Borrowed("{\"query"),
         };
     }
 }
