@@ -10,7 +10,7 @@
 //!
 //! A future revision may use a Patricia trie for O(log n) lookups.
 
-use gw_core::entity::IpBlockScope;
+use gw_core::entity::{IpBlockMode, IpBlockScope};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, UserId};
 use gw_store::EntityStore;
@@ -19,13 +19,55 @@ use std::borrow::Cow;
 use std::net::IpAddr;
 use std::str::FromStr;
 
+use crate::ip_allowlist::{IpAllowlistGuard, IpAllowlistMode};
+use crate::ip_ratelimit::IpRateLimitGuard;
+
+pub async fn check_ip(
+    ip: IpAddr,
+    user_id: Option<&UserId>,
+    api_key_id: Option<&ApiKeyId>,
+    store: &EntityStore,
+    allowlist_guard: &IpAllowlistGuard,
+    ratelimit_guard: &IpRateLimitGuard,
+    allowlist_mode: IpAllowlistMode,
+) -> Result<(), ErrorIR<'static>> {
+    check_blocklist(ip, user_id, api_key_id, store).await?;
+
+    if allowlist_mode == IpAllowlistMode::Enforce {
+        allowlist_guard
+            .check(ip, user_id, api_key_id, store)
+            .await?;
+    }
+
+    if let Err(err) = ratelimit_guard.check(ip) {
+        if err.code == codes::GW_QUOTA_IP_RPM_EXCEEDED {
+            return Err(err);
+        }
+
+        tracing::warn!(
+            code = %err.code,
+            status = err.status,
+            "ip ratelimit check failed internally; failing open"
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn check_blocklist(
     ip: IpAddr,
     user_id: Option<&UserId>,
     api_key_id: Option<&ApiKeyId>,
     store: &EntityStore,
 ) -> Result<(), ErrorIR<'static>> {
-    for (cidr_key, entry) in store.ipblock_snapshot() {
+    let snapshot = store.ipblock_snapshot();
+    metrics::gauge!("gw_ip_blocklist_entries").set(snapshot.len() as f64);
+
+    for (cidr_key, entry) in snapshot {
+        if entry.value.mode != IpBlockMode::Deny {
+            continue;
+        }
+
         match &entry.value.scope {
             IpBlockScope::Global => { /* always check */ }
             IpBlockScope::User(uid) => {
@@ -43,6 +85,7 @@ pub async fn check_blocklist(
         match parse_cidr(&entry.value.cidr) {
             Some(net) => {
                 if net.contains(&ip) {
+                    metrics::counter!("gw_ip_blocklist_hit_total").increment(1);
                     return Err(blocked());
                 }
             }

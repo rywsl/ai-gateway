@@ -3,7 +3,9 @@
 
 pub mod apikey;
 pub mod hard_cap;
+pub mod ip_allowlist;
 pub mod ip_filter;
+pub mod ip_ratelimit;
 pub mod jwt;
 pub mod jwt_blacklist;
 pub mod merge;
