@@ -3,7 +3,7 @@
 //! T3-D lands the IP classifier and the BlockedIpError type. T3-H builds on
 //! top of this by adding a `SafeDnsResolver` that consults DoH then runs each
 //! result through `is_ip_blocked` before returning. The classifier alone is
-//! valuable even without DoH (direct reqwest paths can pre-filter resolved IPs).
+//! valuable even without DoH (direct paths can pre-filter resolved IPs).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

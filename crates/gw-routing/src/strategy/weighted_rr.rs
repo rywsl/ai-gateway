@@ -5,10 +5,9 @@
 //!   2. Pick the `i` with the highest `current[i]` among available keys.
 //!   3. Subtract `total_weight` from the winner's `current[i]`.
 //!
-//! v1 deviation: state lives in a `DashMap`, so concurrent picks may interleave
-//! the read-modify-write phases for the same model. The result is still
-//! eventually-consistent SWRR (no key is starved indefinitely); strict
-//! per-pick atomicity will land in v2 with a single `Mutex` per model.
+//! State lives in a `DashMap`, so concurrent picks may interleave the
+//! read-modify-write phases for the same model. The result is still
+//! eventually-consistent SWRR (no key is starved indefinitely).
 
 use super::*;
 use dashmap::DashMap;

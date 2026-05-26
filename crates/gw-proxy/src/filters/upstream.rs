@@ -40,8 +40,7 @@ use secrecy::ExposeSecret;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// Per-key in-flight cap used by the candidate filter. v1: 1024; v2 will move
-/// this into config.
+/// Per-key in-flight cap used by the candidate filter.
 const PER_KEY_INFLIGHT_CAP: u32 = 1024;
 
 /// Build an `ErrorIR` for an upstream-filter short-circuit.
@@ -569,11 +568,10 @@ pub async fn rewrite_request(
                 Ok(cow) => bytes::Bytes::from(cow.into_owned()),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
-            // OpenAI Responses shares the vendor family with Chat and currently
+            // OpenAI Responses shares the vendor family with Chat and
             // re-renders through the Chat wire form (its `render_request` is
             // wired to OpenAiRequest); same-protocol passthrough delegates to
-            // the Chat codec via a temporary `OpenAi` adapter. T6 closes the
-            // proper shape-preserving path.
+            // the Chat codec via an `OpenAi` adapter.
             AnyCodec::OpenAiResponses(_) => {
                 match same_protocol_passthrough(&gw_codec::openai::OpenAi, cached_body, &mutations)
                 {

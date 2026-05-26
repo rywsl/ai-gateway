@@ -1,16 +1,14 @@
 //! sync ↔ stream upstream policy decision.
 //!
-//! This is interface-only in v1: the actual `AccumulateUpstreamStream` and
-//! `SimulateStreamFromSync` paths require codec S4 (`parse_response`) which
-//! lands separately. T6-D wires the accumulator; this task only fixes the
-//! decision contract.
+//! Determines whether the gateway should pass through, accumulate, or
+//! simulate streaming based on client preference and upstream capability.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamStreamPolicy {
     /// Client wants sync, upstream supports sync → forward as-is.
     PassThroughSync,
     /// Client wants sync, upstream is stream-only → gateway accumulates SSE
-    /// chunks into a single sync response. Body assembly lives in T6-D.
+    /// chunks into a single sync response.
     AccumulateUpstreamStream,
     /// Client wants stream, upstream supports stream → forward chunks.
     PassThroughStream,

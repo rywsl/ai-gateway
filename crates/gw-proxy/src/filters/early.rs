@@ -250,9 +250,8 @@ fn codec_for_shape(shape: gw_core::protocol::ApiShape) -> AnyCodec {
 pub(crate) fn pick_emit_codec(c: &Option<AnyCodec>) -> AnyCodec {
     match c {
         Some(AnyCodec::OpenAi(_)) => AnyCodec::OpenAi(gw_codec::openai::OpenAi),
-        // OpenAI Responses re-emits through the same vendor family; full
-        // shape-preserving emit lands in T6 (S-codec proxy hookup). For now
-        // we collapse to OpenAi so the error-emission path keeps producing
+        // OpenAI Responses re-emits through the same vendor family.
+        // We collapse to OpenAi so the error-emission path produces
         // a valid wire body.
         Some(AnyCodec::OpenAiResponses(_)) => AnyCodec::OpenAi(gw_codec::openai::OpenAi),
         Some(AnyCodec::Anthropic(_)) => AnyCodec::Anthropic(gw_codec::anthropic::Anthropic),

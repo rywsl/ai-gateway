@@ -37,11 +37,9 @@ pub trait UpstreamAdapter: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Browser-fingerprint declaration (A12). `None` = standard reqwest /
-    /// pingora; `Some(profile)` = the http-client selector picks an
-    /// impersonate-capable backend. Full backend selection lands in a
-    /// future spec; in v1 a non-`None` value warns and falls back to
-    /// `Standard`.
+    /// Browser-fingerprint declaration (A12). `None` = standard pingora
+    /// transport; `Some(profile)` = the http-client selector picks an
+    /// impersonate-capable backend.
     fn transport_profile(&self) -> Option<TransportProfile> {
         None
     }

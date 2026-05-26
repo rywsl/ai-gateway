@@ -54,8 +54,7 @@ intended for local + CI use only.
 
 ## Storage (Redis + Postgres)
 
-The integration tests in `crates/gw-store/tests/` and the e2e scaffold in
-`crates/gw-gateway/tests/e2e_full_flow.rs` use [testcontainers] to spin
+The integration tests in `crates/gw-store/tests/` use [testcontainers] to spin
 ephemeral containers per test run. They are guarded with `#[ignore]` so
 that the default `cargo test` invocation passes on machines without
 Docker.

@@ -1,9 +1,9 @@
-//! Model alias → upstream model mapper (T4-A).
+//! Model alias → upstream model mapper.
 //!
 //! Drives both routing-time selection (where availability gates apply) and
 //! dispatch-time picking (where vendor-key overrides are consulted).
-//! Production wiring against `EntityStore` lands in Wave 6; this module
-//! ships the trait + an in-memory Fake for unit tests.
+//! Production wiring uses `EntityStore`; this module also ships an
+//! in-memory `FakeModelMapper` for unit tests.
 
 use async_trait::async_trait;
 use gw_core::entity::{ModelAvailability, ModelMapping};
