@@ -45,6 +45,14 @@ pub struct Config {
     pub billing: BillingCfg,
     #[serde(default)]
     pub auth: AuthCfg,
+    #[serde(default)]
+    pub ip_filter: IpFilterCfg,
+    #[serde(default)]
+    pub ip_ratelimit: IpRateLimitCfg,
+    #[serde(default)]
+    pub adaptive_rpm: AdaptiveRpmCfg,
+    #[serde(default)]
+    pub task: TaskCfg,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,6 +415,168 @@ impl Default for AuthCfg {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+pub enum IpFilterAllowlistMode {
+    #[default]
+    Off,
+    Enforce,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpFilterCfg {
+    #[serde(default)]
+    pub allowlist_mode: IpFilterAllowlistMode,
+}
+
+impl Default for IpFilterCfg {
+    fn default() -> Self {
+        Self {
+            allowlist_mode: IpFilterAllowlistMode::Off,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpRateLimitCfg {
+    #[serde(default = "default_global_per_ip_rpm")]
+    pub global_per_ip_rpm: u32,
+    #[serde(default = "default_ip_ratelimit_max_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_ip_ratelimit_sweep_interval_secs")]
+    pub sweep_interval_secs: u64,
+}
+
+fn default_global_per_ip_rpm() -> u32 {
+    600
+}
+fn default_ip_ratelimit_max_entries() -> usize {
+    100_000
+}
+fn default_ip_ratelimit_sweep_interval_secs() -> u64 {
+    300
+}
+
+impl Default for IpRateLimitCfg {
+    fn default() -> Self {
+        Self {
+            global_per_ip_rpm: default_global_per_ip_rpm(),
+            max_entries: default_ip_ratelimit_max_entries(),
+            sweep_interval_secs: default_ip_ratelimit_sweep_interval_secs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdaptiveRpmCfg {
+    #[serde(default = "default_adaptive_rpm_enforcement_threshold")]
+    pub enforcement_threshold: f64,
+    #[serde(default = "default_adaptive_rpm_confidence_decay_per_min")]
+    pub confidence_decay_per_min: f64,
+    #[serde(default = "default_adaptive_rpm_min_header_observations")]
+    pub min_header_observations: u32,
+    #[serde(default = "default_adaptive_rpm_min_no_header_observations")]
+    pub min_no_header_observations: u32,
+    #[serde(default = "default_adaptive_rpm_buffer_ratio")]
+    pub buffer_ratio: f64,
+    #[serde(default = "default_adaptive_rpm_probe_after_min")]
+    pub probe_after_min: u64,
+    #[serde(default = "default_adaptive_rpm_probe_increment")]
+    pub probe_increment: u32,
+    #[serde(default = "default_adaptive_rpm_min_rpm")]
+    pub min_rpm: u32,
+    #[serde(default = "default_adaptive_rpm_max_rpm")]
+    pub max_rpm: u32,
+}
+
+fn default_adaptive_rpm_enforcement_threshold() -> f64 {
+    0.6
+}
+fn default_adaptive_rpm_confidence_decay_per_min() -> f64 {
+    0.02
+}
+fn default_adaptive_rpm_min_header_observations() -> u32 {
+    2
+}
+fn default_adaptive_rpm_min_no_header_observations() -> u32 {
+    3
+}
+fn default_adaptive_rpm_buffer_ratio() -> f64 {
+    0.85
+}
+fn default_adaptive_rpm_probe_after_min() -> u64 {
+    30
+}
+fn default_adaptive_rpm_probe_increment() -> u32 {
+    5
+}
+fn default_adaptive_rpm_min_rpm() -> u32 {
+    5
+}
+fn default_adaptive_rpm_max_rpm() -> u32 {
+    10_000
+}
+
+impl Default for AdaptiveRpmCfg {
+    fn default() -> Self {
+        Self {
+            enforcement_threshold: default_adaptive_rpm_enforcement_threshold(),
+            confidence_decay_per_min: default_adaptive_rpm_confidence_decay_per_min(),
+            min_header_observations: default_adaptive_rpm_min_header_observations(),
+            min_no_header_observations: default_adaptive_rpm_min_no_header_observations(),
+            buffer_ratio: default_adaptive_rpm_buffer_ratio(),
+            probe_after_min: default_adaptive_rpm_probe_after_min(),
+            probe_increment: default_adaptive_rpm_probe_increment(),
+            min_rpm: default_adaptive_rpm_min_rpm(),
+            max_rpm: default_adaptive_rpm_max_rpm(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_task_queue_stream")]
+    pub queue_stream: String,
+    #[serde(default = "default_task_cancel_stream")]
+    pub cancel_stream: String,
+    #[serde(default = "default_task_billing_base_micro")]
+    pub billing_base_micro: i64,
+    #[serde(default = "default_task_billing_vendor_multiplier")]
+    pub billing_vendor_multiplier: f64,
+    #[serde(default = "default_task_billing_estimated_duration_secs")]
+    pub billing_estimated_duration_secs: u64,
+}
+
+fn default_task_queue_stream() -> String {
+    "tasks:queue".to_string()
+}
+fn default_task_cancel_stream() -> String {
+    "tasks:cancel".to_string()
+}
+const fn default_task_billing_base_micro() -> i64 {
+    1_000
+}
+const fn default_task_billing_vendor_multiplier() -> f64 {
+    1.0
+}
+const fn default_task_billing_estimated_duration_secs() -> u64 {
+    60
+}
+
+impl Default for TaskCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            queue_stream: default_task_queue_stream(),
+            cancel_stream: default_task_cancel_stream(),
+            billing_base_micro: default_task_billing_base_micro(),
+            billing_vendor_multiplier: default_task_billing_vendor_multiplier(),
+            billing_estimated_duration_secs: default_task_billing_estimated_duration_secs(),
+        }
+    }
+}
+
 /// Billing-robustness knobs. Spec:
 /// [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`].
 #[derive(Debug, Clone, Deserialize)]
@@ -543,6 +713,14 @@ impl Config {
         if self.auth.hard_cap_max_cost_micro == 0 {
             anyhow::bail!("invalid config: auth.hard_cap_max_cost_micro must be > 0");
         }
+        if self.task.billing_base_micro <= 0 {
+            anyhow::bail!("invalid config: task.billing_base_micro must be > 0");
+        }
+        if !self.task.billing_vendor_multiplier.is_finite()
+            || self.task.billing_vendor_multiplier <= 0.0
+        {
+            anyhow::bail!("invalid config: task.billing_vendor_multiplier must be finite and > 0");
+        }
 
         if self.billing.cancel_grace_ms == 0 {
             anyhow::bail!("invalid config: billing.cancel_grace_ms must be > 0");
@@ -562,6 +740,58 @@ impl Config {
                 self.billing.heartbeat_interval_secs,
                 self.billing.heartbeat_ttl_secs,
             );
+        }
+
+        if self.ip_ratelimit.global_per_ip_rpm == 0 {
+            anyhow::bail!("invalid config: ip_ratelimit.global_per_ip_rpm must be > 0");
+        }
+        if self.ip_ratelimit.max_entries == 0 {
+            anyhow::bail!("invalid config: ip_ratelimit.max_entries must be > 0");
+        }
+        if self.ip_ratelimit.sweep_interval_secs == 0 {
+            anyhow::bail!("invalid config: ip_ratelimit.sweep_interval_secs must be > 0");
+        }
+
+        if !(0.0..=1.0).contains(&self.adaptive_rpm.enforcement_threshold) {
+            anyhow::bail!(
+                "invalid config: adaptive_rpm.enforcement_threshold must be between 0.0 and 1.0"
+            );
+        }
+        if !(0.0..=1.0).contains(&self.adaptive_rpm.confidence_decay_per_min) {
+            anyhow::bail!(
+                "invalid config: adaptive_rpm.confidence_decay_per_min must be between 0.0 and 1.0"
+            );
+        }
+        if !(0.0..=1.0).contains(&self.adaptive_rpm.buffer_ratio) {
+            anyhow::bail!("invalid config: adaptive_rpm.buffer_ratio must be between 0.0 and 1.0");
+        }
+        if self.adaptive_rpm.min_header_observations == 0 {
+            anyhow::bail!("invalid config: adaptive_rpm.min_header_observations must be > 0");
+        }
+        if self.adaptive_rpm.min_no_header_observations == 0 {
+            anyhow::bail!("invalid config: adaptive_rpm.min_no_header_observations must be > 0");
+        }
+        if self.adaptive_rpm.probe_after_min == 0 {
+            anyhow::bail!("invalid config: adaptive_rpm.probe_after_min must be > 0");
+        }
+        if self.adaptive_rpm.probe_increment == 0 {
+            anyhow::bail!("invalid config: adaptive_rpm.probe_increment must be > 0");
+        }
+        if self.adaptive_rpm.min_rpm == 0 {
+            anyhow::bail!("invalid config: adaptive_rpm.min_rpm must be > 0");
+        }
+        if self.adaptive_rpm.max_rpm == 0 {
+            anyhow::bail!("invalid config: adaptive_rpm.max_rpm must be > 0");
+        }
+        if self.adaptive_rpm.min_rpm > self.adaptive_rpm.max_rpm {
+            anyhow::bail!("invalid config: adaptive_rpm.min_rpm must be <= max_rpm");
+        }
+
+        if self.task.queue_stream.is_empty() {
+            anyhow::bail!("invalid config: task.queue_stream must be non-empty");
+        }
+        if self.task.cancel_stream.is_empty() {
+            anyhow::bail!("invalid config: task.cancel_stream must be non-empty");
         }
 
         Ok(())

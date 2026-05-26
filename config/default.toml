@@ -30,6 +30,33 @@ max_connections = 16
 # DB and is enforced by gw-auth at request time.
 global_rpm = 100000
 
+[ip_filter]
+allowlist_mode = "Off"
+
+[ip_ratelimit]
+global_per_ip_rpm = 600
+max_entries = 100000
+sweep_interval_secs = 300
+
+[adaptive_rpm]
+enforcement_threshold = 0.6
+confidence_decay_per_min = 0.02
+min_header_observations = 2
+min_no_header_observations = 3
+buffer_ratio = 0.85
+probe_after_min = 30
+probe_increment = 5
+min_rpm = 5
+max_rpm = 10000
+
+[task]
+enabled = false
+queue_stream = "tasks:queue"
+cancel_stream = "tasks:cancel"
+billing_base_micro = 1000
+billing_vendor_multiplier = 1.0
+billing_estimated_duration_secs = 60
+
 [ledger]
 # Bounded mpsc channel between proxy filters and the background flusher.
 # `try_send` drops records (with a counter increment) when full to keep the
