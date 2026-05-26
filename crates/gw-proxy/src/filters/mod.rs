@@ -15,4 +15,5 @@ pub mod early;
 pub mod logging;
 pub mod request;
 pub mod response;
+pub mod task;
 pub mod upstream;

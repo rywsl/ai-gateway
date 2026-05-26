@@ -11,7 +11,10 @@ use crate::filters;
 use crate::resilience::ResilienceState;
 use async_trait::async_trait;
 use bytes::Bytes;
+use gw_auth::ip_allowlist::{IpAllowlistGuard, IpAllowlistMode};
+use gw_auth::ip_ratelimit::IpRateLimitGuard;
 use gw_auth::jwt_blacklist::RedisJwtBlacklist;
+use gw_auth::ratelimit::adaptive::AdaptiveRpmManager;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::error::codes;
 use gw_core::ids::{RequestId, TraceId};
@@ -94,12 +97,24 @@ fn remaining_failover_candidates(
         .collect()
 }
 
+fn header_u32(response: &ResponseHeader, name: &str) -> Option<u32> {
+    response
+        .headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
 pub struct LlmGateway {
     pub store: Arc<EntityStore>,
     pub health: Arc<KeyHealthStore>,
     pub in_flight: Arc<InFlightStore>,
     pub latency_tracker: Arc<LatencyTracker>,
     pub ratelimit: Arc<RateLimitGuard>,
+    pub ip_allowlist: Arc<IpAllowlistGuard>,
+    pub ip_ratelimit: Arc<IpRateLimitGuard>,
+    pub adaptive_rpm: Arc<AdaptiveRpmManager>,
+    pub ip_allowlist_mode: IpAllowlistMode,
     pub ledger: Arc<Ledger>,
     pub counters: Arc<CounterStore>,
     pub global_rpm: u32,
@@ -111,6 +126,9 @@ pub struct LlmGateway {
     /// does not silently bypass IP blocklisting via a forged header.
     pub trust_xff: bool,
     pub signature_required: bool,
+    pub task_enabled: bool,
+    pub task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
+    pub task_billing_config: Option<gw_billing::TaskBillingConfig>,
     /// JWT claim validator (iss/aud/nbf, T1-E). `None` until T1-E builds it
     /// from `AuthConfig.global`; auth falls back to signature-only checks.
     pub jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
@@ -164,12 +182,19 @@ impl LlmGateway {
         in_flight: Arc<InFlightStore>,
         latency_tracker: Arc<LatencyTracker>,
         ratelimit: Arc<RateLimitGuard>,
+        ip_allowlist: Arc<IpAllowlistGuard>,
+        ip_ratelimit: Arc<IpRateLimitGuard>,
+        adaptive_rpm: Arc<AdaptiveRpmManager>,
+        ip_allowlist_mode: IpAllowlistMode,
         ledger: Arc<Ledger>,
         counters: Arc<CounterStore>,
         global_rpm: u32,
         admin_upstream_url: Url,
         trust_xff: bool,
         signature_required: bool,
+        task_enabled: bool,
+        task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
+        task_billing_config: Option<gw_billing::TaskBillingConfig>,
         jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
         strategies: Arc<gw_routing::strategy::set::StrategySet>,
         failover_executor: FailoverExecutor,
@@ -189,12 +214,19 @@ impl LlmGateway {
             in_flight,
             latency_tracker,
             ratelimit,
+            ip_allowlist,
+            ip_ratelimit,
+            adaptive_rpm,
+            ip_allowlist_mode,
             ledger,
             counters,
             global_rpm,
             admin_upstream_url,
             trust_xff,
             signature_required,
+            task_enabled,
+            task_contract,
+            task_billing_config,
             jwt_validator,
             strategies,
             failover_executor,
@@ -287,7 +319,19 @@ impl ProxyHttp for LlmGateway {
     }
 
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
-        filters::early::run(session, ctx, &self.store, &self.ratelimit, self.trust_xff).await
+        filters::early::run(
+            session,
+            ctx,
+            filters::early::EarlyFilterDeps {
+                store: &self.store,
+                ratelimit: &self.ratelimit,
+                ip_allowlist: &self.ip_allowlist,
+                ip_ratelimit: &self.ip_ratelimit,
+                ip_allowlist_mode: self.ip_allowlist_mode,
+                trust_xff: self.trust_xff,
+            },
+        )
+        .await
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
@@ -296,10 +340,17 @@ impl ProxyHttp for LlmGateway {
             ctx,
             &self.store,
             &self.ratelimit,
+            &self.ip_allowlist,
+            &self.ip_ratelimit,
+            &self.adaptive_rpm,
+            self.ip_allowlist_mode,
             &self.counters,
             self.global_rpm,
             self.trust_xff,
             self.signature_required,
+            self.task_enabled,
+            self.task_contract.as_deref(),
+            self.task_billing_config,
             self.jwt_validator.as_ref(),
             self.capability_resolver.as_ref(),
             &self.mgmt_blacklist,
@@ -518,6 +569,16 @@ impl ProxyHttp for LlmGateway {
             }
         }
         if let Some(status) = ctx.upstream_status {
+            if status == 429 {
+                if let Some(key) = ctx.picked_vendor_key.as_ref() {
+                    self.adaptive_rpm.observe_429(
+                        &key.key_id,
+                        key.rpm_limit,
+                        header_u32(upstream_response, "x-ratelimit-limit"),
+                        key.rpm_limit,
+                    );
+                }
+            }
             match gw_routing::classify_for_failover(status, ctx.body_started) {
                 class @ (FailoverClass::Retryable5xx | FailoverClass::Retryable429) => {
                     if let Some(candidates) = ctx.picked_candidates.as_ref() {
@@ -868,13 +929,21 @@ impl ProxyHttp for LlmGateway {
                 api_key_id: ctx.api_key_id.clone(),
                 model: ctx.model.clone(),
                 client_protocol: ctx
-                    .client_codec
-                    .as_ref()
-                    .map(|c| c.kind().as_str().to_owned()),
+                    .client_shape
+                    .map(|s| s.format_id().to_owned())
+                    .or_else(|| {
+                        ctx.client_codec
+                            .as_ref()
+                            .map(|c| c.kind().as_str().to_owned())
+                    }),
                 upstream_protocol: ctx
-                    .upstream_codec
-                    .as_ref()
-                    .map(|c| c.kind().as_str().to_owned()),
+                    .upstream_shape
+                    .map(|s| s.format_id().to_owned())
+                    .or_else(|| {
+                        ctx.upstream_codec
+                            .as_ref()
+                            .map(|c| c.kind().as_str().to_owned())
+                    }),
                 http_status: ctx.upstream_status.unwrap_or(0),
                 error_code: err.map(|e| format!("{:?}", e.etype)),
                 is_stream: ctx.is_stream,

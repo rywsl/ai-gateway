@@ -1,0 +1,286 @@
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use gw_billing::TaskBillingConfig;
+use gw_core::ids::UserId;
+use gw_store::deduction::{DeductionState, DEDUCT};
+use gw_task::contract::{CancelReason, ClaimedTask, SettleOutcome};
+use gw_task::{TaskContract, TaskError, TaskId, TaskKind, TaskRecord, TaskStatus};
+
+fn task_record(id: TaskId, status: TaskStatus) -> TaskRecord {
+    TaskRecord {
+        id,
+        schema_version: 1,
+        kind: TaskKind::Generic,
+        status,
+        user_id: "user_task".to_string(),
+        child_id: None,
+        api_key_id: "ak_task".to_string(),
+        client_protocol: "openai".to_string(),
+        vendor_id: "vendor_task".to_string(),
+        vendor_key_hint: None,
+        model: Some("gpt-task".to_string()),
+        created_at_ms: 1_000,
+        updated_at_ms: 1_000,
+        submitted_ts_ms: 1_000,
+        expires_at_ms: 87_400_000,
+        claimed_ts_ms: None,
+        ended_ts_ms: None,
+        lease_until_ms: None,
+        worker_id: None,
+        trace_id: Some("trace_task".to_string()),
+        request_id: Some("request_task".to_string()),
+        provider_task_id: None,
+        provider_first_response_ms: None,
+        input_payload: serde_json::json!({"model":"gpt-task"}),
+        output_payload: None,
+        error_message: None,
+        frozen_micro: 0,
+        actual_micro: None,
+        duration_seconds: None,
+        billing_record_id: None,
+    }
+}
+
+#[derive(Clone, Default)]
+struct MemoryTaskContract {
+    submitted: Arc<Mutex<Vec<TaskRecord>>>,
+    records: Arc<Mutex<std::collections::HashMap<TaskId, TaskRecord>>>,
+    cancelled: Arc<Mutex<Vec<(TaskId, CancelReason)>>>,
+}
+
+impl MemoryTaskContract {
+    fn with_record(record: TaskRecord) -> Self {
+        let this = Self::default();
+        this.records.lock().unwrap().insert(record.id, record);
+        this
+    }
+}
+
+impl TaskContract for MemoryTaskContract {
+    async fn submit(&self, record: TaskRecord) -> Result<TaskId, TaskError> {
+        let id = record.id;
+        self.submitted.lock().unwrap().push(record.clone());
+        self.records.lock().unwrap().insert(id, record);
+        Ok(id)
+    }
+
+    async fn load(&self, id: &TaskId) -> Result<Option<TaskRecord>, TaskError> {
+        Ok(self.records.lock().unwrap().get(id).cloned())
+    }
+
+    async fn watch(&self, id: &TaskId, _wait_ms: u64) -> Result<Option<TaskRecord>, TaskError> {
+        self.load(id).await
+    }
+
+    async fn request_cancel(
+        &self,
+        id: &TaskId,
+        reason: CancelReason,
+    ) -> Result<TaskRecord, TaskError> {
+        self.cancelled.lock().unwrap().push((*id, reason));
+        let mut records = self.records.lock().unwrap();
+        let mut record = records.get(id).cloned().ok_or(TaskError::NotFound(*id))?;
+        record.status = TaskStatus::Cancelling;
+        records.insert(*id, record.clone());
+        Ok(record)
+    }
+
+    async fn claim(&self, _consumer: &str) -> Result<Option<ClaimedTask>, TaskError> {
+        Ok(None)
+    }
+
+    async fn update_running(
+        &self,
+        id: &TaskId,
+        lease_until_ms: u64,
+        provider_task_id: Option<String>,
+    ) -> Result<TaskRecord, TaskError> {
+        let mut records = self.records.lock().unwrap();
+        let mut record = records.get(id).cloned().ok_or(TaskError::NotFound(*id))?;
+        record.status = TaskStatus::Running;
+        record.lease_until_ms = Some(lease_until_ms);
+        record.provider_task_id = provider_task_id;
+        records.insert(*id, record.clone());
+        Ok(record)
+    }
+
+    async fn settle(
+        &self,
+        id: &TaskId,
+        terminal_status: TaskStatus,
+        output_payload: Option<serde_json::Value>,
+        error_message: Option<String>,
+        actual_micro: i64,
+    ) -> Result<SettleOutcome, TaskError> {
+        let mut records = self.records.lock().unwrap();
+        let mut record = records.get(id).cloned().ok_or(TaskError::NotFound(*id))?;
+        record.status = terminal_status;
+        record.output_payload = output_payload;
+        record.error_message = error_message;
+        record.actual_micro = Some(actual_micro);
+        records.insert(*id, record.clone());
+        Ok(SettleOutcome {
+            record,
+            released_micro: 0,
+            deducted_micro: actual_micro,
+            billing_record_id: None,
+        })
+    }
+
+    async fn recover_lease(&self, id: &TaskId, _now_ms: u64) -> Result<TaskRecord, TaskError> {
+        self.load(id).await?.ok_or(TaskError::NotFound(*id))
+    }
+}
+
+#[tokio::test]
+async fn test_submit_endpoint_creates_task() {
+    let contract = MemoryTaskContract::default();
+
+    let response = gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"model":"gpt-task","input":"draw"}"#,
+            user_id: "user_task",
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai",
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: None,
+            available_balance_micro: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 201);
+    assert_eq!(response.body["status"], "queued");
+    assert!(response.body["task_id"].as_str().is_some());
+    assert!(response.body["expires_at"].as_u64().is_some());
+    assert_eq!(contract.submitted.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_freeze_guard_freezes_on_submit() {
+    let contract = MemoryTaskContract::default();
+    let user_id = "user_task_freeze";
+    seed_balance(user_id, 10_000);
+
+    let response = gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"model":"gpt-task","input":"draw"}"#,
+            user_id,
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai",
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: Some(TaskBillingConfig {
+                base_micro: 2_000,
+                vendor_multiplier: 1.0,
+                estimated_duration_secs: 30,
+            }),
+            available_balance_micro: Some(10_000),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 201);
+    let submitted = contract.submitted.lock().unwrap();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0].frozen_micro, 2_000);
+    assert_eq!(frozen_balance(user_id), 2_000);
+}
+
+#[tokio::test]
+async fn test_freeze_guard_insufficient_balance() {
+    let contract = MemoryTaskContract::default();
+    let user_id = "user_task_insufficient";
+    seed_balance(user_id, 1_000);
+
+    let err = gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"model":"gpt-task","input":"draw"}"#,
+            user_id,
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai",
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: Some(TaskBillingConfig {
+                base_micro: 2_000,
+                vendor_multiplier: 1.0,
+                estimated_duration_secs: 30,
+            }),
+            available_balance_micro: Some(1_000),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, 402);
+    assert_eq!(err.code, gw_core::error::codes::GW_TASK_FREEZE_FAILED);
+    assert_eq!(contract.submitted.lock().unwrap().len(), 0);
+    assert_eq!(frozen_balance(user_id), 0);
+}
+
+#[tokio::test]
+async fn test_load_endpoint_returns_task() {
+    let id = TaskId::new_v4();
+    let contract = MemoryTaskContract::with_record(task_record(id, TaskStatus::Queued));
+
+    let response = gw_proxy::filters::task::load_endpoint(&contract, &id.to_string())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body["id"], id.to_string());
+    assert_eq!(response.body["status"], "queued");
+}
+
+#[tokio::test]
+async fn test_cancel_endpoint_requests_cancel() {
+    let id = TaskId::new_v4();
+    let contract = MemoryTaskContract::with_record(task_record(id, TaskStatus::Running));
+
+    let response = gw_proxy::filters::task::cancel_endpoint(&contract, &id.to_string())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body["status"], "cancelling");
+    assert_eq!(
+        contract.cancelled.lock().unwrap().as_slice(),
+        &[(id, CancelReason::Client)]
+    );
+}
+
+#[tokio::test]
+async fn test_load_nonexistent_task() {
+    let id = TaskId::new_v4();
+    let contract = MemoryTaskContract::default();
+
+    let err = gw_proxy::filters::task::load_endpoint(&contract, &id.to_string())
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.status, 404);
+    assert_eq!(err.code, gw_core::error::codes::GW_TASK_NOT_FOUND);
+}
+
+fn seed_balance(user_id: &str, base_micro: i64) {
+    let state = Arc::new(DeductionState {
+        base_micro: AtomicI64::new(base_micro),
+        deducted_micro: AtomicI64::new(0),
+        frozen_micro: AtomicI64::new(0),
+    });
+    DEDUCT.insert(UserId::from(user_id), state);
+}
+
+fn frozen_balance(user_id: &str) -> i64 {
+    DEDUCT
+        .get(&UserId::from(user_id))
+        .map(|state| state.frozen_micro.load(Ordering::SeqCst))
+        .unwrap_or_default()
+}
