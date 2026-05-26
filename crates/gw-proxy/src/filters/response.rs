@@ -410,7 +410,11 @@ fn handle_event(
             }
             StreamEventIR::ThinkingDelta { .. }
             | StreamEventIR::ToolCallStart { .. }
-            | StreamEventIR::ToolCallDelta { .. } => {
+            | StreamEventIR::ToolCallDelta { .. }
+            | StreamEventIR::RefusalDelta { .. }
+            | StreamEventIR::CitationsDelta { .. }
+            | StreamEventIR::ServerToolStart { .. }
+            | StreamEventIR::ServerToolDelta { .. } => {
                 if ctx.timing.ttft.is_none() {
                     ctx.timing.ttft = Some(std::time::Instant::now());
                 }
@@ -636,7 +640,7 @@ pub(crate) fn handle_non_stream_chunk(
         let parse_result = codec.parse_response(&body);
         match parse_result {
             Ok(ir) => {
-                if let Some(u) = ir.usage {
+                if let Some(u) = ir.usage.as_ref() {
                     ctx.usage.input_tokens = u.input_tokens;
                     ctx.usage.output_tokens = u.output_tokens;
                     ctx.usage.cached_tokens = u.cached_tokens;
