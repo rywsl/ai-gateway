@@ -19,7 +19,10 @@
 //! deserialise cleanly.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::borrow::Cow;
+
+pub type ExtraFields = serde_json::Map<String, Value>;
 
 use crate::openai::wire::{OpenAiCompletionTokensDetails, OpenAiPromptTokensDetails};
 
@@ -45,6 +48,10 @@ pub struct OpenAiResponsesResponse<'a> {
 
 fn default_status<'a>() -> Cow<'a, str> {
     Cow::Borrowed("completed")
+}
+
+fn cow_is_empty(s: &str) -> bool {
+    s.is_empty()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -87,6 +94,77 @@ pub enum ResponseOutputItem<'a> {
         #[serde(default = "default_status", borrow)]
         status: Cow<'a, str>,
     },
+    WebSearchCall(#[serde(borrow)] ServerToolCallItem<'a>),
+    FileSearchCall(#[serde(borrow)] ServerToolCallItem<'a>),
+    ComputerCall(#[serde(borrow)] ServerToolCallItem<'a>),
+    ComputerCallOutput(#[serde(borrow)] ServerToolOutputItem<'a>),
+    CodeInterpreterCall(#[serde(borrow)] ServerToolCallItem<'a>),
+    ImageGenerationCall(#[serde(borrow)] ServerToolCallItem<'a>),
+    CustomToolCall(#[serde(borrow)] NamedToolCallItem<'a>),
+    CustomToolCallOutput(#[serde(borrow)] ServerToolOutputItem<'a>),
+    McpCall(#[serde(borrow)] NamedToolCallItem<'a>),
+    McpListTools(#[serde(borrow)] NamedToolCallItem<'a>),
+    ShellCall(#[serde(borrow)] NamedToolCallItem<'a>),
+    ShellCallOutput(#[serde(borrow)] ServerToolOutputItem<'a>),
+    ApplyPatchCall(#[serde(borrow)] NamedToolCallItem<'a>),
+    ApplyPatchCallOutput(#[serde(borrow)] ServerToolOutputItem<'a>),
+    ToolSearchCall(#[serde(borrow)] NamedToolCallItem<'a>),
+    ToolSearchOutput(#[serde(borrow)] ServerToolOutputItem<'a>),
+    Compaction(#[serde(borrow)] CompactionItem<'a>),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerToolCallItem<'a> {
+    #[serde(default, borrow)]
+    pub id: Cow<'a, str>,
+    #[serde(default, borrow, skip_serializing_if = "cow_is_empty")]
+    pub name: Cow<'a, str>,
+    #[serde(default, borrow, skip_serializing_if = "cow_is_empty")]
+    pub call_id: Cow<'a, str>,
+    #[serde(default = "default_status", borrow)]
+    pub status: Cow<'a, str>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NamedToolCallItem<'a> {
+    #[serde(default, borrow)]
+    pub id: Cow<'a, str>,
+    #[serde(default, borrow)]
+    pub name: Cow<'a, str>,
+    #[serde(default, borrow, skip_serializing_if = "cow_is_empty")]
+    pub call_id: Cow<'a, str>,
+    #[serde(default = "default_status", borrow)]
+    pub status: Cow<'a, str>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerToolOutputItem<'a> {
+    #[serde(default, borrow)]
+    pub id: Cow<'a, str>,
+    #[serde(default, borrow, skip_serializing_if = "cow_is_empty")]
+    pub name: Cow<'a, str>,
+    #[serde(default, borrow, skip_serializing_if = "cow_is_empty")]
+    pub call_id: Cow<'a, str>,
+    #[serde(default = "default_status", borrow)]
+    pub status: Cow<'a, str>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CompactionItem<'a> {
+    #[serde(default, borrow)]
+    pub id: Cow<'a, str>,
+    #[serde(default, borrow, skip_serializing_if = "cow_is_empty")]
+    pub name: Cow<'a, str>,
+    #[serde(default = "default_status", borrow)]
+    pub status: Cow<'a, str>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,8 +174,10 @@ pub enum MessageContent<'a> {
         #[serde(borrow)]
         text: Cow<'a, str>,
     },
-    // Refusal / OutputImage shapes exist in the API surface but are not
-    // round-tripped through the v2 IR text channel; add when needed.
+    Refusal {
+        #[serde(borrow)]
+        refusal: Cow<'a, str>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

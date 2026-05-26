@@ -21,6 +21,7 @@ use crate::trait_def::{Headers, ProtocolCodec};
 
 use super::state::OpenAiResponsesStreamState;
 use super::wire_response::OpenAiResponsesResponse;
+use super::wire_stream_chunk::{OpenAiResponsesStreamChunk, OpenAiResponsesStreamEventType};
 
 pub struct OpenAiResponsesCodec;
 
@@ -106,15 +107,14 @@ impl ProtocolCodec for OpenAiResponsesCodec {
             if payload == b"[DONE]" {
                 continue;
             }
-            let json: serde_json::Value = match serde_json::from_slice(payload) {
+            let chunk: OpenAiResponsesStreamChunk = match serde_json::from_slice(payload) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(error = %e, "openai responses stream: malformed data payload");
                     continue;
                 }
             };
-            let typ = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            dispatch_event(st, typ, &json, &mut events);
+            dispatch_event(st, &chunk, &mut events);
         }
 
         Ok(events)
@@ -184,6 +184,7 @@ impl ProtocolCodec for OpenAiResponsesCodec {
                 let status = match finish_reason {
                     FinishReasonIR::Stop | FinishReasonIR::ToolCalls => "completed",
                     FinishReasonIR::Length | FinishReasonIR::ContentFilter => "incomplete",
+                    FinishReasonIR::Refusal => "completed",
                     FinishReasonIR::Other(_) => "completed",
                 };
                 let payload = serde_json::json!({
@@ -204,6 +205,10 @@ impl ProtocolCodec for OpenAiResponsesCodec {
                     "openai responses: StreamEventIR::Start dropped (no direct equivalent)"
                 );
             }
+            StreamEventIR::RefusalDelta { .. }
+            | StreamEventIR::CitationsDelta { .. }
+            | StreamEventIR::ServerToolStart { .. }
+            | StreamEventIR::ServerToolDelta { .. } => {}
         }
         Ok(())
     }
@@ -286,6 +291,7 @@ impl ProtocolCodec for OpenAiResponsesCodec {
             .iter()
             .map(|m| match m {
                 MessageIR::System { content }
+                | MessageIR::Developer { content }
                 | MessageIR::User { content }
                 | MessageIR::Tool { content, .. }
                 | MessageIR::Assistant { content, .. } => approx_tokens(content),
@@ -298,13 +304,13 @@ impl ProtocolCodec for OpenAiResponsesCodec {
 
 fn dispatch_event(
     st: &mut OpenAiResponsesStreamState,
-    typ: &str,
-    json: &serde_json::Value,
+    chunk: &OpenAiResponsesStreamChunk,
     events: &mut Vec<StreamEventIR<'_>>,
 ) {
-    match typ {
-        "response.created" => {
-            if let Some(id) = json
+    match &chunk.r#type {
+        OpenAiResponsesStreamEventType::ResponseCreated => {
+            if let Some(id) = chunk
+                .fields
                 .get("response")
                 .and_then(|r| r.get("id"))
                 .and_then(|v| v.as_str())
@@ -312,8 +318,8 @@ fn dispatch_event(
                 st.seen_response_id = Some(id.to_owned());
             }
         }
-        "response.output_item.added" => {
-            let Some(item) = json.get("item") else {
+        OpenAiResponsesStreamEventType::ResponseOutputItemAdded => {
+            let Some(item) = chunk.fields.get("item") else {
                 return;
             };
             let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -324,7 +330,13 @@ fn dispatch_event(
                 .to_owned();
             match item_type {
                 "reasoning" => {
+                    let request_id = item_id.clone();
                     st.pending_reasoning.entry(item_id).or_default();
+                    if !request_id.is_empty() {
+                        events.push(StreamEventIR::Start {
+                            request_id: Cow::Owned(request_id),
+                        });
+                    }
                 }
                 "function_call" => {
                     let name = item
@@ -357,22 +369,56 @@ fn dispatch_event(
                         });
                     }
                 }
+                "web_search_call"
+                | "file_search_call"
+                | "computer_call"
+                | "computer_call_output"
+                | "code_interpreter_call"
+                | "image_generation_call"
+                | "custom_tool_call"
+                | "custom_tool_call_output"
+                | "mcp_call"
+                | "mcp_list_tools"
+                | "shell_call"
+                | "shell_call_output"
+                | "apply_patch_call"
+                | "apply_patch_call_output"
+                | "tool_search_call"
+                | "tool_search_output"
+                | "compaction" => {
+                    push_server_tool_start(st, item_type, item, events);
+                }
                 _ => {
                     // `message` items announce themselves here too, but the
                     // text actually arrives via `response.output_text.delta`.
                 }
             }
         }
-        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-            let Some(item_id) = json.get("item_id").and_then(|v| v.as_str()) else {
-                return;
-            };
-            let delta = json.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-            let builder = st.pending_reasoning.entry(item_id.to_owned()).or_default();
-            builder.summary.push_str(delta);
+        OpenAiResponsesStreamEventType::ResponseReasoningSummaryTextDelta
+        | OpenAiResponsesStreamEventType::ResponseReasoningTextDelta => {
+            let delta = chunk
+                .fields
+                .get("delta")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !delta.is_empty() {
+                if let Some(item_id) = chunk.fields.get("item_id").and_then(|v| v.as_str()) {
+                    let builder = st.pending_reasoning.entry(item_id.to_owned()).or_default();
+                    builder.summary.push_str(delta);
+                }
+                events.push(StreamEventIR::ThinkingDelta {
+                    text: Cow::Owned(delta.to_owned()),
+                    signature_chunk: None,
+                });
+            }
         }
-        "response.output_text.delta" => {
-            let delta = json.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+        OpenAiResponsesStreamEventType::ResponseOutputTextDelta
+        | OpenAiResponsesStreamEventType::ResponseTextDelta => {
+            let delta = chunk
+                .fields
+                .get("delta")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if !delta.is_empty() {
                 events.push(StreamEventIR::Delta {
                     text: Some(Cow::Owned(delta.to_owned())),
@@ -381,11 +427,27 @@ fn dispatch_event(
                 });
             }
         }
-        "response.function_call_arguments.delta" => {
-            let Some(item_id) = json.get("item_id").and_then(|v| v.as_str()) else {
+        OpenAiResponsesStreamEventType::ResponseRefusalDelta => {
+            let delta = chunk
+                .fields
+                .get("delta")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !delta.is_empty() {
+                events.push(StreamEventIR::RefusalDelta {
+                    text: Cow::Owned(delta.to_owned()),
+                });
+            }
+        }
+        OpenAiResponsesStreamEventType::ResponseFunctionCallArgumentsDelta => {
+            let Some(item_id) = chunk.fields.get("item_id").and_then(|v| v.as_str()) else {
                 return;
             };
-            let delta = json.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+            let delta = chunk
+                .fields
+                .get("delta")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if delta.is_empty() {
                 return;
             }
@@ -397,8 +459,8 @@ fn dispatch_event(
                 });
             }
         }
-        "response.output_item.done" => {
-            let Some(item) = json.get("item") else {
+        OpenAiResponsesStreamEventType::ResponseOutputItemDone => {
+            let Some(item) = chunk.fields.get("item") else {
                 return;
             };
             let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -415,13 +477,15 @@ fn dispatch_event(
                 }
             }
         }
-        "response.completed" => {
-            let status = json
+        OpenAiResponsesStreamEventType::ResponseCompleted => {
+            let status = chunk
+                .fields
                 .get("response")
                 .and_then(|r| r.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("completed");
-            let reason = json
+            let reason = chunk
+                .fields
                 .get("response")
                 .and_then(|r| r.get("incomplete_details"))
                 .and_then(|d| d.get("reason"))
@@ -444,7 +508,7 @@ fn dispatch_event(
                 other => FinishReasonIR::Other(Cow::Owned(other.to_owned())),
             };
             // Optional usage embedded in `response`.
-            if let Some(u) = json.get("response").and_then(|r| r.get("usage")) {
+            if let Some(u) = chunk.fields.get("response").and_then(|r| r.get("usage")) {
                 let input_tokens = u
                     .get("input_tokens")
                     .or_else(|| u.get("prompt_tokens"))
@@ -470,17 +534,21 @@ fn dispatch_event(
                     output_tokens,
                     cached_tokens,
                     reasoning_tokens,
+                    ..Default::default()
                 }));
             }
             events.push(StreamEventIR::End { finish_reason: fr });
         }
-        "response.failed" => {
-            let msg = json
+        OpenAiResponsesStreamEventType::ResponseFailed
+        | OpenAiResponsesStreamEventType::ResponseError => {
+            let msg = chunk
+                .fields
                 .get("response")
                 .and_then(|r| r.get("error"))
                 .and_then(|e| e.get("message"))
+                .or_else(|| chunk.fields.get("error").and_then(|e| e.get("message")))
                 .and_then(|v| v.as_str())
-                .unwrap_or("openai responses stream: response.failed")
+                .unwrap_or("openai responses stream: error")
                 .to_owned();
             events.push(StreamEventIR::Error(ErrorIR {
                 category: ErrorCategory::UpstreamError,
@@ -494,11 +562,78 @@ fn dispatch_event(
                 retry_after_secs: None,
             }));
         }
+        OpenAiResponsesStreamEventType::ResponseFileSearchCallSearching
+        | OpenAiResponsesStreamEventType::ResponseWebSearchCallSearching
+        | OpenAiResponsesStreamEventType::ResponseCodeInterpreterCallInterpreting
+        | OpenAiResponsesStreamEventType::ResponseImageGenerationCallGenerating
+        | OpenAiResponsesStreamEventType::ResponseImageGenerationCallPartialImage
+        | OpenAiResponsesStreamEventType::ResponseMcpCallExecuting
+        | OpenAiResponsesStreamEventType::ResponseCustomToolCallInputDelta
+        | OpenAiResponsesStreamEventType::ResponseCodeInterpreterCallCodeDelta => {
+            push_server_tool_delta(chunk, events);
+        }
+        OpenAiResponsesStreamEventType::Unknown(typ) => {
+            tracing::debug!(
+                event_type = typ.as_str(),
+                "openai responses stream event skipped"
+            );
+        }
         _ => {
-            // Unknown event type: ignore silently so future SSE additions don't
-            // break parsing.
+            tracing::debug!(
+                event_type = chunk.r#type.as_str(),
+                "openai responses stream event skipped"
+            );
         }
     }
+}
+
+fn push_server_tool_start(
+    st: &mut OpenAiResponsesStreamState,
+    kind: &str,
+    item: &serde_json::Value,
+    events: &mut Vec<StreamEventIR<'_>>,
+) {
+    let index = st.next_tool_call_index;
+    st.next_tool_call_index = st.next_tool_call_index.saturating_add(1);
+    let id = item
+        .get("id")
+        .or_else(|| item.get("call_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or(kind);
+    events.push(StreamEventIR::ServerToolStart {
+        index,
+        kind: Cow::Owned(kind.to_owned()),
+        id: Cow::Owned(id.to_owned()),
+        name: Cow::Owned(name.to_owned()),
+    });
+}
+
+fn push_server_tool_delta(chunk: &OpenAiResponsesStreamChunk, events: &mut Vec<StreamEventIR<'_>>) {
+    let data = chunk
+        .fields
+        .get("delta")
+        .or_else(|| chunk.fields.get("partial_image_b64"))
+        .or_else(|| chunk.fields.get("code"))
+        .or_else(|| chunk.fields.get("input"))
+        .map(|v| match v.as_str() {
+            Some(s) => s.to_owned(),
+            None => v.to_string(),
+        })
+        .unwrap_or_default();
+    if data.is_empty() {
+        return;
+    }
+    let index = chunk
+        .fields
+        .get("output_index")
+        .or_else(|| chunk.fields.get("item_index"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    events.push(StreamEventIR::ServerToolDelta {
+        index,
+        data: Cow::Owned(data),
+    });
 }
 
 // ─── small local helpers ──────────────────────────────────────────────────
@@ -582,6 +717,7 @@ mod tests {
                 output_tokens: 5,
                 cached_tokens: None,
                 reasoning_tokens: Some(20),
+                ..Default::default()
             }),
             reasoning: Some(ReasoningBlockIR {
                 summary: Cow::Borrowed("step 1; step 2"),
@@ -651,31 +787,34 @@ mod tests {
         let codec = OpenAiResponsesCodec;
         let mut state: Box<dyn StreamState> = codec.new_stream_state();
 
-        // Open the reasoning item.
         let c1 = br#"event: response.output_item.added
 data: {"type":"response.output_item.added","item":{"type":"reasoning","id":"r_1","summary":[]}}
 
 "#;
         let e1 = codec.parse_stream_chunk(state.as_mut(), c1).unwrap();
-        assert!(
-            e1.is_empty(),
-            "no events on output_item.added for reasoning"
-        );
+        assert!(matches!(
+            e1.first(),
+            Some(StreamEventIR::Start { request_id }) if request_id == "r_1"
+        ));
 
-        // Two summary deltas.
         let c2 = br#"data: {"type":"response.reasoning_summary_text.delta","item_id":"r_1","delta":"step 1; "}
 
 "#;
         let e2 = codec.parse_stream_chunk(state.as_mut(), c2).unwrap();
-        assert!(e2.is_empty(), "no events emitted yet — buffer until done");
+        assert!(matches!(
+            e2.first(),
+            Some(StreamEventIR::ThinkingDelta { text, .. }) if text == "step 1; "
+        ));
 
         let c3 = br#"data: {"type":"response.reasoning_summary_text.delta","item_id":"r_1","delta":"step 2"}
 
 "#;
         let e3 = codec.parse_stream_chunk(state.as_mut(), c3).unwrap();
-        assert!(e3.is_empty());
+        assert!(matches!(
+            e3.first(),
+            Some(StreamEventIR::ThinkingDelta { text, .. }) if text == "step 2"
+        ));
 
-        // Close the reasoning item → expect a ThinkingDelta.
         let c4 =
             br#"data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"r_1"}}
 
@@ -690,7 +829,6 @@ data: {"type":"response.output_item.added","item":{"type":"reasoning","id":"r_1"
             .expect("ThinkingDelta emitted");
         assert_eq!(thinking, "step 1; step 2");
 
-        // response.completed → End.
         let c5 = br#"data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":1,"total_tokens":5}}}
 
 "#;
@@ -704,12 +842,67 @@ data: {"type":"response.output_item.added","item":{"type":"reasoning","id":"r_1"
         let usage = e5
             .iter()
             .find_map(|e| match e {
-                StreamEventIR::Usage(u) => Some(*u),
+                StreamEventIR::Usage(u) => Some(u.clone()),
                 _ => None,
             })
             .expect("Usage emitted");
         assert_eq!(usage.input_tokens, 4);
         assert_eq!(usage.output_tokens, 1);
+    }
+
+    #[test]
+    fn parse_stream_chunk_refusal_delta() {
+        let codec = OpenAiResponsesCodec;
+        let mut state: Box<dyn StreamState> = codec.new_stream_state();
+
+        let chunk = br#"event: response.refusal.delta
+data: {"type":"response.refusal.delta","delta":"I can't help with that"}
+
+"#;
+        let events = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+
+        let refusal = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEventIR::RefusalDelta { text } => Some(text.as_ref()),
+                _ => None,
+            })
+            .expect("RefusalDelta emitted");
+        assert_eq!(refusal, "I can't help with that");
+    }
+
+    #[test]
+    fn parse_stream_chunk_reasoning_text_delta_emits_thinking_delta() {
+        let codec = OpenAiResponsesCodec;
+        let mut state: Box<dyn StreamState> = codec.new_stream_state();
+
+        let chunk = br#"data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"considering evidence"}
+
+"#;
+        let events = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+
+        let thinking = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEventIR::ThinkingDelta { text, .. } => Some(text.as_ref()),
+                _ => None,
+            })
+            .expect("ThinkingDelta emitted");
+        assert_eq!(thinking, "considering evidence");
+    }
+
+    #[test]
+    fn parse_stream_chunk_unknown_event_skips_without_error() {
+        let codec = OpenAiResponsesCodec;
+        let mut state: Box<dyn StreamState> = codec.new_stream_state();
+
+        let chunk = br#"event: response.future.delta
+data: {"type":"response.future.delta","delta":"new thing"}
+
+"#;
+        let events = codec.parse_stream_chunk(state.as_mut(), chunk).unwrap();
+
+        assert!(events.is_empty());
     }
 
     #[test]
