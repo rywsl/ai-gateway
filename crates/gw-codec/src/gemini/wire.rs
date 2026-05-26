@@ -1,7 +1,9 @@
 //! Gemini wire-format structs (`generateContent`).
 //!
 //! Request side: `contents (role + parts) / systemInstruction /
-//! generationConfig.{maxOutputTokens,temperature}`.
+//! generationConfig.{maxOutputTokens,temperature,topP,topK,stopSequences,
+//! candidateCount,presencePenalty,frequencyPenalty,seed,responseMimeType,
+//! responseSchema,thinkingConfig}`.
 //!
 //! Response side adds `GeminiResponse` (`candidates[]`, `usageMetadata`,
 //! `modelVersion`).
@@ -35,8 +37,8 @@ pub struct GeminiRequest<'a> {
     #[serde(default, borrow, skip_serializing_if = "Option::is_none")]
     pub system_instruction: Option<GeminiSystemInstruction<'a>>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation_config: Option<GeminiGenerationConfig>,
+    #[serde(default, borrow, skip_serializing_if = "Option::is_none")]
+    pub generation_config: Option<GeminiGenerationConfig<'a>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -81,13 +83,39 @@ pub enum GeminiPart<'a> {
         #[serde(borrow, rename = "functionResponse")]
         function_response: GeminiFunctionResponse<'a>,
     },
+    /// Server-side code execution. Wire shape:
+    /// `{"executableCode":{"code":"...","language":"PYTHON"}}`.
+    ExecutableCode {
+        #[serde(rename = "executableCode")]
+        executable_code: GeminiExecutableCode<'a>,
+    },
+    /// Result of server-side code execution. Wire shape:
+    /// `{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"..."}}`.
+    CodeExecutionResult {
+        #[serde(rename = "codeExecutionResult")]
+        code_execution_result: GeminiCodeExecutionResult<'a>,
+    },
     /// Free text. Must come LAST in the untagged enum so the structured
     /// variants above are tried first; otherwise an empty `{"text":""}`
     /// shape could shadow a function-call payload that happens to deserialise
     /// loosely.
+    ///
+    /// `thought` and `thought_signature` carry Gemini's thinking-part
+    /// metadata: when `thought == Some(true)` the text is model reasoning
+    /// (mapped to `ResponseIR.thinking`). `thought_signature` is the opaque
+    /// continuation token Gemini attaches to thinking parts.
     Text {
         #[serde(borrow)]
         text: Cow<'a, str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought: Option<bool>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "thoughtSignature",
+            borrow
+        )]
+        thought_signature: Option<Cow<'a, str>>,
     },
 }
 
@@ -128,6 +156,22 @@ pub struct GeminiFunctionResponse<'a> {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct GeminiExecutableCode<'a> {
+    #[serde(borrow)]
+    pub code: Cow<'a, str>,
+    #[serde(borrow)]
+    pub language: Cow<'a, str>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GeminiCodeExecutionResult<'a> {
+    #[serde(borrow)]
+    pub outcome: Cow<'a, str>,
+    #[serde(default, borrow)]
+    pub output: Cow<'a, str>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiSystemInstruction<'a> {
     #[serde(borrow)]
@@ -136,11 +180,40 @@ pub struct GeminiSystemInstruction<'a> {
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct GeminiGenerationConfig {
+pub struct GeminiGenerationConfig<'a> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none", borrow)]
+    pub stop_sequences: Option<Vec<Cow<'a, str>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", borrow)]
+    pub response_mime_type: Option<Cow<'a, str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_config: Option<GeminiThinkingConfig<'a>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiThinkingConfig<'a> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none", borrow)]
+    pub thinking_level: Option<Cow<'a, str>>,
 }
 
 // ── Non-streaming response ────────────────────────────────────────────────
@@ -177,6 +250,9 @@ pub struct GeminiCandidate<'a> {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grounding_metadata: Option<serde_json::Value>,
     // safetyRatings intentionally omitted in v2 — the IR has no per-rating
     // slot and the wire string is opaque; revisit if a cross-protocol
     // consumer needs it.
@@ -195,4 +271,8 @@ pub struct GeminiUsage {
     /// re-emit but the IR side derives its own total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_token_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thoughts_token_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_token_count: Option<u32>,
 }

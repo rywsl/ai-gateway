@@ -14,14 +14,15 @@
 //! only `candidates[0]`.
 
 use super::wire::{
-    GeminiCandidate, GeminiContent, GeminiFunctionCall, GeminiFunctionResponse,
-    GeminiGenerationConfig, GeminiPart, GeminiRequest, GeminiResponse, GeminiSystemInstruction,
-    GeminiUsage,
+    GeminiCandidate, GeminiContent, GeminiExecutableCode, GeminiFunctionCall,
+    GeminiFunctionResponse, GeminiGenerationConfig, GeminiPart, GeminiRequest, GeminiResponse,
+    GeminiSystemInstruction, GeminiThinkingConfig, GeminiUsage,
 };
 use crate::common::{content_to_text, internal_err};
 use gw_core::error::ErrorIR;
 use gw_core::ir::{
-    ContentIR, FinishReasonIR, MessageIR, RequestIR, ResponseIR, ToolCallIR, UsageIR,
+    ContentIR, FinishReasonIR, MessageIR, RequestIR, ResponseFormatIR, ResponseIR,
+    ResponseThinkingIR, ServerToolBlockIR, ThinkingBlockIR, ToolCallIR, UsageIR,
 };
 use serde_json::value::RawValue;
 use std::borrow::Cow;
@@ -42,11 +43,26 @@ impl<'a> From<GeminiRequest<'a>> for RequestIR<'a> {
             lower_content(c, &mut messages);
         }
         let gc = src.generation_config.unwrap_or_default();
+        let reasoning_config = gc.thinking_config.map(|tc| gw_core::ir::ReasoningConfig {
+            effort: tc.thinking_level.map(|l| Cow::Owned(l.into_owned())),
+            budget_tokens: tc.thinking_budget,
+        });
         RequestIR {
             model: src.model,
             messages,
             max_tokens: gc.max_output_tokens,
             temperature: gc.temperature,
+            top_p: gc.top_p,
+            top_k: gc.top_k,
+            stop: gc.stop_sequences,
+            seed: gc.seed,
+            presence_penalty: gc.presence_penalty,
+            frequency_penalty: gc.frequency_penalty,
+            reasoning_config,
+            response_format: gemini_response_format_to_ir(
+                gc.response_mime_type.as_deref(),
+                gc.response_schema,
+            ),
             ..RequestIR::default()
         }
     }
@@ -66,6 +82,26 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
                         system_instruction = Some(GeminiSystemInstruction {
                             parts: vec![GeminiPart::Text {
                                 text: content_to_text(content),
+                                thought: None,
+                                thought_signature: None,
+                            }],
+                        });
+                    }
+                }
+                MessageIR::Developer { content } => {
+                    let text = content_to_text(content);
+                    if let Some(system_instruction) = system_instruction.as_mut() {
+                        system_instruction.parts.push(GeminiPart::Text {
+                            text,
+                            thought: None,
+                            thought_signature: None,
+                        });
+                    } else {
+                        system_instruction = Some(GeminiSystemInstruction {
+                            parts: vec![GeminiPart::Text {
+                                text,
+                                thought: None,
+                                thought_signature: None,
                             }],
                         });
                     }
@@ -75,6 +111,8 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
                         role: Some(Cow::Borrowed("user")),
                         parts: vec![GeminiPart::Text {
                             text: content_to_text(content),
+                            thought: None,
+                            thought_signature: None,
                         }],
                     });
                 }
@@ -104,7 +142,11 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
                     let mut parts: Vec<GeminiPart<'a>> = Vec::new();
                     let text = content_to_text(content);
                     if !text.is_empty() {
-                        parts.push(GeminiPart::Text { text });
+                        parts.push(GeminiPart::Text {
+                            text,
+                            thought: None,
+                            thought_signature: None,
+                        });
                     }
                     if let Some(tcs) = tool_calls {
                         for tc in tcs {
@@ -121,6 +163,8 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
                         // single empty-text part so the schema is preserved.
                         parts.push(GeminiPart::Text {
                             text: Cow::Borrowed(""),
+                            thought: None,
+                            thought_signature: None,
                         });
                     }
                     contents.push(GeminiContent {
@@ -130,10 +174,40 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
                 }
             }
         }
-        let generation_config = if ir.max_tokens.is_some() || ir.temperature.is_some() {
+        let thinking_config = ir.reasoning_config.as_ref().map(|rc| GeminiThinkingConfig {
+            thinking_budget: rc.budget_tokens,
+            thinking_level: rc
+                .effort
+                .as_ref()
+                .map(|e| Cow::Owned(e.clone().into_owned())),
+        });
+        let (response_mime_type, response_schema) =
+            ir_response_format_to_gemini(ir.response_format.as_ref());
+        let has_gen_config = ir.max_tokens.is_some()
+            || ir.temperature.is_some()
+            || ir.top_p.is_some()
+            || ir.top_k.is_some()
+            || ir.stop.is_some()
+            || ir.seed.is_some()
+            || ir.presence_penalty.is_some()
+            || ir.frequency_penalty.is_some()
+            || thinking_config.is_some()
+            || response_mime_type.is_some()
+            || response_schema.is_some();
+        let generation_config = if has_gen_config {
             Some(GeminiGenerationConfig {
                 max_output_tokens: ir.max_tokens,
                 temperature: ir.temperature,
+                top_p: ir.top_p,
+                top_k: ir.top_k,
+                stop_sequences: ir.stop.clone(),
+                candidate_count: None,
+                presence_penalty: ir.presence_penalty,
+                frequency_penalty: ir.frequency_penalty,
+                seed: ir.seed,
+                response_mime_type,
+                response_schema,
+                thinking_config,
             })
         } else {
             None
@@ -147,6 +221,37 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
     }
 }
 
+fn gemini_response_format_to_ir(
+    response_mime_type: Option<&str>,
+    response_schema: Option<serde_json::Value>,
+) -> Option<ResponseFormatIR> {
+    match (response_mime_type, response_schema) {
+        (_, Some(schema)) => Some(ResponseFormatIR::JsonSchema(value_to_raw(schema))),
+        (Some("application/json"), None) => Some(ResponseFormatIR::JsonObject),
+        (Some("text/plain"), None) => Some(ResponseFormatIR::Text),
+        _ => None,
+    }
+}
+
+fn ir_response_format_to_gemini(
+    response_format: Option<&ResponseFormatIR>,
+) -> (Option<Cow<'static, str>>, Option<serde_json::Value>) {
+    match response_format {
+        Some(ResponseFormatIR::Text) => (Some(Cow::Borrowed("text/plain")), None),
+        Some(ResponseFormatIR::JsonObject) => (Some(Cow::Borrowed("application/json")), None),
+        Some(ResponseFormatIR::JsonSchema(raw)) => (
+            Some(Cow::Borrowed("application/json")),
+            Some(gemini_response_schema_value(raw.as_ref())),
+        ),
+        None => (None, None),
+    }
+}
+
+fn gemini_response_schema_value(raw: &RawValue) -> serde_json::Value {
+    let value = raw_to_value(raw);
+    value.get("schema").cloned().unwrap_or(value)
+}
+
 fn lower_content<'a>(c: GeminiContent<'a>, out: &mut Vec<MessageIR<'a>>) {
     let role = c.role.as_deref().unwrap_or("model");
     match role {
@@ -155,7 +260,7 @@ fn lower_content<'a>(c: GeminiContent<'a>, out: &mut Vec<MessageIR<'a>>) {
             let mut tool_calls: Vec<ToolCallIR<'a>> = Vec::new();
             for p in c.parts {
                 match p {
-                    GeminiPart::Text { text } => text_buf.push_str(text.as_ref()),
+                    GeminiPart::Text { text, .. } => text_buf.push_str(text.as_ref()),
                     GeminiPart::FunctionCall { function_call } => {
                         let raw = value_to_raw(function_call.args);
                         tool_calls.push(ToolCallIR {
@@ -166,9 +271,9 @@ fn lower_content<'a>(c: GeminiContent<'a>, out: &mut Vec<MessageIR<'a>>) {
                     }
                     GeminiPart::FunctionResponse { .. }
                     | GeminiPart::InlineData { .. }
-                    | GeminiPart::FileData { .. } => {
-                        // Not valid on an Assistant message in practice; ignore.
-                    }
+                    | GeminiPart::FileData { .. }
+                    | GeminiPart::ExecutableCode { .. }
+                    | GeminiPart::CodeExecutionResult { .. } => {}
                 }
             }
             out.push(MessageIR::Assistant {
@@ -188,7 +293,7 @@ fn lower_content<'a>(c: GeminiContent<'a>, out: &mut Vec<MessageIR<'a>>) {
             let mut function_responses: Vec<(Cow<'a, str>, String)> = Vec::new();
             for p in c.parts {
                 match p {
-                    GeminiPart::Text { text } => text_buf.push_str(text.as_ref()),
+                    GeminiPart::Text { text, .. } => text_buf.push_str(text.as_ref()),
                     GeminiPart::FunctionResponse { function_response } => {
                         let body = match &function_response.response {
                             serde_json::Value::String(s) => s.clone(),
@@ -198,11 +303,9 @@ fn lower_content<'a>(c: GeminiContent<'a>, out: &mut Vec<MessageIR<'a>>) {
                     }
                     GeminiPart::FunctionCall { .. }
                     | GeminiPart::InlineData { .. }
-                    | GeminiPart::FileData { .. } => {
-                        // FunctionCall on user role: silently ignore.
-                        // InlineData / FileData: v2 doesn't surface multimodal
-                        // through the User path of the IR; drop.
-                    }
+                    | GeminiPart::FileData { .. }
+                    | GeminiPart::ExecutableCode { .. }
+                    | GeminiPart::CodeExecutionResult { .. } => {}
                 }
             }
             if !text_buf.is_empty() || function_responses.is_empty() {
@@ -226,7 +329,7 @@ fn lower_content<'a>(c: GeminiContent<'a>, out: &mut Vec<MessageIR<'a>>) {
 fn join_text_parts(parts: &[GeminiPart<'_>]) -> String {
     let mut buf = String::new();
     for p in parts {
-        if let GeminiPart::Text { text } = p {
+        if let GeminiPart::Text { text, .. } = p {
             buf.push_str(text.as_ref());
         }
     }
@@ -237,18 +340,32 @@ fn join_text_parts(parts: &[GeminiPart<'_>]) -> String {
 
 impl<'a> From<GeminiResponse<'a>> for ResponseIR<'a> {
     fn from(w: GeminiResponse<'a>) -> Self {
-        // Gemini surfaces a single candidate in the gateway's traffic;
-        // multi-candidate shapes are not modelled in the IR.
         let mut assistant_text = String::new();
         let mut tool_calls: Vec<ToolCallIR<'a>> = Vec::new();
         let mut tool_messages: Vec<MessageIR<'a>> = Vec::new();
         let mut finish_reason: Option<FinishReasonIR> = None;
+        let mut thinking_blocks: Vec<ThinkingBlockIR<'a>> = Vec::new();
+        let mut server_tool_blocks: Vec<ServerToolBlockIR<'a>> = Vec::new();
+        let mut grounding_metadata_val: Option<serde_json::Value> = None;
 
         if let Some(candidate) = w.candidates.into_iter().next() {
+            grounding_metadata_val = candidate.grounding_metadata;
             if let Some(content) = candidate.content {
                 for p in content.parts {
                     match p {
-                        GeminiPart::Text { text } => assistant_text.push_str(text.as_ref()),
+                        GeminiPart::Text {
+                            text,
+                            thought: Some(true),
+                            thought_signature,
+                        } => {
+                            thinking_blocks.push(ThinkingBlockIR {
+                                text,
+                                signature: thought_signature,
+                            });
+                        }
+                        GeminiPart::Text { text, .. } => {
+                            assistant_text.push_str(text.as_ref());
+                        }
                         GeminiPart::FunctionCall { function_call } => {
                             let raw = value_to_raw(function_call.args);
                             tool_calls.push(ToolCallIR {
@@ -258,9 +375,6 @@ impl<'a> From<GeminiResponse<'a>> for ResponseIR<'a> {
                             });
                         }
                         GeminiPart::FunctionResponse { function_response } => {
-                            // A `functionResponse` block on the model side is
-                            // unusual but spec-legal; surface as a Tool
-                            // message for cross-protocol fidelity.
                             let body = match &function_response.response {
                                 serde_json::Value::String(s) => s.clone(),
                                 other => other.to_string(),
@@ -270,9 +384,42 @@ impl<'a> From<GeminiResponse<'a>> for ResponseIR<'a> {
                                 content: ContentIR::Text(Cow::Owned(body)),
                             });
                         }
-                        GeminiPart::InlineData { .. } | GeminiPart::FileData { .. } => {
-                            // No IR slot for response-side multimodal output yet.
+                        GeminiPart::ExecutableCode { executable_code } => {
+                            let code_json = serde_json::json!(executable_code.code.as_ref());
+                            let mut extra = serde_json::Map::new();
+                            extra.insert(
+                                "language".to_owned(),
+                                serde_json::Value::String(executable_code.language.into_owned()),
+                            );
+                            server_tool_blocks.push(ServerToolBlockIR {
+                                kind: Cow::Borrowed("executable_code"),
+                                id: Cow::Borrowed(""),
+                                name: Cow::Borrowed(""),
+                                input: value_to_raw(code_json),
+                                extra,
+                            });
                         }
+                        GeminiPart::CodeExecutionResult {
+                            code_execution_result,
+                        } => {
+                            let output_json =
+                                serde_json::json!(code_execution_result.output.as_ref());
+                            let mut extra = serde_json::Map::new();
+                            extra.insert(
+                                "outcome".to_owned(),
+                                serde_json::Value::String(
+                                    code_execution_result.outcome.into_owned(),
+                                ),
+                            );
+                            server_tool_blocks.push(ServerToolBlockIR {
+                                kind: Cow::Borrowed("code_execution_result"),
+                                id: Cow::Borrowed(""),
+                                name: Cow::Borrowed(""),
+                                input: value_to_raw(output_json),
+                                extra,
+                            });
+                        }
+                        GeminiPart::InlineData { .. } | GeminiPart::FileData { .. } => {}
                     }
                 }
             }
@@ -295,11 +442,27 @@ impl<'a> From<GeminiResponse<'a>> for ResponseIR<'a> {
             output_tokens: u.candidates_token_count,
             cached_tokens: u.cached_content_token_count,
             reasoning_tokens: None,
+            thoughts_tokens: u.thoughts_token_count,
+            ..Default::default()
         });
 
         // ADR-G5-1: long-running-operation responses set `name:
         // "operations/<uuid>"`; non-LRO chat responses leave it unset.
         let id = w.name.unwrap_or(Cow::Borrowed(""));
+
+        let thinking = if thinking_blocks.is_empty() {
+            None
+        } else {
+            Some(ResponseThinkingIR {
+                blocks: thinking_blocks,
+            })
+        };
+
+        let mut metadata = gw_core::ir::MetadataIR::default();
+        if let Some(gm) = grounding_metadata_val {
+            let ext = metadata.extensions.get_or_insert_with(serde_json::Map::new);
+            ext.insert("grounding_metadata".to_owned(), gm);
+        }
 
         ResponseIR {
             id,
@@ -307,10 +470,16 @@ impl<'a> From<GeminiResponse<'a>> for ResponseIR<'a> {
             messages,
             finish_reason,
             usage,
-            metadata: Default::default(),
-            thinking: None,
+            metadata,
+            thinking,
             reasoning: None,
             tool_use_blocks: None,
+            server_tool_blocks: if server_tool_blocks.is_empty() {
+                None
+            } else {
+                Some(server_tool_blocks)
+            },
+            ..Default::default()
         }
     }
 }
@@ -329,6 +498,18 @@ impl<'a> TryFrom<&ResponseIR<'a>> for GeminiResponse<'a> {
             .find(|m| matches!(m, MessageIR::Assistant { .. }));
 
         let mut parts: Vec<GeminiPart<'a>> = Vec::new();
+
+        // Emit thinking blocks as Text parts with thought=true, before content.
+        if let Some(thinking) = &ir.thinking {
+            for block in &thinking.blocks {
+                parts.push(GeminiPart::Text {
+                    text: block.text.clone(),
+                    thought: Some(true),
+                    thought_signature: block.signature.clone(),
+                });
+            }
+        }
+
         if let Some(MessageIR::Assistant {
             content: ContentIR::Text(content),
             tool_calls,
@@ -336,7 +517,11 @@ impl<'a> TryFrom<&ResponseIR<'a>> for GeminiResponse<'a> {
         {
             let text = content.clone();
             if !text.is_empty() {
-                parts.push(GeminiPart::Text { text });
+                parts.push(GeminiPart::Text {
+                    text,
+                    thought: None,
+                    thought_signature: None,
+                });
             }
             if let Some(tcs) = tool_calls {
                 for tc in tcs {
@@ -360,13 +545,67 @@ impl<'a> TryFrom<&ResponseIR<'a>> for GeminiResponse<'a> {
         if parts.is_empty() {
             parts.push(GeminiPart::Text {
                 text: Cow::Borrowed(""),
+                thought: None,
+                thought_signature: None,
             });
+        }
+
+        // Render server tool blocks as ExecutableCode / CodeExecutionResult parts.
+        if let Some(stbs) = &ir.server_tool_blocks {
+            for stb in stbs {
+                match stb.kind.as_ref() {
+                    "executable_code" => {
+                        let code = raw_to_value(&stb.input);
+                        let code_str = match code {
+                            serde_json::Value::String(s) => Cow::Owned(s),
+                            _ => Cow::Owned(code.to_string()),
+                        };
+                        let language = stb
+                            .extra
+                            .get("language")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("PYTHON");
+                        parts.push(GeminiPart::ExecutableCode {
+                            executable_code: GeminiExecutableCode {
+                                code: code_str,
+                                language: Cow::Owned(language.to_owned()),
+                            },
+                        });
+                    }
+                    "code_execution_result" => {
+                        let output = raw_to_value(&stb.input);
+                        let output_str = match output {
+                            serde_json::Value::String(s) => Cow::Owned(s),
+                            _ => Cow::Owned(output.to_string()),
+                        };
+                        let outcome = stb
+                            .extra
+                            .get("outcome")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("OUTCOME_OK");
+                        parts.push(GeminiPart::CodeExecutionResult {
+                            code_execution_result: super::wire::GeminiCodeExecutionResult {
+                                outcome: Cow::Owned(outcome.to_owned()),
+                                output: output_str,
+                            },
+                        });
+                    }
+                    _ => {}
+                }
+            }
         }
 
         let finish_reason = ir
             .finish_reason
             .as_ref()
             .map(|fr| Cow::Borrowed(map_finish_reason_out(fr)));
+
+        let grounding_metadata = ir
+            .metadata
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("grounding_metadata"))
+            .cloned();
 
         let candidate = GeminiCandidate {
             content: Some(GeminiContent {
@@ -375,6 +614,7 @@ impl<'a> TryFrom<&ResponseIR<'a>> for GeminiResponse<'a> {
             }),
             finish_reason,
             index: Some(0),
+            grounding_metadata,
         };
 
         let usage_metadata = ir.usage.as_ref().map(|u| GeminiUsage {
@@ -382,6 +622,8 @@ impl<'a> TryFrom<&ResponseIR<'a>> for GeminiResponse<'a> {
             candidates_token_count: u.output_tokens,
             cached_content_token_count: u.cached_tokens,
             total_token_count: Some(u.input_tokens.saturating_add(u.output_tokens)),
+            thoughts_token_count: u.thoughts_tokens,
+            tool_use_prompt_token_count: None,
         });
 
         // Surface the IR's id only if it looks like an operations/<uuid>
@@ -425,6 +667,7 @@ pub(crate) fn map_finish_reason_out(fr: &FinishReasonIR) -> &'static str {
         // signalled by the presence of a functionCall part with `STOP`.
         FinishReasonIR::ToolCalls => "STOP",
         FinishReasonIR::ContentFilter => "SAFETY",
+        FinishReasonIR::Refusal => "STOP",
         // cross_render::map_finish_reason degrades Other → Stop before
         // render_response runs; defensively map any survivor to OTHER.
         FinishReasonIR::Other(_) => "OTHER",
@@ -443,4 +686,64 @@ fn value_to_raw(v: serde_json::Value) -> Box<RawValue> {
 /// `Value` for re-rendering through the Gemini wire enum.
 fn raw_to_value(rv: &RawValue) -> serde_json::Value {
     serde_json::from_str(rv.get()).unwrap_or(serde_json::Value::Null)
+}
+
+#[cfg(test)]
+mod usage_detail_tests {
+    use super::*;
+    use crate::gemini::codec::Gemini;
+    use crate::ProtocolCodec;
+
+    #[test]
+    fn tool_use_prompt_token_count_serde_round_trip() {
+        let body = br#"{
+            "candidates":[{"content":{"parts":[{"text":"result"}]},"finishReason":"STOP"}],
+            "usageMetadata":{
+                "promptTokenCount":20,
+                "candidatesTokenCount":5,
+                "totalTokenCount":25,
+                "toolUsePromptTokenCount":12
+            }
+        }"#;
+        let codec = Gemini;
+        let ir = codec.parse_response(body).expect("parse ok");
+        let usage = ir.usage.as_ref().expect("usage present");
+        assert_eq!(usage.input_tokens, 20);
+        assert_eq!(usage.output_tokens, 5);
+        // tool_use_prompt_token_count has no IR slot — verify it parses at the wire level
+        let wire: GeminiResponse<'_> = serde_json::from_slice(body).unwrap();
+        assert_eq!(
+            wire.usage_metadata.unwrap().tool_use_prompt_token_count,
+            Some(12)
+        );
+
+        // Verify the field serialises when present
+        let usage_wire = GeminiUsage {
+            prompt_token_count: 20,
+            candidates_token_count: 5,
+            cached_content_token_count: None,
+            total_token_count: Some(25),
+            thoughts_token_count: None,
+            tool_use_prompt_token_count: Some(12),
+        };
+        let json = serde_json::to_value(usage_wire).unwrap();
+        assert_eq!(json["toolUsePromptTokenCount"], 12);
+    }
+
+    #[test]
+    fn tool_use_prompt_token_count_absent_omitted() {
+        let body = br#"{
+            "candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],
+            "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}
+        }"#;
+        let wire: GeminiResponse<'_> = serde_json::from_slice(body).unwrap();
+        assert!(wire
+            .usage_metadata
+            .unwrap()
+            .tool_use_prompt_token_count
+            .is_none());
+
+        let json = serde_json::to_value(wire.usage_metadata.unwrap()).unwrap();
+        assert!(json.get("toolUsePromptTokenCount").is_none());
+    }
 }

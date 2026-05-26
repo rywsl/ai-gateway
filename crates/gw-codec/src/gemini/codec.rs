@@ -214,6 +214,10 @@ impl ProtocolCodec for Gemini {
             StreamEventIR::ThinkingDelta { .. } => {
                 tracing::warn!("gemini: StreamEventIR::ThinkingDelta dropped (no wire equivalent)");
             }
+            StreamEventIR::RefusalDelta { .. }
+            | StreamEventIR::CitationsDelta { .. }
+            | StreamEventIR::ServerToolStart { .. }
+            | StreamEventIR::ServerToolDelta { .. } => {}
         }
         Ok(())
     }
@@ -299,6 +303,7 @@ impl ProtocolCodec for Gemini {
             .iter()
             .map(|m| match m {
                 MessageIR::System { content }
+                | MessageIR::Developer { content }
                 | MessageIR::User { content }
                 | MessageIR::Tool { content, .. }
                 | MessageIR::Assistant { content, .. } => approx_tokens(content),
@@ -328,8 +333,16 @@ fn dispatch_payload<'a>(
         if let Some(content) = candidate.content {
             for part in content.parts {
                 match part {
-                    GeminiPart::Text { text } => {
-                        if !text.is_empty() {
+                    GeminiPart::Text { text, thought, .. } => {
+                        if thought == Some(true) {
+                            if !text.is_empty() {
+                                events.push(StreamEventIR::Delta {
+                                    text: None,
+                                    tool_call: None,
+                                    thinking: Some(text),
+                                });
+                            }
+                        } else if !text.is_empty() {
                             events.push(StreamEventIR::Delta {
                                 text: Some(text),
                                 tool_call: None,
@@ -388,9 +401,9 @@ fn dispatch_payload<'a>(
                     }
                     GeminiPart::FunctionResponse { .. }
                     | GeminiPart::InlineData { .. }
-                    | GeminiPart::FileData { .. } => {
-                        // Not surfaced through streaming today.
-                    }
+                    | GeminiPart::FileData { .. }
+                    | GeminiPart::ExecutableCode { .. }
+                    | GeminiPart::CodeExecutionResult { .. } => {}
                 }
             }
         }
@@ -407,6 +420,8 @@ fn dispatch_payload<'a>(
             output_tokens: u.candidates_token_count,
             cached_tokens: u.cached_content_token_count,
             reasoning_tokens: None,
+            thoughts_tokens: u.thoughts_token_count,
+            ..Default::default()
         }));
     }
 }
@@ -533,6 +548,7 @@ mod tests {
                 output_tokens: 2,
                 cached_tokens: None,
                 reasoning_tokens: None,
+                ..Default::default()
             }),
             ..ResponseIR::default()
         };
