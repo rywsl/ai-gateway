@@ -16,6 +16,7 @@ use gw_auth::ip_ratelimit::IpRateLimitGuard;
 use gw_auth::jwt_blacklist::RedisJwtBlacklist;
 use gw_auth::ratelimit::adaptive::AdaptiveRpmManager;
 use gw_auth::ratelimit::RateLimitGuard;
+use gw_codec::gemini::files::GeminiFilesGateway;
 use gw_core::error::codes;
 use gw_core::ids::{RequestId, TraceId};
 use gw_health::KeyHealthStore;
@@ -24,6 +25,7 @@ use gw_ledger::Ledger;
 use gw_routing::in_flight::InFlightStore;
 use gw_routing::latency::LatencyTracker;
 use gw_routing::{FailoverClass, FailoverDecision, FailoverExecutor};
+use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
 use gw_store::{CounterStore, EntityStore};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
@@ -172,6 +174,18 @@ pub struct LlmGateway {
     pub(crate) cancel_grace_ms: u64,
     /// Hard-cap configuration (ADR-024). Threaded from `cfg.auth.*` at boot.
     pub(crate) hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
+    pub(crate) classifier: Arc<dyn gw_core::error::ErrorClassifier>,
+    pub(crate) retryable_codes: Arc<std::collections::HashSet<u16>>,
+    pub(crate) error_passthrough_enabled: bool,
+    pub files_gateway: Arc<dyn GeminiFilesGateway>,
+    pub reservation_view: Option<Arc<ReservationGlobalView>>,
+    pub frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
+    pub body_rules: Arc<
+        std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, Box<serde_json::value::RawValue>>,
+        >,
+    >,
 }
 
 impl LlmGateway {
@@ -207,7 +221,21 @@ impl LlmGateway {
         response_deadline_ms: u64,
         cancel_grace_ms: u64,
         hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
+        classifier: Arc<dyn gw_core::error::ErrorClassifier>,
+        retryable_codes: Arc<std::collections::HashSet<u16>>,
+        error_passthrough_enabled: bool,
+        reservation_view: Option<Arc<ReservationGlobalView>>,
+        frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
+        pg: sqlx::PgPool,
     ) -> Self {
+        let files_gateway = Arc::new(crate::filters::gemini_files::HttpGeminiFilesGateway::new(
+            pg,
+            store.clone(),
+            health.clone(),
+            in_flight.clone(),
+            strategies.clone(),
+            latency_tracker.clone(),
+        ));
         Self {
             store,
             health,
@@ -240,6 +268,13 @@ impl LlmGateway {
             response_deadline_ms,
             cancel_grace_ms,
             hard_cap_cfg,
+            classifier,
+            retryable_codes,
+            error_passthrough_enabled,
+            files_gateway,
+            reservation_view,
+            frequency_tracker,
+            body_rules: Arc::new(std::collections::HashMap::new()),
         }
     }
 
@@ -315,7 +350,10 @@ impl ProxyHttp for LlmGateway {
         let id = trace_id_hex();
         let trace = TraceId::from(id.clone());
         let req = RequestId::from(id);
-        ReqCtx::new(trace, req)
+        let mut ctx = ReqCtx::new(trace, req);
+        ctx.reservation_view = self.reservation_view.clone();
+        ctx.frequency_tracker = self.frequency_tracker.clone();
+        ctx
     }
 
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
@@ -355,6 +393,14 @@ impl ProxyHttp for LlmGateway {
             self.capability_resolver.as_ref(),
             &self.mgmt_blacklist,
             &self.hard_cap_cfg,
+            self.files_gateway.as_ref(),
+            Some(filters::request::GeminiFilesRoutingDeps {
+                store: &self.store,
+                health: &self.health,
+                in_flight: &self.in_flight,
+                strategies: &self.strategies,
+                latency_tracker: &self.latency_tracker,
+            }),
         )
         .await?;
         // Emit downstream_request surface (only when process() actually read the
@@ -435,7 +481,8 @@ impl ProxyHttp for LlmGateway {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        filters::upstream::rewrite_request(session, upstream_request, ctx).await?;
+        filters::upstream::rewrite_request(session, upstream_request, ctx, &self.body_rules)
+            .await?;
 
         // W2-T6: Register the in-flight billing entry now that the request is
         // committed to being sent to the upstream. Best-effort — Redis errors
@@ -576,10 +623,12 @@ impl ProxyHttp for LlmGateway {
                         key.rpm_limit,
                         header_u32(upstream_response, "x-ratelimit-limit"),
                         key.rpm_limit,
+                        header_u32(upstream_response, "retry-after"),
                     );
                 }
             }
-            match gw_routing::classify_for_failover(status, ctx.body_started) {
+            match gw_routing::classify_for_failover(status, ctx.body_started, &self.retryable_codes)
+            {
                 class @ (FailoverClass::Retryable5xx | FailoverClass::Retryable429) => {
                     if let Some(candidates) = ctx.picked_candidates.as_ref() {
                         let remaining = remaining_failover_candidates(candidates, ctx);
@@ -658,14 +707,14 @@ impl ProxyHttp for LlmGateway {
                         }
                     }
                     let headers = MetaHeaders(&meta.headers);
-                    use gw_core::error::ErrorClassifier as _;
-                    let outcome = gw_core::error::DefaultClassifier.classify_upstream(
-                        &classify_ctx,
-                        status,
-                        &headers,
-                        None,
-                    );
+                    let outcome =
+                        self.classifier
+                            .classify_upstream(&classify_ctx, status, &headers, None);
                     ctx.error_outcome = Some(outcome);
+
+                    if self.error_passthrough_enabled {
+                        ctx.error_passthrough_active = true;
+                    }
                 }
             }
         }
@@ -720,6 +769,43 @@ impl ProxyHttp for LlmGateway {
         }
 
         let res = filters::response::run(session, body, end_of_stream, ctx);
+
+        if end_of_stream && ctx.error_passthrough_active {
+            if let Some(status) = ctx.upstream_status {
+                let client_kind = ctx
+                    .client_codec
+                    .as_ref()
+                    .map_or(gw_core::protocol::ProtocolKind::OpenAi, |c| c.kind());
+                let accumulated = &ctx.archive_upstream_response_body;
+                let is_html = accumulated.get(..100).is_some_and(|s| {
+                    let start = std::str::from_utf8(s).unwrap_or("");
+                    let trimmed = start.trim_start();
+                    trimmed.starts_with("<!") || trimmed.starts_with("<html")
+                });
+
+                if !is_html {
+                    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(accumulated)
+                    {
+                        let passthrough = gw_core::error::PassthroughBody {
+                            upstream_status: status,
+                            body_json,
+                            is_sse: ctx.is_stream,
+                        };
+                        let error_class = ctx
+                            .error_outcome
+                            .as_ref()
+                            .map_or(gw_core::error::ErrorClass::Internal, |o| o.class);
+                        let rendered = gw_codec::error_passthrough::render_error_to_client(
+                            client_kind,
+                            &passthrough,
+                            error_class,
+                        );
+                        *body = Some(rendered);
+                    }
+                }
+            }
+        }
+
         if end_of_stream {
             self.emit_response_surfaces(ctx);
         }

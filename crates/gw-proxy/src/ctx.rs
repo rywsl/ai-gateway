@@ -10,6 +10,7 @@
 //! ADR-004 freeze-rollback and ADR-024 stream-slot-release contracts even on
 //! cancellation paths.
 
+use crate::filters::gemini_files::GeminiFilesAction;
 use crate::filters::task::TaskAction;
 use bytes::{Bytes, BytesMut};
 use gw_auth::ratelimit::StreamSlot;
@@ -23,6 +24,7 @@ use gw_core::protocol::ApiShape;
 use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
 use gw_routing::in_flight::InFlightGuard;
+use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
@@ -89,7 +91,9 @@ pub struct ReqCtx {
     pub model: Option<ModelName>,
     pub is_stream: bool,
     pub is_task: bool,
+    pub is_gemini_files: bool,
     pub task_action: Option<TaskAction>,
+    pub gemini_files_action: Option<GeminiFilesAction>,
     pub idempotent: bool,
     pub cached_body: Option<Bytes>,
     /// ADR-S3: optional client-supplied conversation identifier read from the
@@ -111,6 +115,8 @@ pub struct ReqCtx {
     pub picked_candidates: Option<Vec<Arc<VendorKey>>>,
     pub forced_params: ForcedParams,
     pub forced_mutations: ForcedMutations,
+    pub reservation_view: Option<Arc<ReservationGlobalView>>,
+    pub frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
 
     // --- Lifecycle / ledger ---
     pub timing: ReqTiming,
@@ -190,6 +196,12 @@ pub struct ReqCtx {
     /// ErrorListener stack. `None` on the happy path; existing tests are
     /// unaffected.
     pub error_outcome: Option<gw_core::error::ClassifierOutcome>,
+
+    /// When set, `response_body_filter` replaces the final body chunk with
+    /// this pre-rendered passthrough payload (produced by
+    /// `gw_codec::render_error_to_client`).
+    pub error_passthrough_body: Option<bytes::Bytes>,
+    pub error_passthrough_active: bool,
 
     // --- HMAC signature (T6-C body-after) ---
     pub signature_required: bool,
@@ -294,7 +306,9 @@ impl ReqCtx {
             model: None,
             is_stream: false,
             is_task: false,
+            is_gemini_files: false,
             task_action: None,
+            gemini_files_action: None,
             idempotent: true,
             cached_body: None,
             conversation_id: None,
@@ -305,6 +319,8 @@ impl ReqCtx {
             picked_candidates: None,
             forced_params: ForcedParams::default(),
             forced_mutations: ForcedMutations::NONE,
+            reservation_view: None,
+            frequency_tracker: None,
             timing: ReqTiming::default(),
             usage: UsageAccumulator {
                 input_tokens: 0,
@@ -335,6 +351,8 @@ impl ReqCtx {
             upstream_error_code: None,
             pending_client_body: None,
             error_outcome: None,
+            error_passthrough_body: None,
+            error_passthrough_active: false,
             signature_required: false,
             signature_algo: gw_core::entity::SignatureAlgo::default(),
             signature_received: None,

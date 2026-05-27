@@ -14,6 +14,60 @@ use crate::ratelimit::RateLimitKind;
 
 pub struct DefaultClassifier;
 
+/// Config-driven classifier that overrides `Retryability` based on a
+/// caller-supplied set of retryable HTTP status codes.
+pub struct ConfigurableClassifier {
+    retryable_codes: std::collections::HashSet<u16>,
+    inner: DefaultClassifier,
+}
+
+impl ConfigurableClassifier {
+    /// Build from a set of retryable HTTP status codes. Default set
+    /// `{429, 500, 502, 503, 504}` matches legacy hardcoded behaviour.
+    pub fn new(retryable_codes: std::collections::HashSet<u16>) -> Self {
+        Self {
+            retryable_codes,
+            inner: DefaultClassifier,
+        }
+    }
+
+    pub fn retryable_codes(&self) -> &std::collections::HashSet<u16> {
+        &self.retryable_codes
+    }
+}
+
+impl ErrorClassifier for ConfigurableClassifier {
+    fn classify_local(&self, err: &ErrorIR<'_>) -> ClassifierOutcome {
+        self.inner.classify_local(err)
+    }
+
+    fn classify_upstream(
+        &self,
+        ctx: &ClassifyCtx<'_>,
+        http_status: u16,
+        headers: &dyn HeadersAccessor,
+        vendor_payload: Option<&serde_json::Value>,
+    ) -> ClassifierOutcome {
+        let mut outcome = self
+            .inner
+            .classify_upstream(ctx, http_status, headers, vendor_payload);
+        // Only override retryability for statuses in the failover-eligible
+        // range (429 + 5xx). Other statuses (401 account-blocked, etc.) keep
+        // DefaultClassifier's retryability judgment unchanged.
+        let is_failover_range = http_status == 429 || (500..=599).contains(&http_status);
+        if is_failover_range {
+            if self.retryable_codes.contains(&http_status) {
+                if outcome.retryable == Retryability::No {
+                    outcome.retryable = Retryability::CrossKey;
+                }
+            } else {
+                outcome.retryable = Retryability::No;
+            }
+        }
+        outcome
+    }
+}
+
 impl ErrorClassifier for DefaultClassifier {
     fn classify_local(&self, err: &ErrorIR<'_>) -> ClassifierOutcome {
         let class = match err.category {
@@ -143,5 +197,106 @@ impl ErrorClassifier for DefaultClassifier {
                 ..Default::default()
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::ProtocolKind;
+
+    fn make_ctx() -> ClassifyCtx<'static> {
+        ClassifyCtx {
+            key_id: "k1",
+            vendor_id: "v1",
+            api_format: ProtocolKind::OpenAi,
+            protocol: ProtocolKind::OpenAi,
+            has_oauth: false,
+        }
+    }
+
+    struct EmptyHeaders;
+    impl HeadersAccessor for EmptyHeaders {
+        fn get(&self, _name: &str) -> Option<&str> {
+            None
+        }
+    }
+
+    fn default_codes() -> std::collections::HashSet<u16> {
+        [429, 500, 502, 503, 504].into_iter().collect()
+    }
+
+    #[test]
+    fn default_config_preserves_non_failover_retryability() {
+        let cfg = ConfigurableClassifier::new(default_codes());
+        let def = DefaultClassifier;
+        let ctx = make_ctx();
+
+        for status in [200, 400, 401, 402, 403, 408] {
+            let cfg_out = cfg.classify_upstream(&ctx, status, &EmptyHeaders, None);
+            let def_out = def.classify_upstream(&ctx, status, &EmptyHeaders, None);
+            assert_eq!(
+                cfg_out.retryable, def_out.retryable,
+                "mismatch on status {status}: cfg={:?} def={:?}",
+                cfg_out.retryable, def_out.retryable,
+            );
+        }
+    }
+
+    #[test]
+    fn default_config_retries_configured_codes() {
+        let cfg = ConfigurableClassifier::new(default_codes());
+        let ctx = make_ctx();
+
+        for status in [429, 500, 502, 503, 504] {
+            let out = cfg.classify_upstream(&ctx, status, &EmptyHeaders, None);
+            assert!(
+                out.retryable != Retryability::No,
+                "status {status} should be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn default_config_demotes_unconfigured_5xx() {
+        let cfg = ConfigurableClassifier::new(default_codes());
+        let ctx = make_ctx();
+
+        for status in [501, 505, 529] {
+            let out = cfg.classify_upstream(&ctx, status, &EmptyHeaders, None);
+            assert_eq!(
+                out.retryable,
+                Retryability::No,
+                "status {status} should NOT be retryable (not in default set)"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_codes_removes_500() {
+        let codes: std::collections::HashSet<u16> = [429, 502].into_iter().collect();
+        let cfg = ConfigurableClassifier::new(codes);
+        let ctx = make_ctx();
+
+        let out_500 = cfg.classify_upstream(&ctx, 500, &EmptyHeaders, None);
+        assert_eq!(out_500.retryable, Retryability::No);
+
+        let out_429 = cfg.classify_upstream(&ctx, 429, &EmptyHeaders, None);
+        assert!(out_429.retryable != Retryability::No);
+
+        let out_502 = cfg.classify_upstream(&ctx, 502, &EmptyHeaders, None);
+        assert!(out_502.retryable != Retryability::No);
+    }
+
+    #[test]
+    fn promotes_non_retryable_status_in_set() {
+        // 501 is in 500-599 range but DefaultClassifier marks it SameKey.
+        // Adding it to the set should keep it retryable.
+        let codes: std::collections::HashSet<u16> = [501].into_iter().collect();
+        let cfg = ConfigurableClassifier::new(codes);
+        let ctx = make_ctx();
+
+        let out = cfg.classify_upstream(&ctx, 501, &EmptyHeaders, None);
+        assert!(out.retryable != Retryability::No);
     }
 }

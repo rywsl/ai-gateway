@@ -6,6 +6,7 @@
 //! key should be tried next.
 
 use gw_core::entity::VendorKey;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Classification of an upstream response for failover decision.
@@ -32,15 +33,23 @@ pub enum FailoverDecision {
     NotRetryable,
 }
 
-pub fn classify_for_failover(status: u16, body_started: bool) -> FailoverClass {
+pub fn classify_for_failover(
+    status: u16,
+    body_started: bool,
+    retryable_codes: &HashSet<u16>,
+) -> FailoverClass {
     if body_started {
         return FailoverClass::BodyAlreadyStarted;
     }
 
-    match status {
-        429 => FailoverClass::Retryable429,
-        500..=599 => FailoverClass::Retryable5xx,
-        _ => FailoverClass::NotRetryable,
+    if !retryable_codes.contains(&status) {
+        return FailoverClass::NotRetryable;
+    }
+
+    if status == 429 {
+        FailoverClass::Retryable429
+    } else {
+        FailoverClass::Retryable5xx
     }
 }
 
@@ -105,6 +114,10 @@ mod tests {
     use gw_core::ids::{KeyId, VendorId};
     use secrecy::SecretString;
 
+    fn default_retryable() -> HashSet<u16> {
+        [429, 500, 502, 503, 504].into_iter().collect()
+    }
+
     fn make_test_key(key_id: &str) -> Arc<VendorKey> {
         Arc::new(VendorKey {
             key_id: KeyId::from(key_id),
@@ -133,52 +146,82 @@ mod tests {
 
     #[test]
     fn test_classify_5xx() {
+        let codes = default_retryable();
         assert_eq!(
-            classify_for_failover(502, false),
+            classify_for_failover(502, false, &codes),
             FailoverClass::Retryable5xx
         );
         assert_eq!(
-            classify_for_failover(500, false),
+            classify_for_failover(500, false, &codes),
             FailoverClass::Retryable5xx
         );
         assert_eq!(
-            classify_for_failover(503, false),
+            classify_for_failover(503, false, &codes),
             FailoverClass::Retryable5xx
         );
     }
 
     #[test]
     fn test_classify_429() {
+        let codes = default_retryable();
         assert_eq!(
-            classify_for_failover(429, false),
+            classify_for_failover(429, false, &codes),
             FailoverClass::Retryable429
         );
     }
 
     #[test]
     fn test_classify_body_started() {
+        let codes = default_retryable();
         assert_eq!(
-            classify_for_failover(502, true),
+            classify_for_failover(502, true, &codes),
             FailoverClass::BodyAlreadyStarted
         );
         assert_eq!(
-            classify_for_failover(429, true),
+            classify_for_failover(429, true, &codes),
             FailoverClass::BodyAlreadyStarted
         );
     }
 
     #[test]
     fn test_classify_not_retryable() {
+        let codes = default_retryable();
         assert_eq!(
-            classify_for_failover(400, false),
+            classify_for_failover(400, false, &codes),
             FailoverClass::NotRetryable
         );
         assert_eq!(
-            classify_for_failover(200, false),
+            classify_for_failover(200, false, &codes),
             FailoverClass::NotRetryable
         );
         assert_eq!(
-            classify_for_failover(404, false),
+            classify_for_failover(404, false, &codes),
+            FailoverClass::NotRetryable
+        );
+    }
+
+    #[test]
+    fn test_classify_custom_codes() {
+        let codes: HashSet<u16> = [429, 503].into_iter().collect();
+        assert_eq!(
+            classify_for_failover(500, false, &codes),
+            FailoverClass::NotRetryable
+        );
+        assert_eq!(
+            classify_for_failover(503, false, &codes),
+            FailoverClass::Retryable5xx
+        );
+        assert_eq!(
+            classify_for_failover(429, false, &codes),
+            FailoverClass::Retryable429
+        );
+    }
+
+    #[test]
+    fn test_classify_501_not_in_default_set() {
+        let codes = default_retryable();
+        assert_eq!(
+            classify_for_failover(501, false, &codes),
             FailoverClass::NotRetryable
         );
     }
