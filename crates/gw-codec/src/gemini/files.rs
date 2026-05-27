@@ -8,9 +8,13 @@
 //! matching Gemini's documented file expiry.
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use gw_core::entity::VendorKey;
+use gw_core::ids::{ApiKeyId, Group};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct GeminiFileRef {
@@ -20,12 +24,30 @@ pub struct GeminiFileRef {
     pub expire_unix_s: u64,
 }
 
+pub type FileInfo = GeminiFileRef;
+
 pub struct UploadCtx {
     pub user_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct FilesCtx {
+    pub vendor_key: Arc<VendorKey>,
+    pub api_key_id: ApiKeyId,
+    pub model_group: Group,
+}
+
 #[async_trait]
 pub trait GeminiFilesGateway: Send + Sync {
+    async fn upload(&self, ctx: &FilesCtx, body: Bytes, mime: &str) -> anyhow::Result<FileInfo>;
+
+    async fn list(&self, ctx: &FilesCtx) -> anyhow::Result<Vec<FileInfo>>;
+
+    async fn get(&self, ctx: &FilesCtx, file_id: &str) -> anyhow::Result<FileInfo>;
+
+    async fn delete(&self, ctx: &FilesCtx, file_id: &str) -> anyhow::Result<()>;
+
+    #[deprecated(note = "use upload/list/get/delete with FilesCtx vendor-key routing context")]
     async fn ensure_uploaded(
         &self,
         ctx: &UploadCtx,
@@ -50,15 +72,60 @@ impl FakeFilesGateway {
 
 #[async_trait]
 impl GeminiFilesGateway for FakeFilesGateway {
+    async fn upload(&self, ctx: &FilesCtx, body: Bytes, mime: &str) -> anyhow::Result<FileInfo> {
+        self.insert_or_get(ctx.api_key_id.as_ref().to_owned(), body.as_ref(), mime)
+    }
+
+    async fn list(&self, ctx: &FilesCtx) -> anyhow::Result<Vec<FileInfo>> {
+        let owner = ctx.api_key_id.as_ref();
+        Ok(self
+            .map
+            .lock()
+            .iter()
+            .filter(|((stored_owner, _), _)| stored_owner == owner)
+            .map(|(_, file)| file.clone())
+            .collect())
+    }
+
+    async fn get(&self, ctx: &FilesCtx, file_id: &str) -> anyhow::Result<FileInfo> {
+        let owner = ctx.api_key_id.as_ref();
+        self.map
+            .lock()
+            .iter()
+            .find(|((stored_owner, _), file)| stored_owner == owner && file.file_uri == file_id)
+            .map(|(_, file)| file.clone())
+            .ok_or_else(|| anyhow::anyhow!("file not found"))
+    }
+
+    async fn delete(&self, ctx: &FilesCtx, file_id: &str) -> anyhow::Result<()> {
+        let owner = ctx.api_key_id.as_ref();
+        self.map
+            .lock()
+            .retain(|(stored_owner, _), file| !(stored_owner == owner && file.file_uri == file_id));
+        Ok(())
+    }
+
+    #[allow(deprecated)]
     async fn ensure_uploaded(
         &self,
         ctx: &UploadCtx,
         bytes: &[u8],
         mime: &str,
     ) -> anyhow::Result<GeminiFileRef> {
+        self.insert_or_get(ctx.user_id.clone(), bytes, mime)
+    }
+}
+
+impl FakeFilesGateway {
+    fn insert_or_get(
+        &self,
+        owner_id: String,
+        bytes: &[u8],
+        mime: &str,
+    ) -> anyhow::Result<GeminiFileRef> {
         use sha2::{Digest, Sha256};
         let sha = hex::encode(Sha256::digest(bytes));
-        let key = (ctx.user_id.clone(), sha);
+        let key = (owner_id, sha);
         if let Some(r) = self.map.lock().get(&key) {
             return Ok(r.clone());
         }

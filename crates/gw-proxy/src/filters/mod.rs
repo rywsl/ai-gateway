@@ -12,6 +12,7 @@
 //!   and DetailedLog.
 
 pub mod early;
+pub mod gemini_files;
 pub mod logging;
 pub mod request;
 pub mod response;
