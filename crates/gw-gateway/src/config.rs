@@ -14,8 +14,11 @@ use figment::{
     providers::{Env, Format, Toml},
     Figment,
 };
+use gw_routing::pipeline::multi_dim::DimWeights;
+use gw_routing::reservation_gate::ReservationGate;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -53,6 +56,12 @@ pub struct Config {
     pub adaptive_rpm: AdaptiveRpmCfg,
     #[serde(default)]
     pub task: TaskCfg,
+    #[serde(default)]
+    pub error: ErrorCfg,
+    #[serde(default)]
+    pub body_rules: BodyRulesCfg,
+    #[serde(default)]
+    pub health: HealthCfg,
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,16 +315,142 @@ impl Default for LoaderCfg {
 pub struct RoutingCfg {
     #[serde(default = "default_sticky_ttl_secs")]
     pub sticky_ttl_secs: u64,
+    #[serde(default = "default_routing_presets")]
+    pub presets: HashMap<String, RoutingPresetCfg>,
+    #[serde(default)]
+    pub reservation: ReservationCfg,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct RoutingPresetCfg {
+    #[serde(default)]
+    pub health: f64,
+    #[serde(default)]
+    pub latency: f64,
+    #[serde(default)]
+    pub cost: f64,
+    #[serde(default)]
+    pub inflight: f64,
+    #[serde(default)]
+    pub error_rate: f64,
+    #[serde(default)]
+    pub reservation: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReservationCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_reservation_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    #[serde(default)]
+    pub thresholds: HashMap<String, u64>,
+}
+
+fn default_reservation_interval_secs() -> u64 {
+    5
+}
+
+impl Default for ReservationCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_reservation_interval_secs(),
+            instance_id: None,
+            thresholds: HashMap::new(),
+        }
+    }
+}
+
+impl ReservationCfg {
+    pub fn gate(&self) -> ReservationGate {
+        ReservationGate::new(self.enabled, self.thresholds.clone())
+    }
+}
+
+impl From<RoutingPresetCfg> for DimWeights {
+    fn from(value: RoutingPresetCfg) -> Self {
+        DimWeights::raw(
+            value.health,
+            value.latency,
+            value.cost,
+            value.inflight,
+            value.error_rate,
+        )
+        .with_reservation(value.reservation)
+    }
 }
 
 fn default_sticky_ttl_secs() -> u64 {
     1800
 }
 
+fn default_routing_presets() -> HashMap<String, RoutingPresetCfg> {
+    HashMap::from([
+        (
+            "health_first".to_string(),
+            RoutingPresetCfg {
+                health: 0.6,
+                latency: 0.2,
+                cost: 0.1,
+                inflight: 0.1,
+                error_rate: 0.0,
+                reservation: 0.0,
+            },
+        ),
+        (
+            "latency_first".to_string(),
+            RoutingPresetCfg {
+                health: 0.2,
+                latency: 0.5,
+                cost: 0.1,
+                inflight: 0.2,
+                error_rate: 0.0,
+                reservation: 0.0,
+            },
+        ),
+        (
+            "cost_first".to_string(),
+            RoutingPresetCfg {
+                health: 0.2,
+                latency: 0.1,
+                cost: 0.5,
+                inflight: 0.1,
+                error_rate: 0.1,
+                reservation: 0.0,
+            },
+        ),
+        (
+            "balanced".to_string(),
+            RoutingPresetCfg {
+                health: 0.25,
+                latency: 0.25,
+                cost: 0.25,
+                inflight: 0.15,
+                error_rate: 0.1,
+                reservation: 0.0,
+            },
+        ),
+    ])
+}
+
+impl RoutingCfg {
+    pub fn preset_weights(&self) -> HashMap<String, DimWeights> {
+        self.presets
+            .iter()
+            .map(|(name, cfg)| (name.clone(), (*cfg).into()))
+            .collect()
+    }
+}
+
 impl Default for RoutingCfg {
     fn default() -> Self {
         Self {
             sticky_ttl_secs: default_sticky_ttl_secs(),
+            presets: default_routing_presets(),
+            reservation: ReservationCfg::default(),
         }
     }
 }
@@ -577,6 +712,98 @@ impl Default for TaskCfg {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ErrorCfg {
+    #[serde(default)]
+    pub classification: ErrorClassificationCfg,
+    #[serde(default)]
+    pub passthrough: ErrorPassthroughCfg,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErrorClassificationCfg {
+    #[serde(default = "default_retryable_status_codes")]
+    pub retryable_status_codes: Vec<u16>,
+}
+
+fn default_retryable_status_codes() -> Vec<u16> {
+    vec![429, 500, 502, 503, 504]
+}
+
+impl Default for ErrorClassificationCfg {
+    fn default() -> Self {
+        Self {
+            retryable_status_codes: default_retryable_status_codes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct ErrorPassthroughCfg {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Per-endpoint body-rule defaults. Each key is an endpoint path pattern
+/// (exact match, e.g. `"/v1/chat/completions"`), and the value is a flat
+/// JSON object whose fields are injected into the upstream request body
+/// with **set-if-absent** semantics (existing client-supplied fields are
+/// never overridden).
+///
+/// ```toml
+/// [body_rules."/v1/chat/completions"]
+/// temperature = 0.7
+/// top_p = 0.9
+/// ```
+///
+/// At boot time the inner `serde_json::Value`s are converted to
+/// `Box<RawValue>` for zero-copy injection into the IR passthrough
+/// overrides map.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BodyRulesCfg {
+    /// Endpoint path → flat key-value defaults.
+    #[serde(flatten)]
+    pub rules:
+        std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
+}
+
+/// Health subsystem knobs.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HealthCfg {
+    #[serde(default)]
+    pub quota_probe: QuotaProbeCfg,
+}
+
+/// Optional quota probe that checks cooldown keys at a fixed interval.
+/// Default: disabled. Boot-time only.
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuotaProbeCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_quota_probe_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_quota_probe_endpoint")]
+    pub probe_endpoint: String,
+}
+
+fn default_quota_probe_interval_secs() -> u64 {
+    30
+}
+
+fn default_quota_probe_endpoint() -> String {
+    "/v1/models".to_string()
+}
+
+impl Default for QuotaProbeCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_quota_probe_interval_secs(),
+            probe_endpoint: default_quota_probe_endpoint(),
+        }
+    }
+}
+
 /// Billing-robustness knobs. Spec:
 /// [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`].
 #[derive(Debug, Clone, Deserialize)]
@@ -677,6 +904,27 @@ impl Config {
         }
         if self.pgsql.max_connections == 0 {
             anyhow::bail!("invalid config: pgsql.max_connections must be > 0");
+        }
+        if self.routing.presets.is_empty() {
+            anyhow::bail!("invalid config: routing.presets must not be empty");
+        }
+        for (name, preset) in &self.routing.presets {
+            if name.trim().is_empty() {
+                anyhow::bail!("invalid config: routing.presets contains an empty preset name");
+            }
+            for (field, value) in [
+                ("health", preset.health),
+                ("latency", preset.latency),
+                ("cost", preset.cost),
+                ("inflight", preset.inflight),
+                ("error_rate", preset.error_rate),
+            ] {
+                if !value.is_finite() || value < 0.0 {
+                    anyhow::bail!(
+                        "invalid config: routing.presets.{name}.{field} must be finite and >= 0.0"
+                    );
+                }
+            }
         }
 
         if self.ledger.batch_size == 0 {
@@ -792,6 +1040,17 @@ impl Config {
         }
         if self.task.cancel_stream.is_empty() {
             anyhow::bail!("invalid config: task.cancel_stream must be non-empty");
+        }
+
+        if self.health.quota_probe.enabled {
+            if self.health.quota_probe.interval_secs == 0 {
+                anyhow::bail!("invalid config: health.quota_probe.interval_secs must be > 0");
+            }
+            if self.health.quota_probe.probe_endpoint.is_empty() {
+                anyhow::bail!(
+                    "invalid config: health.quota_probe.probe_endpoint must be non-empty"
+                );
+            }
         }
 
         Ok(())
@@ -966,5 +1225,130 @@ mod billing_cfg_tests {
             assert_eq!(cfg.billing.cancel_grace_ms, 500);
             Ok(())
         });
+    }
+}
+
+#[cfg(test)]
+mod routing_cfg_tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+    use figment::Figment;
+
+    #[test]
+    fn routing_presets_default_to_four_builtins() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+        cfg.validate().unwrap();
+        for name in ["health_first", "latency_first", "cost_first", "balanced"] {
+            assert!(cfg.routing.presets.contains_key(name));
+        }
+        assert_eq!(cfg.routing.presets["health_first"].health, 0.6);
+    }
+
+    #[test]
+    fn routing_presets_custom_weights_parse() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+[routing.presets]
+custom = { health = 0.1, latency = 0.2, cost = 0.3, inflight = 0.4, error_rate = 0.0 }
+"#;
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("routing preset parse");
+        cfg.validate().unwrap();
+        assert_eq!(cfg.routing.presets["custom"].inflight, 0.4);
+    }
+
+    #[test]
+    fn routing_presets_reject_negative_weight() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+[routing.presets]
+bad = { health = -1.0, latency = 0.0, cost = 0.0, inflight = 0.0, error_rate = 0.0 }
+"#;
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("routing preset parse");
+        assert!(cfg.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod error_cfg_tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+    use figment::Figment;
+
+    #[test]
+    fn error_section_defaults_match_spec() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+        assert_eq!(
+            cfg.error.classification.retryable_status_codes,
+            vec![429, 500, 502, 503, 504]
+        );
+        assert!(!cfg.error.passthrough.enabled);
+    }
+
+    #[test]
+    fn error_env_override_passthrough() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("GW_ERROR__PASSTHROUGH__ENABLED", "true");
+            let defaults = include_str!("../../../config/default.toml");
+            let cfg: Config = Figment::new()
+                .merge(Toml::string(defaults))
+                .merge(figment::providers::Env::prefixed("GW_").split("__"))
+                .extract()
+                .expect("env override extracts");
+            assert!(cfg.error.passthrough.enabled);
+            Ok(())
+        });
+    }
+}
+
+#[cfg(test)]
+mod body_rules_cfg_tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+    use figment::Figment;
+
+    #[test]
+    fn default_body_rules_empty() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+        assert!(cfg.body_rules.rules.is_empty());
+    }
+
+    #[test]
+    fn body_rules_parse_from_toml() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+[body_rules."/v1/chat/completions"]
+temperature = 0.7
+top_p = 0.9
+"#;
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("body_rules parse");
+        cfg.validate().unwrap();
+        let rules = cfg.body_rules.rules.get("/v1/chat/completions").unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules.get("temperature").unwrap(), &serde_json::json!(0.7));
+        assert_eq!(rules.get("top_p").unwrap(), &serde_json::json!(0.9));
     }
 }

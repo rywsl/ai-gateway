@@ -39,6 +39,7 @@ pub mod health;
 pub mod kms;
 pub mod metrics_catalog;
 pub mod observability;
+pub mod quota_probe_transport;
 
 #[cfg(feature = "tunnel")]
 pub use gw_tunnel_client;
@@ -54,6 +55,7 @@ use gw_ledger::Ledger;
 use gw_proxy::resilience::ResilienceState;
 use gw_proxy::LlmGateway;
 use gw_routing::in_flight::InFlightStore;
+use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
 use gw_store::{CounterStore, EntityStore};
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +67,8 @@ struct Wired {
     health: Arc<KeyHealthStore>,
     in_flight: Arc<InFlightStore>,
     latency_tracker: Arc<gw_routing::LatencyTracker>,
+    reservation_view: Option<Arc<ReservationGlobalView>>,
+    frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
     ratelimit: Arc<RateLimitGuard>,
     ip_allowlist: Arc<IpAllowlistGuard>,
     ip_ratelimit: Arc<IpRateLimitGuard>,
@@ -110,6 +114,11 @@ struct Wired {
     cancel_grace_ms: u64,
     /// Hard-cap configuration (ADR-024). From `cfg.auth.*`.
     hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
+    classifier: Arc<dyn gw_core::error::ErrorClassifier>,
+    retryable_codes: Arc<std::collections::HashSet<u16>>,
+    error_passthrough_enabled: bool,
+    body_rules: Arc<gw_proxy::filters::upstream::BodyRulesMap>,
+    pg: sqlx::PgPool,
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -192,7 +201,7 @@ pub fn run() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("pingora Server::new failed: {e}"))?;
     server.bootstrap();
 
-    let gw = LlmGateway::new(
+    let mut gw = LlmGateway::new(
         wired.store,
         wired.health,
         wired.in_flight,
@@ -224,7 +233,14 @@ pub fn run() -> anyhow::Result<()> {
         wired.response_deadline_ms,
         wired.cancel_grace_ms,
         wired.hard_cap_cfg,
+        wired.classifier,
+        wired.retryable_codes,
+        wired.error_passthrough_enabled,
+        wired.reservation_view,
+        wired.frequency_tracker,
+        wired.pg.clone(),
     );
+    gw.body_rules = wired.body_rules;
 
     let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
     business.add_tcp(&format!("0.0.0.0:{}", wired.business_port));
@@ -316,6 +332,26 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     });
 
     spawn_ip_ratelimit_sweep(ip_ratelimit.clone(), cfg.ip_ratelimit.sweep_interval_secs);
+
+    {
+        let probe_cfg = gw_health::QuotaProbeCfg {
+            enabled: cfg.health.quota_probe.enabled,
+            interval_secs: cfg.health.quota_probe.interval_secs,
+            probe_endpoint: cfg.health.quota_probe.probe_endpoint.clone(),
+        };
+        if probe_cfg.enabled {
+            let transport = Arc::new(quota_probe_transport::HttpProbeTransport {
+                store: store.clone(),
+                client: reqwest::Client::new(),
+            });
+            let runner = gw_health::QuotaProbeRunner {
+                health: health.clone(),
+                transport,
+                cfg: probe_cfg,
+            };
+            let _ = runner.spawn();
+        }
+    }
 
     let mut preloaded_ip_blocks = 0usize;
     let mut ip_block_offset = 0i64;
@@ -657,6 +693,35 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // 6. Latency tracker — extracted early to share with HealthState.
     let latency_tracker = Arc::new(gw_routing::LatencyTracker::new());
 
+    let (reservation_view, frequency_tracker) = if cfg.routing.reservation.enabled {
+        let view = Arc::new(ReservationGlobalView::with_gate(
+            cfg.routing.reservation.gate(),
+        ));
+        let tracker = Arc::new(ModelFrequencyTracker::new());
+        let instance_id = cfg
+            .routing
+            .reservation
+            .instance_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        view.clone().spawn(
+            redis.clone(),
+            tracker.clone(),
+            instance_id.clone(),
+            Duration::from_secs(cfg.routing.reservation.interval_secs.max(1)),
+        );
+        tracing::info!(
+            target: "gw_gateway",
+            %instance_id,
+            interval_secs = cfg.routing.reservation.interval_secs.max(1),
+            "reservation global-view task started"
+        );
+        (Some(view), Some(tracker))
+    } else {
+        tracing::info!(target: "gw_gateway", "routing.reservation.enabled=false; skipping reservation global-view task");
+        (None, None)
+    };
+
     // 7. Health server (positioned after TunnelStack so `tunnel` is in scope).
     let health_port = cfg.server.health_port;
     let health_state = health::HealthState {
@@ -687,6 +752,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         health,
         in_flight,
         latency_tracker,
+        reservation_view,
+        frequency_tracker,
         ratelimit,
         ip_allowlist,
         ip_ratelimit,
@@ -707,8 +774,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         }),
         business_port: cfg.server.business_port,
         jwt_validator,
-        strategies: Arc::new(gw_routing::strategy::set::StrategySet::new(
+        strategies: Arc::new(gw_routing::strategy::set::StrategySet::new_with_presets(
             Duration::from_secs(cfg.routing.sticky_ttl_secs),
+            cfg.routing.preset_weights(),
         )),
         capability_resolver,
         #[cfg(feature = "tunnel")]
@@ -723,6 +791,16 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             max_input_tokens: cfg.auth.hard_cap_max_input_tokens,
             max_cost_micro: cfg.auth.hard_cap_max_cost_micro,
         },
+        classifier: Arc::new(gw_core::error::DefaultClassifier),
+        retryable_codes: {
+            let mut codes = std::collections::HashSet::new();
+            codes.insert(429);
+            codes.extend(500..=599);
+            Arc::new(codes)
+        },
+        error_passthrough_enabled: false,
+        body_rules: Arc::new(convert_body_rules(&cfg.body_rules)),
+        pg,
     })
 }
 
@@ -745,6 +823,28 @@ fn map_adaptive_rpm_cfg(cfg: &config::AdaptiveRpmCfg) -> AdaptiveCfg {
         min_rpm: cfg.min_rpm,
         max_rpm: cfg.max_rpm,
     }
+}
+
+fn convert_body_rules(cfg: &config::BodyRulesCfg) -> gw_proxy::filters::upstream::BodyRulesMap {
+    cfg.rules
+        .iter()
+        .filter_map(|(endpoint, fields)| {
+            let converted: std::collections::HashMap<String, Box<serde_json::value::RawValue>> =
+                fields
+                    .iter()
+                    .filter_map(|(key, val)| {
+                        let raw_str = serde_json::to_string(val).ok()?;
+                        let raw = serde_json::value::RawValue::from_string(raw_str).ok()?;
+                        Some((key.clone(), raw))
+                    })
+                    .collect();
+            if converted.is_empty() {
+                None
+            } else {
+                Some((endpoint.clone(), converted))
+            }
+        })
+        .collect()
 }
 
 pub fn spawn_decay_loop(

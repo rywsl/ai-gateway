@@ -434,6 +434,16 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "Forced parameter overrides applied to upstream request; label=field",
     },
+    MetricSpec {
+        name: "gw_model_rewrite_total",
+        kind: MetricKind::Counter,
+        help: "Model-name rewrites applied to upstream request bodies; labels=from,to",
+    },
+    MetricSpec {
+        name: "gw_body_rules_applied_total",
+        kind: MetricKind::Counter,
+        help: "Per-endpoint body-rule defaults injected into upstream request; labels=endpoint,key",
+    },
     // --- Error handler ---
     MetricSpec {
         name: "gw_classifier_outcome_total",
