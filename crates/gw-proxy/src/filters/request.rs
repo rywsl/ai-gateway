@@ -28,6 +28,7 @@ use gw_auth::ratelimit::RateLimitGuard;
 use gw_auth::AuthCtx;
 use gw_billing::TaskBillingConfig;
 use gw_codec::cli::CliCodec;
+use gw_codec::gemini::files::GeminiFilesGateway;
 use gw_core::entity::ApiKeyEntry;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, ModelName, UserId};
@@ -42,6 +43,14 @@ use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use time::OffsetDateTime;
+
+pub struct GeminiFilesRoutingDeps<'a> {
+    pub store: &'a Arc<EntityStore>,
+    pub health: &'a Arc<gw_health::KeyHealthStore>,
+    pub in_flight: &'a Arc<gw_routing::in_flight::InFlightStore>,
+    pub strategies: &'a Arc<gw_routing::strategy::set::StrategySet>,
+    pub latency_tracker: &'a Arc<gw_routing::LatencyTracker>,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -64,6 +73,8 @@ pub async fn run(
     capability_resolver: Option<&Arc<gw_capability::CapabilityResolver>>,
     mgmt_blacklist: &Arc<RedisJwtBlacklist>,
     hard_cap_cfg: &gw_auth::hard_cap::HardCapCfg,
+    files_gateway: &dyn GeminiFilesGateway,
+    routing_deps: Option<GeminiFilesRoutingDeps<'_>>,
 ) -> Result<bool> {
     ctx.phase_start("request_filter");
     ctx.timing.start = Some(Instant::now());
@@ -79,6 +90,12 @@ pub async fn run(
     // ---------------------------------------------------------------------
     let req_path = session.req_header().uri.path().to_string();
     let req_method = session.req_header().method.as_str().to_owned();
+    if let Some(action) =
+        crate::filters::gemini_files::detect_gemini_files_route(&req_method, &req_path)
+    {
+        ctx.is_gemini_files = true;
+        ctx.gemini_files_action = Some(action);
+    }
     crate::filters::task::mark_task_context(ctx, task_enabled, &req_method, &req_path, None);
     if gw_auth::mgmt::is_management_path(&req_path) {
         ctx.mgmt = true;
@@ -595,7 +612,9 @@ pub async fn run(
         .cloned()
         .unwrap_or_else(|| body_bytes.clone());
     let path_str = session.req_header().uri.path();
-    let (model_name, is_stream, est_input_tokens) = if let Some(shape) = cli_shape {
+    let (model_name, is_stream, est_input_tokens) = if ctx.is_gemini_files {
+        (ModelName::from("gemini-files"), false, 1)
+    } else if let Some(shape) = cli_shape {
         let hints = extract_cli_request_hints(shape, path_str, Some(&parse_body));
         let model = hints.model.unwrap_or_default();
         let is_stream = hints.stream.unwrap_or(false);
@@ -765,6 +784,111 @@ pub async fn run(
             retry_after_secs: Some(30),
         };
         bail!(session, ctx, &err, &request_id)
+    }
+
+    if ctx.is_gemini_files {
+        let action = ctx.gemini_files_action.ok_or(ErrorIR {
+            category: ErrorCategory::GatewayInternal,
+            status: 500,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
+            message: Cow::Borrowed("gemini files action missing"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        });
+        let action = match action {
+            Ok(action) => action,
+            Err(err) => bail!(session, ctx, &err, &request_id),
+        };
+        let vendor_key = if let Some(deps) = routing_deps {
+            match crate::filters::gemini_files::select_files_vendor_key(
+                ctx,
+                deps.store,
+                deps.health,
+                deps.in_flight,
+                deps.strategies,
+                deps.latency_tracker,
+            )
+            .await
+            {
+                Ok(vendor_key) => vendor_key,
+                Err(err) => {
+                    let error_ir = ErrorIR {
+                        category: ErrorCategory::UpstreamError,
+                        status: err.status,
+                        upstream_status: None,
+                        code: Cow::Borrowed(err.code),
+                        message: err.message,
+                        retryable: err.status >= 500,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &error_ir, &request_id)
+                }
+            }
+        } else {
+            crate::filters::gemini_files::skeleton_vendor_key()
+        };
+        let files_ctx = match crate::filters::gemini_files::build_files_ctx(ctx, vendor_key) {
+            Ok(files_ctx) => files_ctx,
+            Err(err) => {
+                let error_ir = ErrorIR {
+                    category: ErrorCategory::GatewayInternal,
+                    status: err.status,
+                    upstream_status: None,
+                    code: Cow::Borrowed(err.code),
+                    message: err.message,
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        };
+        let content_type = session
+            .req_header()
+            .headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream");
+        let file_id = crate::filters::gemini_files::file_id_from_path(&req_path);
+        let response = crate::filters::gemini_files::handle_endpoint(
+            files_gateway,
+            action,
+            &files_ctx,
+            body_bytes.clone(),
+            content_type,
+            file_id,
+        )
+        .await;
+        match response {
+            Ok(response) => {
+                crate::filters::gemini_files::write_response(session, response).await?;
+                ctx.phase_end();
+                return Ok(true);
+            }
+            Err(err) => {
+                let error_ir = ErrorIR {
+                    category: match err.status {
+                        400 | 404 => ErrorCategory::ClientBadRequest,
+                        _ => ErrorCategory::GatewayInternal,
+                    },
+                    status: err.status,
+                    upstream_status: None,
+                    code: Cow::Borrowed(err.code),
+                    message: err.message,
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        }
     }
 
     if ctx.is_task {
