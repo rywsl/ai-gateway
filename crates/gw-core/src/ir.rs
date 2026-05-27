@@ -35,6 +35,7 @@ pub struct RequestIR<'a> {
     pub web_search: Option<Box<RawValue>>,
     pub prediction: Option<Box<RawValue>>,
     pub extensions: Option<HashMap<Cow<'a, str>, Box<RawValue>>>,
+    pub passthrough_overrides: Option<HashMap<String, Box<RawValue>>>,
     pub untouched: UntouchedFlags,
 }
 
@@ -63,6 +64,7 @@ impl Default for RequestIR<'_> {
             web_search: None,
             prediction: None,
             extensions: None,
+            passthrough_overrides: None,
             untouched: UntouchedFlags::default(),
         }
     }
@@ -399,6 +401,30 @@ impl Mutations {
     }
     pub fn set_stream(&mut self) {
         self.fields |= 1 << 8;
+    }
+    pub fn set_passthrough_overrides(&mut self) {
+        self.fields |= 1 << 9;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_ir_default_has_no_passthrough_overrides() {
+        let ir = RequestIR::default();
+        assert!(ir.passthrough_overrides.is_none());
+    }
+
+    #[test]
+    fn passthrough_override_mutation_is_not_empty() {
+        let mut mutations = Mutations::NONE;
+        assert!(mutations.is_empty());
+
+        mutations.set_passthrough_overrides();
+
+        assert!(!mutations.is_empty());
     }
 }
 

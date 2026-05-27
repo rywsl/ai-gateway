@@ -27,8 +27,10 @@ impl ProtocolCodec for Gemini {
         // `/v1beta/models/<model>:generateContent`
         // `/v1beta/models/<model>:streamGenerateContent`
         // `/v1/models/<model>:generateContent`
-        if (path.starts_with("/v1beta/models/") || path.starts_with("/v1/models/"))
-            && (path.contains(":generateContent") || path.contains(":streamGenerateContent"))
+        if path == "/v1beta/files"
+            || path.starts_with("/v1beta/files/")
+            || ((path.starts_with("/v1beta/models/") || path.starts_with("/v1/models/"))
+                && (path.contains(":generateContent") || path.contains(":streamGenerateContent")))
         {
             Some(Gemini)
         } else {
@@ -72,6 +74,7 @@ impl ProtocolCodec for Gemini {
         let req = GeminiRequest::try_from(ir)?;
         let bytes =
             serde_json::to_vec(&req).map_err(|_| internal_err("gemini serialize failed"))?;
+        let bytes = merge_passthrough_overrides(ir, bytes)?;
         buf.extend_from_slice(&bytes);
         Ok(())
     }
@@ -312,6 +315,27 @@ impl ProtocolCodec for Gemini {
     }
 }
 
+#[inline]
+fn merge_passthrough_overrides(
+    ir: &RequestIR<'_>,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, ErrorIR<'static>> {
+    let Some(overrides) = ir.passthrough_overrides.as_ref() else {
+        return Ok(bytes);
+    };
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| internal_err("gemini serialize failed"))?;
+    let serde_json::Value::Object(map) = &mut value else {
+        return Err(internal_err("gemini serialize failed"));
+    };
+    for (key, raw) in overrides {
+        let value =
+            serde_json::from_str(raw.get()).map_err(|_| internal_err("gemini serialize failed"))?;
+        map.insert(key.clone(), value);
+    }
+    serde_json::to_vec(&value).map_err(|_| internal_err("gemini serialize failed"))
+}
+
 // ─── streaming dispatch ───────────────────────────────────────────────────
 
 fn dispatch_payload<'a>(
@@ -463,6 +487,11 @@ mod tests {
     };
     use serde_json::value::RawValue;
     use std::borrow::Cow;
+    use std::collections::HashMap;
+
+    fn raw(json: &str) -> Box<RawValue> {
+        RawValue::from_string(json.to_owned()).expect("valid raw JSON")
+    }
 
     #[test]
     fn parse_response_extracts_usage_metadata() {
@@ -483,6 +512,33 @@ mod tests {
         assert_eq!(usage.output_tokens, 4);
         assert_eq!(usage.cached_tokens, Some(8));
         assert_eq!(ir.model.as_ref(), "gemini-1.5-pro");
+    }
+
+    #[test]
+    fn render_request_merges_passthrough_overrides() {
+        let mut overrides = HashMap::new();
+        overrides.insert("temperature".to_owned(), raw("0.5"));
+        overrides.insert("custom_field".to_owned(), raw(r#""value""#));
+        let ir = RequestIR {
+            model: Cow::Borrowed("gemini-1.5-pro"),
+            messages: vec![MessageIR::User {
+                content: ContentIR::Text(Cow::Borrowed("hi")),
+            }],
+            temperature: Some(1.0),
+            passthrough_overrides: Some(overrides),
+            ..RequestIR::default()
+        };
+
+        let mut buf = BytesMut::new();
+        Gemini.render_request(&ir, &mut buf).unwrap();
+        let rendered: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        assert_eq!(
+            rendered["generationConfig"]["temperature"],
+            serde_json::json!(1.0)
+        );
+        assert_eq!(rendered["temperature"], serde_json::json!(0.5));
+        assert_eq!(rendered["custom_field"], serde_json::json!("value"));
     }
 
     #[test]

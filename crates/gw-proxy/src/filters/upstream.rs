@@ -18,11 +18,11 @@ use crate::ctx::ReqCtx;
 use crate::error_emit;
 use crate::filters::early::{pick_emit_codec, short_circuit, with_request_id};
 use crate::timeouts::Timeouts;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
-use gw_core::entity::{ForcedParams, ModelGroup, Pricing, TimeoutSpec, Vendor};
+use gw_core::entity::{ForcedParams, ModelGroup, Pricing, TimeoutSpec, Vendor, VendorKey};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::{ForcedMutations, Mutations};
 use gw_health::KeyHealthStore;
@@ -241,7 +241,7 @@ pub async fn pick_peer(
     // G12: dispatch into the per-process StrategySet so Sticky's moka cache
     // (and any future stateful strategy) is shared across requests rather
     // than allocated per call.
-    let strategy = strategies.pick_for(group.value.strategy);
+    let strategy = strategies.pick_for(&group.value.strategy);
     ctx.strategy_name = Some(strategy.name());
     let pick_ctx = PickCtx {
         user_id: &perm.effective_user_id,
@@ -255,6 +255,8 @@ pub async fn pick_peer(
         api_format: client_codec_kind,
         pricing: ctx.pricing.as_ref().map(|p| &p.value as &Pricing),
         latency_tracker: latency_tracker.as_ref(),
+        reservation_view: ctx.reservation_view.as_deref(),
+        frequency_tracker: ctx.frequency_tracker.as_deref(),
     };
     let failover_pick = if ctx.failover_attempt > 0 && ctx.upstream_status.is_none() {
         ctx.picked_vendor_key.as_ref().and_then(|next| {
@@ -484,10 +486,131 @@ fn apply_forced_params_to_ir(ir: &mut gw_core::ir::RequestIR<'_>, fp: &ForcedPar
     }
 }
 
+fn apply_overrides_to_mutations(mutations: &mut Mutations, has_overrides: bool) {
+    if has_overrides {
+        mutations.set_passthrough_overrides();
+    }
+}
+
+fn model_rewrite(
+    model: Option<&gw_core::ids::ModelName>,
+    picked: &VendorKey,
+) -> Option<(
+    String,
+    std::collections::HashMap<String, Box<serde_json::value::RawValue>>,
+)> {
+    let model = model?;
+    let upstream_model = picked.model_mapping.get(model)?;
+    if upstream_model.is_empty() || upstream_model == model.as_ref() {
+        return None;
+    }
+    let Ok(raw) = serde_json::value::RawValue::from_string(
+        serde_json::to_string(upstream_model).unwrap_or_default(),
+    ) else {
+        return None;
+    };
+    let mut overrides = std::collections::HashMap::with_capacity(1);
+    overrides.insert("model".to_owned(), raw);
+    Some((upstream_model.clone(), overrides))
+}
+
+fn apply_passthrough_overrides_to_ir(
+    ir: &mut gw_core::ir::RequestIR<'_>,
+    overrides: Option<&std::collections::HashMap<String, Box<serde_json::value::RawValue>>>,
+) {
+    if let Some(overrides) = overrides {
+        ir.passthrough_overrides = Some(overrides.clone());
+    }
+}
+
+fn bytes_from_passthrough(cow: Cow<'_, [u8]>, original: &Bytes) -> Bytes {
+    match cow {
+        Cow::Borrowed(b)
+            if std::ptr::eq(b.as_ptr(), original.as_ptr()) && b.len() == original.len() =>
+        {
+            original.clone()
+        }
+        Cow::Borrowed(b) => Bytes::copy_from_slice(b),
+        Cow::Owned(v) => Bytes::from(v),
+    }
+}
+
+pub type BodyRulesMap = std::collections::HashMap<
+    String,
+    std::collections::HashMap<String, Box<serde_json::value::RawValue>>,
+>;
+
+fn ir_has_typed_field(ir: &gw_core::ir::RequestIR<'_>, key: &str) -> bool {
+    match key {
+        "model" => !ir.model.is_empty(),
+        "temperature" => ir.temperature.is_some(),
+        "top_p" => ir.top_p.is_some(),
+        "top_k" => ir.top_k.is_some(),
+        "max_tokens" => ir.max_tokens.is_some(),
+        "presence_penalty" => ir.presence_penalty.is_some(),
+        "frequency_penalty" => ir.frequency_penalty.is_some(),
+        "seed" => ir.seed.is_some(),
+        "stream" => true, // always present in wire format
+        "stop" => ir.stop.is_some(),
+        "tools" => ir.tools.is_some(),
+        "tool_choice" => ir.tool_choice.is_some(),
+        "response_format" => ir.response_format.is_some(),
+        _ => false,
+    }
+}
+
+fn apply_body_rules(
+    ir: &mut gw_core::ir::RequestIR<'_>,
+    endpoint: &str,
+    body_rules: &BodyRulesMap,
+    cached_body: &[u8],
+) -> bool {
+    let rules = match body_rules.get(endpoint) {
+        Some(r) if !r.is_empty() => r,
+        _ => return false,
+    };
+
+    let parsed_body: Option<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_slice(cached_body).ok();
+
+    let mut injected = false;
+    for (key, value) in rules {
+        if ir_has_typed_field(ir, key) {
+            continue;
+        }
+        if let Some(ref body) = parsed_body {
+            if body.contains_key(key) {
+                continue;
+            }
+        }
+        if let Some(ref existing) = ir.passthrough_overrides {
+            if existing.contains_key(key) {
+                continue;
+            }
+        }
+
+        let overrides = ir
+            .passthrough_overrides
+            .get_or_insert_with(std::collections::HashMap::new);
+        overrides.insert(key.clone(), value.clone());
+        injected = true;
+
+        metrics::counter!(
+            "gw_body_rules_applied_total",
+            "endpoint" => endpoint.to_owned(),
+            "key" => key.clone(),
+        )
+        .increment(1);
+    }
+
+    injected
+}
+
 pub async fn rewrite_request(
-    _session: &mut Session,
+    session: &mut Session,
     upstream_request: &mut RequestHeader,
     ctx: &mut ReqCtx,
+    body_rules: &BodyRulesMap,
 ) -> Result<()> {
     ctx.phase_start("upstream_request_filter");
 
@@ -561,11 +684,28 @@ pub async fn rewrite_request(
 
     // Render the outbound body. Same-protocol passthrough avoids a
     // parse+render round trip when the IR was not mutated.
-    let (mutations, forced_mutations) = apply_forced_params_mutations(&ctx.forced_params);
+    let model_rewrite = model_rewrite(ctx.model.as_ref(), &picked);
+    if let Some((upstream_model, _)) = model_rewrite.as_ref() {
+        metrics::counter!(
+            "gw_model_rewrite_total",
+            "from" => ctx.model.as_ref().map(|m| m.as_ref()).unwrap_or_default().to_string(),
+            "to" => upstream_model.clone(),
+        )
+        .increment(1);
+        ctx.model = Some(gw_core::ids::ModelName::from(upstream_model.as_str()));
+    }
+    let passthrough_overrides = model_rewrite.as_ref().map(|(_, overrides)| overrides);
+    let (mut mutations, forced_mutations) = apply_forced_params_mutations(&ctx.forced_params);
+    apply_overrides_to_mutations(&mut mutations, passthrough_overrides.is_some());
+    let endpoint_path = session.req_header().uri.path();
+    let has_body_rules = body_rules.get(endpoint_path).is_some_and(|r| !r.is_empty());
+    if has_body_rules {
+        mutations.set_passthrough_overrides();
+    }
     let outbound: bytes::Bytes = if mutations.is_empty() && upstream_kind == client_codec.kind() {
         match client_codec {
             AnyCodec::OpenAi(c) => match same_protocol_passthrough(c, cached_body, &mutations) {
-                Ok(cow) => bytes::Bytes::from(cow.into_owned()),
+                Ok(cow) => bytes_from_passthrough(cow, cached_body),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
             // OpenAI Responses shares the vendor family with Chat and
@@ -575,16 +715,16 @@ pub async fn rewrite_request(
             AnyCodec::OpenAiResponses(_) => {
                 match same_protocol_passthrough(&gw_codec::openai::OpenAi, cached_body, &mutations)
                 {
-                    Ok(cow) => bytes::Bytes::from(cow.into_owned()),
+                    Ok(cow) => bytes_from_passthrough(cow, cached_body),
                     Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
                 }
             }
             AnyCodec::Anthropic(c) => match same_protocol_passthrough(c, cached_body, &mutations) {
-                Ok(cow) => bytes::Bytes::from(cow.into_owned()),
+                Ok(cow) => bytes_from_passthrough(cow, cached_body),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
             AnyCodec::Gemini(c) => match same_protocol_passthrough(c, cached_body, &mutations) {
-                Ok(cow) => bytes::Bytes::from(cow.into_owned()),
+                Ok(cow) => bytes_from_passthrough(cow, cached_body),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
         }
@@ -594,6 +734,10 @@ pub async fn rewrite_request(
             .parse_request(cached_body)
             .map_err(|_e| Error::new(ErrorType::Custom("gw_request_parse_failed")))?;
         apply_forced_params_to_ir(&mut ir, &ctx.forced_params);
+        apply_passthrough_overrides_to_ir(&mut ir, passthrough_overrides);
+        if has_body_rules {
+            apply_body_rules(&mut ir, endpoint_path, body_rules, cached_body);
+        }
         let mut buf = BytesMut::with_capacity(cached_body.len());
         upstream_codec
             .render_request(&ir, &mut buf)
@@ -628,6 +772,29 @@ pub async fn rewrite_request(
 
     ctx.phase_end();
     Ok(())
+}
+
+#[cfg(test)]
+fn render_same_protocol_openai_with_passthrough_overrides_for_test(
+    body: &[u8],
+    overrides: &[(&str, &str)],
+) -> Bytes {
+    use gw_codec::ProtocolCodec;
+
+    let mut ir = gw_codec::openai::OpenAi.parse_request(body).unwrap();
+    let mut map = std::collections::HashMap::new();
+    for (key, value) in overrides {
+        map.insert(
+            (*key).to_owned(),
+            serde_json::value::RawValue::from_string((*value).to_owned()).unwrap(),
+        );
+    }
+    apply_passthrough_overrides_to_ir(&mut ir, Some(&map));
+    let mut buf = BytesMut::with_capacity(body.len());
+    gw_codec::openai::OpenAi
+        .render_request(&ir, &mut buf)
+        .unwrap();
+    buf.freeze()
 }
 
 pub fn cli_passthrough_body(
@@ -767,6 +934,42 @@ pub(crate) fn body_hash_u64(body: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod body_hash_tests {
     use super::*;
+    use bytes::BytesMut;
+    use gw_codec::ProtocolCodec;
+    use gw_core::entity::KeyStatus;
+    use gw_core::ids::{KeyId, ModelName, VendorId};
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+    use url::Url;
+
+    fn vendor_key_with_mapping(mapping: &[(&str, &str)]) -> VendorKey {
+        VendorKey {
+            key_id: KeyId::from("vk-test"),
+            vendor_id: VendorId::from("vendor-test"),
+            api_key: SecretString::new("secret".into()),
+            accessible_models: Vec::new(),
+            model_mapping: mapping
+                .iter()
+                .map(|(from, to)| (ModelName::from(*from), (*to).to_owned()))
+                .collect::<HashMap<_, _>>(),
+            accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
+            protocol_conversion: true,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None::<Url>,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: Vec::new(),
+            forced_capabilities: Vec::new(),
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+        }
+    }
 
     #[test]
     fn empty_input_returns_none() {
@@ -785,6 +988,226 @@ mod body_hash_tests {
         let first = body_hash_u64(b"test");
         let second = body_hash_u64(b"test");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn passthrough_override_helper_renders_overridden_model() {
+        let rendered = render_same_protocol_openai_with_passthrough_overrides_for_test(
+            br#"{"model":"client-model","messages":[{"role":"user","content":"hi"}]}"#,
+            &[("model", "\"upstream-model\"")],
+        );
+        let body: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
+        assert_eq!(
+            body.get("model").and_then(serde_json::Value::as_str),
+            Some("upstream-model")
+        );
+    }
+
+    #[test]
+    fn model_rewrite_skips_empty_default_upstream_model() {
+        let picked = vendor_key_with_mapping(&[("client-model", "")]);
+        assert!(model_rewrite(Some(&ModelName::from("client-model")), &picked).is_none());
+    }
+
+    #[test]
+    fn model_rewrite_sets_ir_model_and_override_when_mapping_differs() {
+        let picked = vendor_key_with_mapping(&[("client-model", "upstream-model")]);
+        let (upstream_model, overrides) =
+            model_rewrite(Some(&ModelName::from("client-model")), &picked).unwrap();
+
+        assert_eq!(upstream_model, "upstream-model");
+        assert_eq!(
+            overrides.get("model").map(|v| v.get()),
+            Some("\"upstream-model\"")
+        );
+    }
+
+    #[test]
+    fn same_protocol_passthrough_applies_model_rewrite() {
+        let picked = vendor_key_with_mapping(&[("client-model", "upstream-model")]);
+        let (_, overrides) =
+            model_rewrite(Some(&ModelName::from("client-model")), &picked).unwrap();
+        let rendered = render_same_protocol_openai_with_passthrough_overrides_for_test(
+            br#"{"model":"client-model","messages":[{"role":"user","content":"hi"}]}"#,
+            &[("model", overrides.get("model").unwrap().get())],
+        );
+        let body: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
+        assert_eq!(
+            body.get("model").and_then(serde_json::Value::as_str),
+            Some("upstream-model")
+        );
+    }
+
+    #[test]
+    fn cross_protocol_render_applies_model_rewrite() {
+        let picked = vendor_key_with_mapping(&[("client-model", "upstream-model")]);
+        let (_, overrides) =
+            model_rewrite(Some(&ModelName::from("client-model")), &picked).unwrap();
+        let mut ir = gw_codec::anthropic::Anthropic
+            .parse_request(br#"{"model":"client-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#)
+            .unwrap();
+        apply_passthrough_overrides_to_ir(&mut ir, Some(&overrides));
+        let mut buf = BytesMut::new();
+        gw_codec::openai::OpenAi
+            .render_request(&ir, &mut buf)
+            .unwrap();
+
+        let body: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(
+            body.get("model").and_then(serde_json::Value::as_str),
+            Some("upstream-model")
+        );
+    }
+}
+
+#[cfg(test)]
+mod body_rules_tests {
+    use super::*;
+    use gw_codec::ProtocolCodec;
+
+    fn make_body_rules(entries: &[(&str, &[(&str, &str)])]) -> BodyRulesMap {
+        entries
+            .iter()
+            .map(|(endpoint, kvs)| {
+                let inner: std::collections::HashMap<String, Box<serde_json::value::RawValue>> =
+                    kvs.iter()
+                        .map(|(k, v)| {
+                            (
+                                k.to_string(),
+                                serde_json::value::RawValue::from_string(v.to_string()).unwrap(),
+                            )
+                        })
+                        .collect();
+                (endpoint.to_string(), inner)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_config_no_op() {
+        let rules = BodyRulesMap::new();
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut ir = gw_codec::openai::OpenAi.parse_request(body).unwrap();
+        let injected = apply_body_rules(&mut ir, "/v1/chat/completions", &rules, body);
+        assert!(!injected);
+        assert!(ir.passthrough_overrides.is_none());
+    }
+
+    #[test]
+    fn field_exists_no_override() {
+        let rules = make_body_rules(&[("/v1/chat/completions", &[("temperature", "0.7")])]);
+        let body =
+            br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"temperature":0.3}"#;
+        let mut ir = gw_codec::openai::OpenAi.parse_request(body).unwrap();
+        assert!(ir.temperature.is_some());
+        let injected = apply_body_rules(&mut ir, "/v1/chat/completions", &rules, body);
+        assert!(!injected);
+        assert!(ir.passthrough_overrides.is_none());
+    }
+
+    #[test]
+    fn missing_field_gets_injected() {
+        let rules = make_body_rules(&[("/v1/chat/completions", &[("temperature", "0.7")])]);
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut ir = gw_codec::openai::OpenAi.parse_request(body).unwrap();
+        assert!(ir.temperature.is_none());
+        let injected = apply_body_rules(&mut ir, "/v1/chat/completions", &rules, body);
+        assert!(injected);
+        let overrides = ir.passthrough_overrides.as_ref().unwrap();
+        assert_eq!(overrides.get("temperature").unwrap().get(), "0.7");
+    }
+
+    #[test]
+    fn multi_field_partial_injection() {
+        let rules = make_body_rules(&[(
+            "/v1/chat/completions",
+            &[
+                ("temperature", "0.7"),
+                ("top_p", "0.9"),
+                ("custom_field", "\"custom_value\""),
+            ],
+        )]);
+        let body =
+            br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"temperature":0.3}"#;
+        let mut ir = gw_codec::openai::OpenAi.parse_request(body).unwrap();
+        let injected = apply_body_rules(&mut ir, "/v1/chat/completions", &rules, body);
+        assert!(injected);
+        let overrides = ir.passthrough_overrides.as_ref().unwrap();
+        assert!(
+            !overrides.contains_key("temperature"),
+            "temperature already set in IR, should not be in overrides"
+        );
+        assert_eq!(overrides.get("top_p").unwrap().get(), "0.9");
+        assert_eq!(
+            overrides.get("custom_field").unwrap().get(),
+            "\"custom_value\""
+        );
+    }
+
+    #[test]
+    fn unmatched_endpoint_no_injection() {
+        let rules = make_body_rules(&[("/v1/chat/completions", &[("temperature", "0.7")])]);
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut ir = gw_codec::openai::OpenAi.parse_request(body).unwrap();
+        let injected = apply_body_rules(&mut ir, "/v1/other/endpoint", &rules, body);
+        assert!(!injected);
+        assert!(ir.passthrough_overrides.is_none());
+    }
+
+    #[test]
+    fn raw_body_field_not_in_ir_prevents_override() {
+        let rules = make_body_rules(&[("/v1/chat/completions", &[("custom_key", "\"default\"")])]);
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"custom_key":"user_value"}"#;
+        let mut ir = gw_core::ir::RequestIR {
+            model: std::borrow::Cow::Borrowed("gpt-4"),
+            ..Default::default()
+        };
+        let injected = apply_body_rules(&mut ir, "/v1/chat/completions", &rules, body);
+        assert!(!injected);
+        assert!(ir.passthrough_overrides.is_none());
+    }
+
+    #[test]
+    fn body_rules_merge_with_existing_passthrough_overrides() {
+        let rules = make_body_rules(&[("/v1/chat/completions", &[("temperature", "0.7")])]);
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut ir = gw_codec::openai::OpenAi.parse_request(body).unwrap();
+        let mut existing = std::collections::HashMap::new();
+        existing.insert(
+            "model".to_owned(),
+            serde_json::value::RawValue::from_string("\"upstream-model\"".to_owned()).unwrap(),
+        );
+        ir.passthrough_overrides = Some(existing);
+        let injected = apply_body_rules(&mut ir, "/v1/chat/completions", &rules, body);
+        assert!(injected);
+        let overrides = ir.passthrough_overrides.as_ref().unwrap();
+        assert_eq!(
+            overrides.get("model").unwrap().get(),
+            "\"upstream-model\"",
+            "existing model override preserved"
+        );
+        assert_eq!(overrides.get("temperature").unwrap().get(), "0.7");
+    }
+
+    #[test]
+    fn body_rules_do_not_override_existing_passthrough_key() {
+        let rules = make_body_rules(&[("/v1/chat/completions", &[("model", "\"other-model\"")])]);
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut ir = gw_codec::openai::OpenAi.parse_request(body).unwrap();
+        let mut existing = std::collections::HashMap::new();
+        existing.insert(
+            "model".to_owned(),
+            serde_json::value::RawValue::from_string("\"upstream-model\"".to_owned()).unwrap(),
+        );
+        ir.passthrough_overrides = Some(existing);
+        let injected = apply_body_rules(&mut ir, "/v1/chat/completions", &rules, body);
+        assert!(!injected);
+        let overrides = ir.passthrough_overrides.as_ref().unwrap();
+        assert_eq!(
+            overrides.get("model").unwrap().get(),
+            "\"upstream-model\"",
+            "existing passthrough override not overwritten"
+        );
     }
 }
 
