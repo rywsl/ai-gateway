@@ -1,0 +1,22 @@
+[package]
+name = "gw-unified"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ailinkmax-gateway"
+path = "src/main.rs"
+
+[dependencies]
+gw-gateway = { path = "../gw-gateway" }
+gw-task-worker = { path = "../gw-task-worker" }
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true }
+anyhow.workspace = true
+tikv-jemallocator.workspace = true
+
+[features]
+default = []
+tunnel = ["gw-gateway/tunnel"]
