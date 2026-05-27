@@ -7,6 +7,7 @@
 //! available candidates.
 
 use super::*;
+use crate::pipeline::{CandidateFeatures, DimMask, ScoringPolicy};
 use sha2::{Digest, Sha256};
 
 pub struct CacheAffinity;
@@ -59,5 +60,15 @@ impl Strategy for CacheAffinity {
         // not into our temporary `available` vec.
         let chosen_key_id = &available[idx].key_id;
         c.iter().find(|k| &k.key_id == chosen_key_id)
+    }
+}
+
+impl ScoringPolicy for CacheAffinity {
+    fn needed_dims(&self, _ctx: &PickCtx<'_>) -> DimMask {
+        DimMask::HEALTH_ONLY
+    }
+
+    fn score(&self, features: &CandidateFeatures, _ctx: &PickCtx<'_>) -> f64 {
+        features.index as f64
     }
 }

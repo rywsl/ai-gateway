@@ -25,6 +25,12 @@ use gw_core::ids::KeyId;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InFlightSnapshot {
+    pub key_id: KeyId,
+    pub count: u32,
+}
+
 pub struct InFlightCounter {
     pub count: AtomicU32,
 }
@@ -52,6 +58,35 @@ impl InFlightStore {
 
     pub fn count(&self, k: &KeyId) -> u32 {
         self.get_or_create(k).count.load(Ordering::Relaxed)
+    }
+
+    pub fn count_if_present(&self, k: &KeyId) -> u32 {
+        self.by_key
+            .get(k)
+            .map(|counter| counter.count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub fn snapshot_counts<'a, I>(&self, keys: I) -> Vec<InFlightSnapshot>
+    where
+        I: IntoIterator<Item = &'a KeyId>,
+    {
+        keys.into_iter()
+            .map(|key_id| InFlightSnapshot {
+                key_id: key_id.clone(),
+                count: self.count_if_present(key_id),
+            })
+            .collect()
+    }
+
+    pub fn snapshot_existing(&self) -> Vec<InFlightSnapshot> {
+        self.by_key
+            .iter()
+            .map(|entry| InFlightSnapshot {
+                key_id: entry.key().clone(),
+                count: entry.value().count.load(Ordering::Relaxed),
+            })
+            .collect()
     }
 }
 

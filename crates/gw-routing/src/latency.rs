@@ -26,6 +26,14 @@ pub struct KeyLatencyState {
     last_computed: Mutex<Option<Instant>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LatencySnapshot {
+    pub key_id: KeyId,
+    pub format: ApiFormat,
+    pub p50_ttft_ms: Option<u64>,
+    pub error_rate_30s: f64,
+}
+
 impl Default for KeyLatencyState {
     fn default() -> Self {
         Self {
@@ -64,6 +72,61 @@ impl LatencyTracker {
             return 0.0;
         };
         state.error_rate_30s(Instant::now())
+    }
+
+    pub fn snapshot_for(&self, key_id: &KeyId, format: ApiFormat) -> LatencySnapshot {
+        let now = Instant::now();
+        let (p50_ttft_ms, error_rate_30s) = self
+            .by_key_format
+            .get(&(key_id.clone(), format))
+            .map(|state| state.snapshot(now))
+            .unwrap_or((None, 0.0));
+        LatencySnapshot {
+            key_id: key_id.clone(),
+            format,
+            p50_ttft_ms,
+            error_rate_30s,
+        }
+    }
+
+    pub fn snapshot_for_pairs<'a, I>(&self, pairs: I) -> Vec<LatencySnapshot>
+    where
+        I: IntoIterator<Item = (&'a KeyId, ApiFormat)>,
+    {
+        let now = Instant::now();
+        pairs
+            .into_iter()
+            .map(|(key_id, format)| {
+                let (p50_ttft_ms, error_rate_30s) = self
+                    .by_key_format
+                    .get(&(key_id.clone(), format))
+                    .map(|state| state.snapshot(now))
+                    .unwrap_or((None, 0.0));
+                LatencySnapshot {
+                    key_id: key_id.clone(),
+                    format,
+                    p50_ttft_ms,
+                    error_rate_30s,
+                }
+            })
+            .collect()
+    }
+
+    pub fn snapshot_existing(&self) -> Vec<LatencySnapshot> {
+        let now = Instant::now();
+        self.by_key_format
+            .iter()
+            .map(|entry| {
+                let (key_id, format) = entry.key();
+                let (p50_ttft_ms, error_rate_30s) = entry.value().snapshot(now);
+                LatencySnapshot {
+                    key_id: key_id.clone(),
+                    format: *format,
+                    p50_ttft_ms,
+                    error_rate_30s,
+                }
+            })
+            .collect()
     }
 
     pub fn evict_stale(&self, max_age: Duration) {
@@ -130,6 +193,10 @@ impl KeyLatencyState {
         }
         let errors = samples.iter().filter(|(_, is_error)| *is_error).count();
         errors as f64 / samples.len() as f64
+    }
+
+    fn snapshot(&self, now: Instant) -> (Option<u64>, f64) {
+        (self.p50_ttft_ms(now), self.error_rate_30s(now))
     }
 
     fn all_samples_older_than(&self, now: Instant, max_age: Duration) -> bool {

@@ -1,6 +1,8 @@
 //! `LatencyFirst` strategy: pick the available key with the lowest P50 TTFT.
 
 use super::*;
+use crate::pipeline::policies::LatencyFirstPolicy;
+use crate::pipeline::{CandidateFeatures, DimMask, ScoringPolicy, TiebreakStrategy};
 
 pub struct LatencyFirst;
 
@@ -13,32 +15,24 @@ impl Strategy for LatencyFirst {
         &self,
         candidates: &'a [Arc<VendorKey>],
         h: &KeyHealthStore,
-        _f: &InFlightStore,
+        f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
-        // Build (index, Option<p50_ms>) for each available candidate.
-        let mut scored: Vec<(usize, Option<u64>)> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(_, k)| h.is_available(&k.key_id, ctx.api_format))
-            .map(|(i, k)| {
-                let p50 = ctx.latency_tracker.p50_ttft_ms(&k.key_id, ctx.api_format);
-                (i, p50)
-            })
-            .collect();
+        crate::pipeline::execute(self, candidates, h, f, ctx)
+    }
+}
 
-        // Sort: keys with P50 data first (ascending), then keys without data (cold start).
-        // Tie-break: higher priority wins (descending).
-        scored.sort_by(|a, b| match (a.1, b.1) {
-            (Some(pa), Some(pb)) => pa
-                .cmp(&pb)
-                .then_with(|| candidates[b.0].priority.cmp(&candidates[a.0].priority)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => candidates[b.0].priority.cmp(&candidates[a.0].priority),
-        });
+impl ScoringPolicy for LatencyFirst {
+    fn needed_dims(&self, ctx: &PickCtx<'_>) -> DimMask {
+        LatencyFirstPolicy.needed_dims(ctx)
+    }
 
-        scored.first().map(|(i, _)| &candidates[*i])
+    fn score(&self, features: &CandidateFeatures, ctx: &PickCtx<'_>) -> f64 {
+        LatencyFirstPolicy.score(features, ctx)
+    }
+
+    fn tiebreak(&self) -> TiebreakStrategy {
+        TiebreakStrategy::PriorityDesc
     }
 }
 
@@ -104,6 +98,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: None,
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
 
         let picked = LatencyFirst.pick(&keys, &h, &f, &ctx).unwrap();
@@ -126,6 +122,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: None,
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
 
         let picked = LatencyFirst.pick(&keys, &h, &f, &ctx).unwrap();
@@ -163,6 +161,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: None,
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
         let picked = LatencyFirst.pick(&keys, &h, &f, &ctx).unwrap();
         assert_eq!(picked.key_id.as_ref(), "b");
@@ -187,6 +187,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: None,
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
 
         let picked = LatencyFirst.pick(&keys, &h, &f, &ctx).unwrap();

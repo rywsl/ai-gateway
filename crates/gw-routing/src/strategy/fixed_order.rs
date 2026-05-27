@@ -2,6 +2,8 @@
 //! first one that is still available (per `KeyHealthStore::is_available`).
 
 use super::*;
+use crate::pipeline::policies::FixedOrderPolicy;
+use crate::pipeline::{DimMask, ScoringPolicy};
 
 pub struct FixedOrder;
 
@@ -14,17 +16,19 @@ impl Strategy for FixedOrder {
         &self,
         candidates: &'a [Arc<VendorKey>],
         h: &KeyHealthStore,
-        _f: &InFlightStore,
+        f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
-        let mut sorted: Vec<_> = candidates.iter().enumerate().collect();
-        // priority desc — `priority` field is "higher = more preferred" per gw-core::entity.
-        sorted.sort_by_key(|(_, k)| -k.priority);
-        for (i, _) in &sorted {
-            if h.is_available(&candidates[*i].key_id, ctx.api_format) {
-                return Some(&candidates[*i]);
-            }
-        }
-        None
+        crate::pipeline::execute(self, candidates, h, f, ctx)
+    }
+}
+
+impl ScoringPolicy for FixedOrder {
+    fn needed_dims(&self, ctx: &PickCtx<'_>) -> DimMask {
+        FixedOrderPolicy.needed_dims(ctx)
+    }
+
+    fn score(&self, features: &crate::pipeline::CandidateFeatures, ctx: &PickCtx<'_>) -> f64 {
+        FixedOrderPolicy.score(features, ctx)
     }
 }

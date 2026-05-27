@@ -77,6 +77,8 @@ fn bench_strategy_pick(c: &mut Criterion) {
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
         pricing: None,
         latency_tracker: &LatencyTracker::new(),
+        reservation_view: None,
+        frequency_tracker: None,
     };
     let ctx_with_hash = PickCtx {
         user_id: &uid,
@@ -86,12 +88,15 @@ fn bench_strategy_pick(c: &mut Criterion) {
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
         pricing: None,
         latency_tracker: &LatencyTracker::new(),
+        reservation_view: None,
+        frequency_tracker: None,
     };
 
+    use gw_routing::pipeline::multi_dim::DimWeights;
     use gw_routing::strategy::{
         cache_affinity::CacheAffinity, cost_first::CostFirst, fixed_order::FixedOrder,
-        latency_first::LatencyFirst, load_balance::LoadBalance, round_robin::RoundRobin,
-        sticky::Sticky, weighted_rr::WeightedRr,
+        latency_first::LatencyFirst, load_balance::LoadBalance, multi_dim::MultiDim,
+        round_robin::RoundRobin, sticky::Sticky, weighted_rr::WeightedRr,
     };
 
     c.bench_function("fixed_order_pick_8", |b| {
@@ -193,6 +198,19 @@ fn bench_strategy_pick(c: &mut Criterion) {
                 black_box(&health),
                 black_box(&in_flight),
                 black_box(&ctx_with_hash),
+            );
+            black_box(picked);
+        });
+    });
+
+    c.bench_function("multi_dim_pick_8", |b| {
+        let s = MultiDim::new("balanced", DimWeights::raw(0.25, 0.25, 0.25, 0.15, 0.10));
+        b.iter(|| {
+            let picked = s.pick(
+                black_box(&keys),
+                black_box(&health),
+                black_box(&in_flight),
+                black_box(&ctx_no_hash),
             );
             black_box(picked);
         });

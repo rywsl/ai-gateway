@@ -16,9 +16,13 @@ pub mod candidates;
 pub mod failover;
 pub mod in_flight;
 pub mod latency;
+pub mod pipeline;
+pub mod reservation;
+pub mod reservation_gate;
 pub mod strategy;
 
 pub use failover::{classify_for_failover, FailoverClass, FailoverDecision, FailoverExecutor};
 pub use in_flight::{InFlightCounter, InFlightGuard, InFlightStore};
 pub use latency::LatencyTracker;
+pub use reservation::{GlobalModelView, ModelFrequencyTracker, ReservationGlobalView};
 pub use strategy::{PickCtx, Strategy, StrategyAny};

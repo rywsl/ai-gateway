@@ -3,6 +3,7 @@
 //! positions before giving up.
 
 use super::*;
+use crate::pipeline::{CandidateFeatures, DimMask, ScoringPolicy};
 use dashmap::DashMap;
 use gw_core::ids::ModelName;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,5 +52,24 @@ impl Strategy for RoundRobin {
             }
         }
         None
+    }
+}
+
+impl ScoringPolicy for RoundRobin {
+    fn needed_dims(&self, _ctx: &PickCtx<'_>) -> DimMask {
+        DimMask::HEALTH_ONLY
+    }
+
+    fn score(&self, features: &CandidateFeatures, ctx: &PickCtx<'_>) -> f64 {
+        let counter = self
+            .counters
+            .entry(ctx.model.clone())
+            .or_insert_with(|| AtomicUsize::new(0));
+        let target = counter.fetch_add(1, Ordering::Relaxed) % (features.index + 1).max(1);
+        if features.index == target {
+            0.0
+        } else {
+            1.0
+        }
     }
 }

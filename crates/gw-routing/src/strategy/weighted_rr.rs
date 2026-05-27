@@ -10,6 +10,7 @@
 //! eventually-consistent SWRR (no key is starved indefinitely).
 
 use super::*;
+use crate::pipeline::{CandidateFeatures, DimMask, ScoringPolicy};
 use dashmap::DashMap;
 use gw_core::ids::{KeyId, ModelName};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -93,5 +94,19 @@ impl Strategy for WeightedRr {
             cur.fetch_sub(total, Ordering::Relaxed);
         }
         Some(&c[i])
+    }
+}
+
+impl ScoringPolicy for WeightedRr {
+    fn needed_dims(&self, _ctx: &PickCtx<'_>) -> DimMask {
+        DimMask::HEALTH_ONLY
+    }
+
+    fn score(&self, features: &CandidateFeatures, ctx: &PickCtx<'_>) -> f64 {
+        let cur = self
+            .current
+            .entry((ctx.model.clone(), features.key.key_id.clone()))
+            .or_insert_with(|| AtomicI32::new(0));
+        -(cur.load(Ordering::Relaxed) as f64)
     }
 }

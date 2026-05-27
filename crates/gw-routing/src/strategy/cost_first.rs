@@ -5,6 +5,8 @@
 //! priority-descending ordering (identical to the v1 behaviour).
 
 use super::*;
+use crate::pipeline::policies::CostFirstPolicy;
+use crate::pipeline::{CandidateFeatures, DimMask, ScoringPolicy};
 
 pub struct CostFirst;
 
@@ -17,30 +19,20 @@ impl Strategy for CostFirst {
         &self,
         candidates: &'a [Arc<VendorKey>],
         h: &KeyHealthStore,
-        _f: &InFlightStore,
+        f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
-        let markup = ctx.pricing.map(|p| p.model_markup).unwrap_or(1.0);
+        crate::pipeline::execute(self, candidates, h, f, ctx)
+    }
+}
 
-        let mut scored: Vec<(usize, f32)> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(_, k)| h.is_available(&k.key_id, ctx.api_format))
-            .map(|(i, k)| {
-                let cost = k.priority as f32 * markup;
-                (i, cost)
-            })
-            .collect();
+impl ScoringPolicy for CostFirst {
+    fn needed_dims(&self, ctx: &PickCtx<'_>) -> DimMask {
+        CostFirstPolicy.needed_dims(ctx)
+    }
 
-        if ctx.pricing.is_some() {
-            // With pricing: ascending by priority * markup (lower = cheaper).
-            scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        } else {
-            // Without pricing: priority descending (higher = preferred, v1 fallback).
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        }
-
-        scored.first().map(|(i, _)| &candidates[*i])
+    fn score(&self, features: &CandidateFeatures, ctx: &PickCtx<'_>) -> f64 {
+        CostFirstPolicy.score(features, ctx)
     }
 }
 
@@ -111,6 +103,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: Some(&pricing),
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
 
         let picked = strategy.pick(&candidates, &health, &inflight, &ctx);
@@ -138,6 +132,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: None,
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
 
         let picked = strategy.pick(&candidates, &health, &inflight, &ctx);
@@ -185,6 +181,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: Some(&pricing),
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
 
         let picked = strategy.pick(&candidates, &health, &inflight, &ctx);

@@ -12,6 +12,7 @@
 //! the same map.
 
 use super::*;
+use crate::pipeline::{CandidateFeatures, DimMask, ScoringPolicy};
 use gw_core::ids::KeyId;
 use moka::sync::Cache;
 use sha2::{Digest, Sha256};
@@ -120,5 +121,15 @@ impl Strategy for Sticky {
             .insert(conv.to_string(), chosen.key_id.clone());
         metrics::counter!("gw_sticky_bind_total").increment(1);
         c.iter().find(|k| k.key_id == chosen.key_id)
+    }
+}
+
+impl ScoringPolicy for Sticky {
+    fn needed_dims(&self, _ctx: &PickCtx<'_>) -> DimMask {
+        DimMask::HEALTH_ONLY
+    }
+
+    fn score(&self, features: &CandidateFeatures, _ctx: &PickCtx<'_>) -> f64 {
+        features.index as f64
     }
 }

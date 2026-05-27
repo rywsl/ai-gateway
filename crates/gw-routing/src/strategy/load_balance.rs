@@ -2,18 +2,11 @@
 //! score `α·in_flight_ratio + β·p50_ttft_norm + γ·error_rate`.
 
 use super::*;
-use std::sync::atomic::Ordering;
-
-/// Per-key in-flight cap used for normalization (same as candidates.rs).
-const PER_KEY_INFLIGHT_CAP: f32 = 1024.0;
-
-/// Three-dimension weight coefficients (spec R-AB).
-const ALPHA: f32 = 0.40;
-const BETA: f32 = 0.35;
-const GAMMA: f32 = 0.25;
-
-/// Neutral value used when the P50 dimension has no data (cold start).
-const NEUTRAL: f32 = 0.5;
+use crate::pipeline::policies::{
+    LoadBalancePolicy, LOAD_BALANCE_ALPHA, LOAD_BALANCE_BETA, LOAD_BALANCE_GAMMA,
+    PER_KEY_INFLIGHT_CAP,
+};
+use crate::pipeline::{CandidateFeatures, DimMask, ScoringPolicy};
 
 pub struct LoadBalance;
 
@@ -29,48 +22,33 @@ impl Strategy for LoadBalance {
         f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
-        let mut entries: Vec<(usize, f32, Option<u64>, f64)> = Vec::new();
-        for (i, k) in c.iter().enumerate() {
-            if !h.is_available(&k.key_id, ctx.api_format) {
-                continue;
-            }
-            let in_flight = f.get_or_create(&k.key_id).count.load(Ordering::Relaxed) as f32;
-            let p50 = ctx.latency_tracker.p50_ttft_ms(&k.key_id, ctx.api_format);
-            let err = ctx
-                .latency_tracker
-                .error_rate_30s(&k.key_id, ctx.api_format);
-            entries.push((i, in_flight, p50, err));
-        }
-
-        if entries.is_empty() {
+        let features = crate::pipeline::extract(c, h, f, ctx, self.needed_dims(ctx));
+        if features.is_empty() {
             return None;
         }
 
-        let max_p50 = entries
+        let max_p50 = features
             .iter()
-            .filter_map(|(_, _, p, _)| *p)
+            .filter_map(|feature| feature.latency_p50)
             .max()
-            .unwrap_or(1) as f32;
-        let max_p50 = if max_p50 > 0.0 { max_p50 } else { 1.0 };
+            .unwrap_or(1) as f64;
+        let policy = LoadBalancePolicy::new(max_p50);
+        crate::pipeline::pick_best_index(&policy, &features, ctx).map(|i| &c[i])
+    }
+}
 
-        let mut best: Option<(f32, usize)> = None;
-        for &(i, in_flight, p50, err) in &entries {
-            let in_flight_ratio = in_flight / PER_KEY_INFLIGHT_CAP;
-            let p50_norm = match p50 {
-                Some(ms) => ms as f32 / max_p50,
-                None => NEUTRAL,
-            };
-            let error_rate = err as f32;
+impl ScoringPolicy for LoadBalance {
+    fn needed_dims(&self, _ctx: &PickCtx<'_>) -> DimMask {
+        DimMask::HEALTH
+            .union(DimMask::INFLIGHT)
+            .union(DimMask::LATENCY)
+            .union(DimMask::ERROR_RATE)
+    }
 
-            let score = ALPHA * in_flight_ratio + BETA * p50_norm + GAMMA * error_rate;
-
-            match best {
-                Some((bs, _)) if bs <= score => {}
-                _ => best = Some((score, i)),
-            }
-        }
-
-        best.map(|(_, i)| &c[i])
+    fn score(&self, features: &CandidateFeatures, _ctx: &PickCtx<'_>) -> f64 {
+        LOAD_BALANCE_ALPHA * (features.in_flight as f64 / PER_KEY_INFLIGHT_CAP)
+            + LOAD_BALANCE_BETA * features.latency_p50.map(|ms| ms as f64).unwrap_or(0.0)
+            + LOAD_BALANCE_GAMMA * features.error_rate_30s
     }
 }
 
@@ -150,6 +128,8 @@ mod tests {
             api_format: fmt,
             pricing: None,
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
         let picked = LoadBalance.pick(&keys, &h, &f, &ctx).unwrap();
         assert_eq!(
@@ -185,6 +165,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: None,
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
         let picked = LoadBalance.pick(&keys, &h, &f, &ctx).unwrap();
         assert_eq!(
@@ -210,6 +192,8 @@ mod tests {
             api_format: ProtocolKind::OpenAi,
             pricing: None,
             latency_tracker: &lt,
+            reservation_view: None,
+            frequency_tracker: None,
         };
         assert!(LoadBalance.pick(&keys, &h, &f, &ctx).is_none());
     }

@@ -20,6 +20,7 @@ moka.workspace = true
 rand.workspace = true
 sha2.workspace = true
 secrecy.workspace = true
+fred.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
