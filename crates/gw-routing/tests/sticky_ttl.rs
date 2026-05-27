@@ -54,6 +54,8 @@ fn pick_with_conv(sticky: &Sticky, keys: &[Arc<VendorKey>], conv: &str) {
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
         pricing: None,
         latency_tracker: &lt,
+        reservation_view: None,
+        frequency_tracker: None,
     };
     let _ = sticky.pick(keys, &h, &f, &ctx);
 }

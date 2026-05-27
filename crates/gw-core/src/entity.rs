@@ -230,7 +230,7 @@ impl std::fmt::Debug for VendorKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyKind {
     CacheAffinity,
@@ -241,6 +241,7 @@ pub enum StrategyKind {
     LatencyFirst,
     WeightedRr,
     Sticky,
+    MultiDim(String),
 }
 
 #[derive(Clone, Debug, Deserialize)]

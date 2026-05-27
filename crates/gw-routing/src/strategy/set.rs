@@ -32,11 +32,13 @@ use crate::strategy::cost_first::CostFirst;
 use crate::strategy::fixed_order::FixedOrder;
 use crate::strategy::latency_first::LatencyFirst;
 use crate::strategy::load_balance::LoadBalance;
+use crate::strategy::multi_dim::MultiDim;
 use crate::strategy::round_robin::RoundRobin;
 use crate::strategy::sticky::{Sticky, DEFAULT_STICKY_CAP, DEFAULT_STICKY_TTL_SECS};
 use crate::strategy::weighted_rr::WeightedRr;
 use crate::strategy::StrategyAny;
 use gw_core::entity::StrategyKind;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// One instance of each of the 8 strategy variants, owned for the lifetime of
@@ -55,6 +57,7 @@ pub struct StrategySet {
     cache_affinity: StrategyAny,
     /// T2-C migrates this to moka-backed shared state.
     sticky: StrategyAny,
+    multi_dim: HashMap<String, StrategyAny>,
 }
 
 impl StrategySet {
@@ -65,6 +68,23 @@ impl StrategySet {
     /// All other strategies use their existing defaults — only `Sticky`
     /// reads a configurable knob in v1.
     pub fn new(sticky_ttl: Duration) -> Self {
+        Self::new_with_presets(sticky_ttl, HashMap::new())
+    }
+
+    pub fn new_with_presets(
+        sticky_ttl: Duration,
+        presets: HashMap<String, crate::pipeline::multi_dim::DimWeights>,
+    ) -> Self {
+        let multi_dim = presets
+            .into_iter()
+            .map(|(name, weights)| {
+                let strategy_name = name.clone();
+                (
+                    name,
+                    StrategyAny::MultiDim(MultiDim::new(strategy_name, weights)),
+                )
+            })
+            .collect();
         Self {
             fixed_order: StrategyAny::FixedOrder(FixedOrder),
             round_robin: StrategyAny::RoundRobin(RoundRobin::default()),
@@ -74,6 +94,7 @@ impl StrategySet {
             latency_first: StrategyAny::LatencyFirst(LatencyFirst),
             cache_affinity: StrategyAny::CacheAffinity(CacheAffinity),
             sticky: StrategyAny::Sticky(Sticky::new_with_ttl(sticky_ttl, DEFAULT_STICKY_CAP)),
+            multi_dim,
         }
     }
 
@@ -95,7 +116,7 @@ impl StrategySet {
     /// Returns `&StrategyAny` (not `&dyn Strategy`) to stay on enum dispatch
     /// — same shape that the legacy `strategy_for(kind) -> StrategyAny`
     /// factory in `gw-proxy/src/filters/upstream.rs` produces.
-    pub fn pick_for(&self, kind: StrategyKind) -> &StrategyAny {
+    pub fn pick_for(&self, kind: &StrategyKind) -> &StrategyAny {
         match kind {
             StrategyKind::FixedOrder => &self.fixed_order,
             StrategyKind::RoundRobin => &self.round_robin,
@@ -105,6 +126,10 @@ impl StrategySet {
             StrategyKind::LatencyFirst => &self.latency_first,
             StrategyKind::CacheAffinity => &self.cache_affinity,
             StrategyKind::Sticky => &self.sticky,
+            StrategyKind::MultiDim(preset) => self
+                .multi_dim
+                .get(preset)
+                .unwrap_or_else(|| panic!("unknown multi_dim routing preset: {preset}")),
         }
     }
 }

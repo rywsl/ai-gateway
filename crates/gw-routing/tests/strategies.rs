@@ -50,6 +50,8 @@ fn fixed_order_picks_highest_priority() {
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
         pricing: None,
         latency_tracker: &lt,
+        reservation_view: None,
+        frequency_tracker: None,
     };
     let picked = FixedOrder.pick(&keys, &h, &f, &ctx).unwrap();
     assert_eq!(picked.key_id.as_ref(), "b");
@@ -71,6 +73,8 @@ fn round_robin_rotates_through_three_keys() {
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
         pricing: None,
         latency_tracker: &lt,
+        reservation_view: None,
+        frequency_tracker: None,
     };
     let p1 = rr.pick(&keys, &h, &f, &ctx).unwrap().key_id.clone();
     let p2 = rr.pick(&keys, &h, &f, &ctx).unwrap().key_id.clone();
@@ -97,6 +101,8 @@ fn cost_first_picks_highest_priority_proxy() {
         api_format: gw_core::protocol::ProtocolKind::OpenAi,
         pricing: None,
         latency_tracker: &lt,
+        reservation_view: None,
+        frequency_tracker: None,
     };
     let picked = CostFirst.pick(&keys, &h, &f, &ctx).unwrap();
     assert_eq!(picked.key_id.as_ref(), "b");

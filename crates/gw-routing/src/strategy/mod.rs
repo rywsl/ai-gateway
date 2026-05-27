@@ -3,6 +3,8 @@
 
 use crate::in_flight::InFlightStore;
 use crate::latency::LatencyTracker;
+use crate::pipeline;
+use crate::reservation::{ModelFrequencyTracker, ReservationGlobalView};
 use gw_core::entity::Pricing;
 use gw_core::entity::VendorKey;
 use gw_core::ids::*;
@@ -15,6 +17,7 @@ pub mod cost_first;
 pub mod fixed_order;
 pub mod latency_first;
 pub mod load_balance;
+pub mod multi_dim;
 pub mod round_robin;
 pub mod set;
 pub mod sticky;
@@ -32,6 +35,8 @@ pub struct PickCtx<'a> {
     pub pricing: Option<&'a Pricing>,
     /// Shared latency tracker for latency/error-aware strategies.
     pub latency_tracker: &'a LatencyTracker,
+    pub reservation_view: Option<&'a ReservationGlobalView>,
+    pub frequency_tracker: Option<&'a ModelFrequencyTracker>,
 }
 
 /// Pluggable selection strategy. Implementors must be `Send + Sync` because the
@@ -58,6 +63,7 @@ pub enum StrategyAny {
     LatencyFirst(latency_first::LatencyFirst),
     CacheAffinity(cache_affinity::CacheAffinity),
     Sticky(sticky::Sticky),
+    MultiDim(multi_dim::MultiDim),
 }
 
 impl Strategy for StrategyAny {
@@ -71,6 +77,7 @@ impl Strategy for StrategyAny {
             StrategyAny::LatencyFirst(s) => s.name(),
             StrategyAny::CacheAffinity(s) => s.name(),
             StrategyAny::Sticky(s) => s.name(),
+            StrategyAny::MultiDim(s) => s.name(),
         }
     }
 
@@ -81,15 +88,19 @@ impl Strategy for StrategyAny {
         f: &InFlightStore,
         ctx: &PickCtx<'_>,
     ) -> Option<&'a Arc<VendorKey>> {
+        if let Some(tracker) = ctx.frequency_tracker {
+            tracker.record_pick(ctx.model.as_ref());
+        }
         match self {
-            StrategyAny::FixedOrder(s) => s.pick(c, h, f, ctx),
+            StrategyAny::FixedOrder(s) => pipeline::execute(s, c, h, f, ctx),
             StrategyAny::RoundRobin(s) => s.pick(c, h, f, ctx),
             StrategyAny::LoadBalance(s) => s.pick(c, h, f, ctx),
             StrategyAny::WeightedRr(s) => s.pick(c, h, f, ctx),
-            StrategyAny::CostFirst(s) => s.pick(c, h, f, ctx),
-            StrategyAny::LatencyFirst(s) => s.pick(c, h, f, ctx),
+            StrategyAny::CostFirst(s) => pipeline::execute(s, c, h, f, ctx),
+            StrategyAny::LatencyFirst(s) => pipeline::execute(s, c, h, f, ctx),
             StrategyAny::CacheAffinity(s) => s.pick(c, h, f, ctx),
             StrategyAny::Sticky(s) => s.pick(c, h, f, ctx),
+            StrategyAny::MultiDim(s) => pipeline::execute(s, c, h, f, ctx),
         }
     }
 }
