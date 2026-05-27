@@ -9,10 +9,12 @@
 
 pub mod cooldown;
 pub mod format_health;
+pub mod quota_probe;
 pub mod sliding_window;
 pub mod store;
 
 pub use cooldown::{CircuitState, CooldownDirective, CooldownReason};
 pub use format_health::FormatHealth;
+pub use quota_probe::{ProbeResult, ProbeTransport, QuotaProbeCfg, QuotaProbeRunner};
 pub use sliding_window::SlidingWindow;
 pub use store::{HealthSnapshot, KeyHealthStore, OutcomeKind};

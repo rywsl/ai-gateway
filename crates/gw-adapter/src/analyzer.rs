@@ -83,7 +83,14 @@ impl DefaultErrorAnalyzer {
         let outcome = self.analyze(status, body_head, headers);
         if status == 429 {
             let header_limit = rate_limit_header(headers);
-            adaptive_rpm.observe_429(key_id, configured_rpm, header_limit, current_local_rpm);
+            let retry_after = retry_after_header(headers);
+            adaptive_rpm.observe_429(
+                key_id,
+                configured_rpm,
+                header_limit,
+                current_local_rpm,
+                retry_after,
+            );
         }
         outcome
     }
@@ -102,6 +109,12 @@ fn rate_limit_header(headers: &dyn HeaderView) -> Option<u32> {
             .get(name)
             .and_then(|value| value.parse::<u32>().ok())
     })
+}
+
+fn retry_after_header(headers: &dyn HeaderView) -> Option<u32> {
+    headers
+        .get("retry-after")
+        .and_then(|s| s.parse::<u32>().ok())
 }
 
 impl UpstreamErrorAnalyzer for DefaultErrorAnalyzer {

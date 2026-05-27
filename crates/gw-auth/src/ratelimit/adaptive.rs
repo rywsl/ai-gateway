@@ -25,17 +25,20 @@ impl AdaptiveRpmManager {
     ///
     /// `header_limit` may contain the upstream `x-ratelimit-limit` header value.
     /// `current_local_rpm` is the current request rate from this gateway instance.
+    /// `retry_after_secs` carries the parsed `Retry-After` header when present;
+    /// a non-`None` value uses the faster `min_header_observations` threshold.
     pub fn observe_429(
         &self,
         key_id: &KeyId,
         configured_rpm: u32,
         header_limit: Option<u32>,
         current_local_rpm: u32,
+        retry_after_secs: Option<u32>,
     ) {
         metrics::counter!("gw_adaptive_rpm_observe_total").increment(1);
         let now = now_ms();
         let observed_limit = header_limit.unwrap_or(current_local_rpm);
-        let required_observations = if header_limit.is_some() {
+        let required_observations = if header_limit.is_some() || retry_after_secs.is_some() {
             self.cfg.min_header_observations
         } else {
             self.cfg.min_no_header_observations

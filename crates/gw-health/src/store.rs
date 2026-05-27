@@ -11,6 +11,26 @@ use gw_core::protocol::ApiFormat;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn health_snapshot(h: &FormatHealth, now: u64) -> HealthSnapshot {
+    let (_n, rate) = h.failure_window.lock().failure_rate();
+    let cooldown_deadline = h.cooldown_until_ms.load(Ordering::Acquire);
+    HealthSnapshot {
+        circuit: CircuitState::from_u8(h.circuit.load(Ordering::Acquire)),
+        in_cooldown: cooldown_deadline > now,
+        cooldown_until_ms: (cooldown_deadline > 0).then_some(cooldown_deadline),
+        cooldown_reason: CooldownReason::from_u16(h.cooldown_reason.load(Ordering::Acquire)),
+        failure_rate_30s: rate,
+        consecutive_failures: h.consecutive_failures.load(Ordering::Acquire),
+    }
+}
+
 #[derive(Default)]
 pub struct KeyHealthStore {
     pub by_key_format: DashMap<(KeyId, ApiFormat), Arc<FormatHealth>>,
@@ -25,6 +45,13 @@ pub struct HealthSnapshot {
     pub cooldown_reason: CooldownReason,
     pub failure_rate_30s: f32,
     pub consecutive_failures: u32,
+}
+
+pub struct KeyHealthEntrySnapshot {
+    pub key_id: KeyId,
+    pub format: ApiFormat,
+    pub available: bool,
+    pub health: HealthSnapshot,
 }
 
 /// Outcome passed to [`KeyHealthStore::record`].
@@ -51,28 +78,55 @@ impl KeyHealthStore {
 
     pub fn peek(&self, key: &KeyId, fmt: ApiFormat) -> HealthSnapshot {
         let h = self.get_or_create(key, fmt);
-        let (_n, rate) = h.failure_window.lock().failure_rate();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let cooldown_deadline = h.cooldown_until_ms.load(Ordering::Acquire);
-        HealthSnapshot {
-            circuit: CircuitState::from_u8(h.circuit.load(Ordering::Acquire)),
-            in_cooldown: cooldown_deadline > now,
-            cooldown_until_ms: (cooldown_deadline > 0).then_some(cooldown_deadline),
-            cooldown_reason: CooldownReason::from_u16(h.cooldown_reason.load(Ordering::Acquire)),
-            failure_rate_30s: rate,
-            consecutive_failures: h.consecutive_failures.load(Ordering::Acquire),
-        }
+        health_snapshot(&h, current_epoch_ms())
+    }
+
+    pub fn snapshot_for_pairs<'a, I>(&self, pairs: I) -> Vec<KeyHealthEntrySnapshot>
+    where
+        I: IntoIterator<Item = (&'a KeyId, ApiFormat)>,
+    {
+        let now = current_epoch_ms();
+        pairs
+            .into_iter()
+            .map(|(key_id, format)| {
+                let h = self.get_or_create(key_id, format);
+                KeyHealthEntrySnapshot {
+                    key_id: key_id.clone(),
+                    format,
+                    available: h.is_available(),
+                    health: health_snapshot(&h, now),
+                }
+            })
+            .collect()
+    }
+
+    pub fn snapshot_entries(&self) -> Vec<KeyHealthEntrySnapshot> {
+        let now = current_epoch_ms();
+        self.by_key_format
+            .iter()
+            .map(|entry| {
+                let (key_id, format) = entry.key();
+                let h = entry.value();
+                KeyHealthEntrySnapshot {
+                    key_id: key_id.clone(),
+                    format: *format,
+                    available: h.is_available(),
+                    health: health_snapshot(h, now),
+                }
+            })
+            .collect()
+    }
+
+    pub fn snapshot_entries_for_key(&self, key_id: &str) -> Vec<KeyHealthEntrySnapshot> {
+        self.snapshot_entries()
+            .into_iter()
+            .filter(|entry| entry.key_id.as_ref() == key_id)
+            .collect()
     }
 
     pub fn record(&self, key: &KeyId, fmt: ApiFormat, outcome: OutcomeKind) {
         let ok = matches!(outcome, OutcomeKind::Success);
         self.get_or_create(key, fmt).record(ok);
-        // Phase 4 + K-B may layer retry_after_secs / status into the directive
-        // path. v1 ignores them at the record() call site — directives come
-        // through apply_cooldown() instead.
         let _ = outcome;
     }
 

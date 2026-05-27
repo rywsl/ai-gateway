@@ -68,10 +68,10 @@ fn test_observe_429_with_header_learns_after_2() {
     let manager = AdaptiveRpmManager::new(AdaptiveCfg::default());
     let key_id = KeyId::from("vendor-key-header");
 
-    manager.observe_429(&key_id, 120, Some(60), 120);
+    manager.observe_429(&key_id, 120, Some(60), 120, None);
     assert_eq!(manager.state.get(&key_id).unwrap().learned_rpm, None);
 
-    manager.observe_429(&key_id, 120, Some(60), 120);
+    manager.observe_429(&key_id, 120, Some(60), 120, None);
     let state = manager.state.get(&key_id).unwrap();
 
     assert_eq!(state.configured_rpm, 120);
@@ -87,11 +87,11 @@ fn test_observe_429_without_header_learns_after_3() {
     let manager = AdaptiveRpmManager::new(AdaptiveCfg::default());
     let key_id = KeyId::from("vendor-key-no-header");
 
-    manager.observe_429(&key_id, 240, None, 90);
-    manager.observe_429(&key_id, 240, None, 90);
+    manager.observe_429(&key_id, 240, None, 90, None);
+    manager.observe_429(&key_id, 240, None, 90, None);
     assert_eq!(manager.state.get(&key_id).unwrap().learned_rpm, None);
 
-    manager.observe_429(&key_id, 240, None, 90);
+    manager.observe_429(&key_id, 240, None, 90, None);
     let state = manager.state.get(&key_id).unwrap();
 
     assert_eq!(state.learned_rpm, Some(90));
@@ -105,8 +105,8 @@ fn test_observe_429_inconsistent_resets() {
     let manager = AdaptiveRpmManager::new(AdaptiveCfg::default());
     let key_id = KeyId::from("vendor-key-inconsistent");
 
-    manager.observe_429(&key_id, 120, Some(60), 120);
-    manager.observe_429(&key_id, 120, Some(75), 120);
+    manager.observe_429(&key_id, 120, Some(60), 120, None);
+    manager.observe_429(&key_id, 120, Some(75), 120, None);
     let state = manager.state.get(&key_id).unwrap();
 
     assert_eq!(state.learned_rpm, None);
@@ -120,8 +120,8 @@ fn test_aimd_multiplicative_decrease() {
     let manager = AdaptiveRpmManager::new(AdaptiveCfg::default());
     let key_id = KeyId::from("vendor-key-aimd");
 
-    manager.observe_429(&key_id, 120, Some(60), 120);
-    manager.observe_429(&key_id, 120, Some(60), 120);
+    manager.observe_429(&key_id, 120, Some(60), 120, None);
+    manager.observe_429(&key_id, 120, Some(60), 120, None);
 
     assert_eq!(manager.should_enforce(&key_id), Some(51));
 }
@@ -136,7 +136,7 @@ fn test_enforcement_below_threshold_skips() {
     let manager = AdaptiveRpmManager::new(cfg);
     let key_id = KeyId::from("vendor-key-below-threshold");
 
-    manager.observe_429(&key_id, 120, Some(60), 120);
+    manager.observe_429(&key_id, 120, Some(60), 120, None);
 
     assert_eq!(manager.state.get(&key_id).unwrap().learned_rpm, Some(60));
     assert_eq!(manager.should_enforce(&key_id), None);
@@ -152,7 +152,7 @@ fn test_enforcement_above_threshold_enforces() {
     let manager = AdaptiveRpmManager::new(cfg);
     let key_id = KeyId::from("vendor-key-above-threshold");
 
-    manager.observe_429(&key_id, 120, Some(80), 120);
+    manager.observe_429(&key_id, 120, Some(80), 120, None);
 
     assert_eq!(manager.should_enforce(&key_id), Some(68));
 }
@@ -235,8 +235,8 @@ fn test_tick_decay_below_zero_clamps() {
 fn test_evict_removes_key() {
     let manager = AdaptiveRpmManager::new(AdaptiveCfg::default());
     let key_id = KeyId::from("vendor-key-evict");
-    manager.observe_429(&key_id, 120, Some(80), 120);
-    manager.observe_429(&key_id, 120, Some(80), 120);
+    manager.observe_429(&key_id, 120, Some(80), 120, None);
+    manager.observe_429(&key_id, 120, Some(80), 120, None);
     assert_eq!(manager.should_enforce(&key_id), Some(68));
 
     manager.evict(&key_id);
@@ -271,4 +271,41 @@ fn test_probe_respects_max_rpm() {
 
     let state = manager.state.get(&key_id).unwrap();
     assert_eq!(state.learned_rpm, Some(82));
+}
+
+#[test]
+fn test_observe_429_retry_after_uses_header_threshold() {
+    let cfg = AdaptiveCfg {
+        min_header_observations: 2,
+        min_no_header_observations: 3,
+        ..AdaptiveCfg::default()
+    };
+    let manager = AdaptiveRpmManager::new(cfg);
+    let key_id = KeyId::from("vendor-key-retry-after");
+
+    manager.observe_429(&key_id, 240, None, 90, Some(30));
+    assert_eq!(manager.state.get(&key_id).unwrap().learned_rpm, None);
+
+    manager.observe_429(&key_id, 240, None, 90, Some(30));
+    let state = manager.state.get(&key_id).unwrap();
+    assert_eq!(state.learned_rpm, Some(90));
+    assert_eq!(state.confidence.value, 1.0);
+}
+
+#[test]
+fn test_observe_429_no_retry_after_needs_3_observations() {
+    let cfg = AdaptiveCfg {
+        min_header_observations: 2,
+        min_no_header_observations: 3,
+        ..AdaptiveCfg::default()
+    };
+    let manager = AdaptiveRpmManager::new(cfg);
+    let key_id = KeyId::from("vendor-key-no-retry-after");
+
+    manager.observe_429(&key_id, 240, None, 90, None);
+    manager.observe_429(&key_id, 240, None, 90, None);
+    assert_eq!(manager.state.get(&key_id).unwrap().learned_rpm, None);
+
+    manager.observe_429(&key_id, 240, None, 90, None);
+    assert_eq!(manager.state.get(&key_id).unwrap().learned_rpm, Some(90));
 }
