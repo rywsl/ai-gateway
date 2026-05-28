@@ -1,0 +1,43 @@
+//! Per-vendor impersonation profile types and per-VendorKey identity derivation.
+//!
+//! Pure-types layer (no IO / no async). The `gw-egress-impersonate` crate
+//! maps each profile to a concrete `rquest::Emulation` + `Http2Config`; this
+//! module is consumed by both `gw-egress-impersonate` (profile metadata)
+//! and `gw-proxy` (write the forged headers in `inject_vendor_headers`).
+
+use serde::{Deserialize, Serialize};
+
+/// Identifies which official upstream CLI client to imitate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpersonateProfile {
+    /// Anthropic — Claude Code (Stainless SDK on Node + Electron Chrome 131 fingerprint).
+    ClaudeCodeChrome131,
+    /// OpenAI — Codex CLI (codex_cli_rs on Chromium-class TLS).
+    #[serde(rename = "openai_codex")]
+    OpenAiCodex,
+    /// Google — Gemini CLI (Node + undici, impersonated as Chrome 131 for higher pass rate).
+    GeminiCli,
+}
+
+impl ImpersonateProfile {
+    pub fn as_static_str(self) -> &'static str {
+        match self {
+            Self::ClaudeCodeChrome131 => "claude_code_chrome131",
+            Self::OpenAiCodex => "openai_codex",
+            Self::GeminiCli => "gemini_cli",
+        }
+    }
+}
+
+impl std::str::FromStr for ImpersonateProfile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "claude_code_chrome131" => Ok(Self::ClaudeCodeChrome131),
+            "openai_codex" => Ok(Self::OpenAiCodex),
+            "gemini_cli" => Ok(Self::GeminiCli),
+            other => Err(format!("unknown ImpersonateProfile: {other}")),
+        }
+    }
+}

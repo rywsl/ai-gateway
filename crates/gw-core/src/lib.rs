@@ -4,6 +4,7 @@ pub mod debug;
 pub mod entity;
 pub mod error;
 pub mod ids;
+pub mod impersonate;
 pub mod ir;
 pub mod permissions;
 pub mod protocol;
