@@ -20,8 +20,8 @@ use wreq_util::Emulation;
 pub fn emulation_for(profile: ImpersonateProfile) -> Emulation {
     match profile {
         ImpersonateProfile::ClaudeCodeChrome131 => Emulation::Chrome131,
-        ImpersonateProfile::OpenAiCodex         => Emulation::Chrome131,
-        ImpersonateProfile::GeminiCli           => Emulation::Chrome131,
+        ImpersonateProfile::OpenAiCodex => Emulation::Chrome131,
+        ImpersonateProfile::GeminiCli => Emulation::Chrome131,
     }
 }
 

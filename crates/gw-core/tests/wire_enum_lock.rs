@@ -19,9 +19,8 @@ fn protocol_kind_serde_wire_form_locked() {
         let got_str = got.as_str().expect("ProtocolKind serializes as string");
         assert_eq!(
             got_str, *expected,
-            "{:?}: serde wire form drift; got '{}', contract baseline '{}'. \
+            "{v:?}: serde wire form drift; got '{got_str}', contract baseline '{expected}'. \
              entity payload JSONB in PG depends on this — do NOT change.",
-            v, got_str, expected,
         );
     }
 }
@@ -36,9 +35,9 @@ fn protocol_kind_as_str_wire_form_locked() {
     ];
     for (v, expected) in cases {
         assert_eq!(
-            v.as_str(), *expected,
-            "{:?}: as_str wire form drift; events stream + model_mapping.protocol depend on this.",
-            v,
+            v.as_str(),
+            *expected,
+            "{v:?}: as_str wire form drift; events stream + model_mapping.protocol depend on this.",
         );
     }
 }
@@ -61,9 +60,8 @@ fn api_shape_serde_wire_form_locked() {
         let got_str = got.as_str().expect("ApiShape serializes as string");
         assert_eq!(
             got_str, *expected,
-            "{:?}: ApiShape serde wire form drift; got '{}', baseline '{}'. \
+            "{v:?}: ApiShape serde wire form drift; got '{got_str}', baseline '{expected}'. \
              capability resolution + any persisted ApiShape JSON depend on this — do NOT change.",
-            v, got_str, expected,
         );
     }
 }
@@ -85,9 +83,8 @@ fn api_shape_format_id_wire_form_locked() {
         let got = v.format_id();
         assert_eq!(
             got, *expected,
-            "{:?}: ApiShape format_id wire drift; got '{}', baseline '{}'. \
+            "{v:?}: ApiShape format_id wire drift; got '{got}', baseline '{expected}'. \
              Aether FORMAT_ID interop (events stream + capability resolver) depends on this — do NOT change.",
-            v, got, expected,
         );
     }
 }

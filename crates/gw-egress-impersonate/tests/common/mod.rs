@@ -31,7 +31,9 @@ pub mod mock_upstream {
     /// Header names are returned in their original capitalisation as sent over
     /// the wire (as parsed by hyper).
     pub async fn start() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock upstream");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
         let addr = listener.local_addr().expect("local_addr");
 
         tokio::spawn(async move {

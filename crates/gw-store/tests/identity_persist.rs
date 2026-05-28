@@ -21,18 +21,24 @@ async fn drops_when_pending_at_cap() {
     let q = IdentityPersistQueue::new_with_writer(writer.clone(), /*max_pending*/ 1);
     q.schedule("vk-A".into(), sample_snapshot());
     let dropped = q.schedule("vk-B".into(), sample_snapshot());
-    assert!(dropped, "second schedule should be dropped (pending at cap)");
+    assert!(
+        dropped,
+        "second schedule should be dropped (pending at cap)"
+    );
 }
 
 mod noop_writer {
     use async_trait::async_trait;
     use std::sync::atomic::AtomicUsize;
     #[derive(Default)]
-    pub struct Counter { pub calls: AtomicUsize }
+    pub struct Counter {
+        pub calls: AtomicUsize,
+    }
     #[async_trait]
     impl gw_store::identity_persist::SnapshotWriter for Counter {
         async fn write_if_null(
-            &self, _key_id: &str,
+            &self,
+            _key_id: &str,
             _snap: &gw_core::impersonate::IdentitySnapshot,
         ) -> anyhow::Result<()> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

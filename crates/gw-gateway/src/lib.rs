@@ -456,15 +456,15 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // Egress impersonation loopback + identity persistence (Task 4.6, configured by
     // `[egress]` in Task 5.2). Constructed in the bootstrap runtime because
     // EgressHandle::start and IdentityPersistQueue::new both call tokio::spawn.
-    let egress_bind = cfg.egress
-        .bind()
-        .context("invalid [egress] bind config")?;
+    let egress_bind = cfg.egress.bind().context("invalid [egress] bind config")?;
     let egress = Arc::new(gw_egress_impersonate::EgressHandle::start(
         egress_bind,
         cfg.egress.max_sessions,
     ));
     let identity_persist = Arc::new(gw_store::identity_persist::IdentityPersistQueue::new(
-        Arc::new(gw_store::identity_persist::PgSnapshotWriter::new(pg.clone())),
+        Arc::new(gw_store::identity_persist::PgSnapshotWriter::new(
+            pg.clone(),
+        )),
         2000,
     ));
     let turn_state_cache = Arc::new(gw_core::impersonate::turn_state::TurnStateCache::new(
