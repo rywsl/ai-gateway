@@ -34,7 +34,7 @@ const BLOCK_MS: u64 = 200;
 const COUNT_PER_POLL: u64 = 64;
 
 impl StreamConsumer {
-    pub async fn start(self: Arc<Self>) -> anyhow::Result<JoinHandle<()>> {
+    async fn ensure_groups(&self) -> Result<(), anyhow::Error> {
         let client = self.redis.pool.next();
         // mkstream=true so the stream is created if missing; tolerate BUSYGROUP.
         let _: Result<(), _> = client
@@ -43,6 +43,11 @@ impl StreamConsumer {
         let _: Result<(), _> = client
             .xgroup_create(COUNTER_STREAM, &*self.instance_id, "$", true)
             .await;
+        Ok(())
+    }
+
+    pub async fn start(self: Arc<Self>) -> anyhow::Result<JoinHandle<()>> {
+        self.ensure_groups().await?;
         let me = self.clone();
         let h = tokio::spawn(async move {
             me.consume_loop().await;
