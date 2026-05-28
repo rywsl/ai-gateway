@@ -40,3 +40,8 @@ url = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"
 hyper = { workspace = true, features = ["client"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "loopback_rtt"
+harness = false

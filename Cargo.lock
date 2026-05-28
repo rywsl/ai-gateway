@@ -1925,6 +1925,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "criterion",
  "dashmap",
  "futures-util",
  "gw-core",
