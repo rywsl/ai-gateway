@@ -16,7 +16,7 @@
 //! callers that explicitly opt out of the blocking fallback.
 
 use crate::usage::UsageRecord;
-use fred::interfaces::StreamsInterface;
+use fred::interfaces::{KeysInterface, StreamsInterface};
 use fred::types::{XCap, XCapKind, XCapTrim};
 use gw_store::redis_client::RedisCtx;
 use tokio::sync::mpsc;
@@ -89,7 +89,11 @@ impl Ledger {
                 }
             }
         });
-        Self { tx, redis, instance_id }
+        Self {
+            tx,
+            redis,
+            instance_id,
+        }
     }
 
     pub fn instance_id(&self) -> &str {
@@ -189,28 +193,39 @@ async fn dlq_xadd(redis: &RedisCtx, wrapped: String) -> Result<(), String> {
     }
 }
 
-async fn flush(redis: &RedisCtx, _instance_id: &str, buf: &mut Vec<LedgerItem>) {
-    // `_instance_id` is reserved for Task 4 (DEL inflight key path); unused here.
-    // Serialize first so we can replay payloads to DLQ on batch failure.
+async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
+    // Drain into parallel vectors: (payload, clear_opt). Per spec
+    // `docs/superpowers/specs/2026-05-29-billing-record-durability-design.md`
+    // §3.2 (DEL rule), the flusher only DELs the inflight key after the
+    // matching record's XADD on `usage:records` is confirmed; DLQ / serialize-
+    // fail / queue-fail paths leave the key alone so the reconciler can
+    // surface them via CrashFallback.
     let mut payloads: Vec<String> = Vec::with_capacity(buf.len());
+    let mut clears: Vec<Option<ClearKey>> = Vec::with_capacity(buf.len());
     for item in buf.drain(..) {
-        // Task 2 only: clear is silently dropped here. Task 4 will plumb it through.
         match serde_json::to_string(&item.record) {
-            Ok(p) => payloads.push(p),
+            Ok(p) => {
+                payloads.push(p);
+                clears.push(item.clear);
+            }
             Err(e) => {
                 tracing::warn!(target: "gw_ledger", error = %e, "usage flush: serialize failed; record dropped");
                 metrics::counter!("gateway_usage_serialize_errors_total").increment(1);
+                // Serialize-fail path: drop record AND drop clear (no DEL —
+                // key lingers, reconciler will emit CrashFallback later).
+                // Consistent with the DEL rule (no XADD success ⇒ no DEL).
             }
         }
     }
     if payloads.is_empty() {
         return;
     }
+
     let batch_len = payloads.len();
     let client = redis.pool.next();
     let pipe = client.pipeline();
     // Track per-record queue failures so we can DLQ those individually.
-    let mut queue_failed: Vec<(String, String)> = Vec::new();
+    let mut queue_failed: Vec<(usize, String, String)> = Vec::new();
     let mut queued_indices: Vec<usize> = Vec::with_capacity(payloads.len());
     for (idx, payload) in payloads.iter().enumerate() {
         if let Err(e) = pipe
@@ -225,30 +240,86 @@ async fn flush(redis: &RedisCtx, _instance_id: &str, buf: &mut Vec<LedgerItem>) 
         {
             tracing::warn!(target: "gw_ledger", error = %e, "usage flush: xadd queue failed");
             metrics::counter!("gateway_usage_queue_errors_total").increment(1);
-            queue_failed.push((payload.clone(), e.to_string()));
+            queue_failed.push((idx, payload.clone(), e.to_string()));
         } else {
             queued_indices.push(idx);
         }
     }
     // RTT: execute the pipelined batch.
     let batch_result = pipe.all::<()>().await;
-    if let Err(e) = batch_result {
-        tracing::warn!(target: "gw_ledger", error = %e, batch_len, "usage flush RTT failed; routing to DLQ");
-        metrics::counter!("gateway_usage_flush_errors_total").increment(1);
-        // Drain ALL queued records to DLQ.
-        let reason = format!("batch_rtt: {e}");
-        for idx in &queued_indices {
-            let wrapped = wrap_for_dlq(&payloads[*idx], &reason, 0);
-            if dlq_xadd(redis, wrapped).await.is_err() {
-                metrics::counter!("gateway_usage_records_lost_total").increment(1);
+
+    // Collect inflight keys to DEL — only those whose XADD success is confirmed.
+    let mut to_clear: Vec<String> = Vec::new();
+    match batch_result {
+        Ok(_) => {
+            for idx in &queued_indices {
+                if let Some(ck) = &clears[*idx] {
+                    to_clear.push(format!(
+                        "billing:inflight:{instance_id}:{}:{}",
+                        ck.request_id, ck.attempt_index
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(target: "gw_ledger", error = %e, batch_len, "usage flush RTT failed; routing to DLQ");
+            metrics::counter!("gateway_usage_flush_errors_total").increment(1);
+            // Drain ALL queued records to DLQ.
+            let reason = format!("batch_rtt: {e}");
+            for idx in &queued_indices {
+                let wrapped = wrap_for_dlq(&payloads[*idx], &reason, 0);
+                if dlq_xadd(redis, wrapped).await.is_err() {
+                    metrics::counter!("gateway_usage_records_lost_total").increment(1);
+                }
+                // No DEL — DLQ path leaves inflight key for reconciler.
+                if clears[*idx].is_some() {
+                    metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "skipped_dlq").increment(1);
+                }
             }
         }
     }
-    // Handle per-record queue failures (independent of batch RTT).
-    for (payload, reason) in queue_failed {
+
+    // Per-record queue failures (independent of batch RTT).
+    for (idx, payload, reason) in queue_failed {
         let wrapped = wrap_for_dlq(&payload, &format!("xadd_queue: {reason}"), 0);
         if dlq_xadd(redis, wrapped).await.is_err() {
             metrics::counter!("gateway_usage_records_lost_total").increment(1);
+        }
+        if clears[idx].is_some() {
+            metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "skipped_dlq")
+                .increment(1);
+        }
+    }
+
+    // Execute the DEL pipeline for confirmed-XADD records with clear: Some.
+    if !to_clear.is_empty() {
+        let del_client = redis.pool.next();
+        let del_pipe = del_client.pipeline();
+        for key in &to_clear {
+            // Queue DEL into pipeline; queue errors are warned and counted, never panic.
+            if let Err(e) = del_pipe.del::<(), _>(&[key.as_str()]).await {
+                tracing::warn!(target: "gw_ledger", error = %e, key, "inflight DEL queue failed");
+                metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "del_failed")
+                    .increment(1);
+            }
+        }
+        match del_pipe.all::<()>().await {
+            Ok(_) => {
+                metrics::counter!(
+                    "gw_billing_inflight_clear_total",
+                    "outcome" => "ok"
+                )
+                .increment(to_clear.len() as u64);
+            }
+            Err(e) => {
+                tracing::warn!(target: "gw_ledger", error = %e, count = to_clear.len(), "inflight DEL batch RTT failed");
+                metrics::counter!(
+                    "gw_billing_inflight_clear_total",
+                    "outcome" => "del_failed"
+                )
+                .increment(to_clear.len() as u64);
+                // Harmless: keys linger, reconciler/T0 surfaces them.
+            }
         }
     }
 }
