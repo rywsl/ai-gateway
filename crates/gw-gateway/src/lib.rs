@@ -517,7 +517,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         let emit = move |r: gw_ledger::usage::UsageRecord| {
             let l = emit_ledger.clone();
             Box::pin(async move {
-                l.emit(r).await;
+                l.emit(gw_ledger::flusher::LedgerItem { record: r, clear: None }).await;
                 Ok(())
             })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>

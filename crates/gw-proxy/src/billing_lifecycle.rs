@@ -277,7 +277,10 @@ pub async fn on_retry(
         }
 
         // Emit must-deliver billing record for the failed attempt.
-        ledger.emit(rec).await;
+        ledger.emit(gw_ledger::flusher::LedgerItem {
+            record: rec,
+            clear: None,
+        }).await;
 
         // Clear the inflight hash for the failed attempt.
         if let Err(e) = inflight.clear(&request_id, old_attempt).await {

@@ -44,7 +44,7 @@ pub struct ClearKey {
 }
 
 pub struct Ledger {
-    pub tx: mpsc::Sender<UsageRecord>,
+    pub tx: mpsc::Sender<LedgerItem>,
     redis: RedisCtx,
 }
 
@@ -55,17 +55,17 @@ impl Ledger {
         batch_size: usize,
         flush_interval: Duration,
     ) -> Self {
-        let (tx, mut rx) = mpsc::channel::<UsageRecord>(channel_capacity);
+        let (tx, mut rx) = mpsc::channel::<LedgerItem>(channel_capacity);
         let worker_redis = redis.clone();
         tokio::spawn(async move {
-            let mut buf: Vec<UsageRecord> = Vec::with_capacity(batch_size);
+            let mut buf: Vec<LedgerItem> = Vec::with_capacity(batch_size);
             let mut ticker = interval(flush_interval);
             loop {
                 tokio::select! {
-                    maybe_rec = rx.recv() => {
-                        match maybe_rec {
-                            Some(rec) => {
-                                buf.push(rec);
+                    maybe_item = rx.recv() => {
+                        match maybe_item {
+                            Some(item) => {
+                                buf.push(item);
                                 if buf.len() >= batch_size {
                                     flush(&worker_redis, &mut buf).await;
                                 }
@@ -89,19 +89,17 @@ impl Ledger {
     /// full channel falls back to a synchronous direct XADD (bypass), routing
     /// to the DLQ if even the bypass fails. Use this for all production billing
     /// emits so that backpressure never silently drops revenue records.
-    pub async fn emit(&self, rec: UsageRecord) {
-        match self.tx.try_send(rec) {
+    pub async fn emit(&self, item: LedgerItem) {
+        match self.tx.try_send(item) {
             Ok(()) => {
                 metrics::counter!("gw_billing_emit_path_total", "path" => "channel").increment(1);
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(rec_back)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(item_back)) => {
                 metrics::counter!("gw_billing_mpsc_bypass_total").increment(1);
-                if let Err(e) = sync_xadd(&self.redis, &rec_back).await {
+                if let Err(e) = sync_xadd(&self.redis, &item_back.record).await {
                     tracing::error!(error = ?e, "must-deliver sync XADD bypass failed; routing to DLQ");
-                    let payload = match serde_json::to_string(&rec_back) {
-                        Ok(p) => p,
-                        Err(_) => "{}".to_string(),
-                    };
+                    let payload = serde_json::to_string(&item_back.record)
+                        .unwrap_or_else(|_| "{}".to_string());
                     let wrapped = wrap_for_dlq(&payload, "sync_xadd_bypass_failed", 0);
                     if dlq_xadd(&self.redis, wrapped).await.is_err() {
                         metrics::counter!("gateway_usage_records_lost_total").increment(1);
@@ -120,8 +118,8 @@ impl Ledger {
     /// (blocking the proxy request task) would propagate Redis stalls into
     /// upstream latency. Prefer `emit` for production billing paths.
     #[allow(clippy::result_unit_err)]
-    pub fn try_send(&self, rec: UsageRecord) -> Result<(), ()> {
-        self.tx.try_send(rec).map_err(|_| {
+    pub fn try_send(&self, item: LedgerItem) -> Result<(), ()> {
+        self.tx.try_send(item).map_err(|_| {
             metrics::counter!("gateway_usage_channel_full_total").increment(1);
         })
     }
@@ -180,11 +178,12 @@ async fn dlq_xadd(redis: &RedisCtx, wrapped: String) -> Result<(), String> {
     }
 }
 
-async fn flush(redis: &RedisCtx, buf: &mut Vec<UsageRecord>) {
+async fn flush(redis: &RedisCtx, buf: &mut Vec<LedgerItem>) {
     // Serialize first so we can replay payloads to DLQ on batch failure.
     let mut payloads: Vec<String> = Vec::with_capacity(buf.len());
-    for rec in buf.drain(..) {
-        match serde_json::to_string(&rec) {
+    for item in buf.drain(..) {
+        // Task 2 only: clear is silently dropped here. Task 4 will plumb it through.
+        match serde_json::to_string(&item.record) {
             Ok(p) => payloads.push(p),
             Err(e) => {
                 tracing::warn!(target: "gw_ledger", error = %e, "usage flush: serialize failed; record dropped");

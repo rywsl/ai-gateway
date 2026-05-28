@@ -11,6 +11,7 @@ use fred::interfaces::{KeysInterface, StreamsInterface};
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
+use gw_ledger::flusher::LedgerItem;
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
 use gw_store::redis_client::RedisCtx;
@@ -70,8 +71,8 @@ async fn primary_xadd_failure_routes_to_dlq_stream() {
         .unwrap();
 
     let ledger = Ledger::start(redis.clone(), 1024, 2, Duration::from_millis(100));
-    ledger.try_send(sample_record()).unwrap();
-    ledger.try_send(sample_record()).unwrap();
+    ledger.try_send(LedgerItem { record: sample_record(), clear: None }).unwrap();
+    ledger.try_send(LedgerItem { record: sample_record(), clear: None }).unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let dlq_len: i64 = client.xlen("usage:records:dlq").await.unwrap();

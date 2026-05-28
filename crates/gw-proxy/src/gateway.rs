@@ -1045,7 +1045,10 @@ impl ProxyHttp for LlmGateway {
                                     "fail_to_connect on_retry: inflight mark_settled failed"
                                 );
                             }
-                            ledger.emit(rec).await;
+                            ledger.emit(gw_ledger::flusher::LedgerItem {
+                                record: rec,
+                                clear: None,
+                            }).await;
                             if let Err(e) = inflight.clear(&request_id, old_attempt).await {
                                 tracing::warn!(
                                     error = ?e,
