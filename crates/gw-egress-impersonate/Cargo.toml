@@ -32,6 +32,11 @@ futures-util = { workspace = true }
 ## Never enable in production builds.
 test-utils = []
 
+## Opts the `fingerprint_verify` integration test into the build. Off by
+## default — the test needs `GW_FINGERPRINT_ECHO_URL` to point at a JA3/JA4
+## echo service (e.g. mitm-fingerprint) and is intended for nightly CI.
+fingerprint-verify = []
+
 [dev-dependencies]
 gw-egress-impersonate = { path = ".", features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
