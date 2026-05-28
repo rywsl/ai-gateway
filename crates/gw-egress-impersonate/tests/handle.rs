@@ -44,8 +44,7 @@ async fn handler_strips_internal_headers_and_forwards_upstream_headers() {
     // 4. Dispatch.
     let response = handler
         .handle(req)
-        .await
-        .expect("handle must not return Err");
+        .await;
 
     assert_eq!(
         response.status(),
@@ -101,7 +100,7 @@ async fn handler_returns_400_when_target_missing() {
         .body(Full::new(Bytes::new()))
         .expect("valid request");
 
-    let response = handler.handle(req).await.expect("no panic");
+    let response = handler.handle(req).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(response.headers().contains_key("x-egress-error-class"));
 }
@@ -118,7 +117,7 @@ async fn handler_returns_400_when_profile_unknown() {
         .body(Full::new(Bytes::new()))
         .expect("valid request");
 
-    let response = handler.handle(req).await.expect("no panic");
+    let response = handler.handle(req).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(response.headers().contains_key("x-egress-error-class"));
 }

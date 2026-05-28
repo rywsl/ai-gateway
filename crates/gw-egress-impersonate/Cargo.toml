@@ -10,7 +10,6 @@ gw-core = { path = "../gw-core" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 bytes = { workspace = true }
 url = { workspace = true }
 tracing = "0.1"
@@ -38,3 +37,4 @@ gw-egress-impersonate = { path = ".", features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 gw-core = { path = "../gw-core" }
 url = { workspace = true }
+serde_json = { workspace = true }

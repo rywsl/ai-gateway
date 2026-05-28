@@ -68,11 +68,11 @@ const HOP_BY_HOP: &[&str] = &[
 ];
 
 fn is_internal(name: &str) -> bool {
-    INTERNAL_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name))
+    INTERNAL_HEADERS.contains(&name)
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
-    HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(name))
+    HOP_BY_HOP.contains(&name)
 }
 
 // ── Response body type alias ──────────────────────────────────────────────────
@@ -124,9 +124,9 @@ impl Handler {
     /// optionally `X-Egress-Proxy`, then strips internal + hop-by-hop headers
     /// and forwards to the upstream via the pooled `wreq::Client`.
     ///
-    /// Returns a synthetic error response (400/502/504) on any failure —
-    /// this method itself does not return `Err`.
-    pub async fn handle<B>(&self, req: Request<B>) -> anyhow::Result<Response<EgressBody>>
+    /// Returns a synthetic error response (400/502/504) for any failure;
+    /// never panics.
+    pub async fn handle<B>(&self, req: Request<B>) -> Response<EgressBody>
     where
         B: hyper::body::Body<Data = Bytes> + Send + Sync + Unpin + 'static,
         B::Error: std::error::Error + Send + Sync + 'static,
@@ -134,34 +134,34 @@ impl Handler {
         // ── 1. Extract control headers ────────────────────────────────────
         let headers = req.headers();
 
-        let target = match headers.get("x-egress-target").or_else(|| headers.get("X-Egress-Target")) {
+        let target = match headers.get("x-egress-target") {
             Some(v) => match v.to_str() {
                 Ok(s) => s.to_owned(),
-                Err(_) => return Ok(bad_request("X-Egress-Target value is not valid UTF-8")),
+                Err(_) => return bad_request("X-Egress-Target value is not valid UTF-8"),
             },
-            None => return Ok(bad_request("X-Egress-Target header is required")),
+            None => return bad_request("X-Egress-Target header is required"),
         };
 
-        let profile_str = match headers.get("x-egress-profile").or_else(|| headers.get("X-Egress-Profile")) {
+        let profile_str = match headers.get("x-egress-profile") {
             Some(v) => match v.to_str() {
                 Ok(s) => s.to_owned(),
-                Err(_) => return Ok(bad_request("X-Egress-Profile value is not valid UTF-8")),
+                Err(_) => return bad_request("X-Egress-Profile value is not valid UTF-8"),
             },
-            None => return Ok(bad_request("X-Egress-Profile header is required")),
+            None => return bad_request("X-Egress-Profile header is required"),
         };
 
         let profile: ImpersonateProfile = match profile_str.parse() {
             Ok(p) => p,
-            Err(e) => return Ok(bad_request(&format!("invalid X-Egress-Profile: {e}"))),
+            Err(e) => return bad_request(&format!("invalid X-Egress-Profile: {e}")),
         };
 
-        let proxy: Option<url::Url> = match headers.get("x-egress-proxy").or_else(|| headers.get("X-Egress-Proxy")) {
+        let proxy: Option<url::Url> = match headers.get("x-egress-proxy") {
             Some(v) => match v.to_str() {
                 Ok(s) => match s.parse::<url::Url>() {
                     Ok(u) => Some(u),
-                    Err(e) => return Ok(bad_request(&format!("invalid X-Egress-Proxy URL: {e}"))),
+                    Err(e) => return bad_request(&format!("invalid X-Egress-Proxy URL: {e}")),
                 },
-                Err(_) => return Ok(bad_request("X-Egress-Proxy value is not valid UTF-8")),
+                Err(_) => return bad_request("X-Egress-Proxy value is not valid UTF-8"),
             },
             None => None,
         };
@@ -178,7 +178,7 @@ impl Handler {
         let key = PoolKey { profile, proxy };
         let client = match self.pool.get_or_create(key).await {
             Ok(c) => c,
-            Err(e) => return Ok(upstream_error_response(502, "unknown", &e.to_string())),
+            Err(e) => return upstream_error_response(502, "unknown", &e.to_string()),
         };
 
         // ── 4. Build the wreq request: method + stripped headers + body ───
@@ -210,11 +210,11 @@ impl Handler {
                 let class = classify(&e);
                 let detail_str = e.to_string();
                 let detail = truncate_256(&detail_str);
-                return Ok(upstream_error_response(
+                return upstream_error_response(
                     class.status_code(),
                     class.as_str(),
                     detail,
-                ));
+                );
             }
         };
 
@@ -238,7 +238,7 @@ impl Handler {
             }
         }
 
-        Ok(response.body(boxed_body).expect("valid response"))
+        response.body(boxed_body).expect("valid response")
     }
 }
 
@@ -246,10 +246,8 @@ impl Handler {
 
 fn empty_body() -> EgressBody {
     use http_body_util::Empty;
-    use std::convert::Infallible;
     Empty::<Bytes>::new()
-        .map_err(|never: Infallible| match never {})
-        .map_err(|_: std::io::Error| unreachable!())
+        .map_err(|e: std::convert::Infallible| match e {})
         .boxed()
 }
 
