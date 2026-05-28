@@ -295,30 +295,31 @@ async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
     if !to_clear.is_empty() {
         let del_client = redis.pool.next();
         let del_pipe = del_client.pipeline();
+        let mut del_queued: usize = 0;
         for key in &to_clear {
-            // Queue DEL into pipeline; queue errors are warned and counted, never panic.
             if let Err(e) = del_pipe.del::<(), _>(&[key.as_str()]).await {
                 tracing::warn!(target: "gw_ledger", error = %e, key, "inflight DEL queue failed");
                 metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "del_failed")
                     .increment(1);
+            } else {
+                del_queued += 1;
             }
         }
-        match del_pipe.all::<()>().await {
-            Ok(_) => {
-                metrics::counter!(
-                    "gw_billing_inflight_clear_total",
-                    "outcome" => "ok"
-                )
-                .increment(to_clear.len() as u64);
-            }
-            Err(e) => {
-                tracing::warn!(target: "gw_ledger", error = %e, count = to_clear.len(), "inflight DEL batch RTT failed");
-                metrics::counter!(
-                    "gw_billing_inflight_clear_total",
-                    "outcome" => "del_failed"
-                )
-                .increment(to_clear.len() as u64);
-                // Harmless: keys linger, reconciler/T0 surfaces them.
+        if del_queued > 0 {
+            match del_pipe.all::<()>().await {
+                Ok(_) => {
+                    metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "ok")
+                        .increment(del_queued as u64);
+                }
+                Err(e) => {
+                    tracing::warn!(target: "gw_ledger", error = %e, count = del_queued, "inflight DEL batch RTT failed");
+                    metrics::counter!(
+                        "gw_billing_inflight_clear_total",
+                        "outcome" => "del_failed"
+                    )
+                    .increment(del_queued as u64);
+                    // Harmless: keys linger, reconciler/T0 surfaces them.
+                }
             }
         }
     }
