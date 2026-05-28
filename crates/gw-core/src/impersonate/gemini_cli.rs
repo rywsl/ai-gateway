@@ -44,10 +44,7 @@ pub fn headers(
     else {
         panic!("gemini_cli::headers called with non-GeminiCli variant");
     };
-    let ua = format!(
-        "GeminiCLI-/{}/{} ({}; {}; {})",
-        cli_version, model, os_type, arch, SURFACE
-    );
+    let ua = format!("GeminiCLI-/{cli_version}/{model} ({os_type}; {arch}; {SURFACE})");
     let mut h = vec![
         ("Content-Type".into(), "application/json".into()),
         ("User-Agent".into(), ua),

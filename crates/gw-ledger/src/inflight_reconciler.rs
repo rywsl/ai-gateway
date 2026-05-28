@@ -29,7 +29,7 @@ pub async fn run<F>(pool: &RedisPool, instance_id: &str, emit: F) -> anyhow::Res
 where
     F: Fn(UsageRecord) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>,
 {
-    let pattern = format!("billing:inflight:{}:*", instance_id);
+    let pattern = format!("billing:inflight:{instance_id}:*");
     let mut recovered = 0usize;
 
     let client = pool.next();

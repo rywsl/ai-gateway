@@ -12,7 +12,7 @@ fn user_id_roundtrip_json() {
 #[test]
 fn debug_format_includes_type_name() {
     let id = UserId::from("u1");
-    let s = format!("{:?}", id);
+    let s = format!("{id:?}");
     assert!(s.contains("UserId"));
     assert!(s.contains("u1"));
 }

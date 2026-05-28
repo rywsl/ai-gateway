@@ -56,8 +56,7 @@ async fn register_writes_hash_with_expected_fields() {
     let ttl: i64 = pool.ttl(key).await.unwrap();
     assert!(
         ttl > 86_000 && ttl <= 86_400,
-        "expected ~24h TTL, got {}",
-        ttl
+        "expected ~24h TTL, got {ttl}"
     );
     // Cleanup
     let _: () = pool.del(&[key]).await.unwrap();

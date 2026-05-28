@@ -28,11 +28,11 @@ async fn reconciler_emits_and_deletes_own_residuals() {
 
     // Pre-write 2 residual keys under own instance_id
     for i in 0..2 {
-        let key = format!("billing:inflight:{}:req-{}:0", inst, i);
+        let key = format!("billing:inflight:{inst}:req-{i}:0");
         let fields: Vec<(&str, String)> = vec![
             ("state", "sent".to_string()),
             ("ts_sent_ms", "1700000000000".to_string()),
-            ("user_id", format!("u-{}", i)),
+            ("user_id", format!("u-{i}")),
             ("vendor_key_id", "vk-1".to_string()),
             ("freeze_amount", "0".to_string()),
             ("prompt_estimate_tokens", "42".to_string()),
@@ -77,9 +77,9 @@ async fn reconciler_emits_and_deletes_own_residuals() {
 
     // Keys must be deleted post-emit
     for i in 0..2 {
-        let key = format!("billing:inflight:{}:req-{}:0", inst, i);
+        let key = format!("billing:inflight:{inst}:req-{i}:0");
         let exists: bool = pool.exists(&key).await.unwrap();
-        assert!(!exists, "residual key {} should be deleted", key);
+        assert!(!exists, "residual key {key} should be deleted");
     }
 }
 
@@ -89,7 +89,7 @@ async fn reconciler_does_not_touch_other_instances() {
     let pool = make_pool().await;
     let inst_self = format!("inst-self-{}", std::process::id());
     let inst_other = format!("inst-other-{}", std::process::id());
-    let other_key = format!("billing:inflight:{}:req-x:0", inst_other);
+    let other_key = format!("billing:inflight:{inst_other}:req-x:0");
     let fields: Vec<(&str, String)> = vec![("state", "sent".to_string())];
     let _: () = pool.hset(&other_key, fields).await.unwrap();
     let _: () = pool.expire(&other_key, 86_400).await.unwrap();

@@ -40,15 +40,13 @@ fn client_close_error_kinds_map_to_client_close() {
     ] {
         assert!(
             gw_proxy::cancellation::io_error_kind_is_client_close(kind),
-            "expected {:?} to map to client_close",
-            kind
+            "expected {kind:?} to map to client_close"
         );
     }
     for kind in [ErrorKind::PermissionDenied, ErrorKind::NotFound] {
         assert!(
             !gw_proxy::cancellation::io_error_kind_is_client_close(kind),
-            "expected {:?} NOT to map to client_close",
-            kind
+            "expected {kind:?} NOT to map to client_close"
         );
     }
 }

@@ -25,7 +25,7 @@ async fn make_pool() -> RedisPool {
 async fn cold_l2_generates_and_persists_uuid() {
     let pool = make_pool().await;
     let hostname = format!("host-cold-{}", std::process::id());
-    let key = format!("gateway:instance:{}", hostname);
+    let key = format!("gateway:instance:{hostname}");
     let _: () = pool.del(&key).await.unwrap();
     // Clear env so we don't take L0 branch
     std::env::remove_var("GW_INSTANCE_ID");
@@ -37,8 +37,7 @@ async fn cold_l2_generates_and_persists_uuid() {
         .unwrap();
     assert!(
         uuid::Uuid::parse_str(&id).is_ok(),
-        "expected UUID, got {}",
-        id
+        "expected UUID, got {id}"
     );
     let stored: String = pool.get(&key).await.unwrap();
     assert_eq!(stored, id);
@@ -49,7 +48,7 @@ async fn cold_l2_generates_and_persists_uuid() {
 async fn l2_load_returns_existing() {
     let pool = make_pool().await;
     let hostname = format!("host-existing-{}", std::process::id());
-    let key = format!("gateway:instance:{}", hostname);
+    let key = format!("gateway:instance:{hostname}");
     let _: () = pool
         .set(&key, "preloaded-instance-id", None, None, false)
         .await
@@ -76,7 +75,7 @@ async fn env_var_overrides_l2() {
         .unwrap();
     assert_eq!(id, "env-overridden");
     let stored: String = pool
-        .get::<String, _>(&format!("gateway:instance:{}", hostname))
+        .get::<String, _>(&format!("gateway:instance:{hostname}"))
         .await
         .unwrap();
     assert_eq!(stored, "env-overridden", "env L0 must sync into L2");

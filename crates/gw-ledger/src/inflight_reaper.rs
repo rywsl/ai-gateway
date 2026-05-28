@@ -32,7 +32,7 @@ pub async fn run_once(
     instance_id: &str,
     emit_lag_t0_secs: u64,
 ) -> anyhow::Result<usize> {
-    let pattern = format!("billing:inflight:{}:*", instance_id);
+    let pattern = format!("billing:inflight:{instance_id}:*");
     let mut stale = 0usize;
 
     // `scan` lives on `RedisClient`, not on `RedisPool`. `pool.next()` picks

@@ -57,8 +57,7 @@ impl InflightLedger {
     /// production callers should go through `register` / `clear`.
     pub fn test_key(instance_id: &str, request_id: &str, attempt_index: u32) -> String {
         format!(
-            "billing:inflight:{}:{}:{}",
-            instance_id, request_id, attempt_index
+            "billing:inflight:{instance_id}:{request_id}:{attempt_index}"
         )
     }
 

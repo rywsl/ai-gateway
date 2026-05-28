@@ -20,9 +20,7 @@ fn valid_transitions_pass() {
     ] {
         assert!(
             can_transition(from, to),
-            "{:?} -> {:?} should be allowed",
-            from,
-            to
+            "{from:?} -> {to:?} should be allowed"
         );
     }
 }
@@ -40,9 +38,7 @@ fn invalid_transitions_rejected() {
     ] {
         assert!(
             !can_transition(from, to),
-            "{:?} -> {:?} should be rejected",
-            from,
-            to
+            "{from:?} -> {to:?} should be rejected"
         );
     }
 }

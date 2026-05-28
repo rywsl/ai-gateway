@@ -1358,7 +1358,7 @@ mod regression_baseline_tests {
             } else {
                 v
             };
-            out.push_str(&format!("{}: {}\n", k, v));
+            out.push_str(&format!("{k}: {v}\n"));
         }
         out
     }

@@ -26,7 +26,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.88"
 license = "Apache-2.0"
 
 [workspace.dependencies]
@@ -130,8 +130,3 @@ debug = "line-tables-only"
 [profile.bench]
 inherits = "release"
 debug = true
-
-[patch.crates-io]
-# typed-builder-macro 0.23.2 uses `&& let` chains (RFC 2. stabilised in 1.88).
-# Our toolchain is 1.86. Patch the single occurrence with a nested-if equivalent.
-typed-builder-macro = { path = "/tmp/typed-builder-macro-patched" }

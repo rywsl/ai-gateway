@@ -80,7 +80,7 @@ fn alloc_snapshot_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    format!("{:x}-{:x}", now, n)
+    format!("{now:x}-{n:x}")
 }
 
 pub async fn start(

@@ -112,7 +112,7 @@ fn shared_instance_across_threads() {
         let s = Arc::clone(&sticky);
         let k = Arc::clone(&keys);
         handles.push(thread::spawn(move || {
-            pick_with_conv(&s, &k, &format!("conv-{}", i));
+            pick_with_conv(&s, &k, &format!("conv-{i}"));
         }));
     }
     for h in handles {

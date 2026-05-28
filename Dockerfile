@@ -1,5 +1,5 @@
 # ----- Builder stage -----
-FROM rust:1.86-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /build
 
 # pingora pulls in `libz-ng-sys` via `cmake`, plus assorted *-sys crates that
