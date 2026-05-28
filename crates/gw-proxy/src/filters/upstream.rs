@@ -290,13 +290,14 @@ pub async fn pick_peer(
         user_id: &perm.effective_user_id,
         model: &model,
         conversation_id: ctx.conversation_id.as_deref(),
-        message_hash: ctx
-            .body
-            .as_ref()
-            .and_then(|v| {
-                let raw = v.raw();
-                if raw.is_empty() { None } else { body_hash_u64(raw) }
-            }),
+        message_hash: ctx.body.as_ref().and_then(|v| {
+            let raw = v.raw();
+            if raw.is_empty() {
+                None
+            } else {
+                body_hash_u64(raw)
+            }
+        }),
         api_format: client_codec_kind,
         pricing: ctx.pricing.as_ref().map(|p| &p.value as &Pricing),
         latency_tracker: latency_tracker.as_ref(),
@@ -813,16 +814,21 @@ pub async fn rewrite_request(
             // wired to OpenAiRequest); same-protocol passthrough delegates to
             // the Chat codec via an `OpenAi` adapter.
             AnyCodec::OpenAiResponses(_) => {
-                match same_protocol_passthrough(&gw_codec::openai::OpenAi, &outbound_body, &mutations)
-                {
+                match same_protocol_passthrough(
+                    &gw_codec::openai::OpenAi,
+                    &outbound_body,
+                    &mutations,
+                ) {
                     Ok(cow) => bytes_from_passthrough(cow, &outbound_body),
                     Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
                 }
             }
-            AnyCodec::Anthropic(c) => match same_protocol_passthrough(c, &outbound_body, &mutations) {
-                Ok(cow) => bytes_from_passthrough(cow, &outbound_body),
-                Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
-            },
+            AnyCodec::Anthropic(c) => {
+                match same_protocol_passthrough(c, &outbound_body, &mutations) {
+                    Ok(cow) => bytes_from_passthrough(cow, &outbound_body),
+                    Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
+                }
+            }
             AnyCodec::Gemini(c) => match same_protocol_passthrough(c, &outbound_body, &mutations) {
                 Ok(cow) => bytes_from_passthrough(cow, &outbound_body),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),

@@ -20,7 +20,9 @@ fn pos(haystack: &str, needle: &str) -> usize {
 }
 
 fn cli_ctx(shape: ApiShape) -> ReqCtx {
-    let body_bytes = Bytes::from_static(br#"{"model":"claude-sonnet-4-20250514","stream":false,"vendor_extension":{"keep":true}}"#);
+    let body_bytes = Bytes::from_static(
+        br#"{"model":"claude-sonnet-4-20250514","stream":false,"vendor_extension":{"keep":true}}"#,
+    );
     ReqCtx {
         client_shape: Some(shape),
         body: Some(gw_proxy::body::RequestBodyView::from_raw(
@@ -78,7 +80,10 @@ fn test_cli_request_billing_recorded() {
     let hints = request::extract_cli_request_hints(
         ApiShape::ClaudeCli,
         "/v1/messages",
-        ctx.body.as_ref().and_then(|v| v.decoded(64 * 1024).ok()).map(|b| b.as_ref()),
+        ctx.body
+            .as_ref()
+            .and_then(|v| v.decoded(64 * 1024).ok())
+            .map(|b| b.as_ref()),
     );
     ctx.model = hints.model.map(gw_core::ids::ModelName::from);
     ctx.is_stream = hints.stream.unwrap_or(false);

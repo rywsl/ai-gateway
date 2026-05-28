@@ -614,7 +614,10 @@ pub async fn run(
         }
     };
     let parse_body = {
-        let view = ctx.body.as_ref().expect("ctx.body populated after body buffering");
+        let view = ctx
+            .body
+            .as_ref()
+            .expect("ctx.body populated after body buffering");
         match view.decoded(32 * 1024 * 1024) {
             Ok(b) => b.clone(),
             Err(_) => {
@@ -926,7 +929,9 @@ pub async fn run(
                 crate::filters::task::submit_endpoint(
                     contract,
                     crate::filters::task::SubmitTaskRequest {
-                        body: ctx.body.as_ref()
+                        body: ctx
+                            .body
+                            .as_ref()
                             .and_then(|v| v.decoded(32 * 1024 * 1024).ok())
                             .map(|b| b.as_ref())
                             .unwrap_or(body_bytes.as_ref()),

@@ -150,8 +150,7 @@ mod tests {
 
     #[test]
     fn outbound_overrides_raw() {
-        let mut v =
-            RequestBodyView::from_raw(Bytes::from_static(b"raw"), Encoding::Identity);
+        let mut v = RequestBodyView::from_raw(Bytes::from_static(b"raw"), Encoding::Identity);
         assert_eq!(v.outbound_or_raw().as_ref(), b"raw");
         v.set_outbound(Bytes::from_static(b"rewritten"));
         assert_eq!(v.outbound_or_raw().as_ref(), b"rewritten");
