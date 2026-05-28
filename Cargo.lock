@@ -2069,6 +2069,7 @@ dependencies = [
  "hmac",
  "insta",
  "metrics",
+ "once_cell",
  "parking_lot",
  "pingora",
  "pingora-proxy",

@@ -8,6 +8,7 @@
 //! and wires them into the `ProxyHttp` impl.
 
 pub mod billing_lifecycle;
+pub mod body;
 pub mod body_verify;
 pub mod cancellation;
 pub mod ctx;
