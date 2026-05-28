@@ -228,6 +228,11 @@ pub fn run() -> anyhow::Result<()> {
         wired.resilience,
         #[cfg(feature = "tunnel")]
         wired.tunnel,
+        // Wired for compile only; real EgressHandle threaded in Task 4.6.
+        std::sync::Arc::new(gw_egress_impersonate::EgressHandle::start(
+            gw_egress_impersonate::EgressBind::Tcp("127.0.0.1:0".parse().unwrap()),
+            4,
+        )),
         wired.detailed_archive,
         wired.inflight,
         wired.response_deadline_ms,

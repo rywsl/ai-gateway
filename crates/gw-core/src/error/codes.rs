@@ -55,6 +55,9 @@ pub const GW_TUNNEL_NO_NODE: &str = "GW_TUNNEL_NO_NODE";
 pub const GW_TUNNEL_NO_LIVE: &str = "GW_TUNNEL_NO_LIVE";
 pub const GW_TUNNEL_TARGET_DENIED: &str = "GW_TUNNEL_TARGET_DENIED";
 pub const GW_TUNNEL_DNS_BLOCKED: &str = "GW_TUNNEL_DNS_BLOCKED";
+/// A vendor configured for impersonate egress cannot also tunnel; emitted
+/// when tunnel resolution returns `Use(_)` for an Impersonate vendor.
+pub const GW_TUNNEL_IMPERSONATE_CONFLICT: &str = "GW_TUNNEL_IMPERSONATE_CONFLICT";
 
 // --- OAuth codes (G3 / go-onboarding-gaps T0) ---
 pub const GW_AUTH_OAUTH_TOKEN_EXPIRED: &str = "GW_AUTH_OAUTH_TOKEN_EXPIRED";

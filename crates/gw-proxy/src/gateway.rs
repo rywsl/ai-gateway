@@ -157,6 +157,11 @@ pub struct LlmGateway {
     /// `cfg.tunnel.enabled = true`.
     #[cfg(feature = "tunnel")]
     pub tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+    /// Egress impersonation handle (Phase 4). Holds the loopback listener bind
+    /// (`EgressBind::Uds | Tcp`) that `pick_peer` points an `HttpPeer` at when
+    /// the selected vendor's `egress_mode = Impersonate`. Same architectural
+    /// neighborhood as `tunnel` since both gate the upstream peer construction.
+    pub egress: Arc<gw_egress_impersonate::EgressHandle>,
     /// Detailed-log archive (T10). Sender handle for per-surface wire-fidelity
     /// capture. `try_send` is fire-and-forget; a full channel drops + metrics.
     pub(crate) detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
@@ -216,6 +221,7 @@ impl LlmGateway {
         mgmt_blacklist: Arc<RedisJwtBlacklist>,
         resilience: Arc<ResilienceState>,
         #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+        egress: Arc<gw_egress_impersonate::EgressHandle>,
         detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
         inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
         response_deadline_ms: u64,
@@ -263,6 +269,7 @@ impl LlmGateway {
             resilience,
             #[cfg(feature = "tunnel")]
             tunnel,
+            egress,
             detailed_archive,
             inflight,
             response_deadline_ms,
@@ -467,6 +474,7 @@ impl ProxyHttp for LlmGateway {
             &self.in_flight,
             &self.strategies,
             &self.latency_tracker,
+            &self.egress,
             #[cfg(feature = "tunnel")]
             self.tunnel.as_ref(),
         )
