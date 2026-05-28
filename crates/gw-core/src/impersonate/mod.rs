@@ -41,3 +41,19 @@ impl std::str::FromStr for ImpersonateProfile {
         }
     }
 }
+
+/// Per-Vendor egress selection. `Rustls` is the default and preserves the
+/// existing Pingora-rustls upstream path bit-for-bit; `Impersonate` routes
+/// through the in-process boring egress (gw-egress-impersonate).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum VendorEgressMode {
+    Rustls,
+    Impersonate { profile: ImpersonateProfile },
+}
+
+impl Default for VendorEgressMode {
+    fn default() -> Self {
+        Self::Rustls
+    }
+}
