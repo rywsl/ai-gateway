@@ -235,6 +235,14 @@ pub struct ReqCtx {
     /// Read by `logging` for the detailed-log field and by metrics labels.
     pub tunnel_resolution: Option<String>,
 
+    // --- Egress impersonation ---
+    /// Set in `pick_peer` when `Vendor.egress_mode == Impersonate { profile }`.
+    /// Consumed in `inject_vendor_headers` to write `X-Egress-*` + identity.
+    pub egress_profile: Option<gw_core::impersonate::ImpersonateProfile>,
+    /// Real upstream `(host, port)` — communicated to the loopback egress via
+    /// `X-Egress-Target`.
+    pub egress_upstream: Option<(String, u16)>,
+
     // --- Long-running operation (G5 / go-onboarding-gaps T0) ---
     /// G5: Gemini `:predictLongRunning` / OpenAI `/v1/videos` top-level
     /// `name: "operations/..."` extracted by `codec.parse_response`.
@@ -363,6 +371,8 @@ impl ReqCtx {
             required_caps: None,
             retry_upgrade_hint: None,
             tunnel_resolution: None,
+            egress_profile: None,
+            egress_upstream: None,
             response_deadline: None,
             operation_id: None,
             upstream_body_accum: None,
