@@ -548,23 +548,13 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         store: store.clone(),
         instance_id: format!("gw-{}", std::process::id()),
     });
-    match consumer.start().await {
-        Ok(_handle) => {
-            tracing::info!(
-                target: "gw_gateway",
-                "stream consumer started (events:entity, events:counter) with XREADGROUP invalidate-on-event"
-            );
-        }
-        Err(e) => {
-            // Non-fatal: TTL-based eviction will keep caches fresh on a longer
-            // horizon. Log and proceed.
-            tracing::warn!(
-                target: "gw_gateway",
-                error = %e,
-                "stream consumer failed to start; falling back to TTL-only invalidation"
-            );
-        }
-    }
+    // start() is sync and infallible: Supervisor::spawn handles ensure() on boot
+    // and automatically recreates groups on NOGROUP (e.g. after Redis FLUSHALL).
+    let _consumer_handle = consumer.start();
+    tracing::info!(
+        target: "gw_gateway",
+        "stream consumer started (events:entity, events:counter) with XREADGROUP invalidate-on-event"
+    );
 
     // T1-E (G6) — build the hybrid JwtValidator if AuthConfig.global is
     // available. Absent → validator stays None and request_filter falls back
