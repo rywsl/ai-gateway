@@ -95,7 +95,9 @@ pub struct ReqCtx {
     pub task_action: Option<TaskAction>,
     pub gemini_files_action: Option<GeminiFilesAction>,
     pub idempotent: bool,
-    pub cached_body: Option<Bytes>,
+    /// Phase B: explicit three-state body lifecycle. Replaces the retired
+    /// dual-semantic body field with raw / decoded (OnceCell) / outbound states.
+    pub body: Option<crate::body::RequestBodyView>,
     /// ADR-S3: optional client-supplied conversation identifier read from the
     /// `X-Conversation-Id` request header in `early_request_filter`. Threaded
     /// into `PickCtx.conversation_id` so the `Sticky` strategy can bind a
@@ -331,7 +333,7 @@ impl ReqCtx {
             task_action: None,
             gemini_files_action: None,
             idempotent: true,
-            cached_body: None,
+            body: None,
             conversation_id: None,
             picked_vendor_key: None,
             picked_vendor: None,

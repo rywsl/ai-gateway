@@ -622,8 +622,8 @@ impl ProxyHttp for LlmGateway {
 
     /// Replace the upstream-bound body with the codec-rewritten payload (if any).
     ///
-    /// `upstream_request_filter` produced the final outbound bytes and stashed
-    /// them on `ctx.cached_body`. Without this hook, pingora would forward the
+    /// `upstream_request_filter` stored the final outbound bytes in the body
+    /// view via `set_outbound`. Without this hook, pingora would forward the
     /// ORIGINAL downstream body to the upstream, so cross-protocol re-renders
     /// would never reach the wire.
     ///
@@ -631,10 +631,8 @@ impl ProxyHttp for LlmGateway {
     /// the conditional replacement is still correct. We only swap on the final
     /// chunk so chunked-encoding clients still stream cleanly through pingora.
     ///
-    /// `cached_body` is cloned rather than taken because the `logging` filter
-    /// reads it later to build the optional request-body preview when debug
-    /// mode is on. `Bytes` is a cheap refcount, so the clone is effectively
-    /// free.
+    /// `Bytes` is a cheap Arc clone; `outbound_or_raw()` returns a reference to
+    /// the stored bytes so the clone is effectively free.
     async fn request_body_filter(
         &self,
         _session: &mut Session,
@@ -643,8 +641,8 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         if end_of_stream {
-            if let Some(rewritten) = ctx.cached_body.as_ref() {
-                *body = Some(rewritten.clone());
+            if let Some(view) = ctx.body.as_ref() {
+                *body = Some(view.outbound_or_raw().clone());
             }
         } else {
             // Drop pre-EOF chunks: the full body was already buffered in
