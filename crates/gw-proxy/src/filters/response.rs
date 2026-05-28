@@ -710,14 +710,16 @@ pub(crate) fn handle_non_stream_chunk(
                                     "{}",
                                     gw_core::error::codes::GW_CODEC_CROSS_RENDER_FAILED
                                 );
-                                gw_core::observability::observe(gw_core::observability::ErrorObservation {
-                                    code: e.code.as_ref(),
-                                    kind: gw_core::observability::ErrorKind::CodecRender,
-                                    stage: gw_core::observability::Stage::Response,
-                                    status: None,
-                                    trace_id: Some(ctx.trace_id.as_ref()),
-                                    extra: None,
-                                });
+                                gw_core::observability::observe(
+                                    gw_core::observability::ErrorObservation {
+                                        code: e.code.as_ref(),
+                                        kind: gw_core::observability::ErrorKind::CodecRender,
+                                        stage: gw_core::observability::Stage::Response,
+                                        status: None,
+                                        trace_id: Some(ctx.trace_id.as_ref()),
+                                        extra: None,
+                                    },
+                                );
                                 return_body_to_accum = true;
                             }
                         }
