@@ -29,3 +29,5 @@ http-body-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+gw-core = { path = "../gw-core" }
+url = { workspace = true }
