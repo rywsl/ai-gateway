@@ -161,6 +161,10 @@ struct VendorKeyRow {
     /// Absent for all static-API-key rows.
     #[serde(default)]
     oauth: Option<OAuthCredentialsRow>,
+    /// Per-VendorKey persisted impersonation identity snapshot.
+    /// `None` for keys that have not yet used impersonate egress.
+    #[serde(default)]
+    identity_snapshot: Option<gw_core::impersonate::IdentitySnapshot>,
 }
 
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
@@ -272,6 +276,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
             exclusive_capability_match: row.exclusive_capability_match,
             tunnel_preference: row.tunnel_preference,
             oauth,
+            identity_snapshot: row.identity_snapshot,
         })
     })
     .await

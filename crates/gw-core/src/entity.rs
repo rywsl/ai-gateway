@@ -218,6 +218,12 @@ pub struct VendorKey {
     /// Populated by `load_vendor_key` after decrypting the `oauth` sub-object
     /// from the JSONB payload. `None` for all existing rows until backfilled.
     pub oauth: Option<OAuthCredentials>,
+    /// Per-VendorKey persisted impersonation identity (Aether-style lazy
+    /// persist). `None` for keys that have not yet emitted an impersonated
+    /// request, or for keys whose Vendor uses `egress_mode = Rustls`.
+    /// Populated by `ensure_identity` on first impersonated dispatch and
+    /// re-derived if `profile_kind` does not match the current vendor profile.
+    pub identity_snapshot: Option<crate::impersonate::IdentitySnapshot>,
 }
 
 impl std::fmt::Debug for VendorKey {

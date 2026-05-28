@@ -572,6 +572,7 @@ pub fn skeleton_vendor_key() -> Arc<VendorKey> {
         exclusive_capability_match: false,
         tunnel_preference: None,
         oauth: None,
+        identity_snapshot: None,
     })
 }
 
@@ -691,6 +692,7 @@ fn clone_vendor_key(key: &VendorKey) -> Arc<VendorKey> {
         exclusive_capability_match: key.exclusive_capability_match,
         tunnel_preference: key.tunnel_preference.clone(),
         oauth: key.oauth.clone(),
+        identity_snapshot: key.identity_snapshot.clone(),
     })
 }
 
