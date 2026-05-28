@@ -3,6 +3,10 @@
 E.2 — upstream closes connection before body: gateway must return 502 with a
 JSON envelope whose `code` starts with `GW_`, and
 gw_errors_total{kind="upstream_connect"} must increment by 1.
+
+E.3 — upstream closes connection mid-stream: gateway must not inject a
+synthetic SSE error event, and
+gw_errors_total{kind="upstream_mid_stream"} must increment by 1.
 """
 
 from __future__ import annotations
@@ -47,4 +51,46 @@ def test_upstream_connect_failure_returns_json_envelope(
     delta = label_delta(pre, post, 'kind="upstream_connect"')
     assert delta >= 1, (
         f"expected gw_errors_total{{kind=upstream_connect}} to increment by at least 1, got delta={delta}"
+    )
+
+
+_STREAM_BODY = {
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "hello"}],
+    "stream": True,
+}
+
+
+@pytest.mark.skip(reason="e2e infra not available in agent worktree")
+def test_upstream_mid_stream_failure_truncates(
+    gateway_url: str,
+    metrics_url: str,
+    fake_upstream,
+) -> None:
+    """Upstream closes mid-stream → no synthetic SSE error event + gw_errors_total{kind=upstream_mid_stream}+1."""
+    pre_mid = metrics_snapshot("gw_errors_total", metrics_url)
+
+    fake_upstream.set_mode("partial_stream", events=3)
+
+    chunks: list[str] = []
+    with requests.post(
+        f"{gateway_url.rstrip('/')}/v1/chat/completions",
+        headers={"content-type": "application/json"},
+        json=_STREAM_BODY,
+        stream=True,
+        timeout=15,
+    ) as r:
+        for line in r.iter_lines(decode_unicode=True):
+            if line:
+                chunks.append(line)
+
+    assert chunks, "expected at least some SSE chunks before truncation"
+    assert not any(c.startswith('data: {"error"') for c in chunks), (
+        "gateway must not inject synthetic SSE error events on mid-stream upstream failure"
+    )
+
+    post_mid = metrics_snapshot("gw_errors_total", metrics_url)
+    delta = label_delta(pre_mid, post_mid, 'kind="upstream_mid_stream"')
+    assert delta >= 1, (
+        f"expected gw_errors_total{{kind=upstream_mid_stream}} to increment by at least 1, got delta={delta}"
     )
