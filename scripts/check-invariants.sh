@@ -489,6 +489,25 @@ else
     ok "no cached_body identifier in Rust crates"
 fi
 
+# ---------------------------------------------------------------------------
+# managed_loop_advisory (warn-only) — long-loop tokio::spawn in gw-store /
+# gw-ledger should migrate to ManagedLoop + Supervisor::spawn.
+# Phase C of 2026-05-28-systemic-fixes migrated StreamConsumer; remaining
+# raw spawns in these crates should follow.
+# WARN-MODE ONLY: this lint MUST NOT set fail=1.
+# ---------------------------------------------------------------------------
+echo "[managed_loop_advisory] long-loop tokio::spawn in gw-store/gw-ledger should use ManagedLoop"
+WHITELIST_REGEX='managed_loop\.rs|stream_consumer\.rs.*Supervisor::spawn|identity_persist\.rs'
+hits=$(rg -n 'tokio::spawn\(' crates/gw-store/src crates/gw-ledger/src 2>/dev/null \
+       | grep -vE "$WHITELIST_REGEX" || true)
+if [ -n "$hits" ]; then
+    echo "  WARN: non-ManagedLoop tokio::spawn in worker crates:"
+    echo "$hits" | sed 's/^/    /'
+    echo "  (advisory; not a hard failure during Phase C migration)"
+else
+    ok "no unmigrated long-loop tokio::spawn"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "INVARIANT CHECK FAILED"
   exit 1
