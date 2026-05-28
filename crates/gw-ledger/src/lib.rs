@@ -13,7 +13,7 @@ pub mod instance_id;
 pub mod usage;
 
 pub use deduct_gc::DeductGc;
-pub use flusher::Ledger;
+pub use flusher::{ClearKey, Ledger, LedgerItem};
 pub use freeze::{
     FreezeGuard, FreezeKind, ReleaseOutcome, RequestFreeze, TaskFreeze, TaskFreezeRelease,
 };

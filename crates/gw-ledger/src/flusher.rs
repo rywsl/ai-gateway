@@ -26,6 +26,23 @@ const USAGE_STREAM: &str = "usage:records";
 const DLQ_STREAM: &str = "usage:records:dlq";
 const DLQ_MAXLEN: u64 = 100_000;
 
+/// Channel-internal envelope: the wire `UsageRecord` plus an optional
+/// inflight clear instruction. The flusher (or `sync_xadd` bypass) DELs
+/// `billing:inflight:<instance>:<request_id>:<attempt>` after — and only
+/// after — the corresponding `record` is XADD-confirmed on
+/// `usage:records`. See `docs/superpowers/specs/2026-05-29-billing-record-durability-design.md` §3.2 (DEL rule).
+#[derive(Clone, Debug)]
+pub struct LedgerItem {
+    pub record: UsageRecord,
+    pub clear: Option<ClearKey>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClearKey {
+    pub request_id: String,
+    pub attempt_index: u32,
+}
+
 pub struct Ledger {
     pub tx: mpsc::Sender<UsageRecord>,
     redis: RedisCtx,
@@ -222,5 +239,63 @@ async fn flush(redis: &RedisCtx, buf: &mut Vec<UsageRecord>) {
         if dlq_xadd(redis, wrapped).await.is_err() {
             metrics::counter!("gateway_usage_records_lost_total").increment(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usage::{UsageProvenance, UsageRecord, UsageStatus, VendorExposureState};
+    use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
+    use gw_core::permissions::MarkupChainSnapshot;
+    use gw_core::usage::UsageSnapshot;
+
+    fn dummy_record(req_id: &str) -> UsageRecord {
+        UsageRecord {
+            ts_ms: 0,
+            request_id: req_id.to_string(),
+            trace_id: String::new(),
+            user_id: UserId::from("u0"),
+            child_id: None,
+            api_key_id: None,
+            client_protocol: String::new(),
+            upstream_protocol: String::new(),
+            model: ModelName::from("m"),
+            vendor_id: VendorId::from("v"),
+            vendor_key_id: KeyId::from("k"),
+            status: UsageStatus::Ok,
+            error_code: None,
+            http_status: 200,
+            usage: UsageSnapshot::default(),
+            attempt_index: 0,
+            vendor_exposure_state: VendorExposureState::Settled,
+            usage_provenance: UsageProvenance::default(),
+            latency_ms: 0,
+            ttft_ms: None,
+            is_stream: false,
+            freeze_amount_micro: 0,
+            estimate_pricing_version: 0,
+            markup_chain_snapshot: MarkupChainSnapshot::identity(),
+            operation_id: None,
+        }
+    }
+
+    #[test]
+    fn ledger_item_constructs_with_and_without_clear() {
+        let rec = dummy_record("req-1");
+        let with_clear = LedgerItem {
+            record: rec.clone(),
+            clear: Some(ClearKey {
+                request_id: "req-1".to_string(),
+                attempt_index: 0,
+            }),
+        };
+        let without_clear = LedgerItem {
+            record: rec,
+            clear: None,
+        };
+        assert!(with_clear.clear.is_some());
+        assert!(without_clear.clear.is_none());
+        assert_eq!(with_clear.record.request_id, "req-1");
     }
 }
