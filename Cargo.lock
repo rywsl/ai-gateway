@@ -1776,6 +1776,8 @@ name = "gw-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "hex",
+ "moka",
  "rand 0.8.6",
  "secrecy",
  "serde",
@@ -1784,6 +1786,7 @@ dependencies = [
  "smallvec",
  "thiserror 1.0.69",
  "time",
+ "tokio",
  "url",
  "uuid",
 ]

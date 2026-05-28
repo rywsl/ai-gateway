@@ -13,6 +13,7 @@ pub mod claude_code;
 pub mod openai_codex;
 pub mod gemini_cli;
 pub mod ensure;
+pub mod turn_state;
 pub use ensure::{ensure_identity, ResolvedIdentity};
 
 /// Identifies which official upstream CLI client to imitate.
