@@ -19,13 +19,26 @@ set -euo pipefail
 
 PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPECTED="$PROFILE_DIR/expected.json"
-OBSERVED="$(mktemp -d)/observed.json"
+OBSERVED="$(mktemp)"
 
-: "${MITMPROXY_FLOW_FILE:?Set MITMPROXY_FLOW_FILE to the captured mitmproxy flow file}"
+if [[ -z "${MITMPROXY_FLOW_FILE:-}" ]]; then
+  echo "MITMPROXY_FLOW_FILE not set — skipping claude-code drift check (unattended run cannot capture authenticated traffic)."
+  echo "To run: capture a flow with mitmproxy, then re-run via workflow_dispatch or locally with MITMPROXY_FLOW_FILE set. See scripts/capture_real_client_headers/README.md."
+  exit 0
+fi
+if [[ ! -f "$MITMPROXY_FLOW_FILE" ]]; then
+  echo "ERROR: MITMPROXY_FLOW_FILE=$MITMPROXY_FLOW_FILE does not exist."
+  exit 1
+fi
 
 # Extract the static-header subset for /v1/messages from the mitmproxy flow.
 mitmdump -nr "$MITMPROXY_FLOW_FILE" \
   -s "$PROFILE_DIR/extract.py" > "$OBSERVED"
+
+if [[ ! -s "$OBSERVED" ]]; then
+  echo "ERROR: no matching flows found in $MITMPROXY_FLOW_FILE for this profile."
+  exit 1
+fi
 
 if ! diff <(jq -S . "$EXPECTED") <(jq -S . "$OBSERVED"); then
   echo "DRIFT in claude-code headers"

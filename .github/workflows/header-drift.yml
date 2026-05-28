@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install mitmproxy
-        run: pip install mitmproxy
+        run: pip install "mitmproxy>=12,<13"
 
       - name: Install Claude Code / Codex / Gemini CLIs
         run: |

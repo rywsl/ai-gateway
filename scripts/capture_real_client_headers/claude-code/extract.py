@@ -36,10 +36,6 @@ STATIC_HEADERS = {
 _emitted = False
 
 
-def response(flow: http.HTTPFlow) -> None:
-    _emit(flow)
-
-
 def request(flow: http.HTTPFlow) -> None:
     _emit(flow)
 
