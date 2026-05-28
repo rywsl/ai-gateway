@@ -459,6 +459,10 @@ pub async fn run(
     }
     let body_bytes = bytes::Bytes::from(body_buf);
     ctx.cached_body = Some(body_bytes.clone());
+    ctx.body = Some(crate::body::RequestBodyView::from_raw(
+        body_bytes.clone(),
+        ctx.req_content_encoding,
+    ));
     crate::filters::task::mark_task_context(
         ctx,
         task_enabled,
@@ -517,6 +521,9 @@ pub async fn run(
                     gw_codec::compression::Encoding::Identity
                 ) {
                     ctx.cached_body = Some(decoded.clone());
+                    if let Some(view) = ctx.body.as_ref() {
+                        view.prefill_decoded(decoded);
+                    }
                 }
             }
             Ok((SignatureCheckResult::Missing, _)) => {

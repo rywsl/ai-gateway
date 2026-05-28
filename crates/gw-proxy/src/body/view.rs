@@ -70,6 +70,14 @@ impl RequestBodyView {
     pub fn outbound_or_raw(&self) -> &Bytes {
         self.outbound.as_ref().unwrap_or(&self.raw)
     }
+
+    /// Pre-populate the decoded OnceCell with bytes already decoded by another
+    /// path (e.g. HMAC verify which decodes independently). A no-op if the
+    /// cell was already initialised.
+    pub fn prefill_decoded(&self, decoded: Bytes) {
+        // `set` returns Err if already set; ignore.
+        let _ = self.decoded.set(Ok(decoded));
+    }
 }
 
 fn decompress(raw: &Bytes, enc: Encoding, max_bytes: usize) -> Result<Bytes, DecodeErr> {
