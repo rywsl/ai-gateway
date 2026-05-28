@@ -206,6 +206,11 @@ pub struct LlmGateway {
     /// the selected vendor's `egress_mode = Impersonate`. Same architectural
     /// neighborhood as `tunnel` since both gate the upstream peer construction.
     pub egress: Arc<gw_egress_impersonate::EgressHandle>,
+    /// Kill-switch for the egress-impersonate path (Task 5.2). When `true`,
+    /// vendors with `egress_mode = Impersonate` are excluded from candidate
+    /// selection in `pick_peer`; metric `gw_egress_disabled_total` ticks per
+    /// dropped vendor. Rustls vendors are unaffected. Boot-time only.
+    pub egress_disabled: bool,
     /// Identity-persist queue (Task 4.6). Lazy snapshot writer for forged
     /// identities; cloned onto `ReqCtx` in `new_ctx`.
     pub identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
@@ -272,6 +277,7 @@ impl LlmGateway {
         resilience: Arc<ResilienceState>,
         #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
         egress: Arc<gw_egress_impersonate::EgressHandle>,
+        egress_disabled: bool,
         identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
         turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
         detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
@@ -322,6 +328,7 @@ impl LlmGateway {
             #[cfg(feature = "tunnel")]
             tunnel,
             egress,
+            egress_disabled,
             identity_persist,
             turn_state_cache,
             detailed_archive,
@@ -531,6 +538,7 @@ impl ProxyHttp for LlmGateway {
             &self.strategies,
             &self.latency_tracker,
             &self.egress,
+            self.egress_disabled,
             #[cfg(feature = "tunnel")]
             self.tunnel.as_ref(),
         )

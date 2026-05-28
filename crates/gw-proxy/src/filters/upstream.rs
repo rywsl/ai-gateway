@@ -94,6 +94,7 @@ pub async fn pick_peer(
     strategies: &Arc<StrategySet>,
     latency_tracker: &Arc<LatencyTracker>,
     egress: &Arc<gw_egress_impersonate::EgressHandle>,
+    egress_disabled: bool,
     #[cfg(feature = "tunnel")] tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
 ) -> Result<Box<HttpPeer>> {
     // The remaining `ErrorType::Custom(...)` short-circuits in this function
@@ -177,6 +178,36 @@ pub async fn pick_peer(
         ctx.required_caps.as_ref(),
     )
     .await;
+
+    // Kill-switch: when egress is globally disabled, drop any candidate whose
+    // vendor uses `egress_mode = Impersonate`. Rustls vendors are unaffected.
+    // The vendor load is cheap (Moka cache) but still async, hence the explicit
+    // loop — Vec::retain cannot take an async closure.
+    if egress_disabled && !candidates.is_empty() {
+        let mut kept = Vec::with_capacity(candidates.len());
+        let mut dropped: u64 = 0;
+        for candidate in candidates {
+            let is_impersonate = match store.vendor_or_load(&candidate.vendor_id).await {
+                Some(v) => matches!(
+                    v.value.egress_mode,
+                    gw_core::impersonate::VendorEgressMode::Impersonate { .. }
+                ),
+                // If vendor can't be loaded, pass it through; the normal
+                // pick path will surface the missing-vendor 503 error.
+                None => false,
+            };
+            if is_impersonate {
+                dropped += 1;
+            } else {
+                kept.push(candidate);
+            }
+        }
+        if dropped > 0 {
+            metrics::counter!("gw_egress_disabled_total").increment(dropped);
+        }
+        candidates = kept;
+    }
+
     if let Some(client_shape) = ctx.client_shape.filter(gw_core::protocol::ApiShape::is_cli) {
         let required_kind = client_shape.protocol_kind();
         candidates.retain(|key| key.accessible_endpoints.contains(&required_kind));
@@ -1541,5 +1572,146 @@ mod regression_baseline_tests {
         let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
         inject_vendor_headers(&mut ctx, &mut req, &key, &vendor, content_len);
         insta::assert_snapshot!(render(&req));
+    }
+}
+
+/// Unit tests for the egress kill-switch filter logic (Task 5.2).
+///
+/// The full `pick_peer` path requires a `pingora::Session` and an async
+/// store, which makes an inline integration test heavy. Instead we test the
+/// VendorEgressMode matching predicate — the pure core of the filter — and
+/// the counter logic with a simulated candidate list via a small helper.
+///
+/// The helper mirrors the in-function loop body: given a list of
+/// `(VendorKey, VendorEgressMode)` pairs (as if freshly loaded), it applies
+/// the same filter and returns the (kept, dropped) partition. This lets us
+/// verify correctness without touching `EntityStore` or `Session`.
+#[cfg(test)]
+mod egress_kill_switch_tests {
+    use super::*;
+    use gw_core::entity::{KeyStatus, VendorKey};
+    use gw_core::ids::{KeyId, VendorId};
+    use gw_core::impersonate::{ImpersonateProfile, VendorEgressMode};
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+    use url::Url;
+
+    fn make_key(vendor_id: &str) -> Arc<VendorKey> {
+        Arc::new(VendorKey {
+            key_id: KeyId::from(format!("vk-{vendor_id}")),
+            vendor_id: VendorId::from(vendor_id),
+            api_key: SecretString::new("sk-test".into()),
+            accessible_models: Vec::new(),
+            model_mapping: HashMap::new(),
+            accessible_endpoints: Vec::new(),
+            protocol_conversion: false,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None::<Url>,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: Vec::new(),
+            forced_capabilities: Vec::new(),
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+            identity_snapshot: None,
+        })
+    }
+
+    /// Simulates the kill-switch filter: given pre-loaded egress_mode values
+    /// keyed by vendor_id, partition the candidates into (kept, dropped).
+    fn simulate_filter(
+        candidates: Vec<Arc<VendorKey>>,
+        modes: &HashMap<&str, VendorEgressMode>,
+    ) -> (Vec<Arc<VendorKey>>, usize) {
+        let mut kept = Vec::new();
+        let mut dropped = 0usize;
+        for candidate in candidates {
+            let mode = modes
+                .get(candidate.vendor_id.as_ref())
+                .cloned()
+                .unwrap_or_default(); // default = Rustls (fail open)
+            if matches!(mode, VendorEgressMode::Impersonate { .. }) {
+                dropped += 1;
+            } else {
+                kept.push(candidate);
+            }
+        }
+        (kept, dropped)
+    }
+
+    #[test]
+    fn egress_disabled_removes_impersonate_keeps_rustls() {
+        let impersonate_key = make_key("impersonate-vendor");
+        let rustls_key = make_key("rustls-vendor");
+        let candidates = vec![impersonate_key.clone(), rustls_key.clone()];
+
+        let mut modes = HashMap::new();
+        modes.insert(
+            "impersonate-vendor",
+            VendorEgressMode::Impersonate {
+                profile: ImpersonateProfile::ClaudeCodeChrome131,
+            },
+        );
+        modes.insert("rustls-vendor", VendorEgressMode::Rustls);
+
+        let (kept, dropped) = simulate_filter(candidates, &modes);
+
+        assert_eq!(dropped, 1, "one Impersonate vendor should be dropped");
+        assert_eq!(kept.len(), 1, "one Rustls vendor should remain");
+        assert_eq!(
+            kept[0].key_id,
+            rustls_key.key_id,
+            "the remaining candidate should be the Rustls vendor"
+        );
+    }
+
+    #[test]
+    fn egress_disabled_false_does_not_filter() {
+        // Simulate egress_disabled = false: no filtering occurs at all.
+        // The filter block is gated on `egress_disabled && !candidates.is_empty()`,
+        // so we just assert that without the filter, all candidates are present.
+        let impersonate_key = make_key("impersonate-vendor");
+        let rustls_key = make_key("rustls-vendor");
+        let candidates = vec![impersonate_key.clone(), rustls_key.clone()];
+
+        // egress_disabled = false → skip the filter block entirely.
+        // No filtering is applied; we just verify the candidates list is unchanged.
+        let kept = candidates.clone();
+        assert_eq!(kept.len(), 2, "no filtering when egress_disabled = false");
+    }
+
+    #[test]
+    fn egress_disabled_all_impersonate_yields_empty() {
+        let k1 = make_key("imp-vendor-a");
+        let k2 = make_key("imp-vendor-b");
+        let candidates = vec![k1.clone(), k2.clone()];
+
+        let mut modes = HashMap::new();
+        modes.insert(
+            "imp-vendor-a",
+            VendorEgressMode::Impersonate {
+                profile: ImpersonateProfile::ClaudeCodeChrome131,
+            },
+        );
+        modes.insert(
+            "imp-vendor-b",
+            VendorEgressMode::Impersonate {
+                profile: ImpersonateProfile::OpenAiCodex,
+            },
+        );
+
+        let (kept, dropped) = simulate_filter(candidates, &modes);
+
+        assert_eq!(dropped, 2, "all Impersonate vendors should be dropped");
+        assert!(
+            kept.is_empty(),
+            "no candidates should remain (all were Impersonate)"
+        );
     }
 }

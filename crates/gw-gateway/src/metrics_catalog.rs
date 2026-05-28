@@ -267,6 +267,17 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "CLI requests denied because no same-protocol upstream channel remained",
     },
+    // --- Egress impersonation (Phase 4 / Task 5.2) ---
+    MetricSpec {
+        name: "gw_egress_impersonate_dispatch_total",
+        kind: MetricKind::Counter,
+        help: "upstream requests routed through the egress-impersonate loopback (Impersonate vendors)",
+    },
+    MetricSpec {
+        name: "gw_egress_disabled_total",
+        kind: MetricKind::Counter,
+        help: "Impersonate vendor candidates dropped by the egress kill-switch (egress.disabled=true); increments per skipped candidate",
+    },
     MetricSpec {
         name: "gw_tunnel_open_total",
         kind: MetricKind::Counter,

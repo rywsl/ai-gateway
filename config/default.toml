@@ -159,3 +159,27 @@ heartbeat_ttl_secs = 600          # heartbeat key TTL (供 Go-side reaper 探活
 enabled = false
 interval_secs = 30
 probe_endpoint = "/v1/models"
+
+[egress]
+# Workspace kill-switch for the egress-impersonate path. When true, vendors
+# with egress_mode = Impersonate { .. } are excluded from candidate selection
+# and the request fails with the normal no-candidates path; the metric
+# gw_egress_disabled_total ticks per skipped vendor. Direct/Rustls vendors
+# are not affected. Boot-time only.
+disabled = false
+
+# Where the in-process loopback egress listens. Either:
+#   bind_uds = "/tmp/gw-egress.sock"    (unix-domain socket; default)
+# or:
+#   bind_tcp = "127.0.0.1:18080"        (loopback TCP, useful on platforms
+#                                        without UDS or for local debug)
+# Exactly one of bind_uds / bind_tcp must be set.
+bind_uds = "/tmp/gw-egress.sock"
+
+# Maximum concurrent loopback sessions handled by the supervisor before
+# new connections back-pressure.
+max_sessions = 64
+
+# TTL on the in-process `TurnStateCache` (Codex per-turn state). 5 minutes
+# matches the educated guess in spec §11 #2.
+turn_state_ttl_secs = 300

@@ -43,6 +43,8 @@ pub struct Config {
     #[serde(default)]
     pub tunnel: TunnelCfg,
     #[serde(default)]
+    pub egress: EgressCfg,
+    #[serde(default)]
     pub detailed_log: DetailedLogCfg,
     #[serde(default)]
     pub billing: BillingCfg,
@@ -519,6 +521,80 @@ impl Default for TunnelCfg {
             backoff_min_secs: default_backoff_min_secs(),
             backoff_max_secs: default_backoff_max_secs(),
             max_streams_per_conn: default_max_streams(),
+        }
+    }
+}
+
+/// Egress-impersonation subsystem knobs (Phase 4 / Task 5.2).
+///
+/// Controls where the in-process loopback egress listener binds, its
+/// concurrency cap, the TurnStateCache TTL, and a kill-switch (`disabled`)
+/// that excludes Impersonate vendors from candidate selection without touching
+/// the Rustls path.
+///
+/// Boot-time only — changing these fields requires a restart.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EgressCfg {
+    /// When `true`, vendors with `egress_mode = Impersonate { .. }` are
+    /// excluded from `pick_peer` candidate selection and the metric
+    /// `gw_egress_disabled_total` increments per dropped vendor. Rustls
+    /// vendors are unaffected. Default `false`.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Unix-domain socket path the loopback egress listener binds. Mutually
+    /// exclusive with `bind_tcp`. Defaults to `/tmp/gw-egress.sock`.
+    #[serde(default)]
+    pub bind_uds: Option<std::path::PathBuf>,
+    /// Loopback TCP address the egress listener binds. Mutually exclusive
+    /// with `bind_uds`. When set, `bind_uds` must be `None`.
+    #[serde(default)]
+    pub bind_tcp: Option<std::net::SocketAddr>,
+    /// Maximum concurrent loopback sessions before back-pressure. Default 64.
+    #[serde(default = "default_egress_max_sessions")]
+    pub max_sessions: usize,
+    /// TTL for the `TurnStateCache` (Codex per-turn state). Default 300 s.
+    #[serde(default = "default_egress_turn_state_ttl_secs")]
+    pub turn_state_ttl_secs: u64,
+}
+
+fn default_egress_max_sessions() -> usize {
+    64
+}
+fn default_egress_turn_state_ttl_secs() -> u64 {
+    300
+}
+
+impl Default for EgressCfg {
+    fn default() -> Self {
+        Self {
+            disabled: false,
+            bind_uds: Some(std::path::PathBuf::from("/tmp/gw-egress.sock")),
+            bind_tcp: None,
+            max_sessions: default_egress_max_sessions(),
+            turn_state_ttl_secs: default_egress_turn_state_ttl_secs(),
+        }
+    }
+}
+
+impl EgressCfg {
+    /// Resolve the configured bind address to an `EgressBind`.
+    ///
+    /// Returns an error when both `bind_uds` and `bind_tcp` are set, or when
+    /// neither is set.
+    pub fn bind(&self) -> anyhow::Result<gw_egress_impersonate::EgressBind> {
+        match (&self.bind_uds, &self.bind_tcp) {
+            (Some(_), Some(_)) => {
+                anyhow::bail!("[egress] both bind_uds and bind_tcp are set; pick exactly one")
+            }
+            (None, None) => {
+                anyhow::bail!("[egress] neither bind_uds nor bind_tcp is set; one is required")
+            }
+            (Some(path), None) => {
+                Ok(gw_egress_impersonate::EgressBind::Uds(path.clone()))
+            }
+            (None, Some(addr)) => {
+                Ok(gw_egress_impersonate::EgressBind::Tcp(*addr))
+            }
         }
     }
 }
@@ -1065,6 +1141,104 @@ pub fn load() -> anyhow::Result<Config> {
         .extract()?;
     cfg.validate()?;
     Ok(cfg)
+}
+
+#[cfg(test)]
+mod egress_cfg_tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+    use figment::Figment;
+
+    #[test]
+    fn egress_default_values() {
+        let cfg = EgressCfg::default();
+        assert!(!cfg.disabled, "disabled should default to false");
+        assert_eq!(
+            cfg.bind_uds,
+            Some(std::path::PathBuf::from("/tmp/gw-egress.sock")),
+            "bind_uds should default to /tmp/gw-egress.sock"
+        );
+        assert!(cfg.bind_tcp.is_none(), "bind_tcp should default to None");
+        assert_eq!(cfg.max_sessions, 64, "max_sessions should default to 64");
+        assert_eq!(
+            cfg.turn_state_ttl_secs, 300,
+            "turn_state_ttl_secs should default to 300"
+        );
+    }
+
+    #[test]
+    fn egress_bind_returns_uds_for_default() {
+        let cfg = EgressCfg::default();
+        let bind = cfg.bind().expect("bind() should succeed for default");
+        assert!(
+            matches!(bind, gw_egress_impersonate::EgressBind::Uds(_)),
+            "default bind should be Uds"
+        );
+    }
+
+    #[test]
+    fn egress_bind_returns_tcp_when_set() {
+        let cfg = EgressCfg {
+            disabled: false,
+            bind_uds: None,
+            bind_tcp: Some("127.0.0.1:18080".parse().unwrap()),
+            max_sessions: 64,
+            turn_state_ttl_secs: 300,
+        };
+        let bind = cfg.bind().expect("bind() should succeed for tcp config");
+        assert!(
+            matches!(bind, gw_egress_impersonate::EgressBind::Tcp(_)),
+            "bind should be Tcp when bind_tcp is set and bind_uds is None"
+        );
+    }
+
+    #[test]
+    fn egress_bind_errors_when_both_set() {
+        let cfg = EgressCfg {
+            disabled: false,
+            bind_uds: Some(std::path::PathBuf::from("/tmp/gw-egress.sock")),
+            bind_tcp: Some("127.0.0.1:18080".parse().unwrap()),
+            max_sessions: 64,
+            turn_state_ttl_secs: 300,
+        };
+        assert!(
+            cfg.bind().is_err(),
+            "bind() should error when both bind_uds and bind_tcp are set"
+        );
+    }
+
+    #[test]
+    fn egress_bind_errors_when_neither_set() {
+        let cfg = EgressCfg {
+            disabled: false,
+            bind_uds: None,
+            bind_tcp: None,
+            max_sessions: 64,
+            turn_state_ttl_secs: 300,
+        };
+        assert!(
+            cfg.bind().is_err(),
+            "bind() should error when neither bind_uds nor bind_tcp is set"
+        );
+    }
+
+    #[test]
+    fn egress_section_from_default_toml() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml should parse with [egress] section");
+        cfg.validate().expect("default.toml should validate");
+        assert!(!cfg.egress.disabled);
+        assert_eq!(cfg.egress.max_sessions, 64);
+        assert_eq!(cfg.egress.turn_state_ttl_secs, 300);
+        assert_eq!(
+            cfg.egress.bind_uds,
+            Some(std::path::PathBuf::from("/tmp/gw-egress.sock"))
+        );
+        assert!(cfg.egress.bind_tcp.is_none());
+    }
 }
 
 #[cfg(test)]

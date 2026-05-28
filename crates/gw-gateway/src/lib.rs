@@ -121,6 +121,10 @@ struct Wired {
     /// Egress impersonation loopback handle (Task 4.6). Constructed in the
     /// bootstrap runtime because `EgressHandle::start` calls `tokio::spawn`.
     egress: Arc<gw_egress_impersonate::EgressHandle>,
+    /// Kill-switch for the egress-impersonate path (Task 5.2). When `true`,
+    /// vendors with `egress_mode = Impersonate` are excluded from candidate
+    /// selection; metric `gw_egress_disabled_total` ticks per dropped vendor.
+    egress_disabled: bool,
     /// Identity-persist queue (Task 4.6). Spawns a background flush task, so
     /// it must be built inside the bootstrap runtime.
     identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
@@ -237,6 +241,7 @@ pub fn run() -> anyhow::Result<()> {
         #[cfg(feature = "tunnel")]
         wired.tunnel,
         wired.egress,
+        wired.egress_disabled,
         wired.identity_persist,
         wired.turn_state_cache,
         wired.detailed_archive,
@@ -448,21 +453,22 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         archive_cfg,
     ));
 
-    // Egress impersonation loopback + identity persistence (Task 4.6).
-    // Constructed here in the bootstrap runtime because EgressHandle::start
-    // and IdentityPersistQueue::new both call tokio::spawn. Bind path,
-    // max_sessions, and turn-state TTL are hardcoded defaults; a later task
-    // replaces them with `[egress]` config reads.
+    // Egress impersonation loopback + identity persistence (Task 4.6, configured by
+    // `[egress]` in Task 5.2). Constructed in the bootstrap runtime because
+    // EgressHandle::start and IdentityPersistQueue::new both call tokio::spawn.
+    let egress_bind = cfg.egress
+        .bind()
+        .context("invalid [egress] bind config")?;
     let egress = Arc::new(gw_egress_impersonate::EgressHandle::start(
-        gw_egress_impersonate::EgressBind::Uds(std::path::PathBuf::from("/tmp/gw-egress.sock")),
-        64,
+        egress_bind,
+        cfg.egress.max_sessions,
     ));
     let identity_persist = Arc::new(gw_store::identity_persist::IdentityPersistQueue::new(
         Arc::new(gw_store::identity_persist::PgSnapshotWriter::new(pg.clone())),
         2000,
     ));
     let turn_state_cache = Arc::new(gw_core::impersonate::turn_state::TurnStateCache::new(
-        Duration::from_secs(300),
+        Duration::from_secs(cfg.egress.turn_state_ttl_secs),
         8192,
     ));
 
@@ -830,6 +836,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         error_passthrough_enabled: false,
         body_rules: Arc::new(convert_body_rules(&cfg.body_rules)),
         egress,
+        egress_disabled: cfg.egress.disabled,
         identity_persist,
         turn_state_cache,
         pg,
