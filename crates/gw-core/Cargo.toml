@@ -23,4 +23,5 @@ metrics.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+metrics-util = "0.17"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
