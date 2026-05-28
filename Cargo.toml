@@ -21,6 +21,7 @@ members = [
     "crates/gw-tunnel-client",
     "crates/e2e-fake-upstream",
     "crates/e2e-fake-web",
+    "crates/gw-egress-impersonate",
 ]
 
 [workspace.package]
@@ -89,6 +90,10 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 hickory-resolver = { version = "0.25", features = ["https-ring", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+wreq = { version = "6.0.0-rc.28", default-features = false, features = ["json", "stream", "prefix-symbols"] }
+hyper = { version = "1.4", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
+http-body-util = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # 可观测
