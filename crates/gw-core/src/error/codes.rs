@@ -102,3 +102,13 @@ pub const GW_TASK_SUBMIT_FAILED: &str = "GW_TASK_SUBMIT_FAILED";
 pub const GW_TASK_NOT_FOUND: &str = "GW_TASK_NOT_FOUND";
 pub const GW_TASK_FREEZE_FAILED: &str = "GW_TASK_FREEZE_FAILED";
 pub const GW_TASK_CANCELLED: &str = "GW_TASK_CANCELLED";
+
+// --- fail_to_proxy surface (Phase E) ---
+// Emitted when upstream closes the connection after body streaming started.
+pub const GW_UPSTREAM_TRUNCATED: &str = "GW_UPSTREAM_TRUNCATED";
+// Emitted when downstream client disconnects or the connection is unwritable.
+pub const GW_CLIENT_DISCONNECTED: &str = "GW_CLIENT_DISCONNECTED";
+// Emitted for malformed downstream requests that reach fail_to_proxy.
+pub const GW_BAD_REQUEST: &str = "GW_BAD_REQUEST";
+// Emitted when Pingora yields an HTTPStatus error (upstream protocol mismatch).
+pub const GW_UPSTREAM_PROTOCOL: &str = "GW_UPSTREAM_PROTOCOL";
