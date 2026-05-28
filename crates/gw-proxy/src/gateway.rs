@@ -206,6 +206,12 @@ pub struct LlmGateway {
     /// the selected vendor's `egress_mode = Impersonate`. Same architectural
     /// neighborhood as `tunnel` since both gate the upstream peer construction.
     pub egress: Arc<gw_egress_impersonate::EgressHandle>,
+    /// Identity-persist queue (Task 4.6). Lazy snapshot writer for forged
+    /// identities; cloned onto `ReqCtx` in `new_ctx`.
+    pub identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
+    /// Turn-state cache (Task 4.6). Per-conversation impersonation turn
+    /// counter; cloned onto `ReqCtx` in `new_ctx`.
+    pub turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
     /// Detailed-log archive (T10). Sender handle for per-surface wire-fidelity
     /// capture. `try_send` is fire-and-forget; a full channel drops + metrics.
     pub(crate) detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
@@ -266,6 +272,8 @@ impl LlmGateway {
         resilience: Arc<ResilienceState>,
         #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
         egress: Arc<gw_egress_impersonate::EgressHandle>,
+        identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
+        turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
         detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
         inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
         response_deadline_ms: u64,
@@ -314,6 +322,8 @@ impl LlmGateway {
             #[cfg(feature = "tunnel")]
             tunnel,
             egress,
+            identity_persist,
+            turn_state_cache,
             detailed_archive,
             inflight,
             response_deadline_ms,
@@ -404,6 +414,8 @@ impl ProxyHttp for LlmGateway {
         let mut ctx = ReqCtx::new(trace, req);
         ctx.reservation_view = self.reservation_view.clone();
         ctx.frequency_tracker = self.frequency_tracker.clone();
+        ctx.identity_persist = Some(self.identity_persist.clone());
+        ctx.turn_state_cache = Some(self.turn_state_cache.clone());
         ctx
     }
 

@@ -118,6 +118,14 @@ struct Wired {
     retryable_codes: Arc<std::collections::HashSet<u16>>,
     error_passthrough_enabled: bool,
     body_rules: Arc<gw_proxy::filters::upstream::BodyRulesMap>,
+    /// Egress impersonation loopback handle (Task 4.6). Constructed in the
+    /// bootstrap runtime because `EgressHandle::start` calls `tokio::spawn`.
+    egress: Arc<gw_egress_impersonate::EgressHandle>,
+    /// Identity-persist queue (Task 4.6). Spawns a background flush task, so
+    /// it must be built inside the bootstrap runtime.
+    identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
+    /// Per-conversation turn-state cache (Task 4.6).
+    turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
     pg: sqlx::PgPool,
 }
 
@@ -228,11 +236,9 @@ pub fn run() -> anyhow::Result<()> {
         wired.resilience,
         #[cfg(feature = "tunnel")]
         wired.tunnel,
-        // Wired for compile only; real EgressHandle threaded in Task 4.6.
-        std::sync::Arc::new(gw_egress_impersonate::EgressHandle::start(
-            gw_egress_impersonate::EgressBind::Tcp("127.0.0.1:0".parse().unwrap()),
-            4,
-        )),
+        wired.egress,
+        wired.identity_persist,
+        wired.turn_state_cache,
         wired.detailed_archive,
         wired.inflight,
         wired.response_deadline_ms,
@@ -440,6 +446,24 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let detailed_archive = Arc::new(gw_ledger::detailed_archive::DetailedArchive::start(
         (*redis.pool).clone(),
         archive_cfg,
+    ));
+
+    // Egress impersonation loopback + identity persistence (Task 4.6).
+    // Constructed here in the bootstrap runtime because EgressHandle::start
+    // and IdentityPersistQueue::new both call tokio::spawn. Bind path,
+    // max_sessions, and turn-state TTL are hardcoded defaults; a later task
+    // replaces them with `[egress]` config reads.
+    let egress = Arc::new(gw_egress_impersonate::EgressHandle::start(
+        gw_egress_impersonate::EgressBind::Uds(std::path::PathBuf::from("/tmp/gw-egress.sock")),
+        64,
+    ));
+    let identity_persist = Arc::new(gw_store::identity_persist::IdentityPersistQueue::new(
+        Arc::new(gw_store::identity_persist::PgSnapshotWriter::new(pg.clone())),
+        2000,
+    ));
+    let turn_state_cache = Arc::new(gw_core::impersonate::turn_state::TurnStateCache::new(
+        Duration::from_secs(300),
+        8192,
     ));
 
     // 4c. DEDUCT DashMap GC (S-ledger T3). Periodically removes zero-state
@@ -805,6 +829,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         },
         error_passthrough_enabled: false,
         body_rules: Arc::new(convert_body_rules(&cfg.body_rules)),
+        egress,
+        identity_persist,
+        turn_state_cache,
         pg,
     })
 }
