@@ -74,3 +74,37 @@ impl IdentityPersistQueue {
         }
     }
 }
+
+use sqlx::PgPool;
+
+pub struct PgSnapshotWriter {
+    pool: PgPool,
+}
+
+impl PgSnapshotWriter {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl SnapshotWriter for PgSnapshotWriter {
+    async fn write_if_null(
+        &self,
+        key_id: &str,
+        snap: &IdentitySnapshot,
+    ) -> anyhow::Result<()> {
+        let payload = serde_json::to_value(snap)?;
+        // Conditional UPDATE: only write when NULL (preserves admin edits).
+        // `vendor_keys` primary key column is `id` (see migration 0001).
+        sqlx::query(
+            "UPDATE vendor_keys SET identity_snapshot = $1, updated_at = NOW() \
+             WHERE id = $2 AND identity_snapshot IS NULL",
+        )
+        .bind(payload)
+        .bind(key_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
