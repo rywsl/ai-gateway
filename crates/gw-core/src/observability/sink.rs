@@ -53,23 +53,31 @@ impl Stage {
 }
 
 pub struct ErrorObservation<'a> {
+    /// Gateway error code (e.g. `"gw_upstream_connect_failed"`); becomes the `code` label.
     pub code: &'a str,
+    /// Coarse error category; becomes the `kind` label.
     pub kind: ErrorKind,
+    /// Pipeline stage where the error originated; becomes the `stage` label.
     pub stage: Stage,
+    /// HTTP status if known (None at upstream-connect time, Some(401)+ on short-circuit).
     pub status: Option<u16>,
+    /// Trace ID for correlation with the detailed log surface.
     pub trace_id: Option<&'a str>,
-    pub extra: Option<&'a (dyn fmt::Debug + Sync)>,
+    /// Free-form debug context; logged via tracing, NOT emitted as a metric label.
+    pub extra: Option<&'a dyn fmt::Debug>,
 }
 
+/// Emit a unified error observation: increments `gw_errors_total{code,kind,stage}` and logs a `tracing::warn!` on target `"gw_errors"`. Increments on every call (no dedup).
 pub fn observe(o: ErrorObservation<'_>) {
     metrics::counter!(
         "gw_errors_total",
-        "code" => o.code.to_string(),
+        "code" => o.code.to_owned(),
         "kind" => o.kind.as_str(),
         "stage" => o.stage.as_str(),
     )
     .increment(1);
 
+    // Cross-crate aggregation target — flat name (not gw_core::observability) so all error sources surface under one tracing scope.
     tracing::warn!(
         target: "gw_errors",
         code = o.code,
