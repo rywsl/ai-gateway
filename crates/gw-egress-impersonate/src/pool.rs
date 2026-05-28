@@ -30,7 +30,7 @@ impl PoolKey {
             }
             // Strip a bare trailing slash so "http://host:port/" == "http://host:port".
             if u.path() == "/" {
-                let _ = u.set_path("");
+                u.set_path("");
             }
         }
         self

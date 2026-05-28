@@ -1,12 +1,15 @@
 //! Map `ImpersonateProfile` → wreq emulation config.
 //!
 //! # API Deviation from Plan
+//!
 //! The plan referenced `wreq::EmulationProvider` (which does not exist in 6.0.0-rc.28)
 //! and `Emulation::Chrome131.into()` (no `From` impl). The actual API is:
-//!   - `wreq_util::Emulation` implements `wreq::EmulationFactory`
-//!   - `ClientBuilder::emulation<P: EmulationFactory>(self, p)` accepts it directly
-//! So the return type is `wreq_util::Emulation` (not a `wreq::` type), and no conversion
-//! is needed — callers pass the return value directly to `.emulation(...)`.
+//!
+//! - `wreq_util::Emulation` implements `wreq::EmulationFactory`
+//! - `ClientBuilder::emulation<P: EmulationFactory>(self, p)` accepts it directly
+//!
+//! So the return type is `wreq_util::Emulation` (not a `wreq::` type), and no
+//! conversion is needed — callers pass the return value directly to `.emulation(...)`.
 
 use gw_core::impersonate::ImpersonateProfile;
 use wreq_util::Emulation;
