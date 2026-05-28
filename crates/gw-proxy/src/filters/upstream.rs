@@ -740,7 +740,7 @@ pub async fn rewrite_request(
         .body
         .as_ref()
         .map(|v| v.outbound_or_raw().clone())
-        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_cached_body")))?;
+        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_body_view")))?;
     let picked = ctx
         .picked_vendor_key
         .as_ref()
@@ -921,7 +921,7 @@ pub fn cli_passthrough_body(
         .body
         .as_ref()
         .map(|v| v.outbound_or_raw().clone())
-        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_cached_body")))?;
+        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_body_view")))?;
     let passthrough = match client_shape {
         gw_core::protocol::ApiShape::ClaudeCli => {
             gw_codec::cli::claude_cli::ClaudeCliCodec.passthrough_request(&outbound_body)

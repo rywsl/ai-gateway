@@ -72,8 +72,9 @@ impl RequestBodyView {
     }
 
     /// Pre-populate the decoded OnceCell with bytes already decoded by another
-    /// path (e.g. HMAC verify which decodes independently). A no-op if the
-    /// cell was already initialised.
+    /// path (e.g. HMAC verify which decodes independently). Must be called before
+    /// any other consumer reads `decoded()`; later consumers will see this value.
+    /// A no-op if the cell was already initialised.
     pub fn prefill_decoded(&self, decoded: Bytes) {
         // `set` returns Err if already set; ignore.
         let _ = self.decoded.set(Ok(decoded));

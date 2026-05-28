@@ -474,9 +474,9 @@ fi
 # Spec: docs/superpowers/specs/2026-05-28-systemic-fixes-design.md §4
 # ---------------------------------------------------------------------------
 echo "[no_cached_body] ctx.cached_body removed in Phase B (2026-05-28); use ctx.body (RequestBodyView) instead"
-if rg -n 'cached_body' --type rust crates/ 2>/dev/null | grep -v '"gw_no_cached_body"' | grep -q .; then
+if rg -n 'cached_body' --type rust crates/ >/dev/null 2>&1; then
     echo "  FAIL: 'cached_body' identifier references found:"
-    rg -n 'cached_body' --type rust crates/ 2>/dev/null | grep -v '"gw_no_cached_body"' | sed 's/^/    /'
+    rg -n 'cached_body' --type rust crates/ 2>/dev/null | sed 's/^/    /'
     bad "cached_body identifier found; use ctx.body (RequestBodyView) API instead"
 else
     ok "no cached_body identifier in Rust crates"
