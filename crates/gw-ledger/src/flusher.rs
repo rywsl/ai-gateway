@@ -155,6 +155,17 @@ impl Ledger {
     }
 }
 
+/// Build the Redis key for an inflight billing hash.
+///
+/// MUST match `InflightLedger::test_key` / `key()` in `inflight.rs` — Redis
+/// is the integration boundary; a drift here would silently orphan keys.
+fn inflight_key(instance_id: &str, ck: &ClearKey) -> String {
+    format!(
+        "billing:inflight:{instance_id}:{}:{}",
+        ck.request_id, ck.attempt_index
+    )
+}
+
 /// Direct single-record XADD to `usage:records`, used as the must-deliver
 /// bypass when the mpsc channel is full.
 async fn sync_xadd(redis: &RedisCtx, rec: &UsageRecord) -> Result<(), String> {
@@ -171,10 +182,7 @@ async fn sync_xadd(redis: &RedisCtx, rec: &UsageRecord) -> Result<(), String> {
 /// already been confirmed at the caller; key residue is harmless and
 /// reconciler-recoverable).
 async fn sync_del_inflight(redis: &RedisCtx, instance_id: &str, ck: &ClearKey) {
-    let key = format!(
-        "billing:inflight:{instance_id}:{}:{}",
-        ck.request_id, ck.attempt_index
-    );
+    let key = inflight_key(instance_id, ck);
     let client = redis.pool.next();
     match client.del::<(), _>(&[key.as_str()]).await {
         Ok(_) => {
@@ -291,10 +299,7 @@ async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
         Ok(_) => {
             for idx in &queued_indices {
                 if let Some(ck) = &clears[*idx] {
-                    to_clear.push(format!(
-                        "billing:inflight:{instance_id}:{}:{}",
-                        ck.request_id, ck.attempt_index
-                    ));
+                    to_clear.push(inflight_key(instance_id, ck));
                 }
             }
         }
