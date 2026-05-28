@@ -91,6 +91,7 @@ futures-util = "0.3"
 hickory-resolver = { version = "0.25", features = ["https-ring", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 wreq = { version = "6.0.0-rc.28", default-features = false, features = ["json", "stream", "prefix-symbols"] }
+wreq-util = { version = "3.0.0-rc.11" }
 hyper = { version = "1.4", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
 http-body-util = "0.1"
@@ -129,3 +130,8 @@ debug = "line-tables-only"
 [profile.bench]
 inherits = "release"
 debug = true
+
+[patch.crates-io]
+# typed-builder-macro 0.23.2 uses `&& let` chains (RFC 2. stabilised in 1.88).
+# Our toolchain is 1.86. Patch the single occurrence with a nested-if equivalent.
+typed-builder-macro = { path = "/tmp/typed-builder-macro-patched" }
