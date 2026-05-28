@@ -377,7 +377,14 @@ fn handle_event(
     let events = match codec.parse_stream_chunk(state.as_mut(), event_bytes) {
         Ok(evs) => evs,
         Err(e) => {
-            tracing::warn!(error = ?e.code, "stream parse error");
+            gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                code: e.code.as_ref(),
+                kind: gw_core::observability::ErrorKind::CodecParse,
+                stage: gw_core::observability::Stage::Response,
+                status: None,
+                trace_id: Some(ctx.trace_id.as_ref()),
+                extra: None,
+            });
             ctx.stream_state = Some(state);
             return;
         }
@@ -428,7 +435,14 @@ fn handle_event(
             // overwrite.
             if let Some(cc) = client_codec.as_ref() {
                 if let Err(e) = cc.render_stream_chunk(&ev, &mut acc) {
-                    tracing::warn!(error = ?e.code, "cross-protocol stream render error");
+                    gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                        code: e.code.as_ref(),
+                        kind: gw_core::observability::ErrorKind::CodecRender,
+                        stage: gw_core::observability::Stage::Response,
+                        status: None,
+                        trace_id: Some(ctx.trace_id.as_ref()),
+                        extra: None,
+                    });
                 } else {
                     metrics::counter!(
                         "gw_codec_cross_render_total",
@@ -696,6 +710,14 @@ pub(crate) fn handle_non_stream_chunk(
                                     "{}",
                                     gw_core::error::codes::GW_CODEC_CROSS_RENDER_FAILED
                                 );
+                                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                                    code: e.code.as_ref(),
+                                    kind: gw_core::observability::ErrorKind::CodecRender,
+                                    stage: gw_core::observability::Stage::Response,
+                                    status: None,
+                                    trace_id: Some(ctx.trace_id.as_ref()),
+                                    extra: None,
+                                });
                                 return_body_to_accum = true;
                             }
                         }
@@ -714,6 +736,14 @@ pub(crate) fn handle_non_stream_chunk(
                     "{}",
                     gw_core::error::codes::GW_CODEC_PARSE_RESPONSE
                 );
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: e.code.as_ref(),
+                    kind: gw_core::observability::ErrorKind::CodecParse,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: Some(ctx.trace_id.as_ref()),
+                    extra: None,
+                });
                 // parse_response failed (e.g., vendor error JSON body, or a
                 // shape this codec can't decode). Forward the original
                 // upstream bytes verbatim — cross-protocol clients see
