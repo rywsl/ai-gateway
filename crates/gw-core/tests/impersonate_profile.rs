@@ -81,6 +81,10 @@ fn identity_snapshot_openai_codex_roundtrip() {
             user_agent: "codex_cli_rs/0.4.2 (linux; x86_64)".into(),
         },
     };
+    let j = serde_json::to_value(&snap).unwrap();
+    assert_eq!(j["profile_kind"], "openai_codex");
+    assert_eq!(j["variable"]["profile"], "openai_codex");
+
     let s = serde_json::to_string(&snap).unwrap();
     let back: IdentitySnapshot = serde_json::from_str(&s).unwrap();
     match back.variable {

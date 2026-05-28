@@ -59,12 +59,17 @@ impl Default for VendorEgressMode {
     }
 }
 
+/// Persisted per-VendorKey impersonation identity. Written on first
+/// impersonated dispatch (lazy persist) and reused for every subsequent
+/// request from the same key so the upstream sees a stable fingerprint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdentitySnapshot {
     pub profile_kind: ImpersonateProfile,
     pub variable: IdentityVariable,
 }
 
+/// Profile-specific identity payload. The variant chosen by the VendorKey's
+/// owning Vendor — must agree with `IdentitySnapshot.profile_kind`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "profile", rename_all = "snake_case")]
 pub enum IdentityVariable {
@@ -78,6 +83,7 @@ pub enum IdentityVariable {
         electron_version: String,
         user_agent: String,
     },
+    #[serde(rename = "openai_codex")]
     OpenAiCodex {
         codex_version: String,
         os: String,
