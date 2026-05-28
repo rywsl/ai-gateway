@@ -38,9 +38,9 @@ pub async fn serve_tls(addr: &str) -> std::io::Result<()> {
     let cert = match rcgen::generate_simple_self_signed(vec!["fake-upstream".to_owned()]) {
         Ok(c) => c,
         Err(e) => {
-            return Err(std::io::Error::other(
-                format!("[fake-upstream] rcgen self-signed cert failed: {e}"),
-            ));
+            return Err(std::io::Error::other(format!(
+                "[fake-upstream] rcgen self-signed cert failed: {e}"
+            )));
         }
     };
     let cert_der = CertificateDer::from(cert.cert.der().to_vec());
@@ -50,16 +50,12 @@ pub async fn serve_tls(addr: &str) -> std::io::Result<()> {
     let server_cfg = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
         .with_safe_default_protocol_versions()
         .map_err(|e| {
-            std::io::Error::other(
-                format!("[fake-upstream] rustls protocol versions: {e}"),
-            )
+            std::io::Error::other(format!("[fake-upstream] rustls protocol versions: {e}"))
         })?
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)
         .map_err(|e| {
-            std::io::Error::other(
-                format!("[fake-upstream] rustls with_single_cert: {e}"),
-            )
+            std::io::Error::other(format!("[fake-upstream] rustls with_single_cert: {e}"))
         })?;
 
     let acceptor = TlsAcceptor::from(Arc::new(server_cfg));

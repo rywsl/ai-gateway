@@ -9,7 +9,9 @@ use figment::{
 };
 use fred::clients::RedisPool;
 use fred::interfaces::{ClientLike, HashesInterface, KeysInterface};
-use fred::types::{ConnectionConfig, PerformanceConfig, ReconnectPolicy, RedisConfig as FredRedisConfig};
+use fred::types::{
+    ConnectionConfig, PerformanceConfig, ReconnectPolicy, RedisConfig as FredRedisConfig,
+};
 use gw_task::redis_contract::RedisTaskContract;
 use gw_task_runtime::cancel_loop::{
     CancelLoop, CancelLoopConfig, RedisCancelSource, RunningTaskRegistry,

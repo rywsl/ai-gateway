@@ -10,7 +10,10 @@ fn ensure_returns_snapshot_when_present_and_matching_profile() {
     };
     let (resolved, persist) =
         ensure_identity("vk-A", Some(&snap), ImpersonateProfile::ClaudeCodeChrome131);
-    assert!(matches!(resolved.variable, IdentityVariable::ClaudeCode { .. }));
+    assert!(matches!(
+        resolved.variable,
+        IdentityVariable::ClaudeCode { .. }
+    ));
     assert!(!persist, "matching snapshot should not request persist");
 }
 
@@ -22,13 +25,19 @@ fn ensure_re_derives_when_profile_mismatches() {
     };
     let (resolved, persist) =
         ensure_identity("vk-A", Some(&snap), ImpersonateProfile::ClaudeCodeChrome131);
-    assert!(matches!(resolved.variable, IdentityVariable::ClaudeCode { .. }));
+    assert!(matches!(
+        resolved.variable,
+        IdentityVariable::ClaudeCode { .. }
+    ));
     assert!(persist, "mismatched profile must trigger persist");
 }
 
 #[test]
 fn ensure_derives_when_snapshot_absent_and_requests_persist() {
     let (resolved, persist) = ensure_identity("vk-A", None, ImpersonateProfile::GeminiCli);
-    assert!(matches!(resolved.variable, IdentityVariable::GeminiCli { .. }));
+    assert!(matches!(
+        resolved.variable,
+        IdentityVariable::GeminiCli { .. }
+    ));
     assert!(persist);
 }

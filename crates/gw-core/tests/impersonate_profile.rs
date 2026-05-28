@@ -11,8 +11,14 @@ fn impersonate_profile_serde_snake_case() {
 
 #[test]
 fn impersonate_profile_as_static_str() {
-    assert_eq!(ImpersonateProfile::ClaudeCodeChrome131.as_static_str(), "claude_code_chrome131");
-    assert_eq!(ImpersonateProfile::OpenAiCodex.as_static_str(), "openai_codex");
+    assert_eq!(
+        ImpersonateProfile::ClaudeCodeChrome131.as_static_str(),
+        "claude_code_chrome131"
+    );
+    assert_eq!(
+        ImpersonateProfile::OpenAiCodex.as_static_str(),
+        "openai_codex"
+    );
     assert_eq!(ImpersonateProfile::GeminiCli.as_static_str(), "gemini_cli");
 }
 
@@ -36,7 +42,9 @@ fn vendor_egress_mode_serde_tagged() {
     let back: VendorEgressMode = serde_json::from_value(j).unwrap();
     assert!(matches!(
         back,
-        VendorEgressMode::Impersonate { profile: ImpersonateProfile::ClaudeCodeChrome131 }
+        VendorEgressMode::Impersonate {
+            profile: ImpersonateProfile::ClaudeCodeChrome131
+        }
     ));
 
     let rust: VendorEgressMode = serde_json::from_str(r#"{"mode":"rustls"}"#).unwrap();
@@ -88,7 +96,9 @@ fn identity_snapshot_openai_codex_roundtrip() {
     let s = serde_json::to_string(&snap).unwrap();
     let back: IdentitySnapshot = serde_json::from_str(&s).unwrap();
     match back.variable {
-        IdentityVariable::OpenAiCodex { installation_id, .. } => assert_eq!(installation_id, id),
+        IdentityVariable::OpenAiCodex {
+            installation_id, ..
+        } => assert_eq!(installation_id, id),
         _ => panic!("variant mismatch"),
     }
 }
@@ -109,4 +119,3 @@ fn identity_snapshot_gemini_cli_roundtrip() {
     let back: IdentitySnapshot = serde_json::from_str(&s).unwrap();
     assert_eq!(back.profile_kind, ImpersonateProfile::GeminiCli);
 }
-

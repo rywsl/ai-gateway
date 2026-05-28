@@ -12,8 +12,7 @@ use std::sync::Arc;
 pub trait SnapshotWriter: Send + Sync + 'static {
     /// Write iff the DB column is NULL (no-op otherwise — preserves any
     /// admin-edited identity values).
-    async fn write_if_null(&self, key_id: &str, snap: &IdentitySnapshot)
-        -> anyhow::Result<()>;
+    async fn write_if_null(&self, key_id: &str, snap: &IdentitySnapshot) -> anyhow::Result<()>;
 }
 
 pub struct IdentityPersistQueue {
@@ -52,10 +51,13 @@ impl IdentityPersistQueue {
         tokio::spawn(async move {
             let result = writer.write_if_null(&key_id, &snap).await;
             match result {
-                Ok(_) => metrics::counter!("gw_egress_lazy_persist_total", "result" => "ok").increment(1),
+                Ok(_) => {
+                    metrics::counter!("gw_egress_lazy_persist_total", "result" => "ok").increment(1)
+                }
                 Err(e) => {
                     tracing::warn!("identity_persist failed key={key_id}: {e}");
-                    metrics::counter!("gw_egress_lazy_persist_total", "result" => "failed").increment(1);
+                    metrics::counter!("gw_egress_lazy_persist_total", "result" => "failed")
+                        .increment(1);
                 }
             }
             pending.remove(&key_id);
@@ -89,11 +91,7 @@ impl PgSnapshotWriter {
 
 #[async_trait]
 impl SnapshotWriter for PgSnapshotWriter {
-    async fn write_if_null(
-        &self,
-        key_id: &str,
-        snap: &IdentitySnapshot,
-    ) -> anyhow::Result<()> {
+    async fn write_if_null(&self, key_id: &str, snap: &IdentitySnapshot) -> anyhow::Result<()> {
         let payload = serde_json::to_value(snap)?;
         // Conditional UPDATE: only write when NULL (preserves admin edits).
         // `vendor_keys` primary key column is `id` (see migration 0001).

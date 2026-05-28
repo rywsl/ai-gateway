@@ -42,9 +42,7 @@ async fn handler_strips_internal_headers_and_forwards_upstream_headers() {
         .expect("valid request");
 
     // 4. Dispatch.
-    let response = handler
-        .handle(req)
-        .await;
+    let response = handler.handle(req).await;
 
     assert_eq!(
         response.status(),
