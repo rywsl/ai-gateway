@@ -69,6 +69,7 @@ fn vendor_key_capability_fields_default_construction() {
         exclusive_capability_match: false,
         tunnel_preference: None,
         oauth: None,
+        identity_snapshot: None,
     };
 
     assert!(vk.forced_capabilities.is_empty());

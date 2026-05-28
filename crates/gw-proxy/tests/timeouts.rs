@@ -26,6 +26,7 @@ fn vendor_with(timeouts: Option<TimeoutSpec>) -> Vendor {
         timeout_overrides: timeouts,
         default_proxy: None,
         contact: None,
+        egress_mode: Default::default(),
     }
 }
 
