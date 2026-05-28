@@ -58,10 +58,12 @@ fn api_shape_serde_wire_form_locked() {
     ];
     for (v, expected) in cases {
         let got = serde_json::to_value(v).unwrap();
+        let got_str = got.as_str().expect("ApiShape serializes as string");
         assert_eq!(
-            got.as_str().unwrap(), *expected,
-            "{:?}: ApiShape serde wire drift",
-            v,
+            got_str, *expected,
+            "{:?}: ApiShape serde wire form drift; got '{}', baseline '{}'. \
+             capability resolution + any persisted ApiShape JSON depend on this — do NOT change.",
+            v, got_str, expected,
         );
     }
 }
@@ -80,6 +82,12 @@ fn api_shape_format_id_wire_form_locked() {
         (GeminiCli, "gemini:cli"),
     ];
     for (v, expected) in cases {
-        assert_eq!(v.format_id(), *expected, "{:?}: format_id drift", v);
+        let got = v.format_id();
+        assert_eq!(
+            got, *expected,
+            "{:?}: ApiShape format_id wire drift; got '{}', baseline '{}'. \
+             Aether FORMAT_ID interop (events stream + capability resolver) depends on this — do NOT change.",
+            v, got, expected,
+        );
     }
 }

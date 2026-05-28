@@ -470,10 +470,9 @@ fi
 
 echo "[wire_enum_lock] ProtocolKind / ApiShape wire forms locked"
 if cargo test -p gw-core --test wire_enum_lock --quiet >/dev/null 2>&1; then
-    echo "  ok"
+    ok "ProtocolKind / ApiShape wire forms locked"
 else
-    echo "  FAIL: wire enum drift — see docs/superpowers/specs/2026-05-28-systemic-fixes-design.md §6"
-    fail=1
+    bad "wire enum drift — see docs/superpowers/specs/2026-05-28-systemic-fixes-design.md §6"
 fi
 
 if [ "$fail" -ne 0 ]; then
