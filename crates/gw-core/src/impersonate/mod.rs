@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod rng;
+pub mod claude_code;
 
 /// Identifies which official upstream CLI client to imitate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -72,7 +73,7 @@ pub struct IdentitySnapshot {
 
 /// Profile-specific identity payload. The variant chosen by the VendorKey's
 /// owning Vendor — must agree with `IdentitySnapshot.profile_kind`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "profile", rename_all = "snake_case")]
 pub enum IdentityVariable {
     ClaudeCode {
