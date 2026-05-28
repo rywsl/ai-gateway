@@ -60,7 +60,11 @@ impl EgressHandle {
             // this is a no-op (send returns Err); that's fine.
             let _ = done_tx.send(true);
         });
-        Self { bind, shutdown_tx, done_rx }
+        Self {
+            bind,
+            shutdown_tx,
+            done_rx,
+        }
     }
 
     /// The bind address this handle was started with.

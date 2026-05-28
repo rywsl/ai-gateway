@@ -73,7 +73,9 @@ async fn spawn_loopback_handler() -> std::net::SocketAddr {
     use std::convert::Infallible;
     use tokio::net::TcpListener;
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
     let addr = listener.local_addr().expect("loopback local_addr");
     let handler = Arc::new(Handler::new_with_scheme(16, "http"));
 
@@ -127,7 +129,10 @@ fn build_request_with_identity(
         .method("POST")
         .uri("/v1/messages")
         .header("X-Egress-Target", target)
-        .header("X-Egress-Profile", ImpersonateProfile::ClaudeCodeChrome131.as_static_str());
+        .header(
+            "X-Egress-Profile",
+            ImpersonateProfile::ClaudeCodeChrome131.as_static_str(),
+        );
 
     for (name, value) in &identity_hdrs {
         builder = builder.header(name, value);
@@ -358,8 +363,8 @@ async fn impersonate_claude_code_reaches_upstream_with_stainless_headers() {
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers Postgres + Redis)"]
 async fn per_key_identity_is_stable_across_requests() {
-    use testcontainers_modules::testcontainers::runners::AsyncRunner;
     use testcontainers_modules::postgres::Postgres;
+    use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
     // The schema isn't strictly required for this test (it doesn't read from
     // PG), but the plan calls for the migration chain to be applied so that
@@ -443,11 +448,8 @@ async fn per_key_identity_is_stable_across_requests() {
     // We don't assert `assert_ne!(ua1, other_ua)` strictly because two key_ids
     // *could* in principle pick the same pool slots; instead we assert that
     // the per-key derivation is deterministic in both directions.
-    let (re_resolved, _) = ensure_identity(
-        other_key,
-        None,
-        ImpersonateProfile::ClaudeCodeChrome131,
-    );
+    let (re_resolved, _) =
+        ensure_identity(other_key, None, ImpersonateProfile::ClaudeCodeChrome131);
     let re_hdrs = claude_code::headers(&re_resolved.variable, false);
     let expected_ua = re_hdrs
         .iter()
@@ -578,12 +580,10 @@ async fn identity_snapshot_round_trips_through_postgres() {
     // column into the payload that decodes into `VendorKey`. If it doesn't,
     // `vk.identity_snapshot` is `None`, the next ensure_identity re-derives,
     // `should_persist` flips back to true, and the assertion below catches it.
-    let redis = gw_store::redis_client::RedisCtx::connect(
-        &format!("redis://127.0.0.1:{redis_port}"),
-        4,
-    )
-    .await
-    .expect("redis connect");
+    let redis =
+        gw_store::redis_client::RedisCtx::connect(&format!("redis://127.0.0.1:{redis_port}"), 4)
+            .await
+            .expect("redis connect");
     let store = Arc::new(EntityStore::with_loader(LoaderCtx {
         redis,
         pg: pg.clone(),
@@ -593,11 +593,10 @@ async fn identity_snapshot_round_trips_through_postgres() {
         .vendor_key_or_load(&KeyId::from(key_id))
         .await
         .expect("vendor_key_or_load returned None");
-    let snap_from_pg = vk
-        .value
-        .identity_snapshot
-        .clone()
-        .expect("identity_snapshot not rehydrated from the column — loader read path is broken");
+    let snap_from_pg =
+        vk.value.identity_snapshot.clone().expect(
+            "identity_snapshot not rehydrated from the column — loader read path is broken",
+        );
 
     // ── Request 2: resolve FROM the persisted snapshot, send ────────────────
     let (resolved2, should_persist2) = ensure_identity(

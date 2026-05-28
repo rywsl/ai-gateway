@@ -7,7 +7,7 @@
 //! - `is_tls()` is used directly for TLS errors instead of string heuristics.
 //! - `is_proxy_connect()` is used for proxy errors (wreq-specific predicate).
 
-pub const HDR_CLASS:  &str = "X-Egress-Error-Class";
+pub const HDR_CLASS: &str = "X-Egress-Error-Class";
 pub const HDR_DETAIL: &str = "X-Egress-Error-Detail";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,15 +26,15 @@ pub enum ErrorClass {
 impl ErrorClass {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Tls            => "tls",
+            Self::Tls => "tls",
             Self::ConnectTimeout => "connect_timeout",
             Self::ConnectRefused => "connect_refused",
-            Self::ReadTimeout    => "read_timeout",
-            Self::H2Protocol     => "h2_protocol",
-            Self::BodyTruncated  => "body_truncated",
-            Self::ProxyError     => "proxy_error",
-            Self::Panic          => "panic",
-            Self::Unknown        => "unknown",
+            Self::ReadTimeout => "read_timeout",
+            Self::H2Protocol => "h2_protocol",
+            Self::BodyTruncated => "body_truncated",
+            Self::ProxyError => "proxy_error",
+            Self::Panic => "panic",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -87,27 +87,27 @@ mod tests {
     #[test]
     fn class_strings_are_stable() {
         // These exact strings are gw-proxy's pattern-match contract. Pin them.
-        assert_eq!(ErrorClass::Tls.as_str(),            "tls");
+        assert_eq!(ErrorClass::Tls.as_str(), "tls");
         assert_eq!(ErrorClass::ConnectTimeout.as_str(), "connect_timeout");
         assert_eq!(ErrorClass::ConnectRefused.as_str(), "connect_refused");
-        assert_eq!(ErrorClass::ReadTimeout.as_str(),    "read_timeout");
-        assert_eq!(ErrorClass::H2Protocol.as_str(),     "h2_protocol");
-        assert_eq!(ErrorClass::BodyTruncated.as_str(),  "body_truncated");
-        assert_eq!(ErrorClass::ProxyError.as_str(),     "proxy_error");
-        assert_eq!(ErrorClass::Panic.as_str(),          "panic");
-        assert_eq!(ErrorClass::Unknown.as_str(),        "unknown");
+        assert_eq!(ErrorClass::ReadTimeout.as_str(), "read_timeout");
+        assert_eq!(ErrorClass::H2Protocol.as_str(), "h2_protocol");
+        assert_eq!(ErrorClass::BodyTruncated.as_str(), "body_truncated");
+        assert_eq!(ErrorClass::ProxyError.as_str(), "proxy_error");
+        assert_eq!(ErrorClass::Panic.as_str(), "panic");
+        assert_eq!(ErrorClass::Unknown.as_str(), "unknown");
     }
 
     #[test]
     fn status_codes_match_class() {
         assert_eq!(ErrorClass::ConnectTimeout.status_code(), 504);
-        assert_eq!(ErrorClass::ReadTimeout.status_code(),    504);
-        assert_eq!(ErrorClass::Tls.status_code(),            502);
+        assert_eq!(ErrorClass::ReadTimeout.status_code(), 504);
+        assert_eq!(ErrorClass::Tls.status_code(), 502);
         assert_eq!(ErrorClass::ConnectRefused.status_code(), 502);
-        assert_eq!(ErrorClass::H2Protocol.status_code(),     502);
-        assert_eq!(ErrorClass::BodyTruncated.status_code(),  502);
-        assert_eq!(ErrorClass::ProxyError.status_code(),     502);
-        assert_eq!(ErrorClass::Panic.status_code(),          502);
-        assert_eq!(ErrorClass::Unknown.status_code(),        502);
+        assert_eq!(ErrorClass::H2Protocol.status_code(), 502);
+        assert_eq!(ErrorClass::BodyTruncated.status_code(), 502);
+        assert_eq!(ErrorClass::ProxyError.status_code(), 502);
+        assert_eq!(ErrorClass::Panic.status_code(), 502);
+        assert_eq!(ErrorClass::Unknown.status_code(), 502);
     }
 }

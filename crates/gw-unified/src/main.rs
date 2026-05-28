@@ -7,7 +7,11 @@ use clap::{Parser, Subcommand};
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Parser)]
-#[command(name = "ailinkmax-gateway", version, about = "Unified LLM gateway binary")]
+#[command(
+    name = "ailinkmax-gateway",
+    version,
+    about = "Unified LLM gateway binary"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
