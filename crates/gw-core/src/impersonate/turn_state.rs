@@ -23,9 +23,14 @@ impl TurnStateCache {
         match conversation_id {
             Some(cid) => {
                 let k = (key_id.to_owned(), cid.to_owned());
-                self.inner
-                    .get_with(k, async { crate::impersonate::rng::random_hex(32) })
-                    .await
+                let entry = self
+                    .inner
+                    .entry(k)
+                    .or_insert_with(async { crate::impersonate::rng::random_hex(32) })
+                    .await;
+                let event = if entry.is_fresh() { "miss" } else { "hit" };
+                metrics::counter!("gw_egress_identity_cache_total", "kind" => "turn_state", "event" => event).increment(1);
+                entry.into_value()
             }
             None => crate::impersonate::rng::random_hex(32),
         }

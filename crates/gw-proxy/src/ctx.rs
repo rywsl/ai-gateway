@@ -251,6 +251,10 @@ pub struct ReqCtx {
     pub identity_persist: Option<std::sync::Arc<gw_store::identity_persist::IdentityPersistQueue>>,
     /// Wired at gateway start (Task 4.6); None in tests that bypass gateway::new.
     pub turn_state_cache: Option<std::sync::Arc<gw_core::impersonate::turn_state::TurnStateCache>>,
+    /// Wall-clock instant captured in `upstream_request_filter` when the egress
+    /// path is active; consumed once in `response_filter` to record
+    /// `gw_egress_loopback_rtt_seconds`. `None` for the rustls path.
+    pub egress_sent_at: Option<std::time::Instant>,
 
     // --- Long-running operation (G5 / go-onboarding-gaps T0) ---
     /// G5: Gemini `:predictLongRunning` / OpenAI `/v1/videos` top-level
@@ -385,6 +389,7 @@ impl ReqCtx {
             egress_upstream: None,
             identity_persist: None,
             turn_state_cache: None,
+            egress_sent_at: None,
             response_deadline: None,
             operation_id: None,
             upstream_body_accum: None,

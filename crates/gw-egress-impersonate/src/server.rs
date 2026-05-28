@@ -36,11 +36,11 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use gw_core::impersonate::ImpersonateProfile;
-use http_body_util::{BodyExt, StreamBody, combinators::BoxBody};
+use http_body_util::{combinators::BoxBody, BodyExt, StreamBody};
 use hyper::body::Frame;
 use hyper::{Request, Response, StatusCode};
 
-use crate::error::{HDR_CLASS, HDR_DETAIL, classify};
+use crate::error::{classify, HDR_CLASS, HDR_DETAIL};
 use crate::pool::{ClientPool, PoolKey};
 
 // ── Header lists ──────────────────────────────────────────────────────────────
@@ -124,7 +124,10 @@ impl Handler {
     /// rather than creating a new one (which would lose cached clients and
     /// change the apparent capacity).
     pub(crate) fn new_with_pool(pool: Arc<ClientPool>) -> Self {
-        Self { pool, scheme: "https" }
+        Self {
+            pool,
+            scheme: "https",
+        }
     }
 
     /// Dispatch an egress request.
@@ -183,11 +186,17 @@ impl Handler {
             .unwrap_or("/");
         let url = format!("{}://{}{}", self.scheme, target, path_and_query);
 
+        let profile_label = profile.as_static_str();
+
         // ── 3. Get or create the pooled wreq client ───────────────────────
         let key = PoolKey { profile, proxy };
         let client = match self.pool.get_or_create(key).await {
             Ok(c) => c,
-            Err(e) => return upstream_error_response(502, "unknown", &e.to_string()),
+            Err(e) => {
+                metrics::counter!("gw_egress_requests_total", "profile" => profile_label, "result" => "failure").increment(1);
+                metrics::counter!("gw_egress_error_total", "profile" => profile_label, "class" => "unknown").increment(1);
+                return upstream_error_response(502, "unknown", &e.to_string());
+            }
         };
 
         // ── 4. Build the wreq request: method + stripped headers + body ───
@@ -219,15 +228,14 @@ impl Handler {
                 let class = classify(&e);
                 let detail_str = e.to_string();
                 let detail = truncate_256(&detail_str);
-                return upstream_error_response(
-                    class.status_code(),
-                    class.as_str(),
-                    detail,
-                );
+                metrics::counter!("gw_egress_requests_total", "profile" => profile_label, "result" => "failure").increment(1);
+                metrics::counter!("gw_egress_error_total", "profile" => profile_label, "class" => class.as_str()).increment(1);
+                return upstream_error_response(class.status_code(), class.as_str(), detail);
             }
         };
 
         // ── 6. Build the response ─────────────────────────────────────────
+        metrics::counter!("gw_egress_requests_total", "profile" => profile_label, "result" => "success").increment(1);
         let status = wreq_resp.status();
         let resp_headers = wreq_resp.headers().clone();
 
@@ -381,7 +389,10 @@ impl Listener {
             anyhow::Result::<()>::Ok(())
         });
 
-        ListenerJoinHandle { task, shutdown_tx: tx }
+        ListenerJoinHandle {
+            task,
+            shutdown_tx: tx,
+        }
     }
 }
 

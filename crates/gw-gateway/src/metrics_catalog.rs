@@ -279,6 +279,46 @@ pub static METRICS: &[MetricSpec] = &[
         help: "Impersonate vendor candidates dropped by the egress kill-switch (egress.disabled=true); increments per skipped candidate; label=profile (claude_code_chrome131/openai_codex/gemini_cli)",
     },
     MetricSpec {
+        name: "gw_egress_requests_total",
+        kind: MetricKind::Counter,
+        help: "egress-impersonate dispatch results; labels=profile,result (success/failure)",
+    },
+    MetricSpec {
+        name: "gw_egress_error_total",
+        kind: MetricKind::Counter,
+        help: "egress-impersonate transport errors; labels=profile,class (tls/connect_timeout/connect_refused/read_timeout/h2_protocol/body_truncated/proxy_error/panic/unknown)",
+    },
+    MetricSpec {
+        name: "gw_egress_client_pool_total",
+        kind: MetricKind::Counter,
+        help: "wreq client pool events; label=event (hit/miss/evicted)",
+    },
+    MetricSpec {
+        name: "gw_egress_handshake_seconds",
+        kind: MetricKind::Histogram,
+        help: "wreq Client build (BoringSSL emulation template compile) duration; label=profile",
+    },
+    MetricSpec {
+        name: "gw_egress_loopback_rtt_seconds",
+        kind: MetricKind::Histogram,
+        help: "gateway-side egress dispatch->response-headers latency (includes upstream time in prod; Task 6.2 microbench is the pure-overhead SLO gate); no labels",
+    },
+    MetricSpec {
+        name: "gw_egress_lazy_persist_total",
+        kind: MetricKind::Counter,
+        help: "identity-snapshot lazy-persist outcomes; label=result (ok/failed/deferred/dropped)",
+    },
+    MetricSpec {
+        name: "gw_egress_identity_cache_total",
+        kind: MetricKind::Counter,
+        help: "impersonation identity cache events; labels=kind,event (turn_state hit/miss)",
+    },
+    MetricSpec {
+        name: "gw_egress_supervisor_restart_total",
+        kind: MetricKind::Counter,
+        help: "egress loopback supervisor restarts; label=reason",
+    },
+    MetricSpec {
         name: "gw_tunnel_open_total",
         kind: MetricKind::Counter,
         help: "tunnel stream-open outcome per node; labels=node_id,result (ok/no_live/target_denied/err)",

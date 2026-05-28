@@ -614,6 +614,9 @@ impl ProxyHttp for LlmGateway {
                 ),
             });
         }
+        if ctx.egress_profile.is_some() {
+            ctx.egress_sent_at = Some(std::time::Instant::now());
+        }
         Ok(())
     }
 
@@ -658,6 +661,15 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         ctx.upstream_status = Some(upstream_response.status.as_u16());
+        // Egress-impersonate loopback latency (spec §8.6). Gateway-side wall-clock
+        // from dispatch to response headers; in production this INCLUDES real
+        // upstream latency, so it is not pure loopback overhead — the Task 6.2
+        // microbench (inline mock upstream) is the SLO gate (p99 <200µs UDS /
+        // <500µs TCP). Label-free per spec §8.6. `.take()` records at most once.
+        if let Some(sent) = ctx.egress_sent_at.take() {
+            metrics::histogram!("gw_egress_loopback_rtt_seconds")
+                .record(sent.elapsed().as_secs_f64());
+        }
         use crate::ctx::ResponseMeta;
         ctx.archive_upstream_response_meta = Some(ResponseMeta {
             status: upstream_response.status.as_u16(),
@@ -1313,9 +1325,12 @@ mod tests {
 
     #[test]
     fn egress_class_mapping_is_stable() {
-        use gw_core::error::codes::*;
         use super::map_egress_class;
-        assert_eq!(map_egress_class("tls"), (GW_UPSTREAM_TLS_ERROR, false, true));
+        use gw_core::error::codes::*;
+        assert_eq!(
+            map_egress_class("tls"),
+            (GW_UPSTREAM_TLS_ERROR, false, true)
+        );
         assert_eq!(
             map_egress_class("connect_timeout"),
             (GW_UPSTREAM_CONNECT_TIMEOUT, true, false)
@@ -1350,18 +1365,27 @@ mod tests {
     #[test]
     fn redact_egress_headers_strips_internal_and_keeps_rest() {
         let input = vec![
-            ("X-Egress-Target".to_string(), "api.example.com:443".to_string()),
+            (
+                "X-Egress-Target".to_string(),
+                "api.example.com:443".to_string(),
+            ),
             ("x-egress-profile".to_string(), "chrome".to_string()),
             ("X-EGRESS-PROXY".to_string(), "http://p".to_string()),
             ("x-egress-error-class".to_string(), "tls".to_string()),
-            ("X-Egress-Error-Detail".to_string(), "handshake failed".to_string()),
+            (
+                "X-Egress-Error-Detail".to_string(),
+                "handshake failed".to_string(),
+            ),
             ("authorization".to_string(), "Bearer secret".to_string()),
             ("Content-Type".to_string(), "application/json".to_string()),
         ];
         let out = super::redact_egress_headers(input);
         let names: Vec<String> = out.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
         // All five egress-internal headers (any case) are gone.
-        assert!(!names.iter().any(|n| n.starts_with("x-egress-")), "egress headers leaked: {names:?}");
+        assert!(
+            !names.iter().any(|n| n.starts_with("x-egress-")),
+            "egress headers leaked: {names:?}"
+        );
         // Non-egress headers are preserved, in order.
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].0, "authorization");

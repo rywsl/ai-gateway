@@ -6,12 +6,12 @@
 use crate::profiles::emulation_for;
 use gw_core::impersonate::ImpersonateProfile;
 use parking_lot::Mutex;
-use wreq::Client;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
 use url::Url;
+use wreq::Client;
 
 /// Cache key: profile + optional normalized proxy URL.
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -95,7 +95,10 @@ impl ClientPool {
             let mut guard = self.inner.lock();
             guard.insert(
                 key.clone(),
-                Entry { client: Arc::clone(&arc), last_used: Instant::now() },
+                Entry {
+                    client: Arc::clone(&arc),
+                    last_used: Instant::now(),
+                },
             );
             if guard.len() > self.capacity.get() {
                 let lru_key = guard
@@ -121,9 +124,17 @@ impl ClientPool {
 }
 
 async fn build_client(key: &PoolKey) -> anyhow::Result<Client> {
+    let started = Instant::now();
     let mut builder = wreq::Client::builder().emulation(emulation_for(key.profile));
     if let Some(ref proxy) = key.proxy {
         builder = builder.proxy(wreq::Proxy::all(proxy.as_str())?);
     }
-    Ok(builder.build()?)
+    let client = builder.build()?;
+    // Times wreq Client construction (incl. BoringSSL emulation template
+    // compilation), NOT the on-wire TLS handshake — wreq defers the real
+    // handshake to the first request. Used as a per-profile setup-cost proxy
+    // for the spec §8.6 handshake_seconds metric.
+    metrics::histogram!("gw_egress_handshake_seconds", "profile" => key.profile.as_static_str())
+        .record(started.elapsed().as_secs_f64());
+    Ok(client)
 }
