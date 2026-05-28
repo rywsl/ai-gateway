@@ -40,6 +40,7 @@ use gw_codec::cli::CliCodec;
 use gw_codec::cross_render::{CrossRender, WireFormat};
 use gw_codec::AnyCodec;
 use gw_core::ir::StreamEventIR;
+use gw_core::observability::{observe, ErrorKind, ErrorObservation, Stage};
 use gw_core::protocol::{ApiShape, ProtocolKind};
 use pingora::Result;
 use pingora_proxy::Session;
@@ -377,10 +378,10 @@ fn handle_event(
     let events = match codec.parse_stream_chunk(state.as_mut(), event_bytes) {
         Ok(evs) => evs,
         Err(e) => {
-            gw_core::observability::observe(gw_core::observability::ErrorObservation {
+            observe(ErrorObservation {
                 code: e.code.as_ref(),
-                kind: gw_core::observability::ErrorKind::CodecParse,
-                stage: gw_core::observability::Stage::Response,
+                kind: ErrorKind::CodecParse,
+                stage: Stage::Response,
                 status: None,
                 trace_id: Some(ctx.trace_id.as_ref()),
                 extra: None,
@@ -435,10 +436,10 @@ fn handle_event(
             // overwrite.
             if let Some(cc) = client_codec.as_ref() {
                 if let Err(e) = cc.render_stream_chunk(&ev, &mut acc) {
-                    gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    observe(ErrorObservation {
                         code: e.code.as_ref(),
-                        kind: gw_core::observability::ErrorKind::CodecRender,
-                        stage: gw_core::observability::Stage::Response,
+                        kind: ErrorKind::CodecRender,
+                        stage: Stage::Response,
                         status: None,
                         trace_id: Some(ctx.trace_id.as_ref()),
                         extra: None,
@@ -703,6 +704,7 @@ pub(crate) fn handle_non_stream_chunk(
                                     "to" => to.label(),
                                 )
                                 .increment(1);
+                                // keep alongside observe(): warn carries structured fields (from/to or e.code) that observe.extra (single &dyn Debug) cannot.
                                 tracing::warn!(
                                     from = %from,
                                     to = %to,
@@ -710,16 +712,14 @@ pub(crate) fn handle_non_stream_chunk(
                                     "{}",
                                     gw_core::error::codes::GW_CODEC_CROSS_RENDER_FAILED
                                 );
-                                gw_core::observability::observe(
-                                    gw_core::observability::ErrorObservation {
-                                        code: e.code.as_ref(),
-                                        kind: gw_core::observability::ErrorKind::CodecRender,
-                                        stage: gw_core::observability::Stage::Response,
-                                        status: None,
-                                        trace_id: Some(ctx.trace_id.as_ref()),
-                                        extra: None,
-                                    },
-                                );
+                                observe(ErrorObservation {
+                                    code: e.code.as_ref(),
+                                    kind: ErrorKind::CodecRender,
+                                    stage: Stage::Response,
+                                    status: None,
+                                    trace_id: Some(ctx.trace_id.as_ref()),
+                                    extra: None,
+                                });
                                 return_body_to_accum = true;
                             }
                         }
@@ -733,15 +733,10 @@ pub(crate) fn handle_non_stream_chunk(
                     "upstream_status" => ctx.upstream_status.unwrap_or(0).to_string(),
                 )
                 .increment(1);
-                tracing::warn!(
-                    error = ?e.code,
-                    "{}",
-                    gw_core::error::codes::GW_CODEC_PARSE_RESPONSE
-                );
-                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                observe(ErrorObservation {
                     code: e.code.as_ref(),
-                    kind: gw_core::observability::ErrorKind::CodecParse,
-                    stage: gw_core::observability::Stage::Response,
+                    kind: ErrorKind::CodecParse,
+                    stage: Stage::Response,
                     status: None,
                     trace_id: Some(ctx.trace_id.as_ref()),
                     extra: None,

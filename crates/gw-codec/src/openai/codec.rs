@@ -4,6 +4,7 @@
 use bytes::{BufMut, BytesMut};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR, UsageIR};
+use gw_core::observability::{observe, ErrorKind, ErrorObservation, Stage};
 use std::borrow::Cow;
 
 use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
@@ -94,10 +95,10 @@ impl ProtocolCodec for OpenAi {
                 Err(e) => {
                     // CONTRACT: do not short-circuit the stream on a single
                     // malformed payload. Route through observe() and continue.
-                    gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    observe(ErrorObservation {
                         code: "openai_stream_malformed_data",
-                        kind: gw_core::observability::ErrorKind::CodecParse,
-                        stage: gw_core::observability::Stage::Response,
+                        kind: ErrorKind::CodecParse,
+                        stage: Stage::Response,
                         status: None,
                         trace_id: None,
                         extra: Some(&e),
@@ -220,50 +221,50 @@ impl ProtocolCodec for OpenAi {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::Start { .. } => {
-                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                observe(ErrorObservation {
                     code: "openai_render_drop_start",
-                    kind: gw_core::observability::ErrorKind::CodecRender,
-                    stage: gw_core::observability::Stage::Response,
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
                     status: None,
                     trace_id: None,
                     extra: Some(&"Start"),
                 });
             }
             StreamEventIR::Usage(_) => {
-                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                observe(ErrorObservation {
                     code: "openai_render_drop_usage",
-                    kind: gw_core::observability::ErrorKind::CodecRender,
-                    stage: gw_core::observability::Stage::Response,
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
                     status: None,
                     trace_id: None,
                     extra: Some(&"Usage"),
                 });
             }
             StreamEventIR::ThinkingDelta { .. } => {
-                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                observe(ErrorObservation {
                     code: "openai_render_drop_thinking_delta",
-                    kind: gw_core::observability::ErrorKind::CodecRender,
-                    stage: gw_core::observability::Stage::Response,
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
                     status: None,
                     trace_id: None,
                     extra: Some(&"ThinkingDelta"),
                 });
             }
             StreamEventIR::ToolCallStart { .. } => {
-                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                observe(ErrorObservation {
                     code: "openai_render_drop_tool_call_start",
-                    kind: gw_core::observability::ErrorKind::CodecRender,
-                    stage: gw_core::observability::Stage::Response,
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
                     status: None,
                     trace_id: None,
                     extra: Some(&"ToolCallStart"),
                 });
             }
             StreamEventIR::ToolCallDelta { .. } => {
-                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                observe(ErrorObservation {
                     code: "openai_render_drop_tool_call_delta",
-                    kind: gw_core::observability::ErrorKind::CodecRender,
-                    stage: gw_core::observability::Stage::Response,
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
                     status: None,
                     trace_id: None,
                     extra: Some(&"ToolCallDelta"),

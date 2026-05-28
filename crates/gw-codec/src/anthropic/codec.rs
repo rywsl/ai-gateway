@@ -9,6 +9,7 @@
 use bytes::{BufMut, BytesMut};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::{MessageIR, RequestIR, ResponseIR, StreamEventIR, UsageIR};
+use gw_core::observability::{observe, ErrorKind, ErrorObservation, Stage};
 use std::borrow::Cow;
 
 use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
@@ -217,10 +218,10 @@ impl ProtocolCodec for Anthropic {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::Start { .. } => {
-                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                observe(ErrorObservation {
                     code: "anthropic_render_drop_start",
-                    kind: gw_core::observability::ErrorKind::CodecRender,
-                    stage: gw_core::observability::Stage::Response,
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
                     status: None,
                     trace_id: None,
                     extra: Some(&"Start"),
@@ -355,11 +356,12 @@ fn dispatch_payload<'a>(
     let event: AnthropicStreamEvent<'a> = match serde_json::from_slice(payload) {
         Ok(e) => e,
         Err(e) => {
-            // CONTRACT: malformed payloads must not short-circuit the stream.
-            gw_core::observability::observe(gw_core::observability::ErrorObservation {
+            // CONTRACT: do not short-circuit the stream on a single
+            // malformed payload. Route through observe() and continue.
+            observe(ErrorObservation {
                 code: "anthropic_stream_malformed_data",
-                kind: gw_core::observability::ErrorKind::CodecParse,
-                stage: gw_core::observability::Stage::Response,
+                kind: ErrorKind::CodecParse,
+                stage: Stage::Response,
                 status: None,
                 trace_id: None,
                 extra: Some(&e),
@@ -469,10 +471,10 @@ fn dispatch_payload<'a>(
                 return;
             }
             let Some(builder) = st.open_blocks.get_mut(&index) else {
-                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                observe(ErrorObservation {
                     code: "anthropic_stream_delta_unopened_block",
-                    kind: gw_core::observability::ErrorKind::CodecParse,
-                    stage: gw_core::observability::Stage::Response,
+                    kind: ErrorKind::CodecParse,
+                    stage: Stage::Response,
                     status: None,
                     trace_id: None,
                     extra: Some(&index),
