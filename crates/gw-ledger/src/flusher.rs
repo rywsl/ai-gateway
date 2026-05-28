@@ -190,6 +190,7 @@ async fn dlq_xadd(redis: &RedisCtx, wrapped: String) -> Result<(), String> {
 }
 
 async fn flush(redis: &RedisCtx, _instance_id: &str, buf: &mut Vec<LedgerItem>) {
+    // `_instance_id` is reserved for Task 4 (DEL inflight key path); unused here.
     // Serialize first so we can replay payloads to DLQ on batch failure.
     let mut payloads: Vec<String> = Vec::with_capacity(buf.len());
     for item in buf.drain(..) {
