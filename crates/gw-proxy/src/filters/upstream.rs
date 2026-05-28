@@ -85,6 +85,10 @@ async fn emit_envelope_and_bail<T>(
     Err(short_circuit(err.status))
 }
 
+// `pick_peer` is the kill-switch + impersonate-dispatch hot path; the arg count
+// grew with Task 4.2 (impersonate) and Task 5.2 (egress_disabled). Refactoring
+// to a struct would obscure call sites; keep the allow until the next time the
+// signature changes.
 #[allow(clippy::too_many_arguments)]
 pub async fn pick_peer(
     session: &mut Session,
