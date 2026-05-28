@@ -93,8 +93,15 @@ impl ProtocolCodec for OpenAi {
                 Ok(v) => v,
                 Err(e) => {
                     // CONTRACT: do not short-circuit the stream on a single
-                    // malformed payload. Surface a warn and continue.
-                    tracing::warn!(error = %e, "openai stream: malformed data payload");
+                    // malformed payload. Route through observe() and continue.
+                    gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                        code: "openai_stream_malformed_data",
+                        kind: gw_core::observability::ErrorKind::CodecParse,
+                        stage: gw_core::observability::Stage::Response,
+                        status: None,
+                        trace_id: None,
+                        extra: Some(&e),
+                    });
                     continue;
                 }
             };
@@ -213,19 +220,54 @@ impl ProtocolCodec for OpenAi {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::Start { .. } => {
-                tracing::warn!("openai: StreamEventIR::Start dropped (no wire equivalent)");
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "openai_render_drop_start",
+                    kind: gw_core::observability::ErrorKind::CodecRender,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"Start"),
+                });
             }
             StreamEventIR::Usage(_) => {
-                tracing::warn!("openai: StreamEventIR::Usage dropped (no wire equivalent)");
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "openai_render_drop_usage",
+                    kind: gw_core::observability::ErrorKind::CodecRender,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"Usage"),
+                });
             }
             StreamEventIR::ThinkingDelta { .. } => {
-                tracing::warn!("openai: StreamEventIR::ThinkingDelta dropped (no wire equivalent)");
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "openai_render_drop_thinking_delta",
+                    kind: gw_core::observability::ErrorKind::CodecRender,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"ThinkingDelta"),
+                });
             }
             StreamEventIR::ToolCallStart { .. } => {
-                tracing::warn!("openai: StreamEventIR::ToolCallStart dropped (no wire equivalent)");
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "openai_render_drop_tool_call_start",
+                    kind: gw_core::observability::ErrorKind::CodecRender,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"ToolCallStart"),
+                });
             }
             StreamEventIR::ToolCallDelta { .. } => {
-                tracing::warn!("openai: StreamEventIR::ToolCallDelta dropped (no wire equivalent)");
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "openai_render_drop_tool_call_delta",
+                    kind: gw_core::observability::ErrorKind::CodecRender,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"ToolCallDelta"),
+                });
             }
             StreamEventIR::RefusalDelta { text } => {
                 let payload = serde_json::json!({
