@@ -177,8 +177,12 @@ const IP_BLOCK_SQL: &str =
     "SELECT payload, version FROM ip_blocks WHERE id = $1 AND deleted_at IS NULL";
 const VENDOR_SQL: &str =
     "SELECT payload, version FROM vendors WHERE id = $1 AND deleted_at IS NULL";
-const VENDOR_KEY_SQL: &str =
-    "SELECT payload, version FROM vendor_keys WHERE id = $1 AND deleted_at IS NULL";
+// `identity_snapshot` is a dedicated `vendor_keys` column (migration 0009),
+// written by `PgSnapshotWriter::write_if_null`. The generic `load_entity`
+// closure only sees `payload`, so fold the column into `payload.identity_snapshot`
+// with `jsonb_set` — same trick as `API_KEY_SQL` does for `signature_secret`.
+// Without this, lazy-persisted identities would never be read back.
+const VENDOR_KEY_SQL: &str = "SELECT jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true) AS payload, version FROM vendor_keys WHERE id = $1 AND deleted_at IS NULL";
 const MODEL_GROUP_SQL: &str =
     "SELECT payload, version FROM model_groups WHERE id = $1 AND deleted_at IS NULL";
 const PRICING_SQL: &str =

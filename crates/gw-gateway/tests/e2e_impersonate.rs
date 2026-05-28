@@ -48,7 +48,8 @@ use hyper::Request;
 use hyper_util::rt::TokioIo;
 
 use gw_core::impersonate::{
-    claude_code, ensure_identity, ImpersonateProfile, VendorEgressMode,
+    claude_code, ensure_identity, IdentitySnapshot, ImpersonateProfile, ResolvedIdentity,
+    VendorEgressMode,
 };
 use gw_egress_impersonate::server::Handler;
 
@@ -108,6 +109,17 @@ fn build_impersonated_request(
 ) -> Request<Empty<Bytes>> {
     let (resolved, _should_persist) =
         ensure_identity(key_id, None, ImpersonateProfile::ClaudeCodeChrome131);
+    build_request_with_identity(&resolved, recorder_addr)
+}
+
+/// Build the same loopback request as [`build_impersonated_request`], but from
+/// an already-resolved identity. Lets a test resolve the identity from a
+/// persisted snapshot (instead of re-deriving from RNG) and still emit the
+/// exact wire request the gateway would.
+fn build_request_with_identity(
+    resolved: &ResolvedIdentity,
+    recorder_addr: std::net::SocketAddr,
+) -> Request<Empty<Bytes>> {
     let identity_hdrs = claude_code::headers(&resolved.variable, /*is_stream*/ false);
 
     let target = format!("{}:{}", recorder_addr.ip(), recorder_addr.port());
@@ -445,5 +457,176 @@ async fn per_key_identity_is_stable_across_requests() {
     assert_eq!(
         other_ua, expected_ua,
         "other-key identity is not deterministic in key_id"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Test 3 — IdentitySnapshot persist round-trip through Postgres
+// ───────────────────────────────────────────────────────────────────────────────
+
+/// Closes the loop between the lazy-persist layer (Task 2.7/2.8) and the wire.
+///
+/// Test 2 proves `ensure_identity` is deterministic in `key_id` — but that
+/// alone does not prove the *persist path* works. This test forces the second
+/// request to take the read-from-Postgres path:
+///
+/// 1. Request 1 resolves identity with `existing = None` → derives from RNG and
+///    reports `should_persist = true`. The request is sent through the loopback.
+/// 2. The resulting `IdentitySnapshot` is scheduled on a real
+///    `IdentityPersistQueue` backed by `PgSnapshotWriter`, then flushed so the
+///    background write commits to `vendor_keys.identity_snapshot`.
+/// 3. A *fresh* `EntityStore` (cold in-memory + cold Redis) loads the key via
+///    `vendor_key_or_load`, exercising `load_vendor_key`'s SQL. The
+///    `identity_snapshot` column lives outside the `payload` JSONB, so the
+///    loader's `jsonb_set` fold (see `VENDOR_KEY_SQL` in `loader.rs`) is the
+///    only thing that surfaces the persisted snapshot through
+///    `VendorKeyRow.identity_snapshot`. If that fold ever regresses,
+///    `vk.value.identity_snapshot` is `None` and this test fails loudly.
+/// 4. Request 2 resolves identity with `existing = Some(&snapshot_from_pg)` →
+///    must report `should_persist = false` (it trusted the snapshot, did not
+///    re-derive) and is sent through the loopback.
+/// 5. The User-Agent observed at the upstream must be identical across both
+///    requests. If serialisation, the conditional `write_if_null` UPDATE, or
+///    `ensure_identity`'s snapshot-reuse branch dropped any field, the UAs
+///    would diverge.
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers Postgres + Redis)"]
+async fn identity_snapshot_round_trips_through_postgres() {
+    use std::collections::HashMap;
+    use testcontainers_modules::testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::{postgres::Postgres, redis::Redis};
+
+    use gw_core::ids::KeyId;
+    use gw_store::encrypt::{encrypt_for_test_only, KekCache};
+    use gw_store::identity_persist::{IdentityPersistQueue, PgSnapshotWriter};
+    use gw_store::{loader::LoaderCtx, EntityStore};
+
+    // ── Boot Postgres + Redis, migrate through 0009 ─────────────────────────
+    let pg_node = Postgres::default().start().await.expect("start postgres");
+    let redis_node = Redis::default().start().await.expect("start redis");
+    let pg_port = pg_node.get_host_port_ipv4(5432).await.expect("pg port");
+    let redis_port = redis_node
+        .get_host_port_ipv4(6379)
+        .await
+        .expect("redis port");
+    let pg = gw_store::pg_client::connect(
+        &format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres"),
+        4,
+    )
+    .await
+    .expect("pg connect");
+    sqlx::raw_sql(MIGRATION_0001)
+        .execute(&pg)
+        .await
+        .expect("apply 0001");
+    sqlx::raw_sql(MIGRATION_0004)
+        .execute(&pg)
+        .await
+        .expect("apply 0004");
+    sqlx::raw_sql(MIGRATION_0009)
+        .execute(&pg)
+        .await
+        .expect("apply 0009");
+
+    // ── Seed a loadable vendor_keys row (identity_snapshot column = NULL) ────
+    // The row must deserialise through `load_vendor_key`, so it needs a real
+    // encrypted `api_key_enc`; `encrypt_for_test_only` hard-codes kek kid
+    // "test", so the `KekCache` must hold that kid. The `identity_snapshot`
+    // *column* starts NULL — `write_if_null` only writes when it IS NULL.
+    let key_id = "vk-roundtrip-001";
+    let kek_bytes = [7u8; 32];
+    let kek = KekCache::new(HashMap::from([("test".to_string(), kek_bytes)]));
+    let api_key_enc = encrypt_for_test_only("sk-roundtrip", kek_bytes);
+    let payload = serde_json::json!({
+        "key_id": key_id,
+        "vendor_id": "v-impersonate",
+        "api_key_enc": api_key_enc,
+        "status": "active",
+    });
+    sqlx::query("INSERT INTO vendor_keys (id, payload, version) VALUES ($1, $2, 1)")
+        .bind(key_id)
+        .bind(payload)
+        .execute(&pg)
+        .await
+        .expect("seed vendor_key");
+
+    let recorder = start_recorder().await;
+    let loopback_addr = spawn_loopback_handler().await;
+
+    // ── Request 1: derive from RNG (no snapshot), send, then persist ────────
+    let (resolved1, should_persist1) =
+        ensure_identity(key_id, None, ImpersonateProfile::ClaudeCodeChrome131);
+    assert!(
+        should_persist1,
+        "first ensure_identity (no snapshot) must request a lazy persist"
+    );
+    let req1 = build_request_with_identity(&resolved1, recorder.addr);
+    let resp1 = send_through_loopback(loopback_addr, req1).await;
+    assert_eq!(resp1.status(), 200);
+    let _ = resp1.into_body().collect().await;
+
+    let snap1 = IdentitySnapshot {
+        profile_kind: resolved1.profile,
+        variable: resolved1.variable.clone(),
+    };
+    let queue = IdentityPersistQueue::new(Arc::new(PgSnapshotWriter::new(pg.clone())), 128);
+    queue.schedule(key_id.to_owned(), snap1);
+    queue.flush_for_test().await;
+
+    // ── Load through a FRESH EntityStore (cold cache) ───────────────────────
+    // `load_vendor_key`'s SQL must fold the dedicated `identity_snapshot`
+    // column into the payload that decodes into `VendorKey`. If it doesn't,
+    // `vk.identity_snapshot` is `None`, the next ensure_identity re-derives,
+    // `should_persist` flips back to true, and the assertion below catches it.
+    let redis = gw_store::redis_client::RedisCtx::connect(
+        &format!("redis://127.0.0.1:{redis_port}"),
+        4,
+    )
+    .await
+    .expect("redis connect");
+    let store = Arc::new(EntityStore::with_loader(LoaderCtx {
+        redis,
+        pg: pg.clone(),
+        kek,
+    }));
+    let vk = store
+        .vendor_key_or_load(&KeyId::from(key_id))
+        .await
+        .expect("vendor_key_or_load returned None");
+    let snap_from_pg = vk
+        .value
+        .identity_snapshot
+        .clone()
+        .expect("identity_snapshot not rehydrated from the column — loader read path is broken");
+
+    // ── Request 2: resolve FROM the persisted snapshot, send ────────────────
+    let (resolved2, should_persist2) = ensure_identity(
+        key_id,
+        Some(&snap_from_pg),
+        ImpersonateProfile::ClaudeCodeChrome131,
+    );
+    assert!(
+        !should_persist2,
+        "second ensure_identity (with snapshot) must reuse it, not re-persist"
+    );
+    let req2 = build_request_with_identity(&resolved2, recorder.addr);
+    let resp2 = send_through_loopback(loopback_addr, req2).await;
+    assert_eq!(resp2.status(), 200);
+    let _ = resp2.into_body().collect().await;
+
+    // ── Assert the upstream saw an identical UA across the round-trip ───────
+    let captured = await_count(&recorder, 2, Duration::from_secs(5)).await;
+    assert!(captured.len() >= 2, "expected at least 2 captures");
+    let ua1 = captured[0]
+        .header("User-Agent")
+        .expect("ua on request 1")
+        .to_owned();
+    let ua2 = captured[1]
+        .header("User-Agent")
+        .expect("ua on request 2")
+        .to_owned();
+    assert_eq!(
+        ua1, ua2,
+        "User-Agent must survive the persist → Postgres → read round-trip (key={key_id})"
     );
 }
