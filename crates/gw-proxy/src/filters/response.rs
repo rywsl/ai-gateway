@@ -40,6 +40,7 @@ use gw_codec::cli::CliCodec;
 use gw_codec::cross_render::{CrossRender, WireFormat};
 use gw_codec::AnyCodec;
 use gw_core::ir::StreamEventIR;
+use gw_core::observability::{observe, ErrorKind, ErrorObservation, Stage};
 use gw_core::protocol::{ApiShape, ProtocolKind};
 use pingora::Result;
 use pingora_proxy::Session;
@@ -377,7 +378,14 @@ fn handle_event(
     let events = match codec.parse_stream_chunk(state.as_mut(), event_bytes) {
         Ok(evs) => evs,
         Err(e) => {
-            tracing::warn!(error = ?e.code, "stream parse error");
+            observe(ErrorObservation {
+                code: e.code.as_ref(),
+                kind: ErrorKind::CodecParse,
+                stage: Stage::Response,
+                status: None,
+                trace_id: Some(ctx.trace_id.as_ref()),
+                extra: None,
+            });
             ctx.stream_state = Some(state);
             return;
         }
@@ -428,7 +436,14 @@ fn handle_event(
             // overwrite.
             if let Some(cc) = client_codec.as_ref() {
                 if let Err(e) = cc.render_stream_chunk(&ev, &mut acc) {
-                    tracing::warn!(error = ?e.code, "cross-protocol stream render error");
+                    observe(ErrorObservation {
+                        code: e.code.as_ref(),
+                        kind: ErrorKind::CodecRender,
+                        stage: Stage::Response,
+                        status: None,
+                        trace_id: Some(ctx.trace_id.as_ref()),
+                        extra: None,
+                    });
                 } else {
                     metrics::counter!(
                         "gw_codec_cross_render_total",
@@ -689,6 +704,7 @@ pub(crate) fn handle_non_stream_chunk(
                                     "to" => to.label(),
                                 )
                                 .increment(1);
+                                // keep alongside observe(): warn carries structured fields (from/to or e.code) that observe.extra (single &dyn Debug) cannot.
                                 tracing::warn!(
                                     from = %from,
                                     to = %to,
@@ -696,6 +712,14 @@ pub(crate) fn handle_non_stream_chunk(
                                     "{}",
                                     gw_core::error::codes::GW_CODEC_CROSS_RENDER_FAILED
                                 );
+                                observe(ErrorObservation {
+                                    code: e.code.as_ref(),
+                                    kind: ErrorKind::CodecRender,
+                                    stage: Stage::Response,
+                                    status: None,
+                                    trace_id: Some(ctx.trace_id.as_ref()),
+                                    extra: None,
+                                });
                                 return_body_to_accum = true;
                             }
                         }
@@ -709,11 +733,14 @@ pub(crate) fn handle_non_stream_chunk(
                     "upstream_status" => ctx.upstream_status.unwrap_or(0).to_string(),
                 )
                 .increment(1);
-                tracing::warn!(
-                    error = ?e.code,
-                    "{}",
-                    gw_core::error::codes::GW_CODEC_PARSE_RESPONSE
-                );
+                observe(ErrorObservation {
+                    code: e.code.as_ref(),
+                    kind: ErrorKind::CodecParse,
+                    stage: Stage::Response,
+                    status: None,
+                    trace_id: Some(ctx.trace_id.as_ref()),
+                    extra: None,
+                });
                 // parse_response failed (e.g., vendor error JSON body, or a
                 // shape this codec can't decode). Forward the original
                 // upstream bytes verbatim — cross-protocol clients see

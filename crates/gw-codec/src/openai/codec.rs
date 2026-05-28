@@ -4,6 +4,7 @@
 use bytes::{BufMut, BytesMut};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR, UsageIR};
+use gw_core::observability::{observe, ErrorKind, ErrorObservation, Stage};
 use std::borrow::Cow;
 
 use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
@@ -93,8 +94,15 @@ impl ProtocolCodec for OpenAi {
                 Ok(v) => v,
                 Err(e) => {
                     // CONTRACT: do not short-circuit the stream on a single
-                    // malformed payload. Surface a warn and continue.
-                    tracing::warn!(error = %e, "openai stream: malformed data payload");
+                    // malformed payload. Route through observe() and continue.
+                    observe(ErrorObservation {
+                        code: "openai_stream_malformed_data",
+                        kind: ErrorKind::CodecParse,
+                        stage: Stage::Response,
+                        status: None,
+                        trace_id: None,
+                        extra: Some(&e),
+                    });
                     continue;
                 }
             };
@@ -213,19 +221,54 @@ impl ProtocolCodec for OpenAi {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::Start { .. } => {
-                tracing::warn!("openai: StreamEventIR::Start dropped (no wire equivalent)");
+                observe(ErrorObservation {
+                    code: "openai_render_drop_start",
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"Start"),
+                });
             }
             StreamEventIR::Usage(_) => {
-                tracing::warn!("openai: StreamEventIR::Usage dropped (no wire equivalent)");
+                observe(ErrorObservation {
+                    code: "openai_render_drop_usage",
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"Usage"),
+                });
             }
             StreamEventIR::ThinkingDelta { .. } => {
-                tracing::warn!("openai: StreamEventIR::ThinkingDelta dropped (no wire equivalent)");
+                observe(ErrorObservation {
+                    code: "openai_render_drop_thinking_delta",
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"ThinkingDelta"),
+                });
             }
             StreamEventIR::ToolCallStart { .. } => {
-                tracing::warn!("openai: StreamEventIR::ToolCallStart dropped (no wire equivalent)");
+                observe(ErrorObservation {
+                    code: "openai_render_drop_tool_call_start",
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"ToolCallStart"),
+                });
             }
             StreamEventIR::ToolCallDelta { .. } => {
-                tracing::warn!("openai: StreamEventIR::ToolCallDelta dropped (no wire equivalent)");
+                observe(ErrorObservation {
+                    code: "openai_render_drop_tool_call_delta",
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"ToolCallDelta"),
+                });
             }
             StreamEventIR::RefusalDelta { text } => {
                 let payload = serde_json::json!({
