@@ -8,11 +8,11 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub mod rng;
 pub mod claude_code;
-pub mod openai_codex;
-pub mod gemini_cli;
 pub mod ensure;
+pub mod gemini_cli;
+pub mod openai_codex;
+pub mod rng;
 pub mod turn_state;
 pub use ensure::{ensure_identity, ResolvedIdentity};
 

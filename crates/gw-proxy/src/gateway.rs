@@ -1103,28 +1103,64 @@ impl ProxyHttp for LlmGateway {
         use pingora::ErrorType::*;
         use std::borrow::Cow;
 
-        let (gw_code, http_status): (&'static str, u16) = match e.etype() {
-            HTTPStatus(code) => (codes::GW_UPSTREAM_PROTOCOL, *code),
-            _ => match e.esource() {
-                ErrorSource::Upstream => {
-                    if ctx.body_started {
-                        (codes::GW_UPSTREAM_TRUNCATED, 0)
-                    } else {
-                        (codes::GW_BACKEND_UNAVAILABLE, 502)
+        let (gw_code, http_status, kind): (&'static str, u16, gw_core::observability::ErrorKind) =
+            match e.etype() {
+                HTTPStatus(code) => (
+                    codes::GW_UPSTREAM_PROTOCOL,
+                    *code,
+                    gw_core::observability::ErrorKind::UpstreamProtocol,
+                ),
+                _ => match e.esource() {
+                    ErrorSource::Upstream => {
+                        if ctx.body_started {
+                            (
+                                codes::GW_UPSTREAM_TRUNCATED,
+                                0,
+                                gw_core::observability::ErrorKind::UpstreamMidStream,
+                            )
+                        } else {
+                            (
+                                codes::GW_BACKEND_UNAVAILABLE,
+                                502,
+                                gw_core::observability::ErrorKind::UpstreamConnect,
+                            )
+                        }
                     }
-                }
-                ErrorSource::Downstream => match e.etype() {
-                    WriteError | ReadError | ConnectionClosed => (codes::GW_CLIENT_DISCONNECTED, 0),
-                    _ => (codes::GW_BAD_REQUEST, 400),
+                    ErrorSource::Downstream => match e.etype() {
+                        WriteError | ReadError | ConnectionClosed => (
+                            codes::GW_CLIENT_DISCONNECTED,
+                            0,
+                            // No DownstreamDisconnect kind; UpstreamConnect is the closest available.
+                            gw_core::observability::ErrorKind::UpstreamConnect,
+                        ),
+                        _ => (
+                            codes::GW_BAD_REQUEST,
+                            400,
+                            gw_core::observability::ErrorKind::UpstreamConnect,
+                        ),
+                    },
+                    ErrorSource::Internal | ErrorSource::Unset => (
+                        codes::GW_GATEWAY_INTERNAL,
+                        500,
+                        gw_core::observability::ErrorKind::UpstreamConnect,
+                    ),
                 },
-                ErrorSource::Internal | ErrorSource::Unset => (codes::GW_GATEWAY_INTERNAL, 500),
-            },
+            };
+
+        let category = match gw_code {
+            codes::GW_BAD_REQUEST => gw_core::error::ErrorCategory::ClientBadRequest,
+            codes::GW_GATEWAY_INTERNAL => gw_core::error::ErrorCategory::GatewayInternal,
+            _ => gw_core::error::ErrorCategory::UpstreamError,
         };
 
-        let kind = if ctx.body_started {
-            gw_core::observability::ErrorKind::UpstreamMidStream
-        } else {
-            gw_core::observability::ErrorKind::UpstreamConnect
+        let retryable = matches!(http_status, 502..=504);
+
+        let message: Cow<'static, str> = match gw_code {
+            codes::GW_BACKEND_UNAVAILABLE => Cow::Borrowed("upstream unavailable"),
+            codes::GW_UPSTREAM_PROTOCOL => Cow::Borrowed("upstream protocol error"),
+            codes::GW_BAD_REQUEST => Cow::Borrowed("bad request"),
+            codes::GW_GATEWAY_INTERNAL => Cow::Borrowed("gateway internal error"),
+            _ => Cow::Borrowed("upstream unavailable"),
         };
 
         gw_core::observability::observe(gw_core::observability::ErrorObservation {
@@ -1142,12 +1178,12 @@ impl ProxyHttp for LlmGateway {
 
         if http_status > 0 && !ctx.body_started {
             let envelope = gw_core::error::ErrorIR {
-                category: gw_core::error::ErrorCategory::UpstreamError,
+                category,
                 status: http_status,
                 upstream_status: None,
                 code: Cow::Borrowed(gw_code),
-                message: Cow::Borrowed("upstream unavailable"),
-                retryable: false,
+                message,
+                retryable,
                 upstream_raw: None,
                 request_id: ctx.request_id.as_ref(),
                 retry_after_secs: None,
