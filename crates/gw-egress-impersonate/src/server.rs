@@ -118,6 +118,15 @@ impl Handler {
         }
     }
 
+    /// Create a Handler sharing an existing `ClientPool`.
+    ///
+    /// Used by the supervisor so that a restarted listener inherits the pool
+    /// rather than creating a new one (which would lose cached clients and
+    /// change the apparent capacity).
+    pub(crate) fn new_with_pool(pool: Arc<ClientPool>) -> Self {
+        Self { pool, scheme: "https" }
+    }
+
     /// Dispatch an egress request.
     ///
     /// Reads `X-Egress-Target` and `X-Egress-Profile` (both required) and
@@ -280,6 +289,155 @@ fn truncate_256(s: &str) -> &str {
     }
     &s[..idx]
 }
+
+// ── Listener ──────────────────────────────────────────────────────────────────
+
+use crate::handle::EgressBind;
+use std::convert::Infallible;
+use tokio::net::{TcpListener, UnixListener};
+
+/// A bound, not-yet-accepting egress listener.
+///
+/// Created via [`Listener::bind`] and made active via [`Listener::spawn`].
+/// The caller supplies a pre-built [`Handler`] (wrapped in `Arc`) so that
+/// tests can inject `Handler::new_with_scheme("http")` while production code
+/// passes `Handler::new(capacity)`.
+pub struct Listener {
+    bind: EgressBind,
+    handler: Arc<Handler>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Listener {
+    /// Bind the listener to the given address and associate it with `handler`.
+    ///
+    /// For UDS binds: if the socket path already exists it is removed before
+    /// binding (handles restarts without manual cleanup).
+    pub async fn bind(bind: EgressBind, handler: Arc<Handler>) -> anyhow::Result<Self> {
+        // Pre-cleanup for UDS path collisions.
+        if let EgressBind::Uds(ref p) = bind {
+            if p.exists() {
+                std::fs::remove_file(p)?;
+            }
+        }
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        Ok(Self {
+            bind,
+            handler,
+            shutdown_tx: tx,
+            shutdown_rx: rx,
+        })
+    }
+
+    /// Spawn the accept loop. Returns a [`ListenerJoinHandle`] that can be
+    /// used to shut down the listener and await its task.
+    pub fn spawn(self) -> ListenerJoinHandle {
+        let bind = self.bind.clone();
+        let handler = Arc::clone(&self.handler);
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        let tx = self.shutdown_tx.clone();
+
+        let task = tokio::spawn(async move {
+            match bind {
+                EgressBind::Uds(path) => {
+                    let listener = UnixListener::bind(&path)?;
+                    tracing::info!("gw-egress-impersonate: UDS listener bound at {:?}", path);
+                    loop {
+                        tokio::select! {
+                            _ = shutdown_rx.changed() => break,
+                            accept = listener.accept() => match accept {
+                                Ok((stream, _)) => {
+                                    let h = Arc::clone(&handler);
+                                    tokio::spawn(serve_conn_unix(stream, h));
+                                }
+                                Err(e) => tracing::warn!("UDS accept error: {e}"),
+                            }
+                        }
+                    }
+                }
+                EgressBind::Tcp(addr) => {
+                    let listener = TcpListener::bind(addr).await?;
+                    tracing::info!(
+                        "gw-egress-impersonate: TCP listener bound at {}",
+                        listener.local_addr()?
+                    );
+                    loop {
+                        tokio::select! {
+                            _ = shutdown_rx.changed() => break,
+                            accept = listener.accept() => match accept {
+                                Ok((stream, peer)) => {
+                                    if !peer.ip().is_loopback() {
+                                        tracing::warn!(
+                                            "gw-egress-impersonate: rejecting non-loopback peer {peer}"
+                                        );
+                                        continue;
+                                    }
+                                    let h = Arc::clone(&handler);
+                                    tokio::spawn(serve_conn_tcp(stream, h));
+                                }
+                                Err(e) => tracing::warn!("TCP accept error: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
+            anyhow::Result::<()>::Ok(())
+        });
+
+        ListenerJoinHandle { task, shutdown_tx: tx }
+    }
+}
+
+// ── ListenerJoinHandle ────────────────────────────────────────────────────────
+
+/// A handle to a spawned [`Listener`] task. Provides graceful shutdown.
+pub struct ListenerJoinHandle {
+    /// The listener's accept-loop task. `pub(crate)` so that `supervisor.rs`
+    /// can `select!` on its completion without going through an extra channel.
+    pub(crate) task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl ListenerJoinHandle {
+    /// Signal the listener to stop accepting and await the task.
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(true);
+        let _ = self.task.await;
+    }
+}
+
+// ── Per-connection serve helpers ──────────────────────────────────────────────
+
+async fn serve_conn_unix(stream: tokio::net::UnixStream, handler: Arc<Handler>) {
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let service = hyper::service::service_fn(move |req| {
+        let h = Arc::clone(&handler);
+        async move { Ok::<_, Infallible>(h.handle(req).await) }
+    });
+    if let Err(e) = hyper::server::conn::http1::Builder::new()
+        .serve_connection(io, service)
+        .await
+    {
+        tracing::debug!("gw-egress-impersonate: UDS conn error: {e}");
+    }
+}
+
+async fn serve_conn_tcp(stream: tokio::net::TcpStream, handler: Arc<Handler>) {
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let service = hyper::service::service_fn(move |req| {
+        let h = Arc::clone(&handler);
+        async move { Ok::<_, Infallible>(h.handle(req).await) }
+    });
+    if let Err(e) = hyper::server::conn::http1::Builder::new()
+        .serve_connection(io, service)
+        .await
+    {
+        tracing::debug!("gw-egress-impersonate: TCP conn error: {e}");
+    }
+}
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

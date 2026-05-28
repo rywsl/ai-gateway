@@ -11,3 +11,11 @@ pub mod pool;
 pub mod profiles;
 pub mod server;
 pub mod supervisor;
+
+// ── Public API re-exports ─────────────────────────────────────────────────────
+
+/// The bind address for the loopback egress listener (UDS or TCP).
+pub use handle::{EgressBind, EgressHandle};
+
+/// Error classification constants for downstream consumers.
+pub use error::{ErrorClass, HDR_CLASS, HDR_DETAIL};
