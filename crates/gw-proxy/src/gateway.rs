@@ -643,8 +643,15 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         if end_of_stream {
-            if let Some(rewritten) = ctx.cached_body.as_ref() {
-                *body = Some(rewritten.clone());
+            // Phase B: prefer view's outbound_or_raw(); fall back to cached_body
+            // for any path that hasn't been migrated yet.
+            let rewritten = ctx
+                .body
+                .as_ref()
+                .map(|v| v.outbound_or_raw().clone())
+                .or_else(|| ctx.cached_body.clone());
+            if let Some(rewritten) = rewritten {
+                *body = Some(rewritten);
             }
         } else {
             // Drop pre-EOF chunks: the full body was already buffered in

@@ -613,11 +613,22 @@ pub async fn run(
             bail!(session, ctx, &err, &request_id)
         }
     };
-    let parse_body = ctx
-        .cached_body
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| body_bytes.clone());
+    let parse_body = {
+        let view = ctx.body.as_ref().expect("ctx.body populated after body buffering");
+        match view.decoded(32 * 1024 * 1024) {
+            Ok(b) => b.clone(),
+            Err(_) => {
+                // Decompression failed; ctx.cached_body still holds the compressed
+                // raw bytes; fall back to raw for codec (which will likely fail parse
+                // and emit a clean 400). This path is rare: normally the HMAC block
+                // already rejects a bad compressed body. Keep cached_body as fallback.
+                ctx.cached_body
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| body_bytes.clone())
+            }
+        }
+    };
     let path_str = session.req_header().uri.path();
     let (model_name, is_stream, est_input_tokens) = if ctx.is_gemini_files {
         (ModelName::from("gemini-files"), false, 1)
@@ -918,7 +929,10 @@ pub async fn run(
                 crate::filters::task::submit_endpoint(
                     contract,
                     crate::filters::task::SubmitTaskRequest {
-                        body: ctx.cached_body.as_deref().unwrap_or(&body_bytes),
+                        body: ctx.body.as_ref()
+                            .and_then(|v| v.decoded(32 * 1024 * 1024).ok())
+                            .map(|b| b.as_ref())
+                            .unwrap_or(body_bytes.as_ref()),
                         user_id: user_id.as_ref(),
                         api_key_id: api_key_id.as_ref().map(ApiKeyId::as_ref),
                         client_protocol: ctx

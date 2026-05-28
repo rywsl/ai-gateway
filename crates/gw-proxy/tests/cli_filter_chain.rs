@@ -20,9 +20,14 @@ fn pos(haystack: &str, needle: &str) -> usize {
 }
 
 fn cli_ctx(shape: ApiShape) -> ReqCtx {
+    let body_bytes = Bytes::from_static(br#"{"model":"claude-sonnet-4-20250514","stream":false,"vendor_extension":{"keep":true}}"#);
     ReqCtx {
         client_shape: Some(shape),
-        cached_body: Some(Bytes::from_static(br#"{"model":"claude-sonnet-4-20250514","stream":false,"vendor_extension":{"keep":true}}"#)),
+        cached_body: Some(body_bytes.clone()),
+        body: Some(gw_proxy::body::RequestBodyView::from_raw(
+            body_bytes,
+            gw_codec::compression::Encoding::Identity,
+        )),
         ..ReqCtx::default()
     }
 }

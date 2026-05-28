@@ -291,10 +291,12 @@ pub async fn pick_peer(
         model: &model,
         conversation_id: ctx.conversation_id.as_deref(),
         message_hash: ctx
-            .cached_body
+            .body
             .as_ref()
-            .filter(|b| !b.is_empty())
-            .and_then(|b| body_hash_u64(b)),
+            .and_then(|v| {
+                let raw = v.raw();
+                if raw.is_empty() { None } else { body_hash_u64(raw) }
+            }),
         api_format: client_codec_kind,
         pricing: ctx.pricing.as_ref().map(|p| &p.value as &Pricing),
         latency_tracker: latency_tracker.as_ref(),
@@ -734,8 +736,9 @@ pub async fn rewrite_request(
         .as_ref()
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_client_codec")))?;
     let cached_body = ctx
-        .cached_body
+        .body
         .as_ref()
+        .map(|v| v.outbound_or_raw().clone())
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_cached_body")))?;
     let picked = ctx
         .picked_vendor_key
@@ -801,8 +804,8 @@ pub async fn rewrite_request(
     }
     let outbound: bytes::Bytes = if mutations.is_empty() && upstream_kind == client_codec.kind() {
         match client_codec {
-            AnyCodec::OpenAi(c) => match same_protocol_passthrough(c, cached_body, &mutations) {
-                Ok(cow) => bytes_from_passthrough(cow, cached_body),
+            AnyCodec::OpenAi(c) => match same_protocol_passthrough(c, &cached_body, &mutations) {
+                Ok(cow) => bytes_from_passthrough(cow, &cached_body),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
             // OpenAI Responses shares the vendor family with Chat and
@@ -810,30 +813,30 @@ pub async fn rewrite_request(
             // wired to OpenAiRequest); same-protocol passthrough delegates to
             // the Chat codec via an `OpenAi` adapter.
             AnyCodec::OpenAiResponses(_) => {
-                match same_protocol_passthrough(&gw_codec::openai::OpenAi, cached_body, &mutations)
+                match same_protocol_passthrough(&gw_codec::openai::OpenAi, &cached_body, &mutations)
                 {
-                    Ok(cow) => bytes_from_passthrough(cow, cached_body),
+                    Ok(cow) => bytes_from_passthrough(cow, &cached_body),
                     Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
                 }
             }
-            AnyCodec::Anthropic(c) => match same_protocol_passthrough(c, cached_body, &mutations) {
-                Ok(cow) => bytes_from_passthrough(cow, cached_body),
+            AnyCodec::Anthropic(c) => match same_protocol_passthrough(c, &cached_body, &mutations) {
+                Ok(cow) => bytes_from_passthrough(cow, &cached_body),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
-            AnyCodec::Gemini(c) => match same_protocol_passthrough(c, cached_body, &mutations) {
-                Ok(cow) => bytes_from_passthrough(cow, cached_body),
+            AnyCodec::Gemini(c) => match same_protocol_passthrough(c, &cached_body, &mutations) {
+                Ok(cow) => bytes_from_passthrough(cow, &cached_body),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
         }
     } else {
         // Parse → mutate (forced_params) → render through the upstream codec.
         let mut ir = client_codec
-            .parse_request(cached_body)
+            .parse_request(&cached_body)
             .map_err(|_e| Error::new(ErrorType::Custom("gw_request_parse_failed")))?;
         apply_forced_params_to_ir(&mut ir, &ctx.forced_params);
         apply_passthrough_overrides_to_ir(&mut ir, passthrough_overrides);
         if has_body_rules {
-            apply_body_rules(&mut ir, endpoint_path, body_rules, cached_body);
+            apply_body_rules(&mut ir, endpoint_path, body_rules, &cached_body);
         }
         let mut buf = BytesMut::with_capacity(cached_body.len());
         upstream_codec
@@ -847,6 +850,9 @@ pub async fn rewrite_request(
     }
     ctx.forced_mutations = forced_mutations;
     ctx.cached_body = Some(outbound.clone());
+    if let Some(view) = ctx.body.as_mut() {
+        view.set_outbound(outbound.clone());
+    }
     ctx.upstream_codec = Some(upstream_codec);
     ctx.upstream_shape = ctx.upstream_codec.as_ref().map(AnyCodec::api_shape);
 
@@ -907,26 +913,30 @@ pub fn cli_passthrough_body(
         return Err(Error::new(ErrorType::Custom("gw_cli_cross_protocol")));
     }
     let cached_body = ctx
-        .cached_body
+        .body
         .as_ref()
+        .map(|v| v.outbound_or_raw().clone())
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_cached_body")))?;
     let passthrough = match client_shape {
         gw_core::protocol::ApiShape::ClaudeCli => {
-            gw_codec::cli::claude_cli::ClaudeCliCodec.passthrough_request(cached_body)
+            gw_codec::cli::claude_cli::ClaudeCliCodec.passthrough_request(&cached_body)
         }
         gw_core::protocol::ApiShape::OpenAiCli => {
-            gw_codec::cli::openai_cli::OpenAiCliCodec.passthrough_request(cached_body)
+            gw_codec::cli::openai_cli::OpenAiCliCodec.passthrough_request(&cached_body)
         }
         gw_core::protocol::ApiShape::OpenAiCompact => {
-            gw_codec::cli::openai_compact::OpenAiCompactCodec.passthrough_request(cached_body)
+            gw_codec::cli::openai_compact::OpenAiCompactCodec.passthrough_request(&cached_body)
         }
         gw_core::protocol::ApiShape::GeminiCli => {
-            gw_codec::cli::gemini_cli::GeminiCliCodec.passthrough_request(cached_body)
+            gw_codec::cli::gemini_cli::GeminiCliCodec.passthrough_request(&cached_body)
         }
         _ => std::borrow::Cow::Borrowed(cached_body.as_ref()),
     };
     let outbound = bytes::Bytes::copy_from_slice(passthrough.as_ref());
     ctx.cached_body = Some(outbound.clone());
+    if let Some(view) = ctx.body.as_mut() {
+        view.set_outbound(outbound.clone());
+    }
     Ok(outbound)
 }
 
