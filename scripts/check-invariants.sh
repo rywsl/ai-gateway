@@ -468,6 +468,13 @@ else
   ok "no legacy usage_source field"
 fi
 
+echo "[wire_enum_lock] ProtocolKind / ApiShape wire forms locked"
+if cargo test -p gw-core --test wire_enum_lock --quiet >/dev/null 2>&1; then
+    ok "ProtocolKind / ApiShape wire forms locked"
+else
+    bad "wire enum drift — see docs/superpowers/specs/2026-05-28-systemic-fixes-design.md §6"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "INVARIANT CHECK FAILED"
   exit 1
