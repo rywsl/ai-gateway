@@ -47,7 +47,7 @@ async fn empty_streams_produce_zero_warn_logs_over_1s() {
         store,
         instance_id: "test-empty-reply".into(),
     });
-    let _h = consumer.start().await.unwrap();
+    let _h = consumer.start();
 
     // Give the consumer ~6 poll cycles (each BLOCK_MS=200) without XADDs.
     tokio::time::sleep(Duration::from_millis(1_200)).await;

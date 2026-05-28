@@ -56,7 +56,7 @@ async fn entity_event_invalidates_cache_entry() {
         store: store.clone(),
         instance_id: "test-instance".into(),
     });
-    let _h = consumer.clone().start().await.unwrap();
+    let _h = consumer.clone().start();
 
     // XADD an event to events:entity announcing user u-evt-1 changed.
     let client = redis.pool.next();

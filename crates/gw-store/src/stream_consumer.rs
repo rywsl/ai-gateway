@@ -34,7 +34,7 @@ const BLOCK_MS: u64 = 200;
 const COUNT_PER_POLL: u64 = 64;
 
 impl StreamConsumer {
-    pub async fn start(self: Arc<Self>) -> anyhow::Result<JoinHandle<()>> {
+    async fn ensure_groups(&self) -> Result<(), anyhow::Error> {
         let client = self.redis.pool.next();
         // mkstream=true so the stream is created if missing; tolerate BUSYGROUP.
         let _: Result<(), _> = client
@@ -43,93 +43,11 @@ impl StreamConsumer {
         let _: Result<(), _> = client
             .xgroup_create(COUNTER_STREAM, &*self.instance_id, "$", true)
             .await;
-        let me = self.clone();
-        let h = tokio::spawn(async move {
-            me.consume_loop().await;
-        });
-        Ok(h)
+        Ok(())
     }
 
-    async fn consume_loop(&self) {
-        let consumer_name = format!("{}-consumer", self.instance_id);
-        loop {
-            let client = self.redis.pool.next();
-            // We use the raw `xreadgroup` (returning RedisValue) instead of
-            // `xreadgroup_map` because the latter's into_xread_response decoder
-            // does not tolerate RESP `Null` replies — which is what redis returns
-            // when BLOCK_MS expires with no messages. By inspecting the raw value
-            // we can short-circuit on Null/empty before invoking the map decoder.
-            let raw: Result<RedisValue, _> = client
-                .xreadgroup(
-                    &*self.instance_id,
-                    &consumer_name,
-                    Some(COUNT_PER_POLL),
-                    Some(BLOCK_MS),
-                    // noack=false: explicit XACK below confirms processing.
-                    false,
-                    vec![ENTITY_STREAM, COUNTER_STREAM],
-                    vec![">", ">"],
-                )
-                .await;
-
-            let value = match raw {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "gw_store::stream_consumer",
-                        error = %e,
-                        "xreadgroup failed; backing off"
-                    );
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
-                }
-            };
-
-            // Null = BLOCK timed out with no messages. Empty array = same shape
-            // in RESP2 some redis versions. Either way: nothing to do this tick.
-            if value.is_null() {
-                continue;
-            }
-            if let RedisValue::Array(ref a) = value {
-                if a.is_empty() {
-                    continue;
-                }
-            }
-
-            let entries: XReadResponse<String, String, String, String> =
-                match value.into_xread_response() {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "gw_store::stream_consumer",
-                            error = %e,
-                            "xreadgroup non-null reply failed to parse; backing off"
-                        );
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        continue;
-                    }
-                };
-
-            for (stream, stream_entries) in entries {
-                for (entry_id, fields) in stream_entries {
-                    self.apply(&stream, &fields).await;
-                    // ACK regardless of apply outcome — a malformed event
-                    // should not block forward progress. `apply` itself logs.
-                    let ack: Result<u64, _> = client
-                        .xack(stream.as_str(), &*self.instance_id, entry_id.clone())
-                        .await;
-                    if let Err(e) = ack {
-                        tracing::warn!(
-                            target: "gw_store::stream_consumer",
-                            error = %e,
-                            stream = %stream,
-                            entry_id = %entry_id,
-                            "xack failed; will be redelivered"
-                        );
-                    }
-                }
-            }
-        }
+    pub fn start(self: Arc<Self>) -> JoinHandle<()> {
+        crate::managed_loop::Supervisor::spawn(self)
     }
 
     async fn apply(&self, stream: &str, fields: &HashMap<String, String>) {
@@ -241,6 +159,96 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
                 "unknown entity namespace; skipping"
             );
         }
+    }
+}
+
+fn is_nogroup_error(e: &fred::error::RedisError) -> bool {
+    e.to_string().contains("NOGROUP")
+}
+
+use crate::managed_loop::{ManagedLoop, Outcome, RecoverReason};
+
+#[async_trait::async_trait]
+impl ManagedLoop for StreamConsumer {
+    fn name(&self) -> &'static str {
+        "stream_consumer"
+    }
+
+    async fn ensure(&self) -> Result<(), anyhow::Error> {
+        self.ensure_groups().await
+    }
+
+    async fn tick(&self) -> Outcome {
+        let consumer_name = format!("{}-consumer", self.instance_id);
+        let client = self.redis.pool.next();
+        // Raw xreadgroup: RESP Null on BLOCK timeout is handled explicitly.
+        let raw: Result<RedisValue, fred::error::RedisError> = client
+            .xreadgroup(
+                &*self.instance_id,
+                &consumer_name,
+                Some(COUNT_PER_POLL),
+                Some(BLOCK_MS),
+                false,
+                vec![ENTITY_STREAM, COUNTER_STREAM],
+                vec![">", ">"],
+            )
+            .await;
+
+        let value = match raw {
+            Ok(v) => v,
+            Err(e) if is_nogroup_error(&e) => {
+                return Outcome::Recover(RecoverReason::UpstreamResourceGone("NOGROUP"));
+            }
+            Err(_e) => {
+                tracing::warn!(
+                    target: "gw_store::stream_consumer",
+                    error = %_e,
+                    "xreadgroup failed; backing off"
+                );
+                return Outcome::Sleep(Duration::from_millis(500));
+            }
+        };
+
+        if value.is_null() {
+            return Outcome::Continue;
+        }
+        if let RedisValue::Array(ref a) = value {
+            if a.is_empty() {
+                return Outcome::Continue;
+            }
+        }
+
+        let entries: XReadResponse<String, String, String, String> =
+            match value.into_xread_response() {
+                Ok(m) => m,
+                Err(_e) => {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        error = %_e,
+                        "xreadgroup non-null reply failed to parse; backing off"
+                    );
+                    return Outcome::Sleep(Duration::from_millis(500));
+                }
+            };
+
+        for (stream, stream_entries) in entries {
+            for (entry_id, fields) in stream_entries {
+                self.apply(&stream, &fields).await;
+                let ack: Result<u64, _> = client
+                    .xack(stream.as_str(), &*self.instance_id, entry_id.clone())
+                    .await;
+                if let Err(e) = ack {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        error = %e,
+                        stream = %stream,
+                        entry_id = %entry_id,
+                        "xack failed; will be redelivered"
+                    );
+                }
+            }
+        }
+        Outcome::Continue
     }
 }
 
