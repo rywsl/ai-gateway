@@ -70,7 +70,7 @@ async fn primary_xadd_failure_routes_to_dlq_stream() {
         .await
         .unwrap();
 
-    let ledger = Ledger::start(redis.clone(), 1024, 2, Duration::from_millis(100));
+    let ledger = Ledger::start(redis.clone(), "test-instance".to_string(), 1024, 2, Duration::from_millis(100));
     ledger
         .try_send(LedgerItem {
             record: sample_record(),

@@ -46,17 +46,20 @@ pub struct ClearKey {
 pub struct Ledger {
     pub tx: mpsc::Sender<LedgerItem>,
     redis: RedisCtx,
+    instance_id: String,
 }
 
 impl Ledger {
     pub fn start(
         redis: RedisCtx,
+        instance_id: String,
         channel_capacity: usize,
         batch_size: usize,
         flush_interval: Duration,
     ) -> Self {
         let (tx, mut rx) = mpsc::channel::<LedgerItem>(channel_capacity);
         let worker_redis = redis.clone();
+        let worker_instance = instance_id.clone();
         tokio::spawn(async move {
             let mut buf: Vec<LedgerItem> = Vec::with_capacity(batch_size);
             let mut ticker = interval(flush_interval);
@@ -67,22 +70,30 @@ impl Ledger {
                             Some(item) => {
                                 buf.push(item);
                                 if buf.len() >= batch_size {
-                                    flush(&worker_redis, &mut buf).await;
+                                    flush(&worker_redis, &worker_instance, &mut buf).await;
                                 }
                             }
                             None => {
-                                if !buf.is_empty() { flush(&worker_redis, &mut buf).await; }
+                                if !buf.is_empty() {
+                                    flush(&worker_redis, &worker_instance, &mut buf).await;
+                                }
                                 break;
                             }
                         }
                     }
                     _ = ticker.tick() => {
-                        if !buf.is_empty() { flush(&worker_redis, &mut buf).await; }
+                        if !buf.is_empty() {
+                            flush(&worker_redis, &worker_instance, &mut buf).await;
+                        }
                     }
                 }
             }
         });
-        Self { tx, redis }
+        Self { tx, redis, instance_id }
+    }
+
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Must-deliver billing emit path. Attempts the mpsc fast path first; on a
@@ -178,7 +189,7 @@ async fn dlq_xadd(redis: &RedisCtx, wrapped: String) -> Result<(), String> {
     }
 }
 
-async fn flush(redis: &RedisCtx, buf: &mut Vec<LedgerItem>) {
+async fn flush(redis: &RedisCtx, _instance_id: &str, buf: &mut Vec<LedgerItem>) {
     // Serialize first so we can replay payloads to DLQ on batch failure.
     let mut payloads: Vec<String> = Vec::with_capacity(buf.len());
     for item in buf.drain(..) {

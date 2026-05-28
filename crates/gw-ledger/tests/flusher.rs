@@ -57,7 +57,7 @@ async fn batch_flush_writes_usage_stream_no_balance_decr() {
     let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
         .await
         .unwrap();
-    let ledger = Ledger::start(redis.clone(), 1024, 2, Duration::from_millis(100));
+    let ledger = Ledger::start(redis.clone(), "test-instance".to_string(), 1024, 2, Duration::from_millis(100));
     let rec = make_record();
     ledger
         .try_send(LedgerItem {
@@ -99,7 +99,7 @@ async fn emit_bypasses_to_sync_xadd_when_channel_full() {
     // capacity=1 so the channel fills after the first record.
     // The flusher worker has a 60-second flush interval — it won't drain
     // before we overflow the channel with rapid try_send calls.
-    let ledger = Ledger::start(redis.clone(), 1, 100, Duration::from_secs(60));
+    let ledger = Ledger::start(redis.clone(), "test-instance".to_string(), 1, 100, Duration::from_secs(60));
 
     // Fill the channel: first try_send may succeed (capacity=1), subsequent
     // ones will hit Full. We don't care about success/failure here — we just

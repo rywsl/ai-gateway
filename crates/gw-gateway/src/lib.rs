@@ -416,9 +416,30 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // threaded through LlmGateway + HealthState.
     let resilience = Arc::new(ResilienceState::default());
 
-    // 4. Ledger flusher.
+    // 4. Billing instance_id — resolved before Ledger::start so both the
+    // flusher (inflight DEL key path, Task 4) and InflightLedger share the
+    // same stable value. instance_id is stable across restarts on the same
+    // host (stored in Redis under `gateway:instance:<hostname>`). The
+    // heartbeat task keeps the TTL alive so the W4 reconciler knows the
+    // gateway is live.
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "localhost".to_string());
+    let instance_id = gw_ledger::instance_id::resolve(&redis.pool, &hostname)
+        .await
+        .context("billing instance_id resolve failed")?;
+    tracing::info!(
+        target: "gw_gateway",
+        %instance_id,
+        %hostname,
+        "billing instance_id resolved"
+    );
+
+    // 4a. Ledger flusher.
     let ledger = Arc::new(Ledger::start(
         redis.clone(),
+        instance_id.clone(),
         cfg.ledger.channel_capacity,
         cfg.ledger.batch_size,
         Duration::from_millis(cfg.ledger.flush_interval_ms),
@@ -478,23 +499,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // life of the bootstrap runtime (which is parked on pending()).
     let _deduct_gc_handle = gw_ledger::DeductGc::start_default();
 
-    // 4d. Billing instance_id + InflightLedger (W2-T6).
-    // instance_id is stable across restarts on the same host (stored in Redis
-    // under `gateway:instance:<hostname>`). The heartbeat task keeps the TTL
-    // alive so the W4 reconciler knows the gateway is live.
-    let hostname = hostname::get()
-        .ok()
-        .and_then(|s| s.into_string().ok())
-        .unwrap_or_else(|| "localhost".to_string());
-    let instance_id = gw_ledger::instance_id::resolve(&redis.pool, &hostname)
-        .await
-        .context("billing instance_id resolve failed")?;
-    tracing::info!(
-        target: "gw_gateway",
-        %instance_id,
-        %hostname,
-        "billing instance_id resolved"
-    );
+    // 4d. InflightLedger + background tasks (W2-T6).
+    // instance_id was resolved above (before Ledger::start) and is reused here.
     gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
     gw_ledger::inflight_reaper::spawn(
         (*redis.pool).clone(),
