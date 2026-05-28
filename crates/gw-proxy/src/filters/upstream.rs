@@ -968,6 +968,7 @@ mod body_hash_tests {
             exclusive_capability_match: false,
             tunnel_preference: None,
             oauth: None,
+            identity_snapshot: None,
         }
     }
 
@@ -1286,6 +1287,7 @@ mod regression_baseline_tests {
             exclusive_capability_match: false,
             tunnel_preference: None,
             oauth: None,
+            identity_snapshot: None,
         };
 
         // --- Vendor with OpenAI base URL and Bearer auth template ---
@@ -1297,6 +1299,7 @@ mod regression_baseline_tests {
             timeout_overrides: None,
             default_proxy: None,
             contact: None,
+            egress_mode: Default::default(),
         };
         let versioned_vendor = gw_core::versioned::Versioned::new(1, vendor);
 

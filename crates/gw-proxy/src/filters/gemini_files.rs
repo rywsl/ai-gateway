@@ -849,6 +849,7 @@ mod tests {
             exclusive_capability_match: false,
             tunnel_preference: None,
             oauth: None,
+            identity_snapshot: None,
         };
         store
             .vendor_key
@@ -868,6 +869,7 @@ mod tests {
                         timeout_overrides: None,
                         default_proxy: None,
                         contact: None,
+                        egress_mode: Default::default(),
                     },
                 )),
             )
