@@ -1,8 +1,6 @@
 use gw_core::entity::VendorKey;
 use gw_core::ids::*;
-use gw_core::impersonate::{IdentitySnapshot, IdentityVariable, ImpersonateProfile};
 use secrecy::SecretString;
-use uuid::Uuid;
 
 #[test]
 fn vendor_key_identity_snapshot_defaults_to_none() {
