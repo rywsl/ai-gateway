@@ -317,48 +317,60 @@ pub async fn pick_peer(
         VendorEgressMode::Rustls => None,
     };
 
+    // Resolve the tunnel decision once. Both branches need it: the impersonate
+    // branch to detect the tunnel+impersonate conflict, the rustls branch to
+    // pick its peer. `TunnelStack::resolve` is pure today but could grow side
+    // effects (counters, tracing) — keeping the call site singular avoids
+    // double-firing on the impersonate path.
+    #[cfg(feature = "tunnel")]
+    let (tunnel_resolution, tunnel_require) = {
+        let default_pref = gw_core::entity::TunnelPreference::default();
+        let pref = picked_arc
+            .tunnel_preference
+            .as_ref()
+            .unwrap_or(&default_pref);
+        let resolution = match tunnel {
+            Some(t) => t.resolve(
+                vendor.value.id.as_ref(),
+                picked_arc.key_id.as_ref(),
+                pref,
+            ),
+            None => gw_tunnel_client::resolver::TunnelResolution::Direct,
+        };
+        (resolution, pref.require_tunnel)
+    };
+
     let mut peer;
     if let Some(profile) = impersonate_profile {
-        // Hard exclusion: a vendor cannot tunnel AND impersonate. Resolve the
-        // tunnel decision once; if it would route through a tunnel node, bail
-        // with GW_TUNNEL_IMPERSONATE_CONFLICT rather than silently picking one.
+        // Hard exclusion: a vendor cannot tunnel AND impersonate. If the
+        // resolver would route through a tunnel node, bail rather than
+        // silently picking one.
         #[cfg(feature = "tunnel")]
-        {
-            let default_pref = gw_core::entity::TunnelPreference::default();
-            let pref = picked_arc
-                .tunnel_preference
-                .as_ref()
-                .unwrap_or(&default_pref);
-            let resolution = match tunnel {
-                Some(t) => t.resolve(
-                    vendor.value.id.as_ref(),
-                    picked_arc.key_id.as_ref(),
-                    pref,
+        if let gw_tunnel_client::resolver::TunnelResolution::Use(_) = &tunnel_resolution {
+            return emit_envelope_and_bail(
+                session,
+                ctx,
+                envelope_for(
+                    codes::GW_TUNNEL_IMPERSONATE_CONFLICT,
+                    "vendor cannot enable both tunnel and impersonate",
+                    503,
                 ),
-                None => gw_tunnel_client::resolver::TunnelResolution::Direct,
-            };
-            if let gw_tunnel_client::resolver::TunnelResolution::Use(_) = &resolution {
-                return emit_envelope_and_bail(
-                    session,
-                    ctx,
-                    envelope_for(
-                        codes::GW_TUNNEL_IMPERSONATE_CONFLICT,
-                        "vendor cannot enable both tunnel and impersonate",
-                        503,
-                    ),
-                )
-                .await;
-            }
+            )
+            .await;
         }
         ctx.egress_profile = Some(profile);
         ctx.egress_upstream = Some((host.clone(), port));
-        metrics::counter!("gw_egress_dispatch_total", "kind" => "impersonate").increment(1);
+        // `tunnel_resolution` intentionally left None on the impersonate path;
+        // consumers should branch on `egress_profile.is_some()` instead.
+        metrics::counter!("gw_egress_impersonate_dispatch_total").increment(1);
         peer = match egress.bind_addr() {
             gw_egress_impersonate::EgressBind::Uds(p) => HttpPeer::new_uds(
                 p.to_string_lossy().as_ref(),
                 false,
                 host.clone(),
             )
+            // EgressHandle::start validates the path at bind time, so this
+            // arm is an invariant violation rather than a runtime error.
             .map_err(|_| Error::new(ErrorType::Custom("gw_egress_bad_uds_path")))?,
             gw_egress_impersonate::EgressBind::Tcp(addr) => {
                 HttpPeer::new(addr.to_string(), false, host.clone())
@@ -367,20 +379,9 @@ pub async fn pick_peer(
     } else {
         #[cfg(feature = "tunnel")]
         {
-            let provider_id = vendor.value.id.as_ref();
-            let key_id = picked_arc.key_id.as_ref();
-            let default_pref = gw_core::entity::TunnelPreference::default();
-            let pref = picked_arc
-                .tunnel_preference
-                .as_ref()
-                .unwrap_or(&default_pref);
-            let resolution = match tunnel {
-                Some(t) => t.resolve(provider_id, key_id, pref),
-                None => gw_tunnel_client::resolver::TunnelResolution::Direct,
-            };
-            match resolution {
+            match tunnel_resolution {
                 gw_tunnel_client::resolver::TunnelResolution::Direct => {
-                    if pref.require_tunnel {
+                    if tunnel_require {
                         // ADR-T-4 — never silently fall back when require_tunnel=true.
                         metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node")
                             .increment(1);
