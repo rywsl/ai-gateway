@@ -276,7 +276,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_egress_disabled_total",
         kind: MetricKind::Counter,
-        help: "Impersonate vendor candidates dropped by the egress kill-switch (egress.disabled=true); increments per skipped candidate",
+        help: "Impersonate vendor candidates dropped by the egress kill-switch (egress.disabled=true); increments per skipped candidate; label=profile (claude_code_chrome131/openai_codex/gemini_cli)",
     },
     MetricSpec {
         name: "gw_tunnel_open_total",

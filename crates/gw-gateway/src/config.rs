@@ -583,18 +583,18 @@ impl EgressCfg {
     /// neither is set.
     pub fn bind(&self) -> anyhow::Result<gw_egress_impersonate::EgressBind> {
         match (&self.bind_uds, &self.bind_tcp) {
-            (Some(_), Some(_)) => {
-                anyhow::bail!("[egress] both bind_uds and bind_tcp are set; pick exactly one")
+            (Some(uds), Some(tcp)) => {
+                anyhow::bail!(
+                    "[egress] both bind_uds={uds:?} and bind_tcp={tcp} are set — exactly one must be configured",
+                )
             }
             (None, None) => {
-                anyhow::bail!("[egress] neither bind_uds nor bind_tcp is set; one is required")
+                anyhow::bail!(
+                    "[egress] neither bind_uds nor bind_tcp is set — exactly one must be configured",
+                )
             }
-            (Some(path), None) => {
-                Ok(gw_egress_impersonate::EgressBind::Uds(path.clone()))
-            }
-            (None, Some(addr)) => {
-                Ok(gw_egress_impersonate::EgressBind::Tcp(*addr))
-            }
+            (Some(path), None) => Ok(gw_egress_impersonate::EgressBind::Uds(path.clone())),
+            (None, Some(addr)) => Ok(gw_egress_impersonate::EgressBind::Tcp(*addr)),
         }
     }
 }
