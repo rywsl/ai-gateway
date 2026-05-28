@@ -182,6 +182,11 @@ pub struct ReqCtx {
     /// Read by `logging` to surface the right `GW_*` code in metrics / detailed
     /// logs. `None` on the happy path.
     pub upstream_error_code: Option<&'static str>,
+    /// Human-readable upstream error detail. Set by `response_filter` from the
+    /// `X-Egress-Error-Detail` header when the loopback egress reports a
+    /// transport failure. Surfaced in detailed logs / error_emit. `None` on
+    /// the happy path.
+    pub upstream_error_detail: Option<String>,
 
     // --- Cross-protocol response re-render accumulator (G8 + G9) ---
     /// Accumulator across events in one chunk; taken+frozen by
@@ -361,6 +366,7 @@ impl ReqCtx {
             body_started: false,
             retry_blacklist: Vec::new(),
             upstream_error_code: None,
+            upstream_error_detail: None,
             pending_client_body: None,
             error_outcome: None,
             error_passthrough_body: None,

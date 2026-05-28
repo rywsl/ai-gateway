@@ -50,6 +50,17 @@ pub const GW_UPSTREAM_TLS_ERROR: &str = "GW_UPSTREAM_TLS_ERROR";
 // Upstream: codec `parse_response` decode failure on non-streaming path (T1-A/B/C).
 pub const GW_UPSTREAM_PROTOCOL_DECODE_ERROR: &str = "GW_UPSTREAM_PROTOCOL_DECODE_ERROR";
 
+// --- Egress-impersonate loopback error classes (Task 4.4) ---
+// Mapped from the `X-Egress-Error-Class` header emitted by gw-egress-impersonate.
+pub const GW_UPSTREAM_CONNECT_TIMEOUT: &str = "GW_UPSTREAM_CONNECT_TIMEOUT";
+pub const GW_UPSTREAM_CONNECT_REFUSED: &str = "GW_UPSTREAM_CONNECT_REFUSED";
+pub const GW_UPSTREAM_READ_TIMEOUT: &str = "GW_UPSTREAM_READ_TIMEOUT";
+pub const GW_UPSTREAM_H2_PROTOCOL: &str = "GW_UPSTREAM_H2_PROTOCOL";
+pub const GW_UPSTREAM_BODY_TRUNCATED: &str = "GW_UPSTREAM_BODY_TRUNCATED";
+pub const GW_UPSTREAM_PROXY_ERROR: &str = "GW_UPSTREAM_PROXY_ERROR";
+pub const GW_UPSTREAM_PANIC: &str = "GW_UPSTREAM_PANIC";
+pub const GW_UPSTREAM_UNKNOWN: &str = "GW_UPSTREAM_UNKNOWN";
+
 // --- Tunnel codes (ADR-T-1 / spec §4) ---
 pub const GW_TUNNEL_NO_NODE: &str = "GW_TUNNEL_NO_NODE";
 pub const GW_TUNNEL_NO_LIVE: &str = "GW_TUNNEL_NO_LIVE";
