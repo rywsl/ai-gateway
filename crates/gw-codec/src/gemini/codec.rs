@@ -210,12 +210,24 @@ impl ProtocolCodec for Gemini {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::Start { .. } => {
-                tracing::warn!(
-                    "gemini: StreamEventIR::Start dropped (no wire equivalent in this codec)"
-                );
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "gemini_render_drop_start",
+                    kind: gw_core::observability::ErrorKind::CodecRender,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"Start"),
+                });
             }
             StreamEventIR::ThinkingDelta { .. } => {
-                tracing::warn!("gemini: StreamEventIR::ThinkingDelta dropped (no wire equivalent)");
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "gemini_render_drop_thinking_delta",
+                    kind: gw_core::observability::ErrorKind::CodecRender,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"ThinkingDelta"),
+                });
             }
             StreamEventIR::RefusalDelta { .. }
             | StreamEventIR::CitationsDelta { .. }
@@ -347,7 +359,14 @@ fn dispatch_payload<'a>(
         Ok(v) => v,
         Err(e) => {
             // CONTRACT: malformed payloads must not short-circuit the stream.
-            tracing::warn!(error = %e, "gemini stream: malformed data payload");
+            gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                code: "gemini_stream_malformed_data",
+                kind: gw_core::observability::ErrorKind::CodecParse,
+                stage: gw_core::observability::Stage::Response,
+                status: None,
+                trace_id: None,
+                extra: Some(&e),
+            });
             return;
         }
     };
