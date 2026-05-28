@@ -1311,9 +1311,10 @@ mod regression_baseline_tests {
         req.insert_header("host", "api.openai.com").unwrap();
         req.insert_header("content-type", "application/json").unwrap();
         req.insert_header("accept", "application/json").unwrap();
-        // These two MUST be stripped by inject_vendor_headers:
+        // These three MUST be stripped by inject_vendor_headers:
         req.insert_header("authorization", "Bearer client-test-key").unwrap();
         req.insert_header("x-api-key", "should-be-stripped").unwrap();
+        req.insert_header("x-api-key-id", "should-be-stripped").unwrap();
 
         // content_len: 42 (fixed; mirrors a small chat body)
         let content_len: usize = 42;
@@ -1340,6 +1341,8 @@ mod regression_baseline_tests {
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         for (k, v) in entries {
+            // NOTE: Extend this when Phase 4 introduces additional headers carrying
+            // non-deterministic per-request material (e.g. X-Stainless-Session-Id).
             let v = if k == "traceparent" {
                 // traceparent format: "00-<traceid>-<spanid>-01"
                 let mut parts: Vec<&str> = v.split('-').collect();
@@ -1358,7 +1361,7 @@ mod regression_baseline_tests {
     }
 
     #[test]
-    fn rustls_default_inject_vendor_headers() {
+    fn direct_mode_inject_vendor_headers() {
         let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
         inject_vendor_headers(&mut ctx, &mut req, &key, &vendor, content_len);
         insta::assert_snapshot!(render(&req));

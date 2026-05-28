@@ -112,6 +112,7 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
 wiremock = "0.6"
 criterion = { version = "0.5", features = ["async_tokio"] }
+insta = { version = "1", features = ["yaml"] }
 proptest = "1"
 
 [profile.release]
