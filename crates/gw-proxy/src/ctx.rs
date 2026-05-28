@@ -242,6 +242,10 @@ pub struct ReqCtx {
     /// Real upstream `(host, port)` — communicated to the loopback egress via
     /// `X-Egress-Target`.
     pub egress_upstream: Option<(String, u16)>,
+    /// Wired at gateway start (Task 4.6); None in tests that bypass gateway::new.
+    pub identity_persist: Option<std::sync::Arc<gw_store::identity_persist::IdentityPersistQueue>>,
+    /// Wired at gateway start (Task 4.6); None in tests that bypass gateway::new.
+    pub turn_state_cache: Option<std::sync::Arc<gw_core::impersonate::turn_state::TurnStateCache>>,
 
     // --- Long-running operation (G5 / go-onboarding-gaps T0) ---
     /// G5: Gemini `:predictLongRunning` / OpenAI `/v1/videos` top-level
@@ -373,6 +377,8 @@ impl ReqCtx {
             tunnel_resolution: None,
             egress_profile: None,
             egress_upstream: None,
+            identity_persist: None,
+            turn_state_cache: None,
             response_deadline: None,
             operation_id: None,
             upstream_body_accum: None,

@@ -2,7 +2,6 @@
 //! `(key_id, conversation_id)`, TTL configurable (spec default 5 min).
 
 use moka::future::Cache;
-use rand::RngCore;
 use std::time::Duration;
 
 pub struct TurnStateCache {
@@ -24,15 +23,11 @@ impl TurnStateCache {
         match conversation_id {
             Some(cid) => {
                 let k = (key_id.to_owned(), cid.to_owned());
-                self.inner.get_with(k, async { random_hex(32) }).await
+                self.inner
+                    .get_with(k, async { crate::impersonate::rng::random_hex(32) })
+                    .await
             }
-            None => random_hex(32),
+            None => crate::impersonate::rng::random_hex(32),
         }
     }
-}
-
-fn random_hex(bytes: usize) -> String {
-    let mut buf = vec![0u8; bytes];
-    rand::thread_rng().fill_bytes(&mut buf);
-    hex::encode(buf)
 }

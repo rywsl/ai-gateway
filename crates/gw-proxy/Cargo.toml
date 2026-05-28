@@ -45,6 +45,7 @@ fred.workspace = true
 sha2.workspace = true
 reqwest.workspace = true
 sqlx.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

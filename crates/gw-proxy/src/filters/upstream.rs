@@ -743,6 +743,7 @@ pub async fn rewrite_request(
         }
         archive_upstream_request(ctx, upstream_request, outbound.clone());
         inject_vendor_headers(ctx, upstream_request, &picked, &vendor, outbound.len());
+        inject_egress_headers(ctx, upstream_request, &picked).await;
         crate::billing_lifecycle::transition_to(
             ctx,
             crate::billing_lifecycle::VendorExposure::Sent,
@@ -835,6 +836,7 @@ pub async fn rewrite_request(
 
     archive_upstream_request(ctx, upstream_request, outbound.clone());
     inject_vendor_headers(ctx, upstream_request, &picked, &vendor, outbound.len());
+    inject_egress_headers(ctx, upstream_request, &picked).await;
 
     // W2-T4: mark the request as dispatched to the upstream vendor.
     crate::billing_lifecycle::transition_to(ctx, crate::billing_lifecycle::VendorExposure::Sent);
@@ -972,6 +974,108 @@ fn inject_vendor_headers(
 
     // Rewrite Content-Length: the body may have changed.
     let _ = upstream_request.insert_header("content-length", content_len.to_string());
+}
+
+/// Inject X-Egress-* routing headers and per-profile forged identity headers.
+///
+/// This is a separate async function so that `inject_vendor_headers` (and its
+/// unit test `direct_mode_inject_vendor_headers`) remains synchronous.  When
+/// `ctx.egress_profile` is `None` (i.e. the standard rustls path) the function
+/// is a no-op and adds zero overhead to the hot path.
+async fn inject_egress_headers(
+    ctx: &ReqCtx,
+    upstream_request: &mut RequestHeader,
+    picked: &gw_core::entity::VendorKey,
+) {
+    let Some(profile) = ctx.egress_profile else {
+        return;
+    };
+
+    // X-Egress-Target: host:port
+    if let Some((host, port)) = ctx.egress_upstream.as_ref() {
+        let _ = upstream_request.insert_header("X-Egress-Target", format!("{host}:{port}"));
+    }
+
+    // X-Egress-Profile: e.g. "claude_code_chrome131"
+    let _ = upstream_request.insert_header("X-Egress-Profile", profile.as_static_str());
+
+    // X-Egress-Proxy: proxy URL (only when a per-key proxy is configured)
+    if let Some(proxy) = picked.proxy.as_ref() {
+        let _ = upstream_request.insert_header("X-Egress-Proxy", proxy.as_str());
+    }
+
+    // Derive (or reuse) the per-VendorKey identity and optionally schedule a
+    // lazy persist when we just generated a fresh one.
+    let (resolved, should_persist) = gw_core::impersonate::ensure_identity(
+        picked.key_id.as_ref(),
+        picked.identity_snapshot.as_ref(),
+        profile,
+    );
+
+    if should_persist {
+        if let Some(q) = ctx.identity_persist.as_ref() {
+            let snap = gw_core::impersonate::IdentitySnapshot {
+                profile_kind: resolved.profile,
+                variable: resolved.variable.clone(),
+            };
+            q.schedule(picked.key_id.as_ref().to_owned(), snap);
+        }
+    }
+
+    // Build and insert the profile-specific forged identity headers.
+    let identity_hdrs = identity_headers_for(&resolved, ctx, picked).await;
+    for (name, value) in identity_hdrs {
+        let _ = upstream_request.insert_header(name, value);
+    }
+}
+
+/// Dispatch to the per-profile header builder.
+async fn identity_headers_for(
+    resolved: &gw_core::impersonate::ResolvedIdentity,
+    ctx: &ReqCtx,
+    picked: &gw_core::entity::VendorKey,
+) -> Vec<(String, String)> {
+    use gw_core::impersonate::{claude_code, gemini_cli, openai_codex, ImpersonateProfile};
+
+    match resolved.profile {
+        ImpersonateProfile::ClaudeCodeChrome131 => {
+            claude_code::headers(&resolved.variable, ctx.is_stream)
+        }
+        ImpersonateProfile::OpenAiCodex => {
+            use gw_core::impersonate::openai_codex::PerRequest;
+
+            let turn_state = if let Some(cache) = ctx.turn_state_cache.as_ref() {
+                cache
+                    .get_or_create(picked.key_id.as_ref(), ctx.conversation_id.as_deref())
+                    .await
+            } else {
+                // No cache wired (e.g. integration tests that don't boot the
+                // full gateway). Fall back to a fresh random token so the
+                // header set is always complete.
+                tracing::warn!(
+                    key_id = %picked.key_id.as_ref(),
+                    "turn_state_cache not wired; codex turn-state will be unstable"
+                );
+                gw_core::impersonate::rng::random_hex(32)
+            };
+
+            let per_req = PerRequest {
+                session_id: uuid::Uuid::new_v4(),
+                thread_id: uuid::Uuid::new_v4(),
+                window_id: uuid::Uuid::new_v4(),
+                turn_state,
+            };
+            openai_codex::headers(&resolved.variable, ctx.is_stream, &per_req)
+        }
+        ImpersonateProfile::GeminiCli => {
+            let model = ctx.model.as_ref().map(|m| m.as_ref()).unwrap_or("");
+            let quota = picked
+                .oauth
+                .as_ref()
+                .and_then(|o| o.quota_project_id.as_deref());
+            gemini_cli::headers(&resolved.variable, model, quota)
+        }
+    }
 }
 
 /// Wire-format-stateless codec constructors (`AnyCodec` variants are
