@@ -43,6 +43,15 @@ struct Entry {
 }
 
 /// LRU-evicting pool of `wreq::Client` instances.
+///
+/// Tuned for small capacities (≤ ~32 entries). Eviction does an O(n) scan over
+/// the map to find the LRU; that is acceptable at this scale but degrades for
+/// large caches — swap the backing store before raising capacity past ~64.
+///
+/// Concurrent misses on the same key may race and build two clients; the
+/// second writer overwrites the first, and the first Arc is dropped without
+/// firing the `evicted` counter. wreq Clients are channel factories, so the
+/// race is harmless but worth noting if pool metrics ever look short.
 pub struct ClientPool {
     inner: Mutex<HashMap<PoolKey, Entry>>,
     capacity: NonZeroUsize,
