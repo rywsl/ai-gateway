@@ -7,6 +7,7 @@ pub mod encrypt;
 pub mod entity_store;
 pub mod identity_persist;
 pub mod loader;
+pub mod managed_loop;
 pub mod pg_client;
 pub mod redis_client;
 pub mod stream_consumer;
