@@ -1008,6 +1008,14 @@ impl ProxyHttp for LlmGateway {
                 )
                 .increment(1);
                 ctx.upstream_error_code = Some(codes::GW_UPSTREAM_TLS_ERROR);
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: codes::GW_UPSTREAM_TLS_ERROR,
+                    kind: gw_core::observability::ErrorKind::UpstreamConnect,
+                    stage: gw_core::observability::Stage::Upstream,
+                    status: None,
+                    trace_id: Some(ctx.trace_id.as_ref()),
+                    extra: None,
+                });
                 e
             }
             ConnectErrorKind::Connect => {
@@ -1071,6 +1079,14 @@ impl ProxyHttp for LlmGateway {
                     )
                     .increment(1);
                     ctx.upstream_error_code = Some(codes::GW_UPSTREAM_CONNECT_FAILED);
+                    gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                        code: codes::GW_UPSTREAM_CONNECT_FAILED,
+                        kind: gw_core::observability::ErrorKind::UpstreamConnect,
+                        stage: gw_core::observability::Stage::Upstream,
+                        status: None,
+                        trace_id: Some(ctx.trace_id.as_ref()),
+                        extra: None,
+                    });
                     e
                 }
             }

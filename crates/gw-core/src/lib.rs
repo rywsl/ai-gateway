@@ -6,6 +6,7 @@ pub mod error;
 pub mod ids;
 pub mod impersonate;
 pub mod ir;
+pub mod observability;
 pub mod permissions;
 pub mod protocol;
 pub mod traits;

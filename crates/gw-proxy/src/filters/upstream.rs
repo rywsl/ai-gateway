@@ -79,6 +79,14 @@ async fn emit_envelope_and_bail<T>(
     ctx: &ReqCtx,
     err: ErrorIR<'static>,
 ) -> Result<T> {
+    gw_core::observability::observe(gw_core::observability::ErrorObservation {
+        code: err.code.as_ref(),
+        kind: gw_core::observability::ErrorKind::ShortCircuit,
+        stage: gw_core::observability::Stage::Request,
+        status: Some(err.status),
+        trace_id: Some(ctx.trace_id.as_ref()),
+        extra: None,
+    });
     let codec = pick_emit_codec(&ctx.client_codec);
     let scoped = with_request_id(&err, &ctx.request_id.0);
     error_emit::send_error(session, &codec, &scoped).await;
