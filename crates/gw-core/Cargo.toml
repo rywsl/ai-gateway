@@ -15,3 +15,5 @@ time.workspace = true
 url.workspace = true
 smallvec.workspace = true
 uuid = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }

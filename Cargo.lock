@@ -1776,9 +1776,11 @@ name = "gw-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "rand 0.8.6",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
  "thiserror 1.0.69",
  "time",
