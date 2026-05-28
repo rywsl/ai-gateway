@@ -29,10 +29,25 @@ def test_upstream_connect_failure_returns_json_envelope(
     metrics_url: str,
     fake_upstream,
 ) -> None:
-    """Upstream refuse-before-body → 502 JSON envelope + gw_errors_total{kind=upstream_connect}+1."""
+    """Upstream RST-before-body -> 502 JSON envelope + gw_errors_total{kind=upstream_connect}+1.
+
+    Uses tcp_reset_after_headers: fake accepts the connection, sends RST after
+    receiving request headers but before sending any response bytes. Pingora
+    surfaces this as a read/write error (body_started=False), which fail_to_proxy
+    classifies as UpstreamConnect / GW_BACKEND_UNAVAILABLE.
+    """
     pre = metrics_snapshot("gw_errors_total", metrics_url)
 
-    fake_upstream.set_mode("refuse")
+    fake_upstream.set_scenario(
+        {
+            "routes": [
+                {
+                    "match": {"method": "POST", "path_regex": ".*/chat/completions"},
+                    "response": {"kind": "tcp_reset_after_headers"},
+                }
+            ]
+        }
+    )
 
     resp = requests.post(
         f"{gateway_url.rstrip('/')}/v1/chat/completions",
@@ -67,10 +82,24 @@ def test_upstream_mid_stream_failure_truncates(
     metrics_url: str,
     fake_upstream,
 ) -> None:
-    """Upstream closes mid-stream → no synthetic SSE error event + gw_errors_total{kind=upstream_mid_stream}+1."""
+    """Upstream closes mid-stream -> no synthetic SSE error event + gw_errors_total{kind=upstream_mid_stream}+1.
+
+    Uses tcp_reset_mid_body with after_bytes=50: fake sends partial response
+    bytes then forces RST. Pingora surfaces this as a read error with
+    body_started=True, which fail_to_proxy classifies as UpstreamMidStream.
+    """
     pre_mid = metrics_snapshot("gw_errors_total", metrics_url)
 
-    fake_upstream.set_mode("partial_stream", events=3)
+    fake_upstream.set_scenario(
+        {
+            "routes": [
+                {
+                    "match": {"method": "POST", "path_regex": ".*/chat/completions"},
+                    "response": {"kind": "tcp_reset_mid_body", "after_bytes": 50},
+                }
+            ]
+        }
+    )
 
     chunks: list[str] = []
     with requests.post(
