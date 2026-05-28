@@ -107,6 +107,8 @@ struct OAuthCredentialsRow {
     token_endpoint: String,
     #[serde(default)]
     scope: Vec<String>,
+    #[serde(default)]
+    pub quota_project_id: Option<String>,
 }
 
 /// Wire shape of a `vendor_keys.payload` row. The plaintext `api_key` is held
@@ -250,6 +252,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
                     access_expires_at: o.access_expires_at,
                     token_endpoint: o.token_endpoint,
                     scope: o.scope,
+                    quota_project_id: o.quota_project_id,
                 })
             })
             .transpose()?;

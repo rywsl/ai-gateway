@@ -431,6 +431,10 @@ pub struct OAuthCredentials {
     pub access_expires_at: OffsetDateTime,
     pub token_endpoint: String,
     pub scope: Vec<String>,
+    /// Google Cloud "quota project" (`X-Goog-User-Project` header).
+    /// `None` for non-Google credentials; populated for Gemini OAuth keys
+    /// where the user explicitly bound the credential to a billing project.
+    pub quota_project_id: Option<String>,
 }
 
 impl std::fmt::Debug for OAuthCredentials {
@@ -441,6 +445,7 @@ impl std::fmt::Debug for OAuthCredentials {
             .field("access_expires_at", &self.access_expires_at)
             .field("token_endpoint", &self.token_endpoint)
             .field("scope", &self.scope)
+            .field("quota_project_id", &self.quota_project_id)
             .finish()
     }
 }
