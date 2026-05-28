@@ -33,6 +33,7 @@ pub fn is_terminal(v: VendorExposure) -> bool {
 
 use crate::ctx::ReqCtx;
 use gw_ledger::FreezeGuard as _;
+use gw_ledger::LedgerItem;
 
 /// Apply a `VendorExposure` state transition to the ReqCtx.
 ///
@@ -277,10 +278,12 @@ pub async fn on_retry(
         }
 
         // Emit must-deliver billing record for the failed attempt.
-        ledger.emit(gw_ledger::flusher::LedgerItem {
-            record: rec,
-            clear: None,
-        }).await;
+        ledger
+            .emit(LedgerItem {
+                record: rec,
+                clear: None,
+            })
+            .await;
 
         // Clear the inflight hash for the failed attempt.
         if let Err(e) = inflight.clear(&request_id, old_attempt).await {

@@ -22,6 +22,7 @@ use gw_core::ids::{RequestId, TraceId};
 use gw_health::KeyHealthStore;
 use gw_ledger::FreezeGuard;
 use gw_ledger::Ledger;
+use gw_ledger::LedgerItem;
 use gw_routing::in_flight::InFlightStore;
 use gw_routing::latency::LatencyTracker;
 use gw_routing::{FailoverClass, FailoverDecision, FailoverExecutor};
@@ -1045,10 +1046,12 @@ impl ProxyHttp for LlmGateway {
                                     "fail_to_connect on_retry: inflight mark_settled failed"
                                 );
                             }
-                            ledger.emit(gw_ledger::flusher::LedgerItem {
-                                record: rec,
-                                clear: None,
-                            }).await;
+                            ledger
+                                .emit(LedgerItem {
+                                    record: rec,
+                                    clear: None,
+                                })
+                                .await;
                             if let Err(e) = inflight.clear(&request_id, old_attempt).await {
                                 tracing::warn!(
                                     error = ?e,

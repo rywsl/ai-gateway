@@ -71,8 +71,18 @@ async fn primary_xadd_failure_routes_to_dlq_stream() {
         .unwrap();
 
     let ledger = Ledger::start(redis.clone(), 1024, 2, Duration::from_millis(100));
-    ledger.try_send(LedgerItem { record: sample_record(), clear: None }).unwrap();
-    ledger.try_send(LedgerItem { record: sample_record(), clear: None }).unwrap();
+    ledger
+        .try_send(LedgerItem {
+            record: sample_record(),
+            clear: None,
+        })
+        .unwrap();
+    ledger
+        .try_send(LedgerItem {
+            record: sample_record(),
+            clear: None,
+        })
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let dlq_len: i64 = client.xlen("usage:records:dlq").await.unwrap();

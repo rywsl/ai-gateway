@@ -7,7 +7,7 @@ use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
 use gw_health::{KeyHealthStore, OutcomeKind};
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
-use gw_ledger::{FreezeGuard, Ledger};
+use gw_ledger::{FreezeGuard, Ledger, LedgerItem};
 use gw_store::counter_store::daily_tokens_key;
 use gw_store::CounterStore;
 use pingora::ErrorType;
@@ -292,10 +292,12 @@ pub async fn run(
             .increment(1);
         }
 
-        let _ = ledger.emit(gw_ledger::flusher::LedgerItem {
-            record: rec,
-            clear: None,
-        }).await;
+        let _ = ledger
+            .emit(LedgerItem {
+                record: rec,
+                clear: None,
+            })
+            .await;
 
         // -----------------------------------------------------------------
         // G3 (ADR-G3-2) — daily-quota post-increment. Bump
