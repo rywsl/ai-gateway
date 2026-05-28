@@ -1,4 +1,5 @@
 use crate::ids::*;
+use crate::impersonate::VendorEgressMode;
 use crate::protocol::ProtocolKind;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -165,6 +166,10 @@ pub struct Vendor {
     pub default_proxy: Option<Url>,
     #[serde(default)]
     pub contact: Option<String>,
+    /// Egress selection — defaults to `Rustls` (preserves existing behaviour).
+    /// `Impersonate` routes through gw-egress-impersonate's loopback proxy.
+    #[serde(default)]
+    pub egress_mode: VendorEgressMode,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
