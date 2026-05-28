@@ -1,0 +1,12 @@
+---
+source: crates/gw-proxy/src/filters/upstream.rs
+assertion_line: 1364
+expression: render(&req)
+---
+POST /v1/chat/completions
+accept: application/json
+authorization: Bearer sk-vendor-secret
+content-length: 42
+content-type: application/json
+host: api.openai.com
+traceparent: 00-0000000000000000aaaaaaaaaaaaaaaa-SPANID-01

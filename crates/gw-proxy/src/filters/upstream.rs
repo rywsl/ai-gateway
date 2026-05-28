@@ -1235,3 +1235,132 @@ mod oauth_injection_tests {
         );
     }
 }
+
+/// Regression baseline: snapshots the bytes-affecting output of
+/// `inject_vendor_headers` for a Direct-mode vendor (no OAuth, static api_key).
+/// The egress impersonation work in Phase 4 modifies this function to add
+/// `X-Egress-*` headers when `egress_mode == Impersonate`. The Direct-mode
+/// output MUST remain byte-identical. Re-run after every phase:
+///
+/// ```bash
+/// cargo test -p gw-proxy regression_baseline -- --nocapture
+/// ```
+#[cfg(test)]
+mod regression_baseline_tests {
+    use super::*;
+    use gw_core::entity::KeyStatus;
+    use gw_core::ids::{KeyId, RequestId, TraceId, VendorId};
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+    use url::Url;
+
+    /// Build the fixed, deterministic test inputs that mirror a canonical
+    /// OpenAI chat-completion upstream request.
+    fn make_canonical_inputs() -> (
+        ReqCtx,
+        RequestHeader,
+        gw_core::entity::VendorKey,
+        gw_core::versioned::Versioned<Vendor>,
+        usize,
+    ) {
+        // --- VendorKey (Direct mode: no OAuth, static api_key) ---
+        let key = VendorKey {
+            key_id: KeyId::from("vk-baseline"),
+            vendor_id: VendorId::from("openai"),
+            api_key: SecretString::new("sk-vendor-secret".into()),
+            accessible_models: Vec::new(),
+            model_mapping: HashMap::new(),
+            accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
+            protocol_conversion: false,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None::<Url>,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: Vec::new(),
+            forced_capabilities: Vec::new(),
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+        };
+
+        // --- Vendor with OpenAI base URL and Bearer auth template ---
+        let vendor = Vendor {
+            id: VendorId::from("openai"),
+            display_name: "OpenAI".to_owned(),
+            base_urls: vec![Url::parse("https://api.openai.com").unwrap()],
+            auth_template: "Bearer {api_key}".to_owned(),
+            timeout_overrides: None,
+            default_proxy: None,
+            contact: None,
+        };
+        let versioned_vendor = gw_core::versioned::Versioned::new(1, vendor);
+
+        // --- ReqCtx with a FIXED trace_id (32 hex chars = 16 bytes = W3C trace-id) ---
+        let trace_id = TraceId::from("0000000000000000aaaaaaaaaaaaaaaa");
+        let request_id = RequestId::from("req-baseline-0001");
+        let ctx = ReqCtx::new(trace_id, request_id);
+
+        // --- RequestHeader: POST /v1/chat/completions with realistic inbound headers ---
+        let mut req =
+            RequestHeader::build("POST", b"/v1/chat/completions", Some(4)).unwrap();
+        req.insert_header("host", "api.openai.com").unwrap();
+        req.insert_header("content-type", "application/json").unwrap();
+        req.insert_header("accept", "application/json").unwrap();
+        // These two MUST be stripped by inject_vendor_headers:
+        req.insert_header("authorization", "Bearer client-test-key").unwrap();
+        req.insert_header("x-api-key", "should-be-stripped").unwrap();
+
+        // content_len: 42 (fixed; mirrors a small chat body)
+        let content_len: usize = 42;
+
+        (ctx, req, key, versioned_vendor, content_len)
+    }
+
+    /// Render a `RequestHeader` to a deterministic, sorted text form:
+    /// first line is "<METHOD> <PATH>", then headers sorted alphabetically.
+    /// The `traceparent` span-id (8 random bytes) is replaced with "SPANID"
+    /// so the snapshot stays stable across runs.
+    fn render(req: &RequestHeader) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("{} {}\n", req.method, req.uri.path()));
+        let mut entries: Vec<(String, String)> = req
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).to_string(),
+                )
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (k, v) in entries {
+            let v = if k == "traceparent" {
+                // traceparent format: "00-<traceid>-<spanid>-01"
+                let mut parts: Vec<&str> = v.split('-').collect();
+                if parts.len() == 4 {
+                    parts[2] = "SPANID";
+                    parts.join("-")
+                } else {
+                    v
+                }
+            } else {
+                v
+            };
+            out.push_str(&format!("{}: {}\n", k, v));
+        }
+        out
+    }
+
+    #[test]
+    fn rustls_default_inject_vendor_headers() {
+        let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
+        inject_vendor_headers(&mut ctx, &mut req, &key, &vendor, content_len);
+        insta::assert_snapshot!(render(&req));
+    }
+}
