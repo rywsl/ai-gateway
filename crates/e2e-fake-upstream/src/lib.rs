@@ -7,6 +7,7 @@
 
 pub mod chaos;
 pub mod inject;
+pub mod recorder;
 pub mod routes;
 pub mod scenario;
 pub mod server;
@@ -15,6 +16,7 @@ pub mod tls;
 pub mod tunnel_node;
 
 pub use inject::RefuseCounter;
+pub use recorder::{start_recorder, CapturedRequest, Recorder};
 pub use scenario::{default_scenario, Scenario};
 pub use server::{serve_admin, serve_business, SharedCounters, SharedScenario};
 pub use tls::serve_tls;
