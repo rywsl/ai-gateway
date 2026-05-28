@@ -402,6 +402,11 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "UsageRecord emit attempts by path (channel / closed)",
     },
+    MetricSpec {
+        name: "gw_billing_inflight_clear_total",
+        kind: MetricKind::Counter,
+        help: "Outcome of the DEL inflight key step in ledger flusher / sync bypass; labels=outcome(ok|del_failed|skipped_dlq|skipped_lost)",
+    },
     // --- Billing robustness W3-T1 ---
     MetricSpec {
         name: "gw_billing_upstream_cancellation_total",
