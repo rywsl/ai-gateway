@@ -74,7 +74,10 @@ pub fn headers(v: &IdentityVariable, is_stream: bool) -> Vec<(String, String)> {
         ("X-Stainless-OS".into(), os.clone()),
         ("X-Stainless-Arch".into(), arch.clone()),
         ("X-Stainless-Runtime-Version".into(), node_version.clone()),
-        ("X-Stainless-Package-Version".into(), package_version.clone()),
+        (
+            "X-Stainless-Package-Version".into(),
+            package_version.clone(),
+        ),
         ("X-Stainless-Timeout".into(), timeout.clone()),
         ("User-Agent".into(), user_agent.clone()),
         ("anthropic-beta".into(), BETA_TOKENS.join(",")),

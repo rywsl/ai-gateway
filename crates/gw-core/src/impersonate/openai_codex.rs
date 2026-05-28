@@ -63,7 +63,10 @@ pub fn headers(
         ("Accept".into(), accept.into()),
         ("OpenAI-Beta".into(), OPENAI_BETA.into()),
         ("User-Agent".into(), user_agent.clone()),
-        ("x-codex-installation-id".into(), installation_id.to_string()),
+        (
+            "x-codex-installation-id".into(),
+            installation_id.to_string(),
+        ),
         ("session-id".into(), per_req.session_id.to_string()),
         ("thread-id".into(), per_req.thread_id.to_string()),
         ("x-client-request-id".into(), per_req.thread_id.to_string()),

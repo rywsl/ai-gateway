@@ -1093,6 +1093,119 @@ impl ProxyHttp for LlmGateway {
         }
     }
 
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &pingora::Error,
+        ctx: &mut Self::CTX,
+    ) -> pingora_proxy::FailToProxy {
+        use pingora::ErrorSource;
+        use pingora::ErrorType::*;
+        use std::borrow::Cow;
+
+        let (gw_code, http_status, kind): (&'static str, u16, gw_core::observability::ErrorKind) =
+            match e.etype() {
+                HTTPStatus(code) => (
+                    codes::GW_UPSTREAM_PROTOCOL,
+                    *code,
+                    gw_core::observability::ErrorKind::UpstreamProtocol,
+                ),
+                _ => match e.esource() {
+                    ErrorSource::Upstream => {
+                        if ctx.body_started {
+                            (
+                                codes::GW_UPSTREAM_TRUNCATED,
+                                0,
+                                gw_core::observability::ErrorKind::UpstreamMidStream,
+                            )
+                        } else {
+                            (
+                                codes::GW_BACKEND_UNAVAILABLE,
+                                502,
+                                gw_core::observability::ErrorKind::UpstreamConnect,
+                            )
+                        }
+                    }
+                    ErrorSource::Downstream => match e.etype() {
+                        WriteError | ReadError | ConnectionClosed => (
+                            codes::GW_CLIENT_DISCONNECTED,
+                            0,
+                            // No DownstreamDisconnect kind; UpstreamConnect is the closest available.
+                            gw_core::observability::ErrorKind::UpstreamConnect,
+                        ),
+                        _ => (
+                            codes::GW_BAD_REQUEST,
+                            400,
+                            gw_core::observability::ErrorKind::UpstreamConnect,
+                        ),
+                    },
+                    ErrorSource::Internal | ErrorSource::Unset => (
+                        codes::GW_GATEWAY_INTERNAL,
+                        500,
+                        gw_core::observability::ErrorKind::UpstreamConnect,
+                    ),
+                },
+            };
+
+        let category = match gw_code {
+            codes::GW_BAD_REQUEST => gw_core::error::ErrorCategory::ClientBadRequest,
+            codes::GW_GATEWAY_INTERNAL => gw_core::error::ErrorCategory::GatewayInternal,
+            _ => gw_core::error::ErrorCategory::UpstreamError,
+        };
+
+        let retryable = matches!(http_status, 502..=504);
+
+        let message: Cow<'static, str> = match gw_code {
+            codes::GW_BACKEND_UNAVAILABLE => Cow::Borrowed("upstream unavailable"),
+            codes::GW_UPSTREAM_PROTOCOL => Cow::Borrowed("upstream protocol error"),
+            codes::GW_BAD_REQUEST => Cow::Borrowed("bad request"),
+            codes::GW_GATEWAY_INTERNAL => Cow::Borrowed("gateway internal error"),
+            _ => Cow::Borrowed("upstream unavailable"),
+        };
+
+        gw_core::observability::observe(gw_core::observability::ErrorObservation {
+            code: gw_code,
+            kind,
+            stage: gw_core::observability::Stage::Upstream,
+            status: if http_status > 0 {
+                Some(http_status)
+            } else {
+                None
+            },
+            trace_id: Some(ctx.trace_id.as_ref()),
+            extra: None,
+        });
+
+        if http_status > 0 && !ctx.body_started {
+            let envelope = gw_core::error::ErrorIR {
+                category,
+                status: http_status,
+                upstream_status: None,
+                code: Cow::Borrowed(gw_code),
+                message,
+                retryable,
+                upstream_raw: None,
+                request_id: ctx.request_id.as_ref(),
+                retry_after_secs: None,
+            };
+            if let Ok(body) = serde_json::to_vec(&envelope) {
+                let mut resp = pingora::http::ResponseHeader::build(http_status, None)
+                    .unwrap_or_else(|_| pingora::http::ResponseHeader::build(500, None).unwrap());
+                let _ = resp.insert_header("content-type", "application/json");
+                let _ = resp.insert_header("content-length", body.len().to_string());
+                let _ = session.write_response_header(Box::new(resp), false).await;
+                let _ = session
+                    .write_response_body(Some(bytes::Bytes::from(body)), true)
+                    .await;
+            }
+        }
+
+        pingora_proxy::FailToProxy {
+            error_code: http_status,
+            can_reuse_downstream: false,
+        }
+    }
+
     async fn logging(
         &self,
         session: &mut Session,
