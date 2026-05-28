@@ -126,6 +126,19 @@ impl Ledger {
         &self.instance_id
     }
 
+    /// Construct from raw parts. **Test-only entry point** — used by
+    /// integration tests to simulate a Ledger whose flusher task has died
+    /// (closed `rx`). Production code uses `Ledger::start`, which spawns
+    /// the worker task internally.
+    #[doc(hidden)]
+    pub fn from_parts(tx: mpsc::Sender<LedgerItem>, redis: RedisCtx, instance_id: String) -> Self {
+        Self {
+            tx,
+            redis,
+            instance_id,
+        }
+    }
+
     /// Must-deliver billing emit path. Attempts the mpsc fast path first; on a
     /// full channel falls back to a synchronous direct XADD (bypass), routing
     /// to the DLQ if even the bypass fails. Use this for all production billing
@@ -162,9 +175,40 @@ impl Ledger {
                     }
                 }
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(item_back)) => {
                 metrics::counter!("gw_billing_emit_path_total", "path" => "closed").increment(1);
-                tracing::error!("usage record channel closed; flusher dead");
+                metrics::counter!("gw_billing_flusher_dead_total").increment(1);
+                tracing::error!(
+                    "usage record channel closed; flusher dead — falling back to sync XADD"
+                );
+                match sync_xadd(&self.redis, &item_back.record).await {
+                    Ok(()) => {
+                        metrics::counter!(
+                            "gw_billing_emit_path_total",
+                            "path" => "sync_bypass_closed"
+                        )
+                        .increment(1);
+                        if let Some(ck) = &item_back.clear {
+                            sync_del_inflight(&self.redis, &self.instance_id, ck).await;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = ?e, "Closed-branch sync XADD failed; routing to DLQ");
+                        let payload = serde_json::to_string(&item_back.record)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        let wrapped = wrap_for_dlq(&payload, "flusher_dead", 0);
+                        if dlq_xadd(&self.redis, wrapped).await.is_err() {
+                            metrics::counter!("gateway_usage_records_lost_total").increment(1);
+                        }
+                        if item_back.clear.is_some() {
+                            metrics::counter!(
+                                "gw_billing_inflight_clear_total",
+                                "outcome" => "skipped_dlq"
+                            )
+                            .increment(1);
+                        }
+                    }
+                }
             }
         }
     }

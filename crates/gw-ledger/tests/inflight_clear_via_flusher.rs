@@ -165,3 +165,55 @@ async fn full_bypass_sync_xadd_dels_inflight_key() {
         "Full-branch sync_xadd → DEL"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers Redis)"]
+async fn closed_branch_routes_through_sync_xadd_with_del() {
+    let node = Redis::default().start().await.unwrap();
+    let port = node.get_host_port_ipv4(6379).await.unwrap();
+    let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
+        .await
+        .unwrap();
+    let instance = "test-inst-closed".to_string();
+
+    let inflight = InflightLedger::new((*redis.pool).clone(), instance.clone());
+    inflight
+        .register(&InflightRegistration {
+            request_id: "req-closed".to_string(),
+            attempt_index: 0,
+            user_id: "u".to_string(),
+            vendor_key_id: "vk".to_string(),
+            freeze_amount: 0,
+            prompt_estimate_tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    let key = InflightLedger::test_key(&instance, "req-closed", 0);
+    assert_eq!(redis.pool.exists::<u64, _>(&key).await.unwrap(), 1);
+
+    // Construct a Ledger whose flusher task never starts: drop the rx
+    // end immediately. Subsequent emits hit the Closed branch.
+    let (tx, rx) = tokio::sync::mpsc::channel::<LedgerItem>(8);
+    drop(rx); // channel is now Closed
+    let ledger = Ledger::from_parts(tx, redis.clone(), instance.clone());
+
+    ledger
+        .emit(LedgerItem {
+            record: fresh_usage_record("req-closed", 0),
+            clear: Some(ClearKey {
+                request_id: "req-closed".to_string(),
+                attempt_index: 0,
+            }),
+        })
+        .await;
+
+    // sync_xadd is awaited inside emit; no sleep needed.
+    let xlen: u64 = redis.pool.xlen("usage:records").await.unwrap();
+    assert!(xlen >= 1);
+    assert_eq!(
+        redis.pool.exists::<u64, _>(&key).await.unwrap(),
+        0,
+        "Closed branch sync_xadd → DEL"
+    );
+}
