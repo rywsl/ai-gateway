@@ -217,9 +217,14 @@ impl ProtocolCodec for Anthropic {
                 buf.extend_from_slice(b"\n\n");
             }
             StreamEventIR::Start { .. } => {
-                tracing::warn!(
-                    "anthropic: StreamEventIR::Start dropped (no wire equivalent in this codec)"
-                );
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "anthropic_render_drop_start",
+                    kind: gw_core::observability::ErrorKind::CodecRender,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"Start"),
+                });
             }
             StreamEventIR::RefusalDelta { .. }
             | StreamEventIR::CitationsDelta { .. }
@@ -351,7 +356,14 @@ fn dispatch_payload<'a>(
         Ok(e) => e,
         Err(e) => {
             // CONTRACT: malformed payloads must not short-circuit the stream.
-            tracing::warn!(error = %e, "anthropic stream: malformed data payload");
+            gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                code: "anthropic_stream_malformed_data",
+                kind: gw_core::observability::ErrorKind::CodecParse,
+                stage: gw_core::observability::Stage::Response,
+                status: None,
+                trace_id: None,
+                extra: Some(&e),
+            });
             return;
         }
     };
@@ -457,10 +469,14 @@ fn dispatch_payload<'a>(
                 return;
             }
             let Some(builder) = st.open_blocks.get_mut(&index) else {
-                tracing::warn!(
-                    index,
-                    "anthropic stream: content_block_delta for unopened block"
-                );
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "anthropic_stream_delta_unopened_block",
+                    kind: gw_core::observability::ErrorKind::CodecParse,
+                    stage: gw_core::observability::Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&index),
+                });
                 return;
             };
             match (builder, delta) {
