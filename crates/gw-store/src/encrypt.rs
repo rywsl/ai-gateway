@@ -97,7 +97,7 @@ impl KekCache {
             anyhow::bail!("already in dual-read");
         }
         if self.inner.keks.contains_key(&new_kid) {
-            anyhow::bail!("kid {} already resident", new_kid);
+            anyhow::bail!("kid {new_kid} already resident");
         }
         let mut new_map = self.inner.keks.clone();
         new_map.insert(new_kid.clone(), new_kek);
@@ -128,7 +128,7 @@ impl KekCache {
         }
         let active = self.active_kid();
         if old_kid == active {
-            anyhow::bail!("refusing to drop active kid {}", old_kid);
+            anyhow::bail!("refusing to drop active kid {old_kid}");
         }
         let mut new_map = self.inner.keks.clone();
         new_map.remove(old_kid);

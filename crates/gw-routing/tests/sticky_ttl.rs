@@ -37,6 +37,7 @@ fn fake_key(id: &str) -> Arc<VendorKey> {
         exclusive_capability_match: false,
         tunnel_preference: None,
         oauth: None,
+        identity_snapshot: None,
     })
 }
 
@@ -111,7 +112,7 @@ fn shared_instance_across_threads() {
         let s = Arc::clone(&sticky);
         let k = Arc::clone(&keys);
         handles.push(thread::spawn(move || {
-            pick_with_conv(&s, &k, &format!("conv-{}", i));
+            pick_with_conv(&s, &k, &format!("conv-{i}"));
         }));
     }
     for h in handles {

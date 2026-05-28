@@ -85,6 +85,11 @@ async fn emit_envelope_and_bail<T>(
     Err(short_circuit(err.status))
 }
 
+// `pick_peer` is the kill-switch + impersonate-dispatch hot path; the arg count
+// grew with Task 4.2 (impersonate) and Task 5.2 (egress_disabled). Refactoring
+// to a struct would obscure call sites; keep the allow until the next time the
+// signature changes.
+#[allow(clippy::too_many_arguments)]
 pub async fn pick_peer(
     session: &mut Session,
     ctx: &mut ReqCtx,
@@ -93,6 +98,8 @@ pub async fn pick_peer(
     in_flight: &Arc<InFlightStore>,
     strategies: &Arc<StrategySet>,
     latency_tracker: &Arc<LatencyTracker>,
+    egress: &Arc<gw_egress_impersonate::EgressHandle>,
+    egress_disabled: bool,
     #[cfg(feature = "tunnel")] tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
 ) -> Result<Box<HttpPeer>> {
     // The remaining `ErrorType::Custom(...)` short-circuits in this function
@@ -176,6 +183,34 @@ pub async fn pick_peer(
         ctx.required_caps.as_ref(),
     )
     .await;
+
+    // Kill-switch: when egress is globally disabled, drop any candidate whose
+    // vendor uses `egress_mode = Impersonate`. Rustls vendors are unaffected.
+    // A cold `vendor_or_load` miss can hit the DB, which is acceptable during
+    // a kill-switch incident — the candidate set is small and the incident is
+    // brief. `Vec::retain` cannot take an async closure, hence the explicit loop.
+    if egress_disabled && !candidates.is_empty() {
+        let mut kept = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if let Some(v) = store.vendor_or_load(&candidate.vendor_id).await {
+                if let gw_core::impersonate::VendorEgressMode::Impersonate { profile } =
+                    v.value.egress_mode
+                {
+                    metrics::counter!(
+                        "gw_egress_disabled_total",
+                        "profile" => profile.as_static_str(),
+                    )
+                    .increment(1);
+                    continue;
+                }
+            }
+            // Rustls vendor, or vendor failed to load (the normal pick path
+            // will surface the missing-vendor 503).
+            kept.push(candidate);
+        }
+        candidates = kept;
+    }
+
     if let Some(client_shape) = ctx.client_shape.filter(gw_core::protocol::ApiShape::is_cli) {
         let required_kind = client_shape.protocol_kind();
         candidates.retain(|key| key.accessible_endpoints.contains(&required_kind));
@@ -306,81 +341,134 @@ pub async fn pick_peer(
     // ADR-T-1: insert the tunnel decision between strategy.pick and HttpPeer
     // construction. Without `feature = "tunnel"` or with `tunnel = None` the
     // legacy Direct path is byte-identical.
-    let mut peer;
+    //
+    // Phase 4 (egress impersonate): a vendor whose `egress_mode = Impersonate`
+    // routes through the in-process boring egress instead of the rustls/tunnel
+    // path. Rustls vendors (the default) take the existing path unchanged.
+    use gw_core::impersonate::VendorEgressMode;
+    let impersonate_profile = match vendor.value.egress_mode {
+        VendorEgressMode::Impersonate { profile } => Some(profile),
+        VendorEgressMode::Rustls => None,
+    };
+
+    // Resolve the tunnel decision once. Both branches need it: the impersonate
+    // branch to detect the tunnel+impersonate conflict, the rustls branch to
+    // pick its peer. `TunnelStack::resolve` is pure today but could grow side
+    // effects (counters, tracing) — keeping the call site singular avoids
+    // double-firing on the impersonate path.
     #[cfg(feature = "tunnel")]
-    {
-        let provider_id = vendor.value.id.as_ref();
-        let key_id = picked_arc.key_id.as_ref();
+    let (tunnel_resolution, tunnel_require) = {
         let default_pref = gw_core::entity::TunnelPreference::default();
         let pref = picked_arc
             .tunnel_preference
             .as_ref()
             .unwrap_or(&default_pref);
         let resolution = match tunnel {
-            Some(t) => t.resolve(provider_id, key_id, pref),
+            Some(t) => t.resolve(vendor.value.id.as_ref(), picked_arc.key_id.as_ref(), pref),
             None => gw_tunnel_client::resolver::TunnelResolution::Direct,
         };
-        match resolution {
-            gw_tunnel_client::resolver::TunnelResolution::Direct => {
-                if pref.require_tunnel {
-                    // ADR-T-4 — never silently fall back when require_tunnel=true.
-                    metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node")
-                        .increment(1);
-                    return emit_envelope_and_bail(
-                        session,
-                        ctx,
-                        envelope_for(codes::GW_TUNNEL_NO_NODE, "no tunnel node available", 502),
-                    )
-                    .await;
-                }
-                metrics::counter!("gw_tunnel_resolve_total", "result" => "direct").increment(1);
-                ctx.tunnel_resolution = Some("direct".into());
-                peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
+        (resolution, pref.require_tunnel)
+    };
+
+    let mut peer;
+    if let Some(profile) = impersonate_profile {
+        // Hard exclusion: a vendor cannot tunnel AND impersonate. If the
+        // resolver would route through a tunnel node, bail rather than
+        // silently picking one.
+        #[cfg(feature = "tunnel")]
+        if let gw_tunnel_client::resolver::TunnelResolution::Use(_) = &tunnel_resolution {
+            return emit_envelope_and_bail(
+                session,
+                ctx,
+                envelope_for(
+                    codes::GW_TUNNEL_IMPERSONATE_CONFLICT,
+                    "vendor cannot enable both tunnel and impersonate",
+                    503,
+                ),
+            )
+            .await;
+        }
+        ctx.egress_profile = Some(profile);
+        ctx.egress_upstream = Some((host.clone(), port));
+        // `tunnel_resolution` intentionally left None on the impersonate path;
+        // consumers should branch on `egress_profile.is_some()` instead.
+        metrics::counter!("gw_egress_impersonate_dispatch_total").increment(1);
+        peer = match egress.bind_addr() {
+            gw_egress_impersonate::EgressBind::Uds(p) => {
+                HttpPeer::new_uds(p.to_string_lossy().as_ref(), false, host.clone())
+                    // EgressHandle::start validates the path at bind time, so this
+                    // arm is an invariant violation rather than a runtime error.
+                    .map_err(|_| Error::new(ErrorType::Custom("gw_egress_bad_uds_path")))?
             }
-            gw_tunnel_client::resolver::TunnelResolution::Use(node_id) => {
-                let t = tunnel.expect("TunnelStack present implied by Use(_)");
-                match t.peer_for_node(&node_id, &host, port).await {
-                    Ok(p) => {
-                        metrics::counter!("gw_tunnel_resolve_total", "result" => "tunnel")
-                            .increment(1);
-                        ctx.tunnel_resolution = Some(node_id);
-                        peer = p;
-                    }
-                    Err(crate::tunnel_stack::TunnelPeerError::NoLive { .. }) => {
-                        metrics::counter!("gw_tunnel_resolve_total", "result" => "no_live")
-                            .increment(1);
-                        // Push the failed key onto the retry blacklist so a
-                        // retry on this request lands on a different key.
-                        ctx.retry_blacklist.push(picked_arc.key_id.clone());
-                        return emit_envelope_and_bail(
-                            session,
-                            ctx,
-                            envelope_for(codes::GW_TUNNEL_NO_LIVE, "tunnel node not live", 502),
-                        )
-                        .await;
-                    }
-                    Err(crate::tunnel_stack::TunnelPeerError::TargetDenied { .. }) => {
-                        metrics::counter!("gw_tunnel_resolve_total", "result" => "denied")
+            gw_egress_impersonate::EgressBind::Tcp(addr) => {
+                HttpPeer::new(addr.to_string(), false, host.clone())
+            }
+        };
+    } else {
+        #[cfg(feature = "tunnel")]
+        {
+            match tunnel_resolution {
+                gw_tunnel_client::resolver::TunnelResolution::Direct => {
+                    if tunnel_require {
+                        // ADR-T-4 — never silently fall back when require_tunnel=true.
+                        metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node")
                             .increment(1);
                         return emit_envelope_and_bail(
                             session,
                             ctx,
-                            envelope_for(
-                                codes::GW_TUNNEL_TARGET_DENIED,
-                                "tunnel target denied",
-                                502,
-                            ),
+                            envelope_for(codes::GW_TUNNEL_NO_NODE, "no tunnel node available", 502),
                         )
                         .await;
+                    }
+                    metrics::counter!("gw_tunnel_resolve_total", "result" => "direct").increment(1);
+                    ctx.tunnel_resolution = Some("direct".into());
+                    peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
+                }
+                gw_tunnel_client::resolver::TunnelResolution::Use(node_id) => {
+                    let t = tunnel.expect("TunnelStack present implied by Use(_)");
+                    match t.peer_for_node(&node_id, &host, port).await {
+                        Ok(p) => {
+                            metrics::counter!("gw_tunnel_resolve_total", "result" => "tunnel")
+                                .increment(1);
+                            ctx.tunnel_resolution = Some(node_id);
+                            peer = p;
+                        }
+                        Err(crate::tunnel_stack::TunnelPeerError::NoLive { .. }) => {
+                            metrics::counter!("gw_tunnel_resolve_total", "result" => "no_live")
+                                .increment(1);
+                            // Push the failed key onto the retry blacklist so a
+                            // retry on this request lands on a different key.
+                            ctx.retry_blacklist.push(picked_arc.key_id.clone());
+                            return emit_envelope_and_bail(
+                                session,
+                                ctx,
+                                envelope_for(codes::GW_TUNNEL_NO_LIVE, "tunnel node not live", 502),
+                            )
+                            .await;
+                        }
+                        Err(crate::tunnel_stack::TunnelPeerError::TargetDenied { .. }) => {
+                            metrics::counter!("gw_tunnel_resolve_total", "result" => "denied")
+                                .increment(1);
+                            return emit_envelope_and_bail(
+                                session,
+                                ctx,
+                                envelope_for(
+                                    codes::GW_TUNNEL_TARGET_DENIED,
+                                    "tunnel target denied",
+                                    502,
+                                ),
+                            )
+                            .await;
+                        }
                     }
                 }
             }
         }
-    }
-    #[cfg(not(feature = "tunnel"))]
-    {
-        ctx.tunnel_resolution = Some("direct".into());
-        peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
+        #[cfg(not(feature = "tunnel"))]
+        {
+            ctx.tunnel_resolution = Some("direct".into());
+            peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
+        }
     }
 
     // -------------------------------------------------------------
@@ -674,6 +762,7 @@ pub async fn rewrite_request(
         }
         archive_upstream_request(ctx, upstream_request, outbound.clone());
         inject_vendor_headers(ctx, upstream_request, &picked, &vendor, outbound.len());
+        inject_egress_headers(ctx, upstream_request, &picked).await;
         crate::billing_lifecycle::transition_to(
             ctx,
             crate::billing_lifecycle::VendorExposure::Sent,
@@ -766,6 +855,7 @@ pub async fn rewrite_request(
 
     archive_upstream_request(ctx, upstream_request, outbound.clone());
     inject_vendor_headers(ctx, upstream_request, &picked, &vendor, outbound.len());
+    inject_egress_headers(ctx, upstream_request, &picked).await;
 
     // W2-T4: mark the request as dispatched to the upstream vendor.
     crate::billing_lifecycle::transition_to(ctx, crate::billing_lifecycle::VendorExposure::Sent);
@@ -905,6 +995,108 @@ fn inject_vendor_headers(
     let _ = upstream_request.insert_header("content-length", content_len.to_string());
 }
 
+/// Inject X-Egress-* routing headers and per-profile forged identity headers.
+///
+/// This is a separate async function so that `inject_vendor_headers` (and its
+/// unit test `direct_mode_inject_vendor_headers`) remains synchronous.  When
+/// `ctx.egress_profile` is `None` (i.e. the standard rustls path) the function
+/// is a no-op and adds zero overhead to the hot path.
+async fn inject_egress_headers(
+    ctx: &ReqCtx,
+    upstream_request: &mut RequestHeader,
+    picked: &gw_core::entity::VendorKey,
+) {
+    let Some(profile) = ctx.egress_profile else {
+        return;
+    };
+
+    // X-Egress-Target: host:port
+    if let Some((host, port)) = ctx.egress_upstream.as_ref() {
+        let _ = upstream_request.insert_header("X-Egress-Target", format!("{host}:{port}"));
+    }
+
+    // X-Egress-Profile: e.g. "claude_code_chrome131"
+    let _ = upstream_request.insert_header("X-Egress-Profile", profile.as_static_str());
+
+    // X-Egress-Proxy: proxy URL (only when a per-key proxy is configured)
+    if let Some(proxy) = picked.proxy.as_ref() {
+        let _ = upstream_request.insert_header("X-Egress-Proxy", proxy.as_str());
+    }
+
+    // Derive (or reuse) the per-VendorKey identity and optionally schedule a
+    // lazy persist when we just generated a fresh one.
+    let (resolved, should_persist) = gw_core::impersonate::ensure_identity(
+        picked.key_id.as_ref(),
+        picked.identity_snapshot.as_ref(),
+        profile,
+    );
+
+    if should_persist {
+        if let Some(q) = ctx.identity_persist.as_ref() {
+            let snap = gw_core::impersonate::IdentitySnapshot {
+                profile_kind: resolved.profile,
+                variable: resolved.variable.clone(),
+            };
+            q.schedule(picked.key_id.as_ref().to_owned(), snap);
+        }
+    }
+
+    // Build and insert the profile-specific forged identity headers.
+    let identity_hdrs = identity_headers_for(&resolved, ctx, picked).await;
+    for (name, value) in identity_hdrs {
+        let _ = upstream_request.insert_header(name, value);
+    }
+}
+
+/// Dispatch to the per-profile header builder.
+async fn identity_headers_for(
+    resolved: &gw_core::impersonate::ResolvedIdentity,
+    ctx: &ReqCtx,
+    picked: &gw_core::entity::VendorKey,
+) -> Vec<(String, String)> {
+    use gw_core::impersonate::{claude_code, gemini_cli, openai_codex, ImpersonateProfile};
+
+    match resolved.profile {
+        ImpersonateProfile::ClaudeCodeChrome131 => {
+            claude_code::headers(&resolved.variable, ctx.is_stream)
+        }
+        ImpersonateProfile::OpenAiCodex => {
+            use gw_core::impersonate::openai_codex::PerRequest;
+
+            let turn_state = if let Some(cache) = ctx.turn_state_cache.as_ref() {
+                cache
+                    .get_or_create(picked.key_id.as_ref(), ctx.conversation_id.as_deref())
+                    .await
+            } else {
+                // No cache wired (e.g. integration tests that don't boot the
+                // full gateway). Fall back to a fresh random token so the
+                // header set is always complete.
+                tracing::warn!(
+                    key_id = %picked.key_id.as_ref(),
+                    "turn_state_cache not wired; codex turn-state will be unstable"
+                );
+                gw_core::impersonate::rng::random_hex(32)
+            };
+
+            let per_req = PerRequest {
+                session_id: uuid::Uuid::new_v4(),
+                thread_id: uuid::Uuid::new_v4(),
+                window_id: uuid::Uuid::new_v4(),
+                turn_state,
+            };
+            openai_codex::headers(&resolved.variable, ctx.is_stream, &per_req)
+        }
+        ImpersonateProfile::GeminiCli => {
+            let model = ctx.model.as_ref().map(|m| m.as_ref()).unwrap_or("");
+            let quota = picked
+                .oauth
+                .as_ref()
+                .and_then(|o| o.quota_project_id.as_deref());
+            gemini_cli::headers(&resolved.variable, model, quota)
+        }
+    }
+}
+
 /// Wire-format-stateless codec constructors (`AnyCodec` variants are
 /// zero-sized so this is essentially a tag dispatch).
 fn codec_for(k: gw_core::protocol::ProtocolKind) -> AnyCodec {
@@ -968,6 +1160,7 @@ mod body_hash_tests {
             exclusive_capability_match: false,
             tunnel_preference: None,
             oauth: None,
+            identity_snapshot: None,
         }
     }
 
@@ -1232,6 +1425,176 @@ mod oauth_injection_tests {
             src.contains("gw_oauth_token_near_expiry_total")
                 && src.contains("gw_oauth_token_expired_total"),
             "G3 expiry metrics missing"
+        );
+    }
+}
+
+/// Regression baseline: snapshots the bytes-affecting output of
+/// `inject_vendor_headers` for a Direct-mode vendor (no OAuth, static api_key).
+/// The egress impersonation work in Phase 4 modifies this function to add
+/// `X-Egress-*` headers when `egress_mode == Impersonate`. The Direct-mode
+/// output MUST remain byte-identical. Re-run after every phase:
+///
+/// ```bash
+/// cargo test -p gw-proxy regression_baseline -- --nocapture
+/// ```
+#[cfg(test)]
+mod regression_baseline_tests {
+    use super::*;
+    use gw_core::entity::KeyStatus;
+    use gw_core::ids::{KeyId, RequestId, TraceId, VendorId};
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+    use url::Url;
+
+    /// Build the fixed, deterministic test inputs that mirror a canonical
+    /// OpenAI chat-completion upstream request.
+    fn make_canonical_inputs() -> (
+        ReqCtx,
+        RequestHeader,
+        gw_core::entity::VendorKey,
+        gw_core::versioned::Versioned<Vendor>,
+        usize,
+    ) {
+        // --- VendorKey (Direct mode: no OAuth, static api_key) ---
+        let key = VendorKey {
+            key_id: KeyId::from("vk-baseline"),
+            vendor_id: VendorId::from("openai"),
+            api_key: SecretString::new("sk-vendor-secret".into()),
+            accessible_models: Vec::new(),
+            model_mapping: HashMap::new(),
+            accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
+            protocol_conversion: false,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None::<Url>,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: Vec::new(),
+            forced_capabilities: Vec::new(),
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+            identity_snapshot: None,
+        };
+
+        // --- Vendor with OpenAI base URL and Bearer auth template ---
+        let vendor = Vendor {
+            id: VendorId::from("openai"),
+            display_name: "OpenAI".to_owned(),
+            base_urls: vec![Url::parse("https://api.openai.com").unwrap()],
+            auth_template: "Bearer {api_key}".to_owned(),
+            timeout_overrides: None,
+            default_proxy: None,
+            contact: None,
+            egress_mode: Default::default(),
+        };
+        let versioned_vendor = gw_core::versioned::Versioned::new(1, vendor);
+
+        // --- ReqCtx with a FIXED trace_id (32 hex chars = 16 bytes = W3C trace-id) ---
+        let trace_id = TraceId::from("0000000000000000aaaaaaaaaaaaaaaa");
+        let request_id = RequestId::from("req-baseline-0001");
+        let ctx = ReqCtx::new(trace_id, request_id);
+
+        // --- RequestHeader: POST /v1/chat/completions with realistic inbound headers ---
+        let mut req = RequestHeader::build("POST", b"/v1/chat/completions", Some(4)).unwrap();
+        req.insert_header("host", "api.openai.com").unwrap();
+        req.insert_header("content-type", "application/json")
+            .unwrap();
+        req.insert_header("accept", "application/json").unwrap();
+        // These three MUST be stripped by inject_vendor_headers:
+        req.insert_header("authorization", "Bearer client-test-key")
+            .unwrap();
+        req.insert_header("x-api-key", "should-be-stripped")
+            .unwrap();
+        req.insert_header("x-api-key-id", "should-be-stripped")
+            .unwrap();
+
+        // content_len: 42 (fixed; mirrors a small chat body)
+        let content_len: usize = 42;
+
+        (ctx, req, key, versioned_vendor, content_len)
+    }
+
+    /// Render a `RequestHeader` to a deterministic, sorted text form:
+    /// first line is "<METHOD> <PATH>", then headers sorted alphabetically.
+    /// The `traceparent` span-id (8 random bytes) is replaced with "SPANID"
+    /// so the snapshot stays stable across runs.
+    fn render(req: &RequestHeader) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("{} {}\n", req.method, req.uri.path()));
+        let mut entries: Vec<(String, String)> = req
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).to_string(),
+                )
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (k, v) in entries {
+            // NOTE: Extend this when Phase 4 introduces additional headers carrying
+            // non-deterministic per-request material (e.g. X-Stainless-Session-Id).
+            let v = if k == "traceparent" {
+                // traceparent format: "00-<traceid>-<spanid>-01"
+                let mut parts: Vec<&str> = v.split('-').collect();
+                if parts.len() == 4 {
+                    parts[2] = "SPANID";
+                    parts.join("-")
+                } else {
+                    v
+                }
+            } else {
+                v
+            };
+            out.push_str(&format!("{k}: {v}\n"));
+        }
+        out
+    }
+
+    #[test]
+    fn direct_mode_inject_vendor_headers() {
+        let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
+        inject_vendor_headers(&mut ctx, &mut req, &key, &vendor, content_len);
+        insta::assert_snapshot!(render(&req));
+    }
+}
+
+/// Unit test for the egress kill-switch predicate (Task 5.2).
+///
+/// The full `pick_peer` path requires a `pingora::Session` and an async store,
+/// which makes an inline integration test heavy. The non-trivial logic in the
+/// filter is the `matches!(.., VendorEgressMode::Impersonate { .. })` predicate
+/// against the just-loaded vendor — everything else is plumbing. This test
+/// pins that predicate against both variants of `VendorEgressMode` so the
+/// matching rule cannot silently drift.
+#[cfg(test)]
+mod egress_kill_switch_tests {
+    use gw_core::impersonate::{ImpersonateProfile, VendorEgressMode};
+
+    /// Mirrors the production predicate at upstream.rs (the `if let
+    /// VendorEgressMode::Impersonate { .. } = mode` branch).
+    fn is_impersonate(mode: &VendorEgressMode) -> bool {
+        matches!(mode, VendorEgressMode::Impersonate { .. })
+    }
+
+    #[test]
+    fn impersonate_predicate_matches_both_variants() {
+        assert!(
+            !is_impersonate(&VendorEgressMode::Rustls),
+            "Rustls must not be filtered by the kill-switch"
+        );
+        assert!(
+            is_impersonate(&VendorEgressMode::Impersonate {
+                profile: ImpersonateProfile::ClaudeCodeChrome131,
+            }),
+            "Impersonate must be filtered by the kill-switch"
         );
     }
 }

@@ -25,7 +25,7 @@ async fn make_pool() -> RedisPool {
 async fn reaper_fires_metric_on_stale_settled_key() {
     let pool = make_pool().await;
     let inst = format!("inst-reaper-{}", std::process::id());
-    let key = format!("billing:inflight:{}:req-stale:0", inst);
+    let key = format!("billing:inflight:{inst}:req-stale:0");
     // Pre-write a key with ts_settled_ms 90s ago
     let stale_ts =
         (time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000) - 90_000;
@@ -54,7 +54,7 @@ async fn reaper_fires_metric_on_stale_settled_key() {
 async fn reaper_skips_unsettled_keys() {
     let pool = make_pool().await;
     let inst = format!("inst-reaper-unset-{}", std::process::id());
-    let key = format!("billing:inflight:{}:req-active:0", inst);
+    let key = format!("billing:inflight:{inst}:req-active:0");
     // Key with only ts_sent_ms — not yet settled
     let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000 - 90_000;
     let fields: Vec<(&str, String)> = vec![

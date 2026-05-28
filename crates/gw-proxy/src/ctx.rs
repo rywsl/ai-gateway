@@ -182,6 +182,11 @@ pub struct ReqCtx {
     /// Read by `logging` to surface the right `GW_*` code in metrics / detailed
     /// logs. `None` on the happy path.
     pub upstream_error_code: Option<&'static str>,
+    /// Human-readable upstream error detail. Set by `response_filter` from the
+    /// `X-Egress-Error-Detail` header when the loopback egress reports a
+    /// transport failure. Surfaced in detailed logs / error_emit. `None` on
+    /// the happy path.
+    pub upstream_error_detail: Option<String>,
 
     // --- Cross-protocol response re-render accumulator (G8 + G9) ---
     /// Accumulator across events in one chunk; taken+frozen by
@@ -234,6 +239,22 @@ pub struct ReqCtx {
     /// T6 / ADR-T-2 — set by `pick_peer` to `"direct"` or `Some(node_id)`.
     /// Read by `logging` for the detailed-log field and by metrics labels.
     pub tunnel_resolution: Option<String>,
+
+    // --- Egress impersonation ---
+    /// Set in `pick_peer` when `Vendor.egress_mode == Impersonate { profile }`.
+    /// Consumed in `inject_vendor_headers` to write `X-Egress-*` + identity.
+    pub egress_profile: Option<gw_core::impersonate::ImpersonateProfile>,
+    /// Real upstream `(host, port)` — communicated to the loopback egress via
+    /// `X-Egress-Target`.
+    pub egress_upstream: Option<(String, u16)>,
+    /// Wired at gateway start (Task 4.6); None in tests that bypass gateway::new.
+    pub identity_persist: Option<std::sync::Arc<gw_store::identity_persist::IdentityPersistQueue>>,
+    /// Wired at gateway start (Task 4.6); None in tests that bypass gateway::new.
+    pub turn_state_cache: Option<std::sync::Arc<gw_core::impersonate::turn_state::TurnStateCache>>,
+    /// Wall-clock instant captured in `upstream_request_filter` when the egress
+    /// path is active; consumed once in `response_filter` to record
+    /// `gw_egress_loopback_rtt_seconds`. `None` for the rustls path.
+    pub egress_sent_at: Option<std::time::Instant>,
 
     // --- Long-running operation (G5 / go-onboarding-gaps T0) ---
     /// G5: Gemini `:predictLongRunning` / OpenAI `/v1/videos` top-level
@@ -349,6 +370,7 @@ impl ReqCtx {
             body_started: false,
             retry_blacklist: Vec::new(),
             upstream_error_code: None,
+            upstream_error_detail: None,
             pending_client_body: None,
             error_outcome: None,
             error_passthrough_body: None,
@@ -363,6 +385,11 @@ impl ReqCtx {
             required_caps: None,
             retry_upgrade_hint: None,
             tunnel_resolution: None,
+            egress_profile: None,
+            egress_upstream: None,
+            identity_persist: None,
+            turn_state_cache: None,
+            egress_sent_at: None,
             response_deadline: None,
             operation_id: None,
             upstream_body_accum: None,

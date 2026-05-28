@@ -111,6 +111,7 @@ fn seed_key(id: &str, forced: &[&str], exclusive: bool) -> VendorKey {
         exclusive_capability_match: exclusive,
         tunnel_preference: None,
         oauth: None,
+        identity_snapshot: None,
     }
 }
 

@@ -21,6 +21,7 @@ tunnel = ["dep:gw-tunnel-client", "gw-proxy/tunnel"]
 gw-core = { path = "../gw-core" }
 gw-health = { path = "../gw-health" }
 gw-proxy = { path = "../gw-proxy" }
+gw-egress-impersonate = { path = "../gw-egress-impersonate" }
 gw-store = { path = "../gw-store" }
 gw-auth = { path = "../gw-auth" }
 gw-routing = { path = "../gw-routing" }
@@ -67,3 +68,13 @@ testcontainers.workspace = true
 testcontainers-modules.workspace = true
 sqlx = { workspace = true }
 bytes.workspace = true
+# T6.1 — E2E impersonation test. Drives `gw-egress-impersonate`'s loopback
+# Handler against the `e2e-fake-upstream` recorder. The `test-utils` feature
+# unlocks `Handler::new_with_scheme("http")` so the test can target the
+# plain-HTTP recorder instead of needing a real TLS upstream.
+gw-egress-impersonate = { path = "../gw-egress-impersonate", features = ["test-utils"] }
+e2e-fake-upstream = { path = "../e2e-fake-upstream" }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+serde_json = { workspace = true }

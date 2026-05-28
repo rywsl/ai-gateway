@@ -21,11 +21,12 @@ members = [
     "crates/gw-tunnel-client",
     "crates/e2e-fake-upstream",
     "crates/e2e-fake-web",
+    "crates/gw-egress-impersonate",
 ]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.88"
 license = "Apache-2.0"
 
 [workspace.dependencies]
@@ -39,7 +40,7 @@ anyhow = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 time = { version = "0.3", features = ["serde", "macros"] }
 url = { version = "2.5", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 smallvec = { version = "1.13", features = ["serde"] }
 
 # 异步
@@ -89,6 +90,11 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 hickory-resolver = { version = "0.25", features = ["https-ring", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+wreq = { version = "6.0.0-rc.28", default-features = false, features = ["json", "stream"] }
+wreq-util = { version = "3.0.0-rc.11" }
+hyper = { version = "1.4", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
+http-body-util = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # 可观测
@@ -112,6 +118,7 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
 wiremock = "0.6"
 criterion = { version = "0.5", features = ["async_tokio"] }
+insta = { version = "1", features = ["yaml"] }
 proptest = "1"
 
 [profile.release]

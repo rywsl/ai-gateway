@@ -3637,20 +3637,9 @@ pub struct Config {
 
 - [ ] **Step 3: Wire `cfg.egress.disabled` into `pick_peer`**
 
-Back in `crates/gw-proxy/src/filters/upstream.rs::pick_peer`, change the impersonate selection to:
+In `crates/gw-proxy/src/filters/upstream.rs::pick_peer`, thread `egress_disabled: bool` through the function signature. After `get_candidate_keys` returns its candidate set and before any further filtering, fail-closed: drop every candidate whose vendor uses `egress_mode = Impersonate { .. }` and increment `gw_egress_disabled_total` once per drop. Rustls candidates pass through unchanged. (Dropping rather than falling through to Rustls is intentional — silently swapping fingerprints would defeat the operator's anti-ban configuration.)
 
-```rust
-let impersonate_profile = match vendor.value.egress_mode {
-    VendorEgressMode::Impersonate { profile } if !egress_disabled => Some(profile),
-    VendorEgressMode::Impersonate { .. } => {
-        metrics::counter!("gw_egress_disabled_total").increment(1);
-        None
-    }
-    VendorEgressMode::Rustls => None,
-};
-```
-
-Thread `egress_disabled: bool` through the function signature (read from `self.config.egress.disabled` at the call site in `upstream_peer`).
+`LlmGateway` does not own `Config`; add a `pub egress_disabled: bool` field to `LlmGateway` and pass it to `pick_peer`. Set the field in `lib.rs` from `cfg.egress.disabled`.
 
 - [ ] **Step 4: Run baseline**
 

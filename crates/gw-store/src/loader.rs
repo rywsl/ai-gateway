@@ -107,6 +107,8 @@ struct OAuthCredentialsRow {
     token_endpoint: String,
     #[serde(default)]
     scope: Vec<String>,
+    #[serde(default)]
+    pub quota_project_id: Option<String>,
 }
 
 /// Wire shape of a `vendor_keys.payload` row. The plaintext `api_key` is held
@@ -161,6 +163,10 @@ struct VendorKeyRow {
     /// Absent for all static-API-key rows.
     #[serde(default)]
     oauth: Option<OAuthCredentialsRow>,
+    /// Per-VendorKey persisted impersonation identity snapshot.
+    /// `None` for keys that have not yet used impersonate egress.
+    #[serde(default)]
+    identity_snapshot: Option<gw_core::impersonate::IdentitySnapshot>,
 }
 
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
@@ -171,8 +177,12 @@ const IP_BLOCK_SQL: &str =
     "SELECT payload, version FROM ip_blocks WHERE id = $1 AND deleted_at IS NULL";
 const VENDOR_SQL: &str =
     "SELECT payload, version FROM vendors WHERE id = $1 AND deleted_at IS NULL";
-const VENDOR_KEY_SQL: &str =
-    "SELECT payload, version FROM vendor_keys WHERE id = $1 AND deleted_at IS NULL";
+// `identity_snapshot` is a dedicated `vendor_keys` column (migration 0009),
+// written by `PgSnapshotWriter::write_if_null`. The generic `load_entity`
+// closure only sees `payload`, so fold the column into `payload.identity_snapshot`
+// with `jsonb_set` — same trick as `API_KEY_SQL` does for `signature_secret`.
+// Without this, lazy-persisted identities would never be read back.
+const VENDOR_KEY_SQL: &str = "SELECT jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true) AS payload, version FROM vendor_keys WHERE id = $1 AND deleted_at IS NULL";
 const MODEL_GROUP_SQL: &str =
     "SELECT payload, version FROM model_groups WHERE id = $1 AND deleted_at IS NULL";
 const PRICING_SQL: &str =
@@ -246,6 +256,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
                     access_expires_at: o.access_expires_at,
                     token_endpoint: o.token_endpoint,
                     scope: o.scope,
+                    quota_project_id: o.quota_project_id,
                 })
             })
             .transpose()?;
@@ -272,6 +283,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
             exclusive_capability_match: row.exclusive_capability_match,
             tunnel_preference: row.tunnel_preference,
             oauth,
+            identity_snapshot: row.identity_snapshot,
         })
     })
     .await

@@ -99,6 +99,50 @@ fn remaining_failover_candidates(
         .collect()
 }
 
+/// Task 4.4 — map an `X-Egress-Error-Class` header value to
+/// `(stable_code, retryable, is_tls)`. `is_tls` short-circuits (no retry);
+/// `retryable` routes through the FailoverExecutor; otherwise the error is
+/// surfaced to the client as-is.
+fn map_egress_class(class: &str) -> (&'static str, bool, bool) {
+    use gw_core::error::codes::*;
+    match class {
+        "tls" => (GW_UPSTREAM_TLS_ERROR, false, true),
+        "connect_timeout" => (GW_UPSTREAM_CONNECT_TIMEOUT, true, false),
+        "connect_refused" => (GW_UPSTREAM_CONNECT_REFUSED, true, false),
+        "read_timeout" => (GW_UPSTREAM_READ_TIMEOUT, true, false),
+        "h2_protocol" => (GW_UPSTREAM_H2_PROTOCOL, true, false),
+        "body_truncated" => (GW_UPSTREAM_BODY_TRUNCATED, false, false),
+        "proxy_error" => (GW_UPSTREAM_PROXY_ERROR, true, false),
+        "panic" => (GW_UPSTREAM_PANIC, false, false),
+        _ => (GW_UPSTREAM_UNKNOWN, false, false),
+    }
+}
+
+/// Gateway-internal egress control + error headers (Task 4.5). These are
+/// injected by `inject_vendor_headers` (request side) or emitted by the
+/// loopback egress service (response side) and must never be persisted into
+/// the detailed archive. Match is case-insensitive.
+const EGRESS_INTERNAL_HEADERS: &[&str] = &[
+    "x-egress-target",
+    "x-egress-profile",
+    "x-egress-proxy",
+    "x-egress-error-class",
+    "x-egress-error-detail",
+];
+
+/// Drop any gateway-internal egress headers from a captured header snapshot
+/// before it is sent to the detailed archive. Preserves order of all other
+/// headers.
+fn redact_egress_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .filter(|(name, _)| {
+            let lower = name.to_ascii_lowercase();
+            !EGRESS_INTERNAL_HEADERS.contains(&lower.as_str())
+        })
+        .collect()
+}
+
 fn header_u32(response: &ResponseHeader, name: &str) -> Option<u32> {
     response
         .headers
@@ -157,6 +201,22 @@ pub struct LlmGateway {
     /// `cfg.tunnel.enabled = true`.
     #[cfg(feature = "tunnel")]
     pub tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+    /// Egress impersonation handle (Phase 4). Holds the loopback listener bind
+    /// (`EgressBind::Uds | Tcp`) that `pick_peer` points an `HttpPeer` at when
+    /// the selected vendor's `egress_mode = Impersonate`. Same architectural
+    /// neighborhood as `tunnel` since both gate the upstream peer construction.
+    pub egress: Arc<gw_egress_impersonate::EgressHandle>,
+    /// Kill-switch for the egress-impersonate path (Task 5.2). When `true`,
+    /// vendors with `egress_mode = Impersonate` are excluded from candidate
+    /// selection in `pick_peer`; metric `gw_egress_disabled_total` ticks per
+    /// dropped vendor. Rustls vendors are unaffected. Boot-time only.
+    pub egress_disabled: bool,
+    /// Identity-persist queue (Task 4.6). Lazy snapshot writer for forged
+    /// identities; cloned onto `ReqCtx` in `new_ctx`.
+    pub identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
+    /// Turn-state cache (Task 4.6). Per-conversation impersonation turn
+    /// counter; cloned onto `ReqCtx` in `new_ctx`.
+    pub turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
     /// Detailed-log archive (T10). Sender handle for per-surface wire-fidelity
     /// capture. `try_send` is fire-and-forget; a full channel drops + metrics.
     pub(crate) detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
@@ -216,6 +276,10 @@ impl LlmGateway {
         mgmt_blacklist: Arc<RedisJwtBlacklist>,
         resilience: Arc<ResilienceState>,
         #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+        egress: Arc<gw_egress_impersonate::EgressHandle>,
+        egress_disabled: bool,
+        identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
+        turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
         detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
         inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
         response_deadline_ms: u64,
@@ -263,6 +327,10 @@ impl LlmGateway {
             resilience,
             #[cfg(feature = "tunnel")]
             tunnel,
+            egress,
+            egress_disabled,
+            identity_persist,
+            turn_state_cache,
             detailed_archive,
             inflight,
             response_deadline_ms,
@@ -306,7 +374,7 @@ impl LlmGateway {
                 payload: SurfacePayload::Response(
                     ResponsePayload {
                         status: meta.status,
-                        headers: meta.headers,
+                        headers: redact_egress_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
@@ -333,7 +401,7 @@ impl LlmGateway {
             payload: SurfacePayload::Response(
                 ResponsePayload {
                     status: downstream_meta.status,
-                    headers: downstream_meta.headers,
+                    headers: redact_egress_headers(downstream_meta.headers),
                     body_b64: String::new(),
                 },
                 body,
@@ -353,6 +421,8 @@ impl ProxyHttp for LlmGateway {
         let mut ctx = ReqCtx::new(trace, req);
         ctx.reservation_view = self.reservation_view.clone();
         ctx.frequency_tracker = self.frequency_tracker.clone();
+        ctx.identity_persist = Some(self.identity_persist.clone());
+        ctx.turn_state_cache = Some(self.turn_state_cache.clone());
         ctx
     }
 
@@ -422,7 +492,7 @@ impl ProxyHttp for LlmGateway {
                         method: meta.method,
                         url: meta.url,
                         http_version: meta.http_version,
-                        headers: meta.headers,
+                        headers: redact_egress_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
@@ -467,6 +537,8 @@ impl ProxyHttp for LlmGateway {
             &self.in_flight,
             &self.strategies,
             &self.latency_tracker,
+            &self.egress,
+            self.egress_disabled,
             #[cfg(feature = "tunnel")]
             self.tunnel.as_ref(),
         )
@@ -535,12 +607,15 @@ impl ProxyHttp for LlmGateway {
                         method: meta.method,
                         url: meta.url,
                         http_version: meta.http_version,
-                        headers: meta.headers,
+                        headers: redact_egress_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
                 ),
             });
+        }
+        if ctx.egress_profile.is_some() {
+            ctx.egress_sent_at = Some(std::time::Instant::now());
         }
         Ok(())
     }
@@ -586,6 +661,15 @@ impl ProxyHttp for LlmGateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         ctx.upstream_status = Some(upstream_response.status.as_u16());
+        // Egress-impersonate loopback latency (spec §8.6). Gateway-side wall-clock
+        // from dispatch to response headers; in production this INCLUDES real
+        // upstream latency, so it is not pure loopback overhead — the Task 6.2
+        // microbench (inline mock upstream) is the SLO gate (p99 <200µs UDS /
+        // <500µs TCP). Label-free per spec §8.6. `.take()` records at most once.
+        if let Some(sent) = ctx.egress_sent_at.take() {
+            metrics::histogram!("gw_egress_loopback_rtt_seconds")
+                .record(sent.elapsed().as_secs_f64());
+        }
         use crate::ctx::ResponseMeta;
         ctx.archive_upstream_response_meta = Some(ResponseMeta {
             status: upstream_response.status.as_u16(),
@@ -615,7 +699,85 @@ impl ProxyHttp for LlmGateway {
                 let _ = upstream_response.remove_header("content-encoding");
             }
         }
-        if let Some(status) = ctx.upstream_status {
+        // ── Egress-impersonate loopback error mapping (Task 4.4) ──────────
+        // The loopback egress (gw-egress-impersonate) emits a synthetic
+        // 5xx/4xx carrying X-Egress-Error-Class / -Detail when the forged-TLS
+        // dispatch to the real upstream fails. Map the class to a stable code,
+        // capture the detail, then either short-circuit (tls block — a
+        // different key won't beat a fingerprint block) or route through the
+        // existing FailoverExecutor (transient transport faults). Always strip
+        // the internal headers so the client never sees them.
+        let egress_class: Option<String> = upstream_response
+            .headers
+            .get("x-egress-error-class")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        if let Some(class) = egress_class.as_deref() {
+            let (code, retryable, is_tls) = map_egress_class(class);
+            ctx.upstream_error_code = Some(code);
+            if let Some(detail) = upstream_response
+                .headers
+                .get("x-egress-error-detail")
+                .and_then(|v| v.to_str().ok())
+            {
+                ctx.upstream_error_detail = Some(detail.to_owned());
+            }
+            // Strip internal headers before any client-facing path sees them.
+            let _ = upstream_response.remove_header("x-egress-error-class");
+            let _ = upstream_response.remove_header("x-egress-error-detail");
+
+            let status = ctx.upstream_status.unwrap_or(502);
+
+            if is_tls {
+                // Fingerprint/TLS block — retrying a different key won't help.
+                // Surface to the client; do not retry.
+                metrics::counter!(
+                    "gw_retry_attempt_total",
+                    "outcome" => "tls_blocked",
+                )
+                .increment(1);
+                let mut e = Error::new(ErrorType::HTTPStatus(status));
+                e.as_up();
+                return Err(e);
+            }
+
+            if retryable {
+                if let Some(candidates) = ctx.picked_candidates.as_ref() {
+                    let remaining = remaining_failover_candidates(candidates, ctx);
+                    let attempt = ctx.failover_attempt.saturating_add(1);
+                    let decision = self.failover_executor.next_candidate(&remaining, attempt);
+                    if let FailoverDecision::Retry(new_key) = decision {
+                        if let Some(k) = ctx.picked_vendor_key.as_ref() {
+                            if !ctx.retry_blacklist.iter().any(|id| id == &k.key_id) {
+                                ctx.retry_blacklist.push(k.key_id.clone());
+                            }
+                        }
+                        metrics::counter!(
+                            "gw_retry_attempt_total",
+                            "outcome" => "egress_retry",
+                        )
+                        .increment(1);
+                        ctx.failover_attempt = attempt;
+                        ctx.inflight_guard = None;
+                        ctx.picked_vendor_key = Some(new_key);
+                        ctx.picked_vendor = None;
+                        ctx.upstream_codec = None;
+                        ctx.upstream_status = None;
+                        ctx.body_started = false;
+
+                        let mut e = Error::new(ErrorType::HTTPStatus(status));
+                        e.as_up();
+                        e.set_retry(true);
+                        return Err(e);
+                    }
+                    // Exhausted / NotRetryable → fall through to error classification.
+                }
+            }
+            // Non-retryable, or retry candidates exhausted: fall through so the
+            // status >= 400 error-classification block emits a client error body.
+        }
+
+        if let (None, Some(status)) = (egress_class.as_ref(), ctx.upstream_status) {
             if status == 429 {
                 if let Some(key) = ctx.picked_vendor_key.as_ref() {
                     self.adaptive_rpm.observe_429(
@@ -1159,5 +1321,74 @@ mod tests {
             Error::new(ErrorType::Custom("gw_short_circuit")),
         );
         assert!(!is_gw_short_circuit(&e));
+    }
+
+    #[test]
+    fn egress_class_mapping_is_stable() {
+        use super::map_egress_class;
+        use gw_core::error::codes::*;
+        assert_eq!(
+            map_egress_class("tls"),
+            (GW_UPSTREAM_TLS_ERROR, false, true)
+        );
+        assert_eq!(
+            map_egress_class("connect_timeout"),
+            (GW_UPSTREAM_CONNECT_TIMEOUT, true, false)
+        );
+        assert_eq!(
+            map_egress_class("connect_refused"),
+            (GW_UPSTREAM_CONNECT_REFUSED, true, false)
+        );
+        assert_eq!(
+            map_egress_class("read_timeout"),
+            (GW_UPSTREAM_READ_TIMEOUT, true, false)
+        );
+        assert_eq!(
+            map_egress_class("h2_protocol"),
+            (GW_UPSTREAM_H2_PROTOCOL, true, false)
+        );
+        assert_eq!(
+            map_egress_class("body_truncated"),
+            (GW_UPSTREAM_BODY_TRUNCATED, false, false)
+        );
+        assert_eq!(
+            map_egress_class("proxy_error"),
+            (GW_UPSTREAM_PROXY_ERROR, true, false)
+        );
+        assert_eq!(map_egress_class("panic"), (GW_UPSTREAM_PANIC, false, false));
+        assert_eq!(
+            map_egress_class("something_else"),
+            (GW_UPSTREAM_UNKNOWN, false, false)
+        );
+    }
+
+    #[test]
+    fn redact_egress_headers_strips_internal_and_keeps_rest() {
+        let input = vec![
+            (
+                "X-Egress-Target".to_string(),
+                "api.example.com:443".to_string(),
+            ),
+            ("x-egress-profile".to_string(), "chrome".to_string()),
+            ("X-EGRESS-PROXY".to_string(), "http://p".to_string()),
+            ("x-egress-error-class".to_string(), "tls".to_string()),
+            (
+                "X-Egress-Error-Detail".to_string(),
+                "handshake failed".to_string(),
+            ),
+            ("authorization".to_string(), "Bearer secret".to_string()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        let out = super::redact_egress_headers(input);
+        let names: Vec<String> = out.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+        // All five egress-internal headers (any case) are gone.
+        assert!(
+            !names.iter().any(|n| n.starts_with("x-egress-")),
+            "egress headers leaked: {names:?}"
+        );
+        // Non-egress headers are preserved, in order.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "authorization");
+        assert_eq!(out[1].0, "Content-Type");
     }
 }

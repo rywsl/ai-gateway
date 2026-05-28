@@ -106,7 +106,7 @@ fn validate_table(table: &str) -> anyhow::Result<()> {
     if ENTITY_TABLES.contains(&table) {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("table '{}' not in entity allowlist", table))
+        Err(anyhow::anyhow!("table '{table}' not in entity allowlist"))
     }
 }
 

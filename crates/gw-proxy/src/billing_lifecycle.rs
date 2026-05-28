@@ -51,7 +51,7 @@ pub fn transition_to(ctx: &mut ReqCtx, to: VendorExposure) {
         return;
     }
     if !can_transition(from, to) {
-        debug_assert!(false, "invalid transition {:?} -> {:?}", from, to);
+        debug_assert!(false, "invalid transition {from:?} -> {to:?}");
         tracing::warn!(
             ?from,
             ?to,
@@ -71,8 +71,8 @@ pub fn transition_to(ctx: &mut ReqCtx, to: VendorExposure) {
     ctx.vendor_exposure = to;
     metrics::counter!(
         "gw_billing_exposure_transitions_total",
-        "from" => format!("{:?}", from).to_lowercase(),
-        "to" => format!("{:?}", to).to_lowercase(),
+        "from" => format!("{from:?}").to_lowercase(),
+        "to" => format!("{to:?}").to_lowercase(),
     )
     .increment(1);
 }

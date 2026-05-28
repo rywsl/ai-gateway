@@ -14,3 +14,12 @@ secrecy.workspace = true
 time.workspace = true
 url.workspace = true
 smallvec.workspace = true
+uuid = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+moka = { workspace = true, features = ["future"] }
+hex = { workspace = true }
+metrics.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,4 +1,5 @@
 use crate::ids::*;
+use crate::impersonate::VendorEgressMode;
 use crate::protocol::ProtocolKind;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -165,6 +166,10 @@ pub struct Vendor {
     pub default_proxy: Option<Url>,
     #[serde(default)]
     pub contact: Option<String>,
+    /// Egress selection — defaults to `Rustls` (preserves existing behaviour).
+    /// `Impersonate` routes through gw-egress-impersonate's loopback proxy.
+    #[serde(default)]
+    pub egress_mode: VendorEgressMode,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -213,6 +218,12 @@ pub struct VendorKey {
     /// Populated by `load_vendor_key` after decrypting the `oauth` sub-object
     /// from the JSONB payload. `None` for all existing rows until backfilled.
     pub oauth: Option<OAuthCredentials>,
+    /// Per-VendorKey persisted impersonation identity (Aether-style lazy
+    /// persist). `None` for keys that have not yet emitted an impersonated
+    /// request, or for keys whose Vendor uses `egress_mode = Rustls`.
+    /// Populated by `ensure_identity` on first impersonated dispatch and
+    /// re-derived if `profile_kind` does not match the current vendor profile.
+    pub identity_snapshot: Option<crate::impersonate::IdentitySnapshot>,
 }
 
 impl std::fmt::Debug for VendorKey {
@@ -420,6 +431,10 @@ pub struct OAuthCredentials {
     pub access_expires_at: OffsetDateTime,
     pub token_endpoint: String,
     pub scope: Vec<String>,
+    /// Google Cloud "quota project" (`X-Goog-User-Project` header).
+    /// `None` for non-Google credentials; populated for Gemini OAuth keys
+    /// where the user explicitly bound the credential to a billing project.
+    pub quota_project_id: Option<String>,
 }
 
 impl std::fmt::Debug for OAuthCredentials {
@@ -430,6 +445,7 @@ impl std::fmt::Debug for OAuthCredentials {
             .field("access_expires_at", &self.access_expires_at)
             .field("token_endpoint", &self.token_endpoint)
             .field("scope", &self.scope)
+            .field("quota_project_id", &self.quota_project_id)
             .finish()
     }
 }

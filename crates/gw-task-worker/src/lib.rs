@@ -236,6 +236,7 @@ pub struct TimeoutConfig {
 }
 
 impl WorkerConfig {
+    #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, figment::Error> {
         Figment::from(Serialized::defaults(Self::default()))
             .merge(Toml::file("config/task-default.toml"))
@@ -243,6 +244,7 @@ impl WorkerConfig {
             .extract()
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn from_toml_str(input: &str) -> Result<Self, figment::Error> {
         Figment::from(Serialized::defaults(Self::default()))
             .merge(Toml::string(input))
@@ -404,7 +406,7 @@ pub async fn run() -> anyhow::Result<()> {
         RedisCancelSource::new_with_prefix(pool.clone(), cfg.worker.redis_prefix.clone()),
         registry.clone(),
         CancelLoopConfig {
-            consumer_name: format!("{}-cancel", consumer_name),
+            consumer_name: format!("{consumer_name}-cancel"),
             block_timeout: cfg.cancel_block(),
             cancellation_token: shutdown.clone(),
         },

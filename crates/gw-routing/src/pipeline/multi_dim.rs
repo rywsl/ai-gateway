@@ -208,6 +208,7 @@ mod tests {
             exclusive_capability_match: false,
             tunnel_preference: None,
             oauth: None,
+            identity_snapshot: None,
         })
     }
 

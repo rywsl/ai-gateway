@@ -38,7 +38,7 @@ pub async fn resolve(pool: &RedisPool, hostname: &str) -> anyhow::Result<String>
         return Ok(cached.clone());
     }
 
-    let l2_key = format!("{}{}", L2_KEY_PREFIX, hostname);
+    let l2_key = format!("{L2_KEY_PREFIX}{hostname}");
 
     let id = if let Ok(env_val) = std::env::var(ENV_VAR) {
         // L0: env override. Sync into L2 so other tools observing L2 see the same value.
@@ -71,7 +71,7 @@ pub fn current() -> Option<String> {
 }
 
 pub fn heartbeat_key(instance_id: &str) -> String {
-    format!("gateway:instance:{}:heartbeat", instance_id)
+    format!("gateway:instance:{instance_id}:heartbeat")
 }
 
 pub async fn renew_heartbeat(pool: &RedisPool, instance_id: &str) -> anyhow::Result<()> {

@@ -25,13 +25,11 @@ async fn timeout_returns_none_on_stall() {
     assert!(out.is_none(), "stalled loader must resolve to None");
     assert!(
         elapsed >= Duration::from_millis(50),
-        "must wait at least the deadline (50ms), got {:?}",
-        elapsed
+        "must wait at least the deadline (50ms), got {elapsed:?}"
     );
     assert!(
         elapsed < Duration::from_millis(250),
-        "must not significantly exceed the deadline, got {:?}",
-        elapsed
+        "must not significantly exceed the deadline, got {elapsed:?}"
     );
 }
 

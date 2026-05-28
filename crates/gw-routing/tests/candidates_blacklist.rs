@@ -38,6 +38,7 @@ fn seed_key(id: &str) -> VendorKey {
         exclusive_capability_match: false,
         tunnel_preference: None,
         oauth: None,
+        identity_snapshot: None,
     }
 }
 

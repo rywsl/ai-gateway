@@ -358,7 +358,7 @@ fn ir_content_to_openai_user<'a>(c: &ContentIR<'a>) -> OpenAiUserContent<'a> {
                         source: ImageSource::B64 { media_type, data },
                     } => OpenAiContentPart::ImageUrl {
                         image_url: OpenAiImageUrl {
-                            url: Cow::Owned(format!("data:{};base64,{}", media_type, data)),
+                            url: Cow::Owned(format!("data:{media_type};base64,{data}")),
                             detail: None,
                         },
                     },
