@@ -249,6 +249,96 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
     }
 }
 
+fn is_nogroup_error(e: &fred::error::RedisError) -> bool {
+    e.to_string().contains("NOGROUP")
+}
+
+use crate::managed_loop::{ManagedLoop, Outcome, RecoverReason};
+
+#[async_trait::async_trait]
+impl ManagedLoop for StreamConsumer {
+    fn name(&self) -> &'static str {
+        "stream_consumer"
+    }
+
+    async fn ensure(&self) -> Result<(), anyhow::Error> {
+        self.ensure_groups().await
+    }
+
+    async fn tick(&self) -> Outcome {
+        let consumer_name = format!("{}-consumer", self.instance_id);
+        let client = self.redis.pool.next();
+        // Raw xreadgroup: RESP Null on BLOCK timeout is handled explicitly.
+        let raw: Result<RedisValue, fred::error::RedisError> = client
+            .xreadgroup(
+                &*self.instance_id,
+                &consumer_name,
+                Some(COUNT_PER_POLL),
+                Some(BLOCK_MS),
+                false,
+                vec![ENTITY_STREAM, COUNTER_STREAM],
+                vec![">", ">"],
+            )
+            .await;
+
+        let value = match raw {
+            Ok(v) => v,
+            Err(e) if is_nogroup_error(&e) => {
+                return Outcome::Recover(RecoverReason::UpstreamResourceGone("NOGROUP"));
+            }
+            Err(_e) => {
+                tracing::warn!(
+                    target: "gw_store::stream_consumer",
+                    error = %_e,
+                    "xreadgroup failed; backing off"
+                );
+                return Outcome::Sleep(Duration::from_millis(500));
+            }
+        };
+
+        if value.is_null() {
+            return Outcome::Continue;
+        }
+        if let RedisValue::Array(ref a) = value {
+            if a.is_empty() {
+                return Outcome::Continue;
+            }
+        }
+
+        let entries: XReadResponse<String, String, String, String> =
+            match value.into_xread_response() {
+                Ok(m) => m,
+                Err(_e) => {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        error = %_e,
+                        "xreadgroup non-null reply failed to parse; backing off"
+                    );
+                    return Outcome::Sleep(Duration::from_millis(500));
+                }
+            };
+
+        for (stream, stream_entries) in entries {
+            for (entry_id, fields) in stream_entries {
+                self.apply(&stream, &fields).await;
+                let ack: Result<u64, _> = client
+                    .xack(stream.as_str(), &*self.instance_id, entry_id.clone())
+                    .await;
+                if let Err(e) = ack {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        error = %e,
+                        stream = %stream,
+                        entry_id = %entry_id,
+                        "xack failed; will be redelivered"
+                    );
+                }
+            }
+        }
+        Outcome::Continue
+    }
+}
+
 /// Test-only helper: drive [`apply_entity_event`] against an [`EntityStore`]
 /// without needing a live [`StreamConsumer`] or Redis connection.
 #[doc(hidden)]
