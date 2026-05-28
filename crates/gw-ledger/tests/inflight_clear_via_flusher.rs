@@ -105,3 +105,63 @@ async fn flusher_dels_inflight_key_on_xadd_success() {
     let exists_after: u64 = redis.pool.exists(&key).await.unwrap();
     assert_eq!(exists_after, 0, "inflight key DEL'd after XADD success");
 }
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers Redis)"]
+async fn full_bypass_sync_xadd_dels_inflight_key() {
+    let node = Redis::default().start().await.unwrap();
+    let port = node.get_host_port_ipv4(6379).await.unwrap();
+    let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
+        .await
+        .unwrap();
+    let instance = "test-inst-bypass".to_string();
+
+    let inflight = InflightLedger::new((*redis.pool).clone(), instance.clone());
+    inflight
+        .register(&InflightRegistration {
+            request_id: "req-bypass".to_string(),
+            attempt_index: 0,
+            user_id: "u".to_string(),
+            vendor_key_id: "vk".to_string(),
+            freeze_amount: 0,
+            prompt_estimate_tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    let key = InflightLedger::test_key(&instance, "req-bypass", 0);
+    assert_eq!(redis.pool.exists::<u64, _>(&key).await.unwrap(), 1);
+
+    // Force the channel to be Full immediately: capacity = 1, ticker disabled.
+    let ledger = Ledger::start(
+        redis.clone(),
+        instance.clone(),
+        1,
+        1,
+        Duration::from_secs(600), // ticker effectively disabled
+    );
+    // First emit fills the channel.
+    ledger
+        .emit(LedgerItem {
+            record: fresh_usage_record("filler", 0),
+            clear: None,
+        })
+        .await;
+    // Second emit must hit the Full branch → sync_xadd.
+    ledger
+        .emit(LedgerItem {
+            record: fresh_usage_record("req-bypass", 0),
+            clear: Some(ClearKey {
+                request_id: "req-bypass".to_string(),
+                attempt_index: 0,
+            }),
+        })
+        .await;
+
+    // sync_xadd is awaited inside emit; no sleep needed for the bypass path.
+    assert_eq!(
+        redis.pool.exists::<u64, _>(&key).await.unwrap(),
+        0,
+        "Full-branch sync_xadd → DEL"
+    );
+}

@@ -111,13 +111,28 @@ impl Ledger {
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(item_back)) => {
                 metrics::counter!("gw_billing_mpsc_bypass_total").increment(1);
-                if let Err(e) = sync_xadd(&self.redis, &item_back.record).await {
-                    tracing::error!(error = ?e, "must-deliver sync XADD bypass failed; routing to DLQ");
-                    let payload = serde_json::to_string(&item_back.record)
-                        .unwrap_or_else(|_| "{}".to_string());
-                    let wrapped = wrap_for_dlq(&payload, "sync_xadd_bypass_failed", 0);
-                    if dlq_xadd(&self.redis, wrapped).await.is_err() {
-                        metrics::counter!("gateway_usage_records_lost_total").increment(1);
+                match sync_xadd(&self.redis, &item_back.record).await {
+                    Ok(()) => {
+                        // XADD durably landed — apply the DEL rule.
+                        if let Some(ck) = &item_back.clear {
+                            sync_del_inflight(&self.redis, &self.instance_id, ck).await;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = ?e, "must-deliver sync XADD bypass failed; routing to DLQ");
+                        let payload = serde_json::to_string(&item_back.record)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        let wrapped = wrap_for_dlq(&payload, "sync_xadd_bypass_failed", 0);
+                        if dlq_xadd(&self.redis, wrapped).await.is_err() {
+                            metrics::counter!("gateway_usage_records_lost_total").increment(1);
+                        }
+                        if item_back.clear.is_some() {
+                            metrics::counter!(
+                                "gw_billing_inflight_clear_total",
+                                "outcome" => "skipped_dlq"
+                            )
+                            .increment(1);
+                        }
                     }
                 }
             }
@@ -149,6 +164,28 @@ async fn sync_xadd(redis: &RedisCtx, rec: &UsageRecord) -> Result<(), String> {
         .xadd::<(), _, _, _, _>(USAGE_STREAM, false, None::<()>, "*", ("payload", payload))
         .await
         .map_err(|e| format!("xadd: {e}"))
+}
+
+/// DEL a single inflight key after a successful sync_xadd bypass. Best-effort:
+/// failure is warned + counted but never propagated (record durability has
+/// already been confirmed at the caller; key residue is harmless and
+/// reconciler-recoverable).
+async fn sync_del_inflight(redis: &RedisCtx, instance_id: &str, ck: &ClearKey) {
+    let key = format!(
+        "billing:inflight:{instance_id}:{}:{}",
+        ck.request_id, ck.attempt_index
+    );
+    let client = redis.pool.next();
+    match client.del::<(), _>(&[key.as_str()]).await {
+        Ok(_) => {
+            metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "ok").increment(1);
+        }
+        Err(e) => {
+            tracing::warn!(target: "gw_ledger", error = %e, key, "sync inflight DEL failed");
+            metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "del_failed")
+                .increment(1);
+        }
+    }
 }
 
 fn dlq_cap() -> XCap {
