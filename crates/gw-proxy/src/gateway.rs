@@ -118,6 +118,31 @@ fn map_egress_class(class: &str) -> (&'static str, bool, bool) {
     }
 }
 
+/// Gateway-internal egress control + error headers (Task 4.5). These are
+/// injected by `inject_vendor_headers` (request side) or emitted by the
+/// loopback egress service (response side) and must never be persisted into
+/// the detailed archive. Match is case-insensitive.
+const EGRESS_INTERNAL_HEADERS: &[&str] = &[
+    "x-egress-target",
+    "x-egress-profile",
+    "x-egress-proxy",
+    "x-egress-error-class",
+    "x-egress-error-detail",
+];
+
+/// Drop any gateway-internal egress headers from a captured header snapshot
+/// before it is sent to the detailed archive. Preserves order of all other
+/// headers.
+fn redact_egress_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .filter(|(name, _)| {
+            let lower = name.to_ascii_lowercase();
+            !EGRESS_INTERNAL_HEADERS.contains(&lower.as_str())
+        })
+        .collect()
+}
+
 fn header_u32(response: &ResponseHeader, name: &str) -> Option<u32> {
     response
         .headers
@@ -332,7 +357,7 @@ impl LlmGateway {
                 payload: SurfacePayload::Response(
                     ResponsePayload {
                         status: meta.status,
-                        headers: meta.headers,
+                        headers: redact_egress_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
@@ -359,7 +384,7 @@ impl LlmGateway {
             payload: SurfacePayload::Response(
                 ResponsePayload {
                     status: downstream_meta.status,
-                    headers: downstream_meta.headers,
+                    headers: redact_egress_headers(downstream_meta.headers),
                     body_b64: String::new(),
                 },
                 body,
@@ -448,7 +473,7 @@ impl ProxyHttp for LlmGateway {
                         method: meta.method,
                         url: meta.url,
                         http_version: meta.http_version,
-                        headers: meta.headers,
+                        headers: redact_egress_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
@@ -562,7 +587,7 @@ impl ProxyHttp for LlmGateway {
                         method: meta.method,
                         url: meta.url,
                         http_version: meta.http_version,
-                        headers: meta.headers,
+                        headers: redact_egress_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
@@ -1300,5 +1325,26 @@ mod tests {
             map_egress_class("something_else"),
             (GW_UPSTREAM_UNKNOWN, false, false)
         );
+    }
+
+    #[test]
+    fn redact_egress_headers_strips_internal_and_keeps_rest() {
+        let input = vec![
+            ("X-Egress-Target".to_string(), "api.example.com:443".to_string()),
+            ("x-egress-profile".to_string(), "chrome".to_string()),
+            ("X-EGRESS-PROXY".to_string(), "http://p".to_string()),
+            ("x-egress-error-class".to_string(), "tls".to_string()),
+            ("X-Egress-Error-Detail".to_string(), "handshake failed".to_string()),
+            ("authorization".to_string(), "Bearer secret".to_string()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        let out = super::redact_egress_headers(input);
+        let names: Vec<String> = out.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+        // All five egress-internal headers (any case) are gone.
+        assert!(!names.iter().any(|n| n.starts_with("x-egress-")), "egress headers leaked: {names:?}");
+        // Non-egress headers are preserved, in order.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "authorization");
+        assert_eq!(out[1].0, "Content-Type");
     }
 }
