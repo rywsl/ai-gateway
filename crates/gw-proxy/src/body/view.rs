@@ -11,7 +11,7 @@
 
 use bytes::Bytes;
 use gw_codec::compression::Encoding;
-use once_cell::unsync::OnceCell;
+use once_cell::sync::OnceCell;
 
 /// Errors that can occur when decompressing a request body.
 #[derive(Debug)]
