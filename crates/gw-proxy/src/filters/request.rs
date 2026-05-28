@@ -458,7 +458,6 @@ pub async fn run(
         body_buf.extend_from_slice(&chunk);
     }
     let body_bytes = bytes::Bytes::from(body_buf);
-    ctx.cached_body = Some(body_bytes.clone());
     ctx.body = Some(crate::body::RequestBodyView::from_raw(
         body_bytes.clone(),
         ctx.req_content_encoding,
@@ -471,9 +470,9 @@ pub async fn run(
         Some(&body_bytes),
     );
 
-    // Wire-fidelity archive: snapshot the raw downstream request. `cached_body`
-    // is overwritten by `upstream::rewrite_request` on the cross-protocol path,
-    // so the snapshot must happen now while we still have the original bytes.
+    // Wire-fidelity archive: snapshot the raw downstream request. The body
+    // view's outbound_or_raw() may be overwritten by upstream::rewrite_request
+    // on the cross-protocol path, so the snapshot must happen now.
     ctx.downstream_request_body = Some(Arc::new(body_bytes.clone()));
     {
         use crate::ctx::DownstreamRequestMeta;
@@ -520,7 +519,8 @@ pub async fn run(
                     ctx.req_content_encoding,
                     gw_codec::compression::Encoding::Identity
                 ) {
-                    ctx.cached_body = Some(decoded.clone());
+                    // Pre-populate view's decoded OnceCell so codec parse reuses
+                    // the bytes HMAC already decompressed — decompress happens once.
                     if let Some(view) = ctx.body.as_ref() {
                         view.prefill_decoded(decoded);
                     }
@@ -618,14 +618,11 @@ pub async fn run(
         match view.decoded(32 * 1024 * 1024) {
             Ok(b) => b.clone(),
             Err(_) => {
-                // Decompression failed; ctx.cached_body still holds the compressed
-                // raw bytes; fall back to raw for codec (which will likely fail parse
-                // and emit a clean 400). This path is rare: normally the HMAC block
-                // already rejects a bad compressed body. Keep cached_body as fallback.
-                ctx.cached_body
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| body_bytes.clone())
+                // Decompression failed; fall back to raw bytes for codec
+                // (which will likely fail parse and emit a clean 400).
+                // This path is rare: normally the HMAC block rejects bad
+                // compressed bodies before we get here.
+                view.raw().clone()
             }
         }
     };

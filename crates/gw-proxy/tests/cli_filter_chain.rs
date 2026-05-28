@@ -23,7 +23,6 @@ fn cli_ctx(shape: ApiShape) -> ReqCtx {
     let body_bytes = Bytes::from_static(br#"{"model":"claude-sonnet-4-20250514","stream":false,"vendor_extension":{"keep":true}}"#);
     ReqCtx {
         client_shape: Some(shape),
-        cached_body: Some(body_bytes.clone()),
         body: Some(gw_proxy::body::RequestBodyView::from_raw(
             body_bytes,
             gw_codec::compression::Encoding::Identity,
@@ -79,7 +78,7 @@ fn test_cli_request_billing_recorded() {
     let hints = request::extract_cli_request_hints(
         ApiShape::ClaudeCli,
         "/v1/messages",
-        ctx.cached_body.as_deref(),
+        ctx.body.as_ref().and_then(|v| v.decoded(64 * 1024).ok()).map(|b| b.as_ref()),
     );
     ctx.model = hints.model.map(gw_core::ids::ModelName::from);
     ctx.is_stream = hints.stream.unwrap_or(false);
@@ -103,11 +102,11 @@ fn test_cli_request_billing_recorded() {
 #[test]
 fn test_cli_request_body_not_ir_converted() {
     let mut ctx = cli_ctx(ApiShape::ClaudeCli);
-    let original = ctx.cached_body.clone().unwrap();
+    let original = ctx.body.as_ref().unwrap().raw().clone();
     let outbound = upstream::cli_passthrough_body(&mut ctx, ProtocolKind::Anthropic).unwrap();
 
     assert_eq!(outbound, original);
-    assert_eq!(ctx.cached_body.as_ref(), Some(&original));
+    assert_eq!(ctx.body.as_ref().unwrap().outbound_or_raw(), &original);
     assert!(UPSTREAM_RS.contains("cli_passthrough_body"));
     assert!(RESPONSE_RS.contains("run_cli_body_filter"));
 }
