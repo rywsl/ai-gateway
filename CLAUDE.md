@@ -29,6 +29,7 @@ Capability surface highlights:
 - **Routing**: 8 strategies (`FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky`). Multi-dim per-(key, format) health, sliding-window cooldown, per-key in-flight cap.
 - **Capability**: model → required capabilities → matching keys via `gw-capability::CapabilityResolver`.
 - **Tunnel**: optional WebSocket transport to remote proxy nodes (`--features tunnel`). When `cfg.tunnel.enabled = true`, `pick_peer` consults `TunnelStack::resolve` per-request; otherwise the byte-identical Direct path runs. `VendorKey.tunnel_preference.require_tunnel = true` makes a missing node a hard `GW_TUNNEL_NO_NODE` rather than a silent Direct fallback. Boot-time only — flipping `enabled` requires restart. See [`docs/superpowers/specs/2026-05-22-tunnel-t-design.md`](docs/superpowers/specs/2026-05-22-tunnel-t-design.md) and `[tunnel]` in `config/default.toml`.
+- **Egress impersonation**: optional TLS-fingerprint + browser-header impersonation for vendor keys whose `egress_mode = Impersonate { profile }`. Routes the upstream connection through an in-process loopback (UDS by default) running on `wreq` + BoringSSL, which presents a Chrome-class JA3/JA4 fingerprint, HTTP/2 SETTINGS, and a per-identity static-header set (Claude Code / OpenAI Codex / Gemini CLI). Direct vendors are byte-identical to before (no rustls regression). Off by default at the workspace level (`[egress].disabled = true` is the kill-switch); enable per-vendor by setting `egress_mode`. See [`docs/superpowers/specs/2026-05-28-egress-impersonation-design.md`](docs/superpowers/specs/2026-05-28-egress-impersonation-design.md) and `[egress]` in `config/default.toml`.
 - **Soak / chaos harness**: a 50,000-req / 60-s end-to-end soak (3 protocols × stream/non-stream × `off|light|heavy` upstream chaos) driven from `tests/e2e/client/soak/`. Hard invariants cover process liveness, strict-equality account consistency (`usage:records + dlq == fake_upstream_hits_total` at drain steady state), resource gauge release, error-code catalog compliance, and chaos causal reconciliation. Reports are AI-consumable JSON+JSONL at `tests/e2e/client/.soak_report/`. See [`docs/superpowers/specs/2026-05-22-chaos-soak-design.md`](docs/superpowers/specs/2026-05-22-chaos-soak-design.md). Gateway code is not touched — soak only consumes existing surfaces (§C1).
 - **Observability**: `usage:records` (billing), `usage:detailed` (wire-fidelity archive — 5 per-surface XADD per request, tiered compression raw/lz4/zstd, no redaction, drop-on-outage; Go drainer mandatory), Prometheus `/metrics`, `/livez` + `/readyz`, admin `/healthz/*` (token-gated). Billing robustness (lifecycle state machine, InflightLedger crash recovery, T0 emit-lag watchdog, per-attempt UsageRecord) per spec [`2026-05-24-billing-robustness-design.md`](docs/superpowers/specs/2026-05-24-billing-robustness-design.md).
 
@@ -53,7 +54,7 @@ Tracking:
 ## Source layout
 
 ```
-crates/                  Rust workspace (13 crates; see docs/architecture.md §Workspace layout)
+crates/                  Rust workspace (15 crates; see docs/architecture.md §Workspace layout)
 config/default.toml      figment base layer; per-machine override at config/local.toml (gitignored)
 docs/
   architecture.md        Layered architecture, crates, traits, persistence, invariants
@@ -62,7 +63,8 @@ docs/
   go-contracts/          Rust ↔ Go cross-process contracts (main.md + parts/01-03)
   superpowers/specs/     Authoritative design specs
   superpowers/plans/     Implementation plans + status
-  issues/                Operational gotchas (e.g. fred + redis:7 XREADGROUP parse warn)
+  issues/                Operational gotchas (e.g. fred + redis:7 XREADGROUP parse warn,
+                         egress-impersonate known gaps)
 scripts/check-invariants.sh   Layering / namespace / retired-symbol lints
 ```
 
@@ -166,10 +168,11 @@ Ports: `8000` business proxy, `9090` Prometheus `/metrics`, `8080` health (`/liv
 
 ## Toolchain & build pitfalls
 
-- **Rust 1.86.0** is pinned in `rust-toolchain.toml`. Do not bump without coordinating: Pingora 0.8 pulls `getrandom 0.4` (via `cf-rustracing`) whose `wasip3` target manifest needs `edition2024` (min rustc 1.85). 1.86 matches CI.
+- **Rust 1.88.0** is pinned in `rust-toolchain.toml`. The bump from 1.86 was driven by `wreq` (egress-impersonate transitive) which requires a newer compiler; Pingora 0.8 + `getrandom 0.4`'s `wasip3` target manifest is still satisfied.
 - **`GW_KMS__KEK_HEX` must contain at least one a–f character.** Figment's env deserializer tries integer coercion first, so an all-digit 64-char hex string round-trips as `i64` and fails the hex parser. `python3 secrets.token_hex(32)` is fine; hand-rolled values must include a letter.
 - **No sqlx offline cache.** v1 uses runtime-checked `sqlx::query` / `sqlx::raw_sql` exclusively — there is no `.sqlx/` directory and no `cargo sqlx prepare` step. When the codebase migrates to `query!` macros the workflow will be added in `docs/dev-setup.md`.
 - Migrations live at `crates/gw-store/migrations/0001_initial.sql`, `0002_gemini_file_mapping.sql`, `0003_model_mapping.sql` and are **not auto-applied**; for a host Postgres run them with `psql -f`.
+- **boring-sys system deps.** The egress-impersonate stack pulls `wreq` → `boring-sys`, which bundles BoringSSL and runs bindgen at build time. The Docker builder installs `cmake`, `build-essential`, `pkg-config`, `perl`, `libssl-dev`, `libclang-dev` for this. A host build needs the same set (or the equivalent for your distro) on `$PATH`. Without `libclang-dev` the bindgen step fails; without `build-essential` (a C++ toolchain) the BoringSSL build fails.
 
 ## Configuration
 
