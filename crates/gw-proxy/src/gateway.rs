@@ -20,6 +20,7 @@ use gw_codec::gemini::files::GeminiFilesGateway;
 use gw_core::error::codes;
 use gw_core::ids::{RequestId, TraceId};
 use gw_health::KeyHealthStore;
+use gw_ledger::ClearKey;
 use gw_ledger::FreezeGuard;
 use gw_ledger::Ledger;
 use gw_ledger::LedgerItem;
@@ -1049,17 +1050,16 @@ impl ProxyHttp for LlmGateway {
                             ledger
                                 .emit(LedgerItem {
                                     record: rec,
-                                    clear: None,
+                                    clear: Some(ClearKey {
+                                        request_id: request_id.clone(),
+                                        attempt_index: old_attempt,
+                                    }),
                                 })
                                 .await;
-                            if let Err(e) = inflight.clear(&request_id, old_attempt).await {
-                                tracing::warn!(
-                                    error = ?e,
-                                    request_id = %request_id,
-                                    attempt = old_attempt,
-                                    "fail_to_connect on_retry: inflight clear failed"
-                                );
-                            }
+                            // inflight.clear is NOT called here — see
+                            // docs/superpowers/specs/2026-05-29-billing-record-durability-design.md §3.6.
+                            // If this spawn never runs (process shutdown), the inflight key remains
+                            // and the startup reconciler emits a CrashFallback — A2 closed.
                         });
                     }
 
