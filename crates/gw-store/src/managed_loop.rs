@@ -37,7 +37,7 @@ impl Supervisor {
         let name = l.name();
         tokio::spawn(async move {
             if let Err(e) = l.ensure().await {
-                let extra = format!("{name}: {:?}", e);
+                let extra = format!("{name}: {e:?}");
                 gw_core::observability::observe(gw_core::observability::ErrorObservation {
                     code: "ensure_failed",
                     kind: gw_core::observability::ErrorKind::BackgroundWorker,
@@ -68,7 +68,7 @@ impl Supervisor {
                         let _ = l.ensure().await;
                     }
                     Outcome::Fatal(e) => {
-                        let extra = format!("{name}: {:?}", e);
+                        let extra = format!("{name}: {e:?}");
                         gw_core::observability::observe(gw_core::observability::ErrorObservation {
                             code: "fatal",
                             kind: gw_core::observability::ErrorKind::BackgroundWorker,
