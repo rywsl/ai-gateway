@@ -30,11 +30,16 @@ pub enum EgressBind {
 ///
 /// Obtain via [`EgressHandle::start`]. The handle is cheaply `Clone`; all
 /// clones share the same broadcast channel and therefore all receive the
-/// shutdown signal.
+/// shutdown signal. The `done_rx` watch receiver lets `shutdown` wait
+/// efficiently for the supervisor task to finish rather than polling a
+/// receiver count.
 #[derive(Clone)]
 pub struct EgressHandle {
     bind: EgressBind,
     shutdown_tx: broadcast::Sender<()>,
+    /// Flipped to `true` by the supervisor task just before it returns.
+    /// Used in `shutdown` to block until the supervisor has fully exited.
+    done_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl EgressHandle {
@@ -42,14 +47,20 @@ impl EgressHandle {
     ///
     /// `max_sessions` caps the number of concurrent `wreq::Client` instances
     /// in the pool (one per profile/proxy combination).
-    pub async fn start(bind: EgressBind, max_sessions: usize) -> Self {
+    ///
+    /// This function is synchronous — all spawning is non-blocking.
+    pub fn start(bind: EgressBind, max_sessions: usize) -> Self {
         let pool = Arc::new(ClientPool::new(max_sessions));
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let (done_tx, done_rx) = tokio::sync::watch::channel(false);
         let bind_clone = bind.clone();
         tokio::spawn(async move {
             supervise(bind_clone, pool, shutdown_rx).await;
+            // Signal completion. If all EgressHandle clones are already dropped
+            // this is a no-op (send returns Err); that's fine.
+            let _ = done_tx.send(true);
         });
-        Self { bind, shutdown_tx }
+        Self { bind, shutdown_tx, done_rx }
     }
 
     /// The bind address this handle was started with.
@@ -58,25 +69,28 @@ impl EgressHandle {
     }
 
     /// Cooperative shutdown — signals the supervisor to stop accepting and
-    /// waits up to `drain_timeout` for in-flight egress connections to drain.
+    /// waits up to `drain_timeout` for the supervisor task to finish.
     ///
-    /// Best-effort: polls the subscriber count every 25 ms. If the supervisor
-    /// does not exit within `drain_timeout`, returns anyway so the gateway
-    /// process can terminate.
+    /// Uses a `watch` channel that the supervisor flips to `true` on exit,
+    /// so this returns immediately once the supervisor is done rather than
+    /// spinning on a poll. Falls back to the timeout if the supervisor takes
+    /// too long or its task panics.
     pub async fn shutdown(self, drain_timeout: Duration) {
         // Broadcast the shutdown signal. Errors here mean no receivers (already
         // shut down), which is fine.
         let _ = self.shutdown_tx.send(());
 
-        let deadline = tokio::time::Instant::now() + drain_timeout;
-        loop {
-            if self.shutdown_tx.receiver_count() == 0 {
-                break;
+        let mut done_rx = self.done_rx.clone();
+        let _ = tokio::time::timeout(drain_timeout, async {
+            // If `done_rx` already shows `true` the loop exits on the first
+            // check (supervisor already exited before we called shutdown).
+            while !*done_rx.borrow() {
+                if done_rx.changed().await.is_err() {
+                    // done_tx was dropped (supervisor task panicked); treat as done.
+                    break;
+                }
             }
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        })
+        .await;
     }
 }

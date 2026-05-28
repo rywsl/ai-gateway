@@ -305,8 +305,6 @@ use tokio::net::{TcpListener, UnixListener};
 pub struct Listener {
     bind: EgressBind,
     handler: Arc<Handler>,
-    shutdown_tx: tokio::sync::watch::Sender<bool>,
-    shutdown_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Listener {
@@ -321,13 +319,7 @@ impl Listener {
                 std::fs::remove_file(p)?;
             }
         }
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        Ok(Self {
-            bind,
-            handler,
-            shutdown_tx: tx,
-            shutdown_rx: rx,
-        })
+        Ok(Self { bind, handler })
     }
 
     /// Spawn the accept loop. Returns a [`ListenerJoinHandle`] that can be
@@ -335,8 +327,7 @@ impl Listener {
     pub fn spawn(self) -> ListenerJoinHandle {
         let bind = self.bind.clone();
         let handler = Arc::clone(&self.handler);
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let tx = self.shutdown_tx.clone();
+        let (tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         let task = tokio::spawn(async move {
             match bind {
@@ -345,6 +336,7 @@ impl Listener {
                     tracing::info!("gw-egress-impersonate: UDS listener bound at {:?}", path);
                     loop {
                         tokio::select! {
+                            biased;
                             _ = shutdown_rx.changed() => break,
                             accept = listener.accept() => match accept {
                                 Ok((stream, _)) => {
@@ -364,6 +356,7 @@ impl Listener {
                     );
                     loop {
                         tokio::select! {
+                            biased;
                             _ = shutdown_rx.changed() => break,
                             accept = listener.accept() => match accept {
                                 Ok((stream, peer)) => {
@@ -371,6 +364,9 @@ impl Listener {
                                         tracing::warn!(
                                             "gw-egress-impersonate: rejecting non-loopback peer {peer}"
                                         );
+                                        // Drop the stream — this sends a TCP RST to the
+                                        // caller. Intentional: non-loopback peers are not
+                                        // permitted and should fail fast.
                                         continue;
                                     }
                                     let h = Arc::clone(&handler);

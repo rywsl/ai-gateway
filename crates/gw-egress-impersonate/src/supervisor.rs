@@ -55,7 +55,8 @@ pub async fn supervise(
         tokio::select! {
             res = &mut handle.task => {
                 match res {
-                    // Graceful listener exit (shutdown_tx fired inside Listener).
+                    // Graceful listener exit: the Listener's own shutdown_tx fired
+                    // (i.e. we forwarded the signal on a previous iteration).
                     Ok(Ok(())) => break,
                     Ok(Err(e)) => tracing::warn!("gw-egress-impersonate: listener exited with error: {e}"),
                     Err(e) if e.is_panic() => {
@@ -77,7 +78,11 @@ pub async fn supervise(
         restarts.push(now);
 
         if restarts.len() > 5 {
+            // Note: if bind is a UDS path, the socket file may be left on
+            // disk. The next bind attempt will pre-clean it, but operators
+            // should correlate the stale socket path with this log entry.
             tracing::error!(
+                bind = ?bind,
                 "gw-egress-impersonate: supervisor: >5 restarts/min, giving up"
             );
             metrics::counter!(

@@ -39,6 +39,4 @@ gw-core = { path = "../gw-core" }
 url = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"
-hyper = { version = "1.4", features = ["server", "http1", "client"] }
-http-body-util = { workspace = true }
-bytes = { workspace = true }
+hyper = { workspace = true, features = ["client"] }
