@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub mod rng;
 pub mod claude_code;
 pub mod openai_codex;
+pub mod gemini_cli;
 
 /// Identifies which official upstream CLI client to imitate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
