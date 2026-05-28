@@ -28,7 +28,13 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 futures-util = { workspace = true }
 
+[features]
+## Enables test-only constructors (e.g. `Handler::new_with_scheme`).
+## Never enable in production builds.
+test-utils = []
+
 [dev-dependencies]
+gw-egress-impersonate = { path = ".", features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 gw-core = { path = "../gw-core" }
 url = { workspace = true }

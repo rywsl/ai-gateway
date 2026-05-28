@@ -10,6 +10,9 @@
 //! - **Hop-by-hop headers** (`Connection`, `Keep-Alive`, `Proxy-Authenticate`,
 //!   `Proxy-Authorization`, `TE`, `Trailers`, `Transfer-Encoding`, `Upgrade`) —
 //!   standard HTTP/1.1 hop-by-hop list per RFC 7230 §6.1.
+//! - **`Host`** — stripped so wreq can set the correct value from the target URL.
+//! - **`Content-Length`** — stripped so it does not clash with wreq's chunked
+//!   re-framing of the streamed request body.
 //!
 //! All other headers (including `Authorization`, `User-Agent`, etc.) pass
 //! through verbatim.
@@ -45,8 +48,12 @@ use crate::pool::{ClientPool, PoolKey};
 /// Gateway-internal control headers. Always stripped before egress.
 const INTERNAL_HEADERS: &[&str] = &["x-egress-target", "x-egress-profile", "x-egress-proxy"];
 
-/// Standard HTTP/1.1 hop-by-hop headers (RFC 7230 §6.1). Stripped on both
-/// request egress and response ingress.
+/// Standard HTTP/1.1 hop-by-hop headers (RFC 7230 §6.1) plus gateway-managed
+/// framing headers. Stripped on both request egress and response ingress.
+///
+/// `Host` is stripped so wreq can set it correctly from the target URL.
+/// `Content-Length` is stripped so it does not clash with wreq's chunked
+/// re-framing of the streamed body.
 const HOP_BY_HOP: &[&str] = &[
     "connection",
     "keep-alive",
@@ -56,6 +63,8 @@ const HOP_BY_HOP: &[&str] = &[
     "trailers",
     "transfer-encoding",
     "upgrade",
+    "host",
+    "content-length",
 ];
 
 fn is_internal(name: &str) -> bool {
@@ -100,6 +109,7 @@ impl Handler {
     /// **Test-only.** Pass `scheme = "http"` to target plain-HTTP mock upstreams
     /// in integration tests without TLS. Production code must always use
     /// `Handler::new` which defaults to `https`.
+    #[cfg(feature = "test-utils")]
     #[doc(hidden)]
     pub fn new_with_scheme(capacity: usize, scheme: &'static str) -> Self {
         Self {
