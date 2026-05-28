@@ -14,3 +14,4 @@ secrecy.workspace = true
 time.workspace = true
 url.workspace = true
 smallvec.workspace = true
+uuid = { workspace = true }

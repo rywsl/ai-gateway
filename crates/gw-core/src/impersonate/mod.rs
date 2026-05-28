@@ -6,6 +6,7 @@
 //! and `gw-proxy` (write the forged headers in `inject_vendor_headers`).
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Identifies which official upstream CLI client to imitate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -56,4 +57,38 @@ impl Default for VendorEgressMode {
     fn default() -> Self {
         Self::Rustls
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IdentitySnapshot {
+    pub profile_kind: ImpersonateProfile,
+    pub variable: IdentityVariable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "profile", rename_all = "snake_case")]
+pub enum IdentityVariable {
+    ClaudeCode {
+        os: String,
+        arch: String,
+        node_version: String,
+        package_version: String,
+        timeout: String,
+        chrome_version: String,
+        electron_version: String,
+        user_agent: String,
+    },
+    OpenAiCodex {
+        codex_version: String,
+        os: String,
+        arch: String,
+        installation_id: Uuid,
+        user_agent: String,
+    },
+    GeminiCli {
+        cli_version: String,
+        os_type: String,
+        arch: String,
+        installation_id: Uuid,
+    },
 }

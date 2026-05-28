@@ -43,3 +43,66 @@ fn vendor_egress_mode_serde_tagged() {
     assert!(matches!(rust, VendorEgressMode::Rustls));
 }
 
+use gw_core::impersonate::{IdentitySnapshot, IdentityVariable};
+use uuid::Uuid;
+
+#[test]
+fn identity_snapshot_claude_code_roundtrip() {
+    let snap = IdentitySnapshot {
+        profile_kind: ImpersonateProfile::ClaudeCodeChrome131,
+        variable: IdentityVariable::ClaudeCode {
+            os: "Linux".into(),
+            arch: "arm64".into(),
+            node_version: "v22.14.0".into(),
+            package_version: "0.70.0".into(),
+            timeout: "600".into(),
+            chrome_version: "131.0.6778.265".into(),
+            electron_version: "37.3.0".into(),
+            user_agent: "Mozilla/5.0 (...)".into(),
+        },
+    };
+    let j = serde_json::to_value(&snap).unwrap();
+    assert_eq!(j["profile_kind"], "claude_code_chrome131");
+    assert_eq!(j["variable"]["profile"], "claude_code");
+    let back: IdentitySnapshot = serde_json::from_value(j).unwrap();
+    assert_eq!(back.profile_kind, snap.profile_kind);
+}
+
+#[test]
+fn identity_snapshot_openai_codex_roundtrip() {
+    let id = Uuid::new_v4();
+    let snap = IdentitySnapshot {
+        profile_kind: ImpersonateProfile::OpenAiCodex,
+        variable: IdentityVariable::OpenAiCodex {
+            codex_version: "0.4.2".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            installation_id: id,
+            user_agent: "codex_cli_rs/0.4.2 (linux; x86_64)".into(),
+        },
+    };
+    let s = serde_json::to_string(&snap).unwrap();
+    let back: IdentitySnapshot = serde_json::from_str(&s).unwrap();
+    match back.variable {
+        IdentityVariable::OpenAiCodex { installation_id, .. } => assert_eq!(installation_id, id),
+        _ => panic!("variant mismatch"),
+    }
+}
+
+#[test]
+fn identity_snapshot_gemini_cli_roundtrip() {
+    let id = Uuid::new_v4();
+    let snap = IdentitySnapshot {
+        profile_kind: ImpersonateProfile::GeminiCli,
+        variable: IdentityVariable::GeminiCli {
+            cli_version: "0.1.21".into(),
+            os_type: "linux".into(),
+            arch: "x64".into(),
+            installation_id: id,
+        },
+    };
+    let s = serde_json::to_string(&snap).unwrap();
+    let back: IdentitySnapshot = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.profile_kind, ImpersonateProfile::GeminiCli);
+}
+
