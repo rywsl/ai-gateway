@@ -233,9 +233,9 @@ pub async fn run(
         // with HS256 / static_pem_rs256 fallbacks). Otherwise fall through to
         // the legacy `verify_jwt` so deployments without AuthConfig keep
         // working with v1 semantics (exp-only, JWKS-by-kid).
-        match jwt_validator {
+        let (jwt_uid, jwt_jti): (UserId, Option<String>) = match jwt_validator {
             Some(v) => match v.validate_sub(bearer).await {
-                Ok(uid) => Ok((uid, None, None)),
+                Ok(pair) => pair,
                 Err(jerr) => {
                     let (code, msg) = match jerr {
                         JwtError::InvalidIss => {
@@ -265,12 +265,40 @@ pub async fn run(
                 }
             },
             None => match verify_jwt(bearer, store).await {
-                Ok(uid) => Ok((uid, None, None)),
+                Ok(pair) => pair,
                 Err(err) => {
                     bail!(session, ctx, &err, &request_id)
                 }
             },
+        };
+        // Revocation gate (audit 2026-05-30): a client JWT carrying a `jti`
+        // present in the `jwt:blacklist:` namespace (written by Go on
+        // logout/admin-revoke) is rejected even though it is still within `exp`.
+        // Enforce-when-present: the blacklist is `jti`-keyed, so a token minted
+        // without a `jti` is inherently non-revocable and passes — checking
+        // only when `jti` is present closes the revocable-token hole without
+        // breaking IdPs that omit `jti`. FailClosed: a Redis outage rejects a
+        // `jti`-bearing token (contract go-contracts/parts/01 §1.6 default).
+        if let Some(jti) = jwt_jti.as_deref() {
+            if mgmt_blacklist
+                .check_jwt(jti, gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed)
+                .await
+            {
+                let err = ErrorIR {
+                    category: ErrorCategory::ClientAuth,
+                    status: 401,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_AUTH_JWT_REVOKED),
+                    message: Cow::Borrowed("jwt revoked"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                bail!(session, ctx, &err, &request_id)
+            }
         }
+        Ok((jwt_uid, None, None))
     } else if let (Some(akid_str), Some(akey)) = (api_key_id_hdr.as_ref(), api_key_hdr.as_ref()) {
         let akid = ApiKeyId::from(akid_str.as_str());
         match verify_apikey(akey, &akid, store).await {
@@ -278,6 +306,26 @@ pub async fn run(
                 // Resolve the user_id via the api-key entry.
                 match store.apikey_or_load(&akid).await {
                     Some(entry) => {
+                        // Admit-time status gate (audit 2026-05-30): a key whose
+                        // status was flipped to Disabled via op=status_change (row
+                        // retained, deleted_at still NULL) must be rejected here —
+                        // the loader only filters deleted_at, so a disabled row
+                        // loads and would otherwise authenticate. Checked before
+                        // expiry so a disabled key reports as disabled, not expired.
+                        if check_api_key_status(&entry.value).is_err() {
+                            let err = ErrorIR {
+                                category: ErrorCategory::ClientAuth,
+                                status: 401,
+                                upstream_status: None,
+                                code: Cow::Borrowed(codes::GW_AUTH_KEY_DISABLED),
+                                message: Cow::Borrowed("api key disabled"),
+                                retryable: false,
+                                upstream_raw: None,
+                                request_id: "",
+                                retry_after_secs: None,
+                            };
+                            bail!(session, ctx, &err, &request_id)
+                        }
                         // G1 — reject expired keys before any IR parse or
                         // permission merge. Closed interval: a request issued
                         // exactly at `expires_at` rejects (spec ADR-G1-1).
@@ -380,6 +428,25 @@ pub async fn run(
             bail!(session, ctx, &err, &request_id)
         }
     };
+    // Admit-time status gate (audit 2026-05-30): reject banned users. Like the
+    // disabled-key gate above, the loader only filters deleted_at, so a row
+    // flipped to Banned via op=status_change loads normally and would otherwise
+    // be served. Parent (sub-account owner) banning is enforced in
+    // merge_permissions, which loads the parent.
+    if check_user_status(&user_entry.value).is_err() {
+        let err = ErrorIR {
+            category: ErrorCategory::ClientAuth,
+            status: 403,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_AUTH_USER_BANNED),
+            message: Cow::Borrowed("user banned"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        };
+        bail!(session, ctx, &err, &request_id)
+    }
     ctx.user = Some(user_entry);
     ctx.api_key_id = api_key_id.clone();
 
@@ -562,6 +629,25 @@ pub async fn run(
                     upstream_status: None,
                     code: Cow::Borrowed(codes::GW_AUTH_SIGNATURE_INVALID),
                     message: Cow::Borrowed("signature invalid"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                bail!(session, ctx, &err, &request_id)
+            }
+            Ok((SignatureCheckResult::SecretUnavailable, _)) => {
+                // Fail-closed: signing required but no signature_secret configured.
+                // An empty HMAC key is forgeable, so reject as a server misconfig
+                // (500) rather than verifying against it. GatewayInternal, not
+                // ClientAuth — the client did nothing wrong; ops must populate the
+                // secret (DB-20) before enabling HMAC for this key.
+                let err = ErrorIR {
+                    category: ErrorCategory::GatewayInternal,
+                    status: 500,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_AUTH_SIGNATURE_NOT_CONFIGURED),
+                    message: Cow::Borrowed("signature required but no secret configured"),
                     retryable: false,
                     upstream_raw: None,
                     request_id: "",
@@ -1313,6 +1399,29 @@ pub fn check_api_key_expiry(
         None => Ok(()),
         Some(exp) if now < exp => Ok(()),
         _ => Err(()),
+    }
+}
+
+/// Admit-time status gate for API keys (audit 2026-05-30). Pure so a test can
+/// pin it. A key flipped to `Disabled` via `op=status_change` keeps its row
+/// (`deleted_at` still NULL) and so loads normally — the loader only filters
+/// `deleted_at`. Exhaustive `match` (not `matches!`) so a future `ApiKeyStatus`
+/// variant forces a compile error here rather than silently admitting.
+#[allow(clippy::result_unit_err)]
+pub fn check_api_key_status(entry: &ApiKeyEntry) -> std::result::Result<(), ()> {
+    match entry.status {
+        gw_core::entity::ApiKeyStatus::Active => Ok(()),
+        gw_core::entity::ApiKeyStatus::Disabled => Err(()),
+    }
+}
+
+/// Admit-time status gate for users (audit 2026-05-30). Pure so a test can pin
+/// it. Same rationale as [`check_api_key_status`]: a `Banned` row loads normally.
+#[allow(clippy::result_unit_err)]
+pub fn check_user_status(entry: &gw_core::entity::UserEntry) -> std::result::Result<(), ()> {
+    match entry.status {
+        gw_core::entity::UserStatus::Active => Ok(()),
+        gw_core::entity::UserStatus::Banned => Err(()),
     }
 }
 

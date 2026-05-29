@@ -210,3 +210,71 @@ async fn markup_is_product_of_tiers() {
     // user * main(==user) * group * apikey = 1.5 * 1.5 * 2.0 * 3.0 = 13.5
     assert!((perm.markup_chain.product - 13.5).abs() < 1e-4);
 }
+
+// --- Audit 2026-05-30: banned-user / banned-parent admit-time gate ---
+
+fn banned_user(id: &str, parent: Option<&str>) -> Arc<Versioned<UserEntry>> {
+    Arc::new(Versioned::new(
+        1,
+        UserEntry {
+            user_id: UserId::from(id),
+            parent_id: parent.map(UserId::from),
+            tier: "standard".into(),
+            status: UserStatus::Banned,
+            allowed_models: vec![],
+            allowed_channels: vec![],
+            allowed_groups: vec![],
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_concurrent_streams: 100,
+            daily_quota_tokens: 0,
+            user_group_ids: vec![],
+            markup: 1.0,
+            debug_enabled: false,
+        },
+    ))
+}
+
+#[tokio::test]
+async fn banned_user_is_rejected() {
+    let store = EntityStore::new();
+    store
+        .user
+        .insert(UserId::from("u1"), banned_user("u1", None))
+        .await;
+    let ctx = AuthCtx {
+        user_id: UserId::from("u1"),
+        api_key_id: None,
+        client_ip: ip(),
+    };
+    let err = merge_permissions(&ctx, &store, 0, None)
+        .await
+        .expect_err("banned user must be rejected");
+    assert_eq!(err.code, gw_core::error::codes::GW_AUTH_USER_BANNED);
+    assert_eq!(err.status, 403);
+}
+
+#[tokio::test]
+async fn banned_parent_rejects_active_sub_account() {
+    // The sub-account itself is Active but its parent (owner) is Banned. The
+    // request_filter only loads the direct user; merge_permissions loads the
+    // parent, so this is where a banned owner disables all sub-accounts.
+    let store = EntityStore::new();
+    store
+        .user
+        .insert(UserId::from("sub"), user("sub", Some("owner"), &[], 0, &[], 1.0))
+        .await;
+    store
+        .user
+        .insert(UserId::from("owner"), banned_user("owner", None))
+        .await;
+    let ctx = AuthCtx {
+        user_id: UserId::from("sub"),
+        api_key_id: None,
+        client_ip: ip(),
+    };
+    let err = merge_permissions(&ctx, &store, 0, None)
+        .await
+        .expect_err("active sub-account of a banned owner must be rejected");
+    assert_eq!(err.code, gw_core::error::codes::GW_AUTH_USER_BANNED);
+}

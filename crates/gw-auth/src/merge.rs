@@ -41,6 +41,16 @@ pub async fn merge_permissions(
         None => user.clone(),
     };
 
+    // Defense-in-depth status gate (audit 2026-05-30): the proxy request_filter
+    // already rejects a banned direct user, but this catches any caller path and
+    // — crucially — a banned PARENT (sub-account owner), which the request_filter
+    // does not load. A banned owner disables all of its sub-accounts.
+    if matches!(user.value.status, gw_core::entity::UserStatus::Banned)
+        || matches!(main.value.status, gw_core::entity::UserStatus::Banned)
+    {
+        return Err(user_banned());
+    }
+
     let mut groups = Vec::new();
     for gid in &main.value.user_group_ids {
         if let Some(g) = store.user_group_or_load(gid).await {
@@ -204,6 +214,20 @@ fn user_not_found() -> ErrorIR<'static> {
         upstream_status: None,
         code: Cow::Borrowed(codes::GW_AUTH_INVALID_APIKEY),
         message: Cow::Borrowed("user not found"),
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    }
+}
+
+fn user_banned() -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::ClientAuth,
+        status: 403,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_AUTH_USER_BANNED),
+        message: Cow::Borrowed("user banned"),
         retryable: false,
         upstream_raw: None,
         request_id: "",

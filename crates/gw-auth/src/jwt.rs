@@ -25,9 +25,19 @@ struct Claims {
     sub: String,
     #[allow(dead_code)]
     exp: usize,
+    /// JWT ID — used for revocation-blacklist lookup. Optional: tokens minted
+    /// without a `jti` cannot be individually revoked (the caller decides the
+    /// fail policy).
+    #[serde(default)]
+    jti: Option<String>,
 }
 
-pub async fn verify_jwt(token: &str, store: &EntityStore) -> Result<UserId, ErrorIR<'static>> {
+/// Verify a legacy (JWKS-by-kid, exp-only) JWT and return `(user_id, jti)`.
+/// `jti` is `None` when the token carries no `jti` claim.
+pub async fn verify_jwt(
+    token: &str,
+    store: &EntityStore,
+) -> Result<(UserId, Option<String>), ErrorIR<'static>> {
     let hdr = decode_header(token).map_err(|_| auth_err())?;
     let kid = hdr.kid.ok_or_else(auth_err)?;
     let jwk = store
@@ -38,7 +48,7 @@ pub async fn verify_jwt(token: &str, store: &EntityStore) -> Result<UserId, Erro
     let mut val = Validation::new(Algorithm::RS256);
     val.validate_exp = true;
     let data = decode::<Claims>(token, &key, &val).map_err(|_| auth_err())?;
-    Ok(UserId::from(data.claims.sub))
+    Ok((UserId::from(data.claims.sub), data.claims.jti))
 }
 
 fn auth_err() -> ErrorIR<'static> {
@@ -236,15 +246,19 @@ impl JwtValidator {
             .map_err(|e| classify_jwt_error(&e))
     }
 
-    /// Convenience: validate and extract the `sub` claim as a [`UserId`].
-    /// Used by the proxy `request_filter` JWT branch.
-    pub async fn validate_sub(&self, token: &str) -> Result<UserId, JwtError> {
+    /// Convenience: validate and extract the `sub` claim as a [`UserId`]
+    /// together with the optional `jti` (for revocation-blacklist lookup).
+    /// Used by the proxy `request_filter` JWT branch. `jti` is `None` when the
+    /// token carries no `jti` claim.
+    pub async fn validate_sub(&self, token: &str) -> Result<(UserId, Option<String>), JwtError> {
         #[derive(Deserialize)]
-        struct OnlySub {
+        struct SubJti {
             sub: String,
+            #[serde(default)]
+            jti: Option<String>,
         }
-        let c: OnlySub = self.validate(token).await?;
-        Ok(UserId::from(c.sub))
+        let c: SubJti = self.validate(token).await?;
+        Ok((UserId::from(c.sub), c.jti))
     }
 }
 

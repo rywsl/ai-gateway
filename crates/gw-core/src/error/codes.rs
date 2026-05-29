@@ -48,6 +48,21 @@ pub const GW_AUTH_JWT_EXPIRED: &str = "GW_AUTH_JWT_EXPIRED";
 // above; the missing-header and clock-drift variants are new.
 pub const GW_AUTH_SIGNATURE_MISSING: &str = "GW_AUTH_SIGNATURE_MISSING";
 pub const GW_AUTH_SIGNATURE_TIMESTAMP_DRIFT: &str = "GW_AUTH_SIGNATURE_TIMESTAMP_DRIFT";
+/// Signing is required for this key/global but no `signature_secret` is
+/// configured. HTTP 500 — fail-closed server misconfiguration, NOT a client
+/// error: verifying against an empty HMAC key would otherwise be forgeable.
+pub const GW_AUTH_SIGNATURE_NOT_CONFIGURED: &str = "GW_AUTH_SIGNATURE_NOT_CONFIGURED";
+
+// --- Audit remediation (2026-05-30): admit-time status / revocation gates ---
+// Auth: ApiKeyEntry.status == Disabled on the business request path. HTTP 401.
+// Distinct from GW_AUTH_INVALID_APIKEY (hash mismatch / not found) so ops can
+// tell a disabled-but-present key from a bad one.
+pub const GW_AUTH_KEY_DISABLED: &str = "GW_AUTH_KEY_DISABLED";
+// Auth: UserEntry.status == Banned (resolved user or its parent). HTTP 403.
+pub const GW_AUTH_USER_BANNED: &str = "GW_AUTH_USER_BANNED";
+// Auth: client JWT carries a `jti` present in the `jwt:blacklist:` namespace,
+// or (fail-closed) carries no `jti` while revocation enforcement is on. HTTP 401.
+pub const GW_AUTH_JWT_REVOKED: &str = "GW_AUTH_JWT_REVOKED";
 // Quota: daily token cap (G3).
 pub const GW_QUOTA_DAILY_TOKENS_EXCEEDED: &str = "GW_QUOTA_DAILY_TOKENS_EXCEEDED";
 // Routing: capability match via CapabilityResolver (G13).
