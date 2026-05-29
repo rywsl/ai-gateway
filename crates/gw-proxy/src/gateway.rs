@@ -153,6 +153,36 @@ fn header_u32(response: &ResponseHeader, name: &str) -> Option<u32> {
         .and_then(|value| value.parse::<u32>().ok())
 }
 
+/// First-present RPM-class rate-limit header (audit 2026-05-30 §3.9). Vendor
+/// specific request-rate headers are preferred over the generic `x-ratelimit-limit`
+/// so the adaptive learner ingests the most accurate signal. TPM/token headers
+/// are intentionally excluded (Go-delegated per RL-Core).
+fn rpm_limit_header(resp: &ResponseHeader) -> Option<u32> {
+    [
+        "anthropic-ratelimit-requests-limit",
+        "x-ratelimit-remaining-requests",
+        "x-ratelimit-limit",
+        "x-rate-limit-limit",
+        "ratelimit-limit",
+        "rate-limit-limit",
+    ]
+    .iter()
+    .find_map(|h| header_u32(resp, h))
+}
+
+/// True if the response carries a vendor-specific RPM-class header (NOT the
+/// generic `x-ratelimit-limit`, which is too coarse to imply request-rate). Used
+/// for the detection metric only.
+fn detect_rpm_kind(resp: &ResponseHeader) -> bool {
+    [
+        "anthropic-ratelimit-requests-limit",
+        "anthropic-ratelimit-requests-remaining",
+        "x-ratelimit-remaining-requests",
+    ]
+    .iter()
+    .any(|h| header_u32(resp, h).is_some())
+}
+
 pub struct LlmGateway {
     pub store: Arc<EntityStore>,
     pub health: Arc<KeyHealthStore>,
@@ -811,10 +841,13 @@ impl ProxyHttp for LlmGateway {
                     self.adaptive_rpm.observe_429(
                         &key.key_id,
                         key.rpm_limit,
-                        header_u32(upstream_response, "x-ratelimit-limit"),
+                        rpm_limit_header(upstream_response),
                         key.rpm_limit,
                         header_u32(upstream_response, "retry-after"),
                     );
+                    if detect_rpm_kind(upstream_response) {
+                        metrics::counter!("gw_adaptive_rpm_rpm_detected_total").increment(1);
+                    }
                 }
             }
             match gw_routing::classify_for_failover(status, ctx.body_started, &self.retryable_codes)

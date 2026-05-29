@@ -94,6 +94,39 @@ fn ttl_for(ns: &str) -> u64 {
     }
 }
 
+/// Deserialization helpers for cross-process (Go→Rust) payload shapes.
+mod de {
+    use serde::{Deserialize, Deserializer};
+    use time::OffsetDateTime;
+
+    /// Accept a timestamp as EITHER a unix-seconds integer (legacy in-tree shape)
+    /// OR an RFC3339 string (the Go contract shape — go-contracts/parts/03
+    /// §shared-schema). Audit 2026-05-30 §1.7: the field was unix-int-only via
+    /// `time::serde::timestamp`, so a contract-shaped RFC3339 string failed the
+    /// whole-row decode and the OAuth vendor key vanished from candidate
+    /// selection. Accepting both forms is robust to whichever the writer emits.
+    pub fn flexible_timestamp<'de, D>(d: D) -> Result<OffsetDateTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Ts {
+            Int(i64),
+            Str(String),
+        }
+        match Ts::deserialize(d)? {
+            Ts::Int(secs) => {
+                OffsetDateTime::from_unix_timestamp(secs).map_err(serde::de::Error::custom)
+            }
+            Ts::Str(s) => {
+                OffsetDateTime::parse(&s, &time::format_description::well_known::Rfc3339)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
 /// Wire shape of the `oauth` sub-object inside a `vendor_keys.payload` row.
 /// Tokens are AES-256-GCM encrypted at rest; `load_vendor_key` decrypts them
 /// into `OAuthCredentials` held only in process memory (G3 / T0).
@@ -101,8 +134,8 @@ fn ttl_for(ns: &str) -> u64 {
 struct OAuthCredentialsRow {
     access_token_enc: EncryptedKey,
     refresh_token_enc: EncryptedKey,
-    /// Unix seconds timestamp (serde: integer).
-    #[serde(with = "time::serde::timestamp")]
+    /// Unix-seconds integer OR RFC3339 string (see `de::flexible_timestamp`).
+    #[serde(deserialize_with = "de::flexible_timestamp")]
     access_expires_at: time::OffsetDateTime,
     token_endpoint: String,
     #[serde(default)]
@@ -424,8 +457,8 @@ mod oauth_row_tests {
 
     #[test]
     fn vendor_key_row_oauth_field_roundtrip() {
-        // access_expires_at is stored as a Unix seconds integer
-        // (OAuthCredentialsRow uses `#[serde(with = "time::serde::timestamp")]`).
+        // access_expires_at as a Unix seconds integer (legacy in-tree shape;
+        // still accepted by `de::flexible_timestamp`).
         let payload = json!({
             "key_id": "key-123",
             "vendor_id": "v-1",
@@ -447,6 +480,51 @@ mod oauth_row_tests {
         // NOT a default-time serde array — getting this wrong gives dates
         // a thousand times off without a compile error.
         assert_eq!(oauth.access_expires_at.unix_timestamp(), 1893456000);
+    }
+
+    #[test]
+    fn vendor_key_row_oauth_accepts_rfc3339_string() {
+        // Go contract shape (go-contracts/parts/03): access_expires_at as an
+        // RFC3339 string. Audit 2026-05-30 §1.7 — previously failed the whole-row
+        // decode. Asserted against a direct parse to avoid hardcoding a unix int.
+        let payload = json!({
+            "key_id": "key-rfc",
+            "vendor_id": "v-1",
+            "api_key_enc": enc_key_json(),
+            "status": "active",
+            "oauth": {
+                "access_token_enc": enc_key_json(),
+                "refresh_token_enc": enc_key_json(),
+                "access_expires_at": "2026-05-22T12:00:00Z",
+                "token_endpoint": "https://oauth.example.com/token"
+            }
+        });
+        let row: VendorKeyRow = serde_json::from_value(payload).expect("RFC3339 must decode");
+        let oauth = row.oauth.expect("oauth should be Some");
+        let expected = time::OffsetDateTime::parse(
+            "2026-05-22T12:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(oauth.access_expires_at, expected);
+    }
+
+    #[test]
+    fn vendor_key_row_oauth_rejects_invalid_timestamp() {
+        let payload = json!({
+            "key_id": "key-bad",
+            "vendor_id": "v-1",
+            "api_key_enc": enc_key_json(),
+            "status": "active",
+            "oauth": {
+                "access_token_enc": enc_key_json(),
+                "refresh_token_enc": enc_key_json(),
+                "access_expires_at": "not-a-timestamp",
+                "token_endpoint": "https://oauth.example.com/token"
+            }
+        });
+        let res: Result<VendorKeyRow, _> = serde_json::from_value(payload);
+        assert!(res.is_err(), "an unparseable timestamp must fail the decode");
     }
 
     #[test]

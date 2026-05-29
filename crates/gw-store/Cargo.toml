@@ -12,7 +12,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
-time.workspace = true
+# `parsing` for OffsetDateTime::parse(Rfc3339) in loader::de::flexible_timestamp
+# (audit 2026-05-30 §1.7); previously available only via cross-crate feature
+# unification, which broke `cargo test -p gw-store` in isolation.
+time = { workspace = true, features = ["parsing"] }
 secrecy.workspace = true
 url.workspace = true
 tokio.workspace = true

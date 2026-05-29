@@ -48,17 +48,25 @@ impl ErrorClass {
 
 /// Classify a wreq error into a stable `ErrorClass` value for header emission.
 ///
-/// Detection order matters: `is_tls()` is checked before `is_connect()` because
-/// TLS handshake failures set both flags in wreq.
+/// Detection order matters:
+/// - `is_tls()` is checked first because TLS handshake failures set both the TLS
+///   and connect flags in wreq.
+/// - `is_proxy_connect()` is checked BEFORE `is_timeout()` (audit 2026-05-30
+///   §1.13): a black-holed proxy CONNECT sets BOTH the proxy-connect flag and the
+///   inner-io timeout flag, and proxy-specificity must win — otherwise the error
+///   is mislabeled GW_UPSTREAM_CONNECT_TIMEOUT (504, "the LLM upstream timed out")
+///   instead of GW_UPSTREAM_PROXY_ERROR (502, "the configured proxy failed"),
+///   pointing operators at the wrong component. A genuine non-proxy timeout has
+///   is_proxy_connect()==false and still classifies as ConnectTimeout.
 pub fn classify(err: &wreq::Error) -> ErrorClass {
     if err.is_tls() {
         return ErrorClass::Tls;
     }
-    if err.is_timeout() {
-        return ErrorClass::ConnectTimeout;
-    }
     if err.is_proxy_connect() {
         return ErrorClass::ProxyError;
+    }
+    if err.is_timeout() {
+        return ErrorClass::ConnectTimeout;
     }
     if err.is_connect() {
         // Belt-and-suspenders: is_proxy_connect() above catches the wreq-specific

@@ -113,6 +113,26 @@ pub static METRICS: &[MetricSpec] = &[
         help: "cross-protocol non-stream upstream body failed content-encoding decode; label=encoding",
     },
     MetricSpec {
+        name: "gw_adaptive_rpm_rpm_detected_total",
+        kind: MetricKind::Counter,
+        help: "429 carried a vendor-specific RPM-class rate-limit header (Anthropic/OpenAI requests)",
+    },
+    MetricSpec {
+        name: "gw_upstream_auth_header_invalid_total",
+        kind: MetricKind::Counter,
+        help: "vendor auth_template had a colon but an invalid header name; fell back to authorization",
+    },
+    MetricSpec {
+        name: "gateway_cold_load_timeout_total",
+        kind: MetricKind::Counter,
+        help: "cold entity load exceeded its deadline; label=ns (pre-existing emit, registered 2026-05-30)",
+    },
+    MetricSpec {
+        name: "gateway_pool_acquire_timeout_total",
+        kind: MetricKind::Counter,
+        help: "cold entity load hit a PG pool acquire timeout (transient contention, not a missing row); label=ns",
+    },
+    MetricSpec {
         name: "gw_adaptive_rpm_probe_total",
         kind: MetricKind::Counter,
         help: "adaptive RPM probe expansions after decay and quiet period",

@@ -384,6 +384,28 @@ pub async fn pick_peer(
         VendorEgressMode::Rustls => None,
     };
 
+    // Audit 2026-05-30 §3.4: pingora 0.8's Proxy.next_hop is UDS-only and cannot
+    // route through an arbitrary HTTP proxy URL, so a Direct (Rustls) vendor key
+    // with a per-key/vendor `proxy` configured CANNOT be honored on this path.
+    // Fail closed rather than silently connecting direct — a silent bypass would
+    // leak the gateway's egress IP and violate the operator's intended routing.
+    // Proxied egress must use `egress_mode = Impersonate`, whose loopback honors
+    // `X-Egress-Proxy`.
+    if impersonate_profile.is_none()
+        && (picked_arc.proxy.is_some() || vendor.value.default_proxy.is_some())
+    {
+        return emit_envelope_and_bail(
+            session,
+            ctx,
+            envelope_for(
+                codes::GW_UPSTREAM_PROXY_UNSUPPORTED,
+                "per-key HTTP proxy requires egress_mode=Impersonate; Direct path cannot proxy",
+                502,
+            ),
+        )
+        .await;
+    }
+
     // Resolve the tunnel decision once. Both branches need it: the impersonate
     // branch to detect the tunnel+impersonate conflict, the rustls branch to
     // pick its peer. `TunnelStack::resolve` is pure today but could grow side
@@ -990,6 +1012,15 @@ fn archive_upstream_request(
     });
 }
 
+/// True if `s` is a valid HTTP header-name token for auth_template parsing
+/// (audit 2026-05-30 §3.3). Conservative subset of RFC 7230 token chars covering
+/// real header names (alphanumerics, '-', '_'); rejects spaces / colons / etc.
+fn is_header_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn inject_vendor_headers(
     ctx: &mut ReqCtx,
     upstream_request: &mut RequestHeader,
@@ -1025,11 +1056,25 @@ fn inject_vendor_headers(
     } else {
         picked.api_key.expose_secret().to_owned()
     };
-    let auth_value = vendor
-        .value
-        .auth_template
-        .replace("{api_key}", &auth_secret);
-    let _ = upstream_request.insert_header("authorization", auth_value);
+    // Audit 2026-05-30 §3.3: honor the header NAME encoded in auth_template so
+    // native Gemini vendors (x-goog-api-key) work, not only Bearer/authorization.
+    // Form: "<header-name>: <value-with-{api_key}>" injects under <header-name>;
+    // a template with no colon (e.g. "Bearer {api_key}") keeps the legacy
+    // authorization behavior. Split on the TEMPLATE's first colon (before
+    // substituting the secret, which may itself contain a colon). A colon with an
+    // invalid header-name token falls back leniently to authorization + a metric
+    // (operator misconfig; pre-production so we don't hard-fail the request).
+    let template = vendor.value.auth_template.as_str();
+    let (header_name, value_template) = match template.split_once(':') {
+        Some((name, rest)) if is_header_token(name.trim()) => (name.trim(), rest.trim_start()),
+        Some(_) => {
+            metrics::counter!("gw_upstream_auth_header_invalid_total").increment(1);
+            ("authorization", template)
+        }
+        None => ("authorization", template),
+    };
+    let auth_value = value_template.replace("{api_key}", &auth_secret);
+    let _ = upstream_request.insert_header(header_name.to_string(), auth_value);
     if let Some(host) = vendor.value.base_urls.first().and_then(|u| u.host_str()) {
         let _ = upstream_request.insert_header("host", host.to_string());
     }

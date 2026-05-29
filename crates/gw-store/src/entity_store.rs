@@ -50,12 +50,28 @@ pub async fn with_cold_load_timeout<T>(
     match timeout(deadline, fut).await {
         Ok(Ok(v)) => Some(v),
         Ok(Err(e)) => {
-            tracing::warn!(
-                target: "gw_store::loader",
-                ns = %ns,
-                error = %e,
-                "cold loader returned error"
-            );
+            // Audit 2026-05-30 §1.12: a PoolTimedOut here is transient pool
+            // contention, NOT a missing row — surface it distinctly (counted +
+            // clearer log) so it is not silently read as "entity not found".
+            // The caller still gets None, but the metric makes it observable.
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::PoolTimedOut)
+            ) {
+                metrics::counter!("gateway_pool_acquire_timeout_total", "ns" => ns).increment(1);
+                tracing::warn!(
+                    target: "gw_store::loader",
+                    ns = %ns,
+                    "cold loader hit a pool acquire timeout (transient contention, not a missing row)"
+                );
+            } else {
+                tracing::warn!(
+                    target: "gw_store::loader",
+                    ns = %ns,
+                    error = %e,
+                    "cold loader returned error"
+                );
+            }
             None
         }
         Err(_elapsed) => {

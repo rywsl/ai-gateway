@@ -81,6 +81,12 @@ pub const GW_UPSTREAM_READ_TIMEOUT: &str = "GW_UPSTREAM_READ_TIMEOUT";
 pub const GW_UPSTREAM_H2_PROTOCOL: &str = "GW_UPSTREAM_H2_PROTOCOL";
 pub const GW_UPSTREAM_BODY_TRUNCATED: &str = "GW_UPSTREAM_BODY_TRUNCATED";
 pub const GW_UPSTREAM_PROXY_ERROR: &str = "GW_UPSTREAM_PROXY_ERROR";
+/// A Direct (Rustls) vendor key has a per-key/vendor HTTP `proxy` configured,
+/// but pingora 0.8's peer proxy is UDS-only and cannot route an HTTP proxy URL.
+/// Fail-closed (HTTP 502): connecting direct would silently bypass the operator's
+/// egress policy. Proxied egress must use `egress_mode = Impersonate` (whose
+/// loopback honors `X-Egress-Proxy`). Audit 2026-05-30 §3.4.
+pub const GW_UPSTREAM_PROXY_UNSUPPORTED: &str = "GW_UPSTREAM_PROXY_UNSUPPORTED";
 pub const GW_UPSTREAM_PANIC: &str = "GW_UPSTREAM_PANIC";
 pub const GW_UPSTREAM_UNKNOWN: &str = "GW_UPSTREAM_UNKNOWN";
 
