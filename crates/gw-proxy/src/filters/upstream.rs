@@ -106,6 +106,7 @@ pub async fn pick_peer(
     in_flight: &Arc<InFlightStore>,
     strategies: &Arc<StrategySet>,
     latency_tracker: &Arc<LatencyTracker>,
+    adaptive_rpm: &Arc<gw_auth::ratelimit::adaptive::AdaptiveRpmManager>,
     egress: &Arc<gw_egress_impersonate::EgressHandle>,
     egress_disabled: bool,
     #[cfg(feature = "tunnel")] tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
@@ -315,9 +316,30 @@ pub async fn pick_peer(
     };
     let picked = match failover_pick {
         Some(candidate) => candidate,
-        None => strategy
-            .pick(&candidates, health, in_flight, &pick_ctx)
-            .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?,
+        None => {
+            let first = strategy
+                .pick(&candidates, health, in_flight, &pick_ctx)
+                .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?;
+            // Adaptive-RPM enforcement (audit 2026-05-30 §1.8): if the strategy's
+            // pick is over its learned per-key ceiling, divert to another
+            // candidate that is within its ceiling. This makes the learned limit
+            // actually enforced (the former request_filter clamp was dead code).
+            // Fail-operational: if every candidate is over its ceiling, send to
+            // `first` anyway — the per-user RPM bucket and response-side cooldown
+            // remain in force, so a denial is proactive back-pressure, not a hard
+            // reject. Only applied on the first-attempt pick; the failover path
+            // honors the FailoverExecutor's deliberate choice as-is.
+            if adaptive_rpm.try_admit(&first.key_id) {
+                first
+            } else if let Some(alt) = candidates
+                .iter()
+                .find(|c| c.key_id != first.key_id && adaptive_rpm.try_admit(&c.key_id))
+            {
+                alt
+            } else {
+                first
+            }
+        }
     };
     let picked_arc = Arc::clone(picked);
 
@@ -755,15 +777,17 @@ pub async fn rewrite_request(
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_vendor")))?
         .clone();
 
-    // Pick the upstream codec: prefer same protocol as client (passthrough
-    // fast path); otherwise pick the first protocol the key supports.
-    let upstream_kind = if picked.accessible_endpoints.contains(&client_codec.kind()) {
-        client_codec.kind()
-    } else if let Some(k) = picked.accessible_endpoints.first() {
-        *k
-    } else {
+    // Pick the upstream codec via the shared resolver (single source of truth,
+    // identical to the routing health gate's read side) so the (key, ApiFormat)
+    // health bucket written on the response path matches the one selection read
+    // (audit 2026-05-30 §1.5). Empty accessible_endpoints is a hard error.
+    if picked.accessible_endpoints.is_empty() {
         return Err(Error::new(ErrorType::Custom("gw_no_upstream_codec")));
-    };
+    }
+    let upstream_kind = gw_core::protocol::resolve_upstream_format(
+        &picked.accessible_endpoints,
+        client_codec.kind(),
+    );
     let upstream_codec = codec_for(upstream_kind);
 
     if let Some(client_shape) = ctx.client_shape.filter(gw_core::protocol::ApiShape::is_cli) {

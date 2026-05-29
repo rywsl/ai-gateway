@@ -61,10 +61,18 @@ fn strategy_set_dispatches_multi_dim_preset() {
 }
 
 #[test]
-#[should_panic(expected = "unknown multi_dim routing preset")]
-fn strategy_set_rejects_unknown_multi_dim_preset() {
+fn strategy_set_falls_back_unknown_multi_dim_preset() {
+    // Audit 2026-05-30 §2.1: an unknown preset name (control-plane skew / typo)
+    // must NOT panic the request task. pick_for falls back to the always-present
+    // fixed_order strategy (and emits gw_routing_unknown_preset_total + a
+    // warn-once) so the request still routes deterministically.
     let set = StrategySet::new_default();
-    let _ = set.pick_for(&StrategyKind::MultiDim("missing".to_string()));
+    let strategy = set.pick_for(&StrategyKind::MultiDim("missing".to_string()));
+    assert_eq!(
+        strategy.name(),
+        "fixed_order",
+        "unknown multi_dim preset must fall back to fixed_order, not panic"
+    );
 }
 
 #[test]

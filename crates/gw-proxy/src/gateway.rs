@@ -458,7 +458,6 @@ impl ProxyHttp for LlmGateway {
             &self.ratelimit,
             &self.ip_allowlist,
             &self.ip_ratelimit,
-            &self.adaptive_rpm,
             self.ip_allowlist_mode,
             &self.counters,
             self.global_rpm,
@@ -546,6 +545,7 @@ impl ProxyHttp for LlmGateway {
             &self.in_flight,
             &self.strategies,
             &self.latency_tracker,
+            &self.adaptive_rpm,
             &self.egress,
             self.egress_disabled,
             #[cfg(feature = "tunnel")]

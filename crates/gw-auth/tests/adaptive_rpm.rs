@@ -309,3 +309,28 @@ fn test_observe_429_no_retry_after_needs_3_observations() {
     manager.observe_429(&key_id, 240, None, 90, None);
     assert_eq!(manager.state.get(&key_id).unwrap().learned_rpm, Some(90));
 }
+
+// Audit 2026-05-30 §1.8: try_admit is the live enforcement of the learned
+// ceiling (the former request_filter clamp was dead code). pick_peer uses it.
+#[test]
+fn test_try_admit_enforces_learned_ceiling() {
+    let manager = AdaptiveRpmManager::new(AdaptiveCfg::default());
+    let key = KeyId::from("vk-admit");
+
+    // No learned ceiling yet → admit unconditionally (no limiter built).
+    assert!(manager.try_admit(&key), "no ceiling → admit");
+
+    // Learn a 1-rpm ceiling (2 header observations). enforced = (1*0.85).max(1) = 1.
+    manager.observe_429(&key, 120, Some(1), 120, None);
+    manager.observe_429(&key, 120, Some(1), 120, None);
+    assert_eq!(manager.should_enforce(&key), Some(1));
+
+    // GCRA burst for per_minute(1) is 1: first send admits, the next is denied.
+    assert!(manager.try_admit(&key), "first send within ceiling");
+    assert!(!manager.try_admit(&key), "second send over the 1-rpm ceiling");
+
+    // Evicting the key clears both state and the cached limiter, so admission
+    // is unconditional again (no stale limiter — mem-leak guard).
+    manager.evict(&key);
+    assert!(manager.try_admit(&key), "post-evict → admit (limiter cleared)");
+}

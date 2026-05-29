@@ -1,5 +1,7 @@
 use dashmap::DashMap;
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use gw_core::ids::KeyId;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,6 +12,10 @@ fn set_adaptive_state_metrics(state: &KeyAdaptiveState) {
 
 pub struct AdaptiveRpmManager {
     pub state: DashMap<KeyId, Arc<KeyAdaptiveState>>,
+    /// Per-vendor-key GCRA limiter enforcing the learned ceiling. Cached and
+    /// rebuilt only when the enforced limit changes (audit 2026-05-30 §1.8).
+    /// The `u32` is the per-minute limit the cached limiter was built for.
+    limiters: DashMap<KeyId, (u32, Arc<DefaultDirectRateLimiter>)>,
     pub cfg: AdaptiveCfg,
 }
 
@@ -17,6 +23,7 @@ impl AdaptiveRpmManager {
     pub fn new(cfg: AdaptiveCfg) -> Self {
         Self {
             state: DashMap::new(),
+            limiters: DashMap::new(),
             cfg,
         }
     }
@@ -65,14 +72,60 @@ impl AdaptiveRpmManager {
 
     /// Returns the enforced RPM ceiling if confidence is above threshold.
     /// Returns None if confidence is too low or no learned_rpm exists.
+    ///
+    /// Pure query (no metric side-effect — the enforcement counter fires in
+    /// [`Self::try_admit`] only when a send is actually denied). Clamped to
+    /// at least 1 so the GCRA `Quota` is always constructible.
     pub fn should_enforce(&self, key_id: &KeyId) -> Option<u32> {
         let state = self.state.get(key_id)?;
         if state.confidence.value < self.cfg.enforcement_threshold {
             return None;
         }
         let learned_rpm = state.learned_rpm?;
-        metrics::counter!("gw_adaptive_rpm_enforced_total").increment(1);
-        Some((learned_rpm as f32 * self.cfg.buffer_ratio) as u32)
+        Some(((learned_rpm as f32 * self.cfg.buffer_ratio) as u32).max(1))
+    }
+
+    /// Admission check for sending a request to `key_id`, enforcing the learned
+    /// adaptive ceiling via a per-key GCRA (audit 2026-05-30 §1.8). Returns:
+    /// - `true` (admit, consuming one cell) when no ceiling is learned yet, or
+    ///   the key is within its learned rate;
+    /// - `false` (deny, NO cell consumed) when the key is over its learned rate.
+    ///
+    /// The caller diverts a denied key to another candidate (failover) and only
+    /// degrades to sending anyway when every candidate is over its ceiling — the
+    /// base per-user RPM bucket and response-side cooldown remain in force, so a
+    /// denial is back-pressure, not a hard rejection. The limiter is cached per
+    /// key and rebuilt only when the enforced limit changes.
+    pub fn try_admit(&self, key_id: &KeyId) -> bool {
+        let Some(limit) = self.should_enforce(key_id) else {
+            // Nothing learned with enough confidence — admit unconditionally.
+            return true;
+        };
+        // Reuse the cached limiter unless the enforced limit moved.
+        let needs_rebuild = self
+            .limiters
+            .get(key_id)
+            .map(|e| e.0 != limit)
+            .unwrap_or(true);
+        if needs_rebuild {
+            // `limit` is clamped >= 1 by should_enforce, so NonZeroU32 is safe.
+            let quota = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
+            self.limiters
+                .insert(key_id.clone(), (limit, Arc::new(RateLimiter::direct(quota))));
+        }
+        let limiter = self
+            .limiters
+            .get(key_id)
+            .map(|e| e.1.clone())
+            .expect("limiter inserted above");
+        match limiter.check() {
+            Ok(()) => true,
+            Err(_) => {
+                // Over the learned ceiling — this is the real "we enforced" event.
+                metrics::counter!("gw_adaptive_rpm_enforced_total").increment(1);
+                false
+            }
+        }
     }
 
     pub fn tick_decay(&self) {
@@ -118,6 +171,9 @@ impl AdaptiveRpmManager {
 
     pub fn evict(&self, key_id: &KeyId) {
         self.state.remove(key_id);
+        // Also drop the cached limiter so an evicted key doesn't leave a stale
+        // RateLimiter in the cache forever (audit 2026-05-30 §1.8 mem-leak fix).
+        self.limiters.remove(key_id);
     }
 }
 

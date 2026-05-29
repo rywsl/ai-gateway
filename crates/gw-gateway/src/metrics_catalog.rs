@@ -100,7 +100,12 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_adaptive_rpm_enforced_total",
         kind: MetricKind::Counter,
-        help: "adaptive RPM enforcement decisions returned Some(...)",
+        help: "adaptive RPM admission denied a send (key over its learned ceiling)",
+    },
+    MetricSpec {
+        name: "gw_routing_unknown_preset_total",
+        kind: MetricKind::Counter,
+        help: "model group referenced an unknown multi_dim routing preset; fell back to fixed_order",
     },
     MetricSpec {
         name: "gw_adaptive_rpm_probe_total",

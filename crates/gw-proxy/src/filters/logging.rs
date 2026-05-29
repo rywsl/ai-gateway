@@ -172,23 +172,25 @@ pub async fn run(
     // ---------------------------------------------------------------------
     let ok = err.is_none() && matches!(ctx.upstream_status, Some(s) if (200..400).contains(&s));
     if let Some(pk) = ctx.picked_vendor_key.as_ref() {
-        // upstream_codec is set by upstream_request_filter (rewrite_request),
-        // which runs after pick_peer. If rewrite_request fails before
-        // committing the codec, picked_vendor_key is Some while
-        // upstream_codec is None. The OpenAi fallback here is best-effort.
-        //
-        // Phase 3 K-B precondition: KeyHealthStore::record currently ignores
-        // api_format in v1, but once K-B acts on per-format health state
-        // (separate buckets per ApiFormat) a stale OpenAi fallback would
-        // silently contaminate the wrong (key, OpenAi) bucket for a key that
-        // actually served Anthropic traffic. Before K-B lands, a reliable
-        // api_format source must be established at this call site (e.g.
-        // capture it on ReqCtx during pick_peer).
-        let api_fmt = ctx
-            .upstream_codec
-            .as_ref()
-            .map(|c| c.kind())
-            .unwrap_or(gw_core::protocol::ProtocolKind::OpenAi);
+        // Audit 2026-05-30 §1.5: record into the SAME (key, ApiFormat) bucket the
+        // routing health gate read. `record()` keys by api_format, so the bucket
+        // must match selection. Normally `upstream_codec` is already the resolved
+        // upstream format (set by rewrite_request via the shared resolver). If
+        // rewrite_request failed before committing the codec, derive the bucket
+        // identically — resolve_upstream_format(accessible, client) — instead of a
+        // hardcoded OpenAi fallback that would contaminate the wrong bucket for a
+        // protocol-conversion key.
+        let api_fmt = match ctx.upstream_codec.as_ref() {
+            Some(c) => c.kind(),
+            None => {
+                let client_kind = ctx
+                    .client_codec
+                    .as_ref()
+                    .map(|c| c.kind())
+                    .unwrap_or(gw_core::protocol::ProtocolKind::OpenAi);
+                gw_core::protocol::resolve_upstream_format(&pk.accessible_endpoints, client_kind)
+            }
+        };
         let outcome = if ok {
             OutcomeKind::Success
         } else {

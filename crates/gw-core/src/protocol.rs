@@ -80,3 +80,63 @@ impl ApiShape {
         }
     }
 }
+
+/// Resolve the protocol format spoken to the upstream for a given vendor key.
+///
+/// This is the **single source of truth** for client→upstream codec selection.
+/// It MUST be used identically at the routing health gate (the *read* side —
+/// `is_available(key, fmt)`) and at codec/health recording (the *write* side —
+/// `record(key, fmt)`); deriving the format independently in those two places
+/// is what caused the cross-protocol health-bucket mismatch (audit 2026-05-30
+/// §1.5), where a protocol-conversion key was selected under the client bucket
+/// but its cooldown/circuit was written to the upstream bucket.
+///
+/// Selection:
+/// 1. client format is in `accessible` → client (same-protocol passthrough);
+/// 2. else the first accessible endpoint (deterministic — DB insertion order);
+/// 3. else `client` as a *deferred error*: callers re-check
+///    `accessible.is_empty()` and emit `gw_no_upstream_codec`. This is NOT a
+///    fail-operational fallback — an empty endpoint set always errors at the
+///    call site; returning `client` here merely keeps the function total.
+pub fn resolve_upstream_format(accessible: &[ApiFormat], client: ApiFormat) -> ApiFormat {
+    if accessible.contains(&client) {
+        client
+    } else if let Some(&first) = accessible.first() {
+        first
+    } else {
+        client
+    }
+}
+
+#[cfg(test)]
+mod resolve_upstream_format_tests {
+    use super::*;
+
+    #[test]
+    fn same_protocol_passthrough_prefers_client() {
+        let acc = [ProtocolKind::Anthropic, ProtocolKind::OpenAi];
+        assert_eq!(
+            resolve_upstream_format(&acc, ProtocolKind::OpenAi),
+            ProtocolKind::OpenAi
+        );
+    }
+
+    #[test]
+    fn cross_protocol_uses_first_accessible() {
+        // Client speaks OpenAi but the key only accepts an Anthropic upstream.
+        let acc = [ProtocolKind::Anthropic];
+        assert_eq!(
+            resolve_upstream_format(&acc, ProtocolKind::OpenAi),
+            ProtocolKind::Anthropic
+        );
+    }
+
+    #[test]
+    fn empty_accessible_returns_client_deferred_error() {
+        // The call site re-checks is_empty() and errors; the value is unused.
+        assert_eq!(
+            resolve_upstream_format(&[], ProtocolKind::Gemini),
+            ProtocolKind::Gemini
+        );
+    }
+}

@@ -23,7 +23,6 @@ use gw_auth::merge_permissions;
 use gw_auth::model_permissions::{
     check_with_budget, ModelPermission, PermissionEffect, RedosTracker,
 };
-use gw_auth::ratelimit::adaptive::AdaptiveRpmManager;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_auth::AuthCtx;
 use gw_billing::TaskBillingConfig;
@@ -60,7 +59,6 @@ pub async fn run(
     ratelimit: &Arc<RateLimitGuard>,
     ip_allowlist: &Arc<IpAllowlistGuard>,
     ip_ratelimit: &Arc<IpRateLimitGuard>,
-    adaptive_rpm: &Arc<AdaptiveRpmManager>,
     ip_allowlist_mode: IpAllowlistMode,
     counters: &Arc<CounterStore>,
     global_rpm: u32,
@@ -1201,13 +1199,13 @@ pub async fn run(
     // 8. RateLimitGuard (RPM check) + per-user stream-slot for streaming
     //    requests.
     // ---------------------------------------------------------------------
-    let mut rate_limited = merged.clone();
-    if let Some(key) = ctx.picked_vendor_key.as_ref() {
-        if let Some(adaptive_limit) = adaptive_rpm.should_enforce(&key.key_id) {
-            rate_limited.rpm_limit = rate_limited.rpm_limit.min(adaptive_limit);
-        }
-    }
-    match ratelimit.check(&rate_limited) {
+    // NOTE (audit 2026-05-30 §1.8): the per-user RPM bucket is enforced here.
+    // The adaptive per-VENDOR-KEY ceiling is NOT applied at this point — the
+    // vendor key is not picked until `pick_peer` (upstream_peer phase), so the
+    // former clamp here was dead code (gated on ctx.picked_vendor_key, always
+    // None in request_filter). Adaptive enforcement now lives in `pick_peer`
+    // via AdaptiveRpmManager::try_admit, where the picked key is known.
+    match ratelimit.check(&merged) {
         Ok(_ticket) => { /* dropped at end of fn — RPM only checks once per request */ }
         Err(err) => {
             bail!(session, ctx, &err, &request_id)

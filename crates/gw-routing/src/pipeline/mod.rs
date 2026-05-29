@@ -196,8 +196,20 @@ fn extract_features(
     let markup = ctx.pricing.map(|p| p.model_markup as f64).unwrap_or(1.0);
     let mut out = Vec::with_capacity(candidates.len());
     for (index, key) in candidates.iter().enumerate() {
-        if dims.contains(DimMask::HEALTH) && !health.is_available(&key.key_id, ctx.api_format) {
-            continue;
+        // Audit 2026-05-30 §1.5: read the SAME (key, ApiFormat) health bucket
+        // that the response path writes. For a protocol-conversion key the
+        // upstream format differs from the client format (ctx.api_format), so
+        // resolve it per-candidate via the shared helper — otherwise the gate
+        // reads the client bucket while record() writes the upstream bucket,
+        // and circuit/cooldown protection is silently inert for that key.
+        if dims.contains(DimMask::HEALTH) {
+            let health_fmt = gw_core::protocol::resolve_upstream_format(
+                &key.accessible_endpoints,
+                ctx.api_format,
+            );
+            if !health.is_available(&key.key_id, health_fmt) {
+                continue;
+            }
         }
         let latency_entry = latency.get(index);
         let p50 = latency_entry.and_then(|entry| entry.p50_ttft_ms);

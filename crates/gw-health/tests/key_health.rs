@@ -193,3 +193,50 @@ fn half_open_admits_exactly_one_probe() {
         "subsequent callers must NOT be admitted while half_open"
     );
 }
+
+#[test]
+fn half_open_failure_reopens() {
+    // Audit 2026-05-30 §1.4: a failed recovery probe must return the circuit to
+    // Open (re-arming the 60s hold), not leave it stuck HalfOpen forever.
+    use gw_health::format_health::FormatHealth;
+    use std::sync::atomic::Ordering;
+
+    let h = FormatHealth::new();
+    // Force Open with an elapsed deadline, then claim the half-open probe.
+    h.circuit
+        .store(CircuitState::Open.as_u8(), Ordering::Release);
+    h.open_until_ms.store(0, Ordering::Release);
+    assert!(h.is_available(), "probe slot claimed");
+    assert_eq!(
+        CircuitState::from_u8(h.circuit.load(Ordering::Acquire)),
+        CircuitState::HalfOpen,
+    );
+
+    // The probe FAILS.
+    h.record(false);
+
+    // Circuit must be back to Open with a future deadline...
+    assert_eq!(
+        CircuitState::from_u8(h.circuit.load(Ordering::Acquire)),
+        CircuitState::Open,
+        "a failed half-open probe must reopen the circuit"
+    );
+    assert!(
+        h.open_until_ms.load(Ordering::Acquire) > 0,
+        "open_until_ms must be re-armed"
+    );
+    // ...and the key is unavailable during the new hold (not stuck-unavailable
+    // forever, but recoverable once the deadline elapses again).
+    assert!(
+        !h.is_available(),
+        "key unavailable during the re-armed open hold"
+    );
+
+    // After the hold elapses, the circuit admits a fresh probe again (proving
+    // recovery is possible, unlike the stuck-HalfOpen bug).
+    h.open_until_ms.store(0, Ordering::Release);
+    assert!(
+        h.is_available(),
+        "a fresh probe is admitted once the re-armed hold elapses"
+    );
+}

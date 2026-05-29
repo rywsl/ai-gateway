@@ -123,6 +123,31 @@ impl FormatHealth {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             );
+        } else if !ok
+            && CircuitState::from_u8(self.circuit.load(Ordering::Acquire)) == CircuitState::HalfOpen
+        {
+            // Audit 2026-05-30 §1.4: a FAILED half-open probe must return to Open
+            // and re-arm the 60s hold. Without this transition the circuit was
+            // stuck HalfOpen forever (after the 60s open hold the 30s window is
+            // near-empty, so the trip branch above can't fire on one sample), and
+            // is_available() returns false for HalfOpen — permanently sidelining
+            // the (key, fmt) until process restart. Matches the K-A spec
+            // (2026-05-19-key-health-k-a-state-machine.md §"半开失败一次就回 open").
+            // Re-arm open_until_ms only on CAS success so a concurrent winner
+            // doesn't double-arm.
+            if self
+                .circuit
+                .compare_exchange(
+                    CircuitState::HalfOpen.as_u8(),
+                    CircuitState::Open.as_u8(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.open_until_ms
+                    .store(now_ms() + OPEN_HOLD_MS, Ordering::Release);
+            }
         }
     }
 
