@@ -95,6 +95,26 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 
    Fail-closed: an unverifiable body cannot reach codec parse. HMAC verify calls `ctx.body.prefill_decoded(plaintext)` so the decompressed bytes are cached in `RequestBodyView` and reused by codec parse in step 8 without a second decompress pass.
 8. **Request shape extraction** — standard requests call `codec.parse_request(&body_bytes)` to produce `RequestIR` carrying model name, stream flag, and estimated input tokens. CLI requests do not enter IR: `extract_cli_request_hints(ctx.client_shape, path, body)` shallow-reads model / stream from the raw body or path, leaves `ctx.body` unchanged, and uses a conservative prompt estimate. Both branches stash `ctx.model`, `ctx.is_stream`, `ctx.idempotent = !is_stream` before permission, quota, RPM, hard-cap, and freeze gates.
+
+### Step 8.5 — Credit lease (protected mode)
+
+When `[protection].enabled = true` and the user has been pushed into protected mode
+via `events:counter ns=protected_lease` (`mode=protected`):
+
+1. Resolve `max_output_tokens` (request `max_tokens` → `default_output_ceiling_tokens` from config).
+2. Read the lease's `coef_table_version` and call `estimate_request_credits` to compute the
+   reserved credits for this request (input + max_output, 2-dim).
+3. `LeaseGuard::try_acquire`:
+   - `Expired` → 503 `GW_QUOTA_LEASE_EXPIRED` (operator signal; the Go push pipeline is stalled).
+   - `Insufficient` → 402 `GW_QUOTA_LEASE_INSUFFICIENT` (client retries after next Go push).
+   - `NoLease` (race with mode flip) → fall through to legacy soft defense (step 9/10).
+   - `Ok(guard)` → store `lease_guard` on `ReqCtx` and **skip step 16** `RequestFreeze`.
+
+If `estimate_request_credits` fails (no coefs for the lease version), the request is
+fail-closed-rejected with `GW_QUOTA_LEASE_INSUFFICIENT`.
+
+Spec: [`docs/superpowers/specs/2026-05-29-credit-lease-design.md`](superpowers/specs/2026-05-29-credit-lease-design.md).
+
 9. **Cross-protocol non-stream** — cross-protocol non-stream requests now round-trip end-to-end: `upstream_peer` lets the request through, the upstream body is accumulated in `response_body_filter` (§2.6), `parse_response` produces the IR, and `CrossRender` re-renders into `ctx.pending_client_body` (`gw_codec_cross_render_nonstream_total{from,to}`). The pre-S-codec-v2 `503 GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` short-circuit is gone. Same-protocol non-stream stays zero-copy on the response side (body is forwarded as-is; only `parse_response` runs to populate `ctx.usage`).
 10. **5-tier permission merge** — `merge_permissions(AuthCtx, store, global_rpm)` produces a `MarkupChainSnapshot`. Tier order: global → user-group → user → sub-account → api-key; intersection on lists, min-positive on `rpm`/`tpm`, product on markup. Sets `forced_model_group` + `effective_user_id` (parent on sub-accounts).
 11. **Model permission** — `merged.allowed_models.contains(&model_name)`; deny → `GW_REQUEST_MODEL_NOT_FOUND` 403. When the resolved `ApiKeyEntry` carries a `model_whitelist_regex`, `check_model_whitelist_regex()` runs after the static list check: the pattern is compiled into a `ModelPermission` via `ModelPermission::new(pattern, PermissionEffect::Allow)`, then evaluated with `check_with_budget(model_name)` under a 100 ms per-call ReDoS budget (`BUDGET_MS=100`). Outcomes: `None` regex → skip (static list governs). Compile error → `GW_REQUEST_MODEL_NOT_FOUND` 403. Match → allow. No match → `GW_REQUEST_MODEL_NOT_FOUND` 403. Budget timeout → counted by `RedosTracker` (per-key `OnceLock` singleton); after `TIMEOUT_THRESHOLD=10` consecutive timeouts the key's regex is auto-disabled and all subsequent requests are denied with 403 (fail-closed, not silently skipped).
@@ -173,7 +193,7 @@ After parsing, the loop decides how to forward the chunk to the client. If `ctx.
 `crates/gw-proxy/src/filters/logging.rs` is the universal finaliser:
 
 1. **Status class** — derive `1xx`/`2xx`/`3xx`/`4xx`/`5xx`/`other`/`err`/`early` from `ctx.upstream_status` or from the pingora `Error` etype. Emit `gateway_requests_total{status_class}`.
-2. **Release freeze** — `ctx.freeze_guard.release()`. The guard's `Drop` is the safety net for cancellation paths; the explicit release ensures idempotency and surfaces the canonical metric.
+2. **Release freeze** — `ctx.freeze_guard.release()`. The guard's `Drop` is the safety net for cancellation paths; the explicit release ensures idempotency and surfaces the canonical metric. When `ctx.lease_guard` is set (protected-mode requests), settle the lease (`LeaseGuard::settle_actual` with 6-dim actual usage; refunds if actual ≤ reserved) and release it.
 3. **Key-health record** — `KeyHealthStore::record(key_id, api_format, OutcomeKind)`. Drives cooldown / circuit state in `gw-health`.
 4. **Build `UsageRecord`** — needs all four of `auth_user_id`, `effective_user_id`, `model`, `picked_vendor_key`. Carries timestamps, request/trace IDs, `client_protocol`, `upstream_protocol`, `status` (`Ok` / `Error`), `usage` (from the accumulator), `attempt_index`, `vendor_exposure_state` (`Settled` for fully consumed upstream responses, `Terminated` for cut-short attempts), per-dimension `usage_provenance`, `freeze_amount_micro`, and the `markup_chain_snapshot`. `ledger.emit(LedgerItem { record, clear: Some(ClearKey{ req, attempt }) })` enqueues onto the must-deliver mpsc; if the queue is Full or Closed, it falls back to `sync_xadd`, which performs the DEL itself. When `ctx.picked_vendor_key.is_some()`, the filter also calls `inflight.mark_settled(..)` to HSET `ts_settled_ms` for the T0 watchdog. **No `inflight.clear` is called from the proxy** — the flusher DELs the inflight key after XADD-confirmed delivery on `usage:records` (see [`2026-05-29-billing-record-durability`](superpowers/specs/2026-05-29-billing-record-durability-design.md) §3.5).
 5. **DetailedArchive** — `crates/gw-ledger::detailed_archive::DetailedArchive` flusher pool consumes a bounded mpsc; each filter that completes a surface (downstream request body read / upstream rewrite / upstream response EOS / downstream response EOS / `logging`) calls `archive.try_send(CapturedSurface{...})` with the raw bytes. Workers pick an encoding (raw / lz4 / zstd) by uncompressed payload size and XADD to `usage:detailed`. No body redaction, no header denylist, no preview truncation, no sampling — wire-fidelity per [`detailed-log-complete-design`](superpowers/specs/2026-05-23-detailed-log-complete-design.md). Drop-on-outage (channel full / oversize / serialize fail / XADD fail) only emit metrics; the request path is never blocked. Go drainer is the long-term archive sink (180 days).
