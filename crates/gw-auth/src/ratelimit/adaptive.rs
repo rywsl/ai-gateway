@@ -101,23 +101,27 @@ impl AdaptiveRpmManager {
             // Nothing learned with enough confidence — admit unconditionally.
             return true;
         };
-        // Reuse the cached limiter unless the enforced limit moved.
-        let needs_rebuild = self
-            .limiters
-            .get(key_id)
-            .map(|e| e.0 != limit)
-            .unwrap_or(true);
-        if needs_rebuild {
-            // `limit` is clamped >= 1 by should_enforce, so NonZeroU32 is safe.
-            let quota = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
-            self.limiters
-                .insert(key_id.clone(), (limit, Arc::new(RateLimiter::direct(quota))));
-        }
-        let limiter = self
-            .limiters
-            .get(key_id)
-            .map(|e| e.1.clone())
-            .expect("limiter inserted above");
+        // Fetch-or-build the cached limiter under a SINGLE DashMap `entry` lock,
+        // rebuilding in place if the enforced limit moved. Audit 2026-05-30: the
+        // prior insert-then-separate-get split the read-modify-write across two
+        // non-atomic ops, so a concurrent `evict(key_id)` between them made the
+        // re-`get()` return None and panic the worker (TOCTOU at the former
+        // `expect("limiter inserted above")`). Holding the entry lock across the
+        // rebuild decision closes that gap. The RefMut is dropped at the end of
+        // this block so the shard lock is not held across `limiter.check()`.
+        let limiter = {
+            let mut entry = self.limiters.entry(key_id.clone()).or_insert_with(|| {
+                // `limit` is clamped >= 1 by should_enforce, so NonZeroU32 is safe.
+                let quota = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
+                (limit, Arc::new(RateLimiter::direct(quota)))
+            });
+            if entry.0 != limit {
+                // Enforced limit moved — rebuild in place under the same lock.
+                let quota = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
+                *entry = (limit, Arc::new(RateLimiter::direct(quota)));
+            }
+            entry.1.clone()
+        };
         match limiter.check() {
             Ok(()) => true,
             Err(_) => {

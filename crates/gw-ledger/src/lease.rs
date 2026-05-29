@@ -178,9 +178,15 @@ impl Drop for LeaseGuard {
 }
 
 pub fn now_ms() -> u64 {
+    // Audit 2026-05-30 (Wave 6b): a pre-1970 wall clock (VM/container clock reset
+    // before NTP sync, manual adjustment) makes duration_since(UNIX_EPOCH) return
+    // Err — the prior `.expect()` panicked the request worker on the credit-lease
+    // admission path. Fall back to 0 (matches gw-routing/gw-task convention); a 0
+    // timestamp makes any TTL comparison treat the lease as expired, the correct
+    // fail-closed direction for a credit layer that cannot time-bound overdraft.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock pre-epoch")
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
