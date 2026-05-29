@@ -553,6 +553,11 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
     // The consumer's join handle is intentionally dropped: the task lives for
     // the life of the bootstrap runtime (which itself is parked on pending()).
+    //
+    // Install the credit-lease counter handler BEFORE start() so the very
+    // first events:counter delivery has a registered handler. OnceCell-backed,
+    // so any later install_counter_handler() calls are silent no-ops.
+    gw_ledger::install_counter_handler();
     let consumer = Arc::new(gw_store::stream_consumer::StreamConsumer {
         redis: redis.clone(),
         store: store.clone(),

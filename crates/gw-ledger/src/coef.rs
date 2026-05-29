@@ -84,6 +84,13 @@ pub static COEF_CACHE: Lazy<ArcSwap<CoefSnapshot>> =
 
 pub static COEF_STAGING: Lazy<DashMap<u64, StagingState>> = Lazy::new(DashMap::new);
 
+/// Test-only mutex that serializes any test mutating the process-global
+/// `COEF_CACHE` / `COEF_STAGING`. Exposed `pub(crate)` so cross-module tests
+/// (e.g. `counter_handler::tests::coef_table_event_then_commit_swaps_snapshot`)
+/// can take the same lock and avoid racing with `coef::tests`.
+#[cfg(test)]
+pub(crate) static TEST_COEF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Apply a single coef entry to the staging area for `version`.
 /// Idempotent: re-applying the same (version, model_id, dim) overwrites.
 pub fn apply_coef_entry(version: u64, model_id: &str, dim: Dim, coef: u64) {
@@ -157,13 +164,9 @@ pub fn lookup(version: u64, model_id: &str) -> Option<ModelCoefs> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialize all tests that touch process-global COEF_CACHE / COEF_STAGING.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = TEST_COEF_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         COEF_CACHE.store(Arc::new(CoefSnapshot::empty()));
         COEF_STAGING.clear();
         guard

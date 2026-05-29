@@ -36,3 +36,5 @@ pub use lease::{
 };
 pub mod credit_estimator;
 pub use credit_estimator::{actual_usage_credits, estimate_request_credits, EstimatorError};
+pub mod counter_handler;
+pub use counter_handler::install_counter_handler;

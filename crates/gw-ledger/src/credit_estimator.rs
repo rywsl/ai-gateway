@@ -69,15 +69,14 @@ mod tests {
     use super::*;
     use crate::coef::{
         apply_coef_commit, apply_coef_entry, CoefSnapshot, Dim, COEF_CACHE, COEF_STAGING,
+        TEST_COEF_LOCK,
     };
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
 
-    /// Serialize tests against the global COEF_CACHE / COEF_STAGING — the
-    /// `coef.rs` test module uses the same approach. We hold the lock for
-    /// the entire test body so install_test_coefs + assertion run atomically.
-    fn test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// Serialize tests against the global COEF_CACHE / COEF_STAGING — shared
+    /// with `coef::tests` and `counter_handler::tests` via `TEST_COEF_LOCK`.
+    fn test_lock() -> &'static std::sync::Mutex<()> {
+        &TEST_COEF_LOCK
     }
 
     fn install_test_coefs() {
