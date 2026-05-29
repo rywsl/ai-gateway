@@ -112,6 +112,60 @@ pub async fn run(
     }
 
     // ---------------------------------------------------------------------
+    // Credit-lease settle (protected mode). Compute actual credits consumed
+    // using the SAME coef_table_version the lease was acquired under, then
+    // refund the difference if actual ≤ reserved. Spec 2026-05-29 §6.4.
+    //
+    // The two cases are mutually exclusive (request_filter step 8.5 only
+    // sets lease_guard on success and bypasses step 10's RequestFreeze).
+    // The settle MUST happen before the UsageRecord literal below reads
+    // `ctx.credits_consumed` / `ctx.coef_table_version_at_settle`.
+    // ---------------------------------------------------------------------
+    if let Some(guard) = ctx.lease_guard.as_ref() {
+        let coef_version = guard.coef_version();
+        let model_name = ctx
+            .model
+            .as_ref()
+            .map(|m| m.as_ref().to_string())
+            .unwrap_or_default();
+        let usage_snap = UsageSnapshot {
+            input_tokens: ctx.usage.input_tokens,
+            output_tokens: ctx.usage.output_tokens,
+            cache_read_input_tokens: ctx.usage.cached_tokens,
+            cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
+            thinking_tokens: ctx.usage.thinking_tokens,
+            multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
+        };
+        match gw_ledger::actual_usage_credits(coef_version, model_name.as_str(), &usage_snap) {
+            Ok(actual) => {
+                if actual > guard.reserved() {
+                    metrics::counter!(
+                        "gw_credit_actual_exceeds_reserved_total",
+                        "model_id" => model_name.clone(),
+                    )
+                    .increment(1);
+                }
+                guard.settle_actual(actual);
+                ctx.credits_consumed = Some(actual);
+                ctx.coef_table_version_at_settle = Some(coef_version);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "gw_proxy::filters::logging",
+                    error = ?e,
+                    coef_version,
+                    model = %model_name,
+                    "credit-lease actual_usage_credits failed; settle skipped"
+                );
+            }
+        }
+    }
+
+    if let Some(g) = ctx.lease_guard.as_ref() {
+        g.release();
+    }
+
+    // ---------------------------------------------------------------------
     // Key-health bookkeeping. We treat a non-error status from upstream as
     // success, otherwise failure. The picked key's FormatHealth is fetched
     // on demand (multi-dim: key + api_format).
@@ -261,6 +315,9 @@ pub async fn run(
                 .map(|m| m.markup_chain)
                 .unwrap_or_else(MarkupChainSnapshot::identity),
             operation_id: ctx.operation_id.clone(),
+            pod_id: gw_ledger::instance_id::cached().unwrap_or_default(),
+            credits_consumed: ctx.credits_consumed,
+            coef_table_version: ctx.coef_table_version_at_settle,
         };
 
         // -----------------------------------------------------------------

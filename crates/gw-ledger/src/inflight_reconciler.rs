@@ -153,5 +153,8 @@ async fn build_fallback_record(pool: &RedisPool, key: &str) -> anyhow::Result<Op
         ttft_ms: None,
         is_stream: false,
         operation_id: None,
+        pod_id: crate::instance_id::cached().unwrap_or_default(),
+        credits_consumed: None,
+        coef_table_version: None,
     }))
 }

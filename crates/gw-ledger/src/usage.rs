@@ -98,6 +98,22 @@ pub struct UsageRecord {
     /// all ordinary (non-LRO) requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+
+    // --- Credit lease (2026-05-29 design) ---
+    /// Source Pod's `instance_id`. Allows Go to attribute outstanding credits.
+    /// Always populated; empty string for code paths predating this spec.
+    pub pod_id: String,
+
+    /// Credits this request consumed against the per-Pod lease (protected mode
+    /// only). When `None`, request went through the legacy `frozen_micro`
+    /// soft-defense path and Go skips outstanding-ledger decrement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits_consumed: Option<i64>,
+
+    /// `coef_table_version` used by Rust to compute `credits_consumed`. Go must
+    /// use this same version when reconciling outstanding ledger entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coef_table_version: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -113,9 +129,8 @@ pub enum UsageStatus {
 mod tests {
     use super::*;
 
-    #[test]
-    fn usage_record_json_shape() {
-        let rec = UsageRecord {
+    fn make_minimal_record() -> UsageRecord {
+        UsageRecord {
             ts_ms: 1700000000000,
             request_id: "req-1".into(),
             trace_id: "tr-1".into(),
@@ -145,7 +160,15 @@ mod tests {
             estimate_pricing_version: 0,
             markup_chain_snapshot: MarkupChainSnapshot::identity(),
             operation_id: None,
-        };
+            pod_id: String::new(),
+            credits_consumed: None,
+            coef_table_version: None,
+        }
+    }
+
+    #[test]
+    fn usage_record_json_shape() {
+        let rec = make_minimal_record();
         let s = serde_json::to_string(&rec).unwrap();
         // Smoke: critical fields appear; the retired fields are GONE.
         assert!(s.contains("\"usage\""));
@@ -180,5 +203,31 @@ mod tests {
             s2.contains("\"operation_id\":\"operations/xyz-123\""),
             "operation_id must appear when Some"
         );
+    }
+
+    #[test]
+    fn usage_record_serializes_pod_id_when_present() {
+        let mut rec = make_minimal_record();
+        rec.pod_id = "pod-xyz".into();
+        let json = serde_json::to_value(&rec).unwrap();
+        assert_eq!(json["pod_id"], "pod-xyz");
+    }
+
+    #[test]
+    fn credits_consumed_omitted_when_none() {
+        let rec = make_minimal_record();
+        let json = serde_json::to_value(&rec).unwrap();
+        assert!(json.get("credits_consumed").is_none());
+        assert!(json.get("coef_table_version").is_none());
+    }
+
+    #[test]
+    fn credits_consumed_serialized_when_some() {
+        let mut rec = make_minimal_record();
+        rec.credits_consumed = Some(12345);
+        rec.coef_table_version = Some(7);
+        let json = serde_json::to_value(&rec).unwrap();
+        assert_eq!(json["credits_consumed"], 12345);
+        assert_eq!(json["coef_table_version"], 7);
     }
 }

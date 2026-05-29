@@ -213,6 +213,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# no_currency_in_lease (credit-lease §16) — the credit-lease layer (lease.rs,
+# coef.rs, credit_estimator.rs, protection_config.rs) must not reference
+# currency, prices, or micro-units. Go owns all monetary computation; Rust
+# holds opaque "credits" only.
+# Files may not exist yet (created by later tasks) — missing files are silently
+# skipped. Comment-only lines (// or * line-leader) are exempt so doc-boundary
+# explanations don't trip the lint.
+# ---------------------------------------------------------------------------
+echo "[no_currency_in_lease] credit lease modules must not reference currency or pricing"
+_currency_hits=$(grep -iEHn 'usd|cny|micro|cost|price' \
+    crates/gw-ledger/src/lease.rs \
+    crates/gw-ledger/src/coef.rs \
+    crates/gw-ledger/src/credit_estimator.rs \
+    crates/gw-ledger/src/protection_config.rs \
+    2>/dev/null \
+    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*\*' \
+    || true)
+if [ -n "$_currency_hits" ]; then
+  echo "$_currency_hits"
+  bad "credit lease modules reference currency or pricing (Rust must hold opaque credits only)"
+else
+  ok "no currency/pricing references in credit lease modules"
+fi
+
+# ---------------------------------------------------------------------------
 # no_global_hmac_force (G7) — HMAC signing is per-api-key (ApiKeyEntry.
 # signature_required). A workspace-global force flag is an explicit v2
 # follow-up (ADR-G7-2) and must not leak into v1.5 source.

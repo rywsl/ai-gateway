@@ -73,6 +73,7 @@ pub async fn run(
     capability_resolver: Option<&Arc<gw_capability::CapabilityResolver>>,
     mgmt_blacklist: &Arc<RedisJwtBlacklist>,
     hard_cap_cfg: &gw_auth::hard_cap::HardCapCfg,
+    protection_cfg: &gw_ledger::ProtectionConfig,
     files_gateway: &dyn GeminiFilesGateway,
     routing_deps: Option<GeminiFilesRoutingDeps<'_>>,
 ) -> Result<bool> {
@@ -630,21 +631,22 @@ pub async fn run(
         }
     };
     let path_str = session.req_header().uri.path();
-    let (model_name, is_stream, est_input_tokens) = if ctx.is_gemini_files {
-        (ModelName::from("gemini-files"), false, 1)
+    let (model_name, is_stream, est_input_tokens, req_max_tokens) = if ctx.is_gemini_files {
+        (ModelName::from("gemini-files"), false, 1, None)
     } else if let Some(shape) = cli_shape {
         let hints = extract_cli_request_hints(shape, path_str, Some(&parse_body));
         let model = hints.model.unwrap_or_default();
         let is_stream = hints.stream.unwrap_or(false);
-        (ModelName::from(model.as_str()), is_stream, 1)
+        (ModelName::from(model.as_str()), is_stream, 1, None)
     } else {
         let parsed = codec.parse_request(&parse_body);
-        let (model_name, is_stream, est_input_tokens) = match parsed {
+        let (model_name, is_stream, est_input_tokens, max_tokens) = match parsed {
             Ok(ir) => {
                 let values = (
                     ModelName::from(ir.model.as_ref()),
                     ir.stream,
                     codec.estimate_input_tokens(&ir),
+                    ir.max_tokens,
                 );
                 values
             }
@@ -661,7 +663,7 @@ pub async fn run(
         } else {
             model_name
         };
-        (model_name, is_stream, est_input_tokens)
+        (model_name, is_stream, est_input_tokens, max_tokens)
     };
     ctx.model = Some(model_name.clone());
     ctx.is_stream = is_stream;
@@ -1131,6 +1133,141 @@ pub async fn run(
             Ok(slot) => ctx.stream_slot = Some(slot),
             Err(err) => {
                 bail!(session, ctx, &err, &request_id)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 8.5. Credit Lease (protected mode). Spec 2026-05-29-credit-lease-design.
+    //      If the user is in protected mode (Go pushed `mode=protected` via
+    //      `events:counter ns=protected_lease`), enforce a HARD upper bound on
+    //      the per-Pod credits pool instead of the legacy frozen_micro soft
+    //      defense. On success, bypasses step 9-10 entirely and returns; the
+    //      LeaseGuard sits on ctx and is released in `logging`.
+    // ---------------------------------------------------------------------
+    if protection_cfg.enabled {
+        let in_protected = gw_ledger::LEASE_POOL
+            .get(&merged.effective_user_id)
+            .map(|s| s.mode() == gw_ledger::Mode::Protected)
+            .unwrap_or(false);
+
+        if in_protected {
+            let model_id_str = model_name.as_ref().to_string();
+
+            // Resolve max_output_tokens with 3-tier fallback:
+            //   1. request explicit max_tokens
+            //   2. (no per-model default exists in MergedPermission yet — skip)
+            //   3. configured ceiling
+            let max_out = req_max_tokens.unwrap_or_else(|| {
+                metrics::counter!(
+                    "gw_credit_default_ceiling_used_total",
+                    "model_id" => model_id_str.clone()
+                )
+                .increment(1);
+                protection_cfg.default_output_ceiling_tokens
+            });
+
+            // Read the lease's coef_table_version (the version this lease was
+            // priced under). settle MUST use the same version.
+            let coef_version = gw_ledger::LEASE_POOL
+                .get(&merged.effective_user_id)
+                .map(|s| {
+                    s.coef_table_version
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+                .unwrap_or(0);
+
+            let credits = match gw_ledger::estimate_request_credits(
+                coef_version,
+                model_id_str.as_str(),
+                est_input_tokens,
+                max_out,
+            ) {
+                Ok(c) => c,
+                Err(_) => {
+                    // Coefs unavailable for this (version, model). Fail-closed:
+                    // protected mode without coef data cannot safely admit
+                    // requests.
+                    metrics::counter!(
+                        "gw_credit_lease_acquire_total",
+                        "result" => "no_coefs"
+                    )
+                    .increment(1);
+                    let err = ErrorIR {
+                        category: ErrorCategory::ClientQuota,
+                        status: 402,
+                        upstream_status: None,
+                        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_INSUFFICIENT),
+                        message: Cow::Borrowed(
+                            "credit coefficients unavailable for protected mode",
+                        ),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &err, &request_id)
+                }
+            };
+
+            let now = gw_ledger::now_ms();
+            match gw_ledger::LeaseGuard::try_acquire(&merged.effective_user_id, credits, now) {
+                Ok(guard) => {
+                    metrics::counter!(
+                        "gw_credit_lease_acquire_total",
+                        "result" => "ok"
+                    )
+                    .increment(1);
+                    ctx.lease_guard = Some(guard);
+                    ctx.merged_perm = Some(merged);
+                    ctx.phase_end();
+                    return Ok(false);
+                }
+                Err(gw_ledger::LeaseError::Expired) => {
+                    metrics::counter!("gw_credit_lease_expired_total").increment(1);
+                    let err = ErrorIR {
+                        category: ErrorCategory::ClientQuota,
+                        status: 402,
+                        upstream_status: None,
+                        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_EXPIRED),
+                        message: Cow::Borrowed(
+                            "lease expired; ops should investigate Go push pipeline",
+                        ),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &err, &request_id)
+                }
+                Err(gw_ledger::LeaseError::Insufficient { .. }) => {
+                    metrics::counter!(
+                        "gw_credit_lease_acquire_total",
+                        "result" => "insufficient"
+                    )
+                    .increment(1);
+                    let err = ErrorIR {
+                        category: ErrorCategory::ClientQuota,
+                        status: 402,
+                        upstream_status: None,
+                        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_INSUFFICIENT),
+                        message: Cow::Borrowed("insufficient credits for this request"),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &err, &request_id)
+                }
+                Err(gw_ledger::LeaseError::NoLease) => {
+                    // Race: in_protected was true at the get, but state was
+                    // wiped (e.g., concurrent unprotected push) between then
+                    // and try_acquire. Fall through to legacy soft-defense
+                    // path (step 9-10).
+                    metrics::counter!("gw_credit_lease_warmup_pending_total").increment(1);
+                    // Note: do not return here. Let control flow continue to
+                    // step 9 (hard caps) and step 10 (RequestFreeze).
+                }
             }
         }
     }

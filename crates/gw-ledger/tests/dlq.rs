@@ -50,6 +50,9 @@ fn sample_record() -> UsageRecord {
         estimate_pricing_version: 0,
         markup_chain_snapshot: MarkupChainSnapshot::identity(),
         operation_id: None,
+        pod_id: String::new(),
+        credits_consumed: None,
+        coef_table_version: None,
     }
 }
 

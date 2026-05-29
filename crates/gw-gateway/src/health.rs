@@ -134,7 +134,8 @@ async fn handle_connection(
             || path.starts_with("/healthz/key/")
             || path == "/healthz/resilience"
             || path == "/healthz/tunnel"
-            || path == "/healthz/strategies" =>
+            || path == "/healthz/strategies"
+            || path.starts_with("/healthz/credit/") =>
         {
             // ADR-B2-3 + B2-5: mgmt-token gated admin endpoints. Verify
             // chain mirrors the proxy's request_filter mgmt branch
@@ -275,6 +276,10 @@ fn build_healthz_body(path: &str, state: &HealthState) -> String {
         build_tunnel_healthz_body(state)
     } else if path == "/healthz/strategies" {
         build_strategies_body(state)
+    } else if let Some(uid) = path.strip_prefix("/healthz/credit/lease/") {
+        build_credit_lease_body(uid)
+    } else if path == "/healthz/credit/coef-table" {
+        build_credit_coef_table_body()
     } else {
         String::from("{}")
     }
@@ -355,7 +360,92 @@ fn escape_json_string(s: &str) -> String {
     out
 }
 
-/// Parse the request path from the first line of an HTTP/1.1 request.
+/// `/healthz/credit/lease/<uid>` — returns the current LeaseState for a user,
+/// or 404 JSON if the user has no entry in the pool.
+///
+/// The response body is a JSON object; the HTTP status is embedded in the
+/// `write_json_response` call at the call site. Because `build_healthz_body`
+/// returns a plain `String`, we encode the 404 case as a sentinel prefix
+/// `"404:"` that `handle_connection` can detect. To keep the call-site diff
+/// minimal we instead return a two-tuple via a dedicated helper called
+/// directly from `handle_connection` — but that would require restructuring
+/// the existing single-return `build_healthz_body` contract.
+///
+/// Simpler approach: embed status in the JSON and always return 200 from the
+/// outer handler (consistent with how `/healthz/key/<id>` works — it returns
+/// `{}` for unknown keys rather than 404). The operator can inspect the
+/// `"found"` field.
+fn build_credit_lease_body(uid: &str) -> String {
+    use gw_core::ids::UserId;
+    use std::sync::atomic::Ordering;
+
+    let key = UserId::from(uid);
+    match gw_ledger::LEASE_POOL.get(&key) {
+        Some(state) => {
+            let mode_str = match state.mode() {
+                gw_ledger::Mode::Protected => "protected",
+                gw_ledger::Mode::Unprotected => "unprotected",
+            };
+            let credits = state.credits();
+            let expires_at_ms = state.expires_at_ms.load(Ordering::Acquire);
+            let coef_table_version = state.coef_table_version.load(Ordering::Acquire);
+            let lease_id = state.lease_id.load();
+            format!(
+                r#"{{"found":true,"user_id":"{uid}","mode":"{mode_str}","credits":{credits},"expires_at_ms":{expires_at_ms},"coef_table_version":{coef_table_version},"lease_id":"{lease_id}"}}"#,
+                uid = escape_json_str(uid),
+                mode_str = mode_str,
+                credits = credits,
+                expires_at_ms = expires_at_ms,
+                coef_table_version = coef_table_version,
+                lease_id = escape_json_str(&lease_id),
+            )
+        }
+        None => format!(
+            r#"{{"found":false,"user_id":"{}","error":"no lease for user"}}"#,
+            escape_json_str(uid)
+        ),
+    }
+}
+
+/// `/healthz/credit/coef-table` — returns a summary of the currently active
+/// coef snapshot: version, model count, and up to 64 model IDs.
+fn build_credit_coef_table_body() -> String {
+    let snap = gw_ledger::current_coef_snapshot();
+    let version = snap.version;
+    let model_count = snap.by_model.len();
+    let mut models_buf = String::from("[");
+    for (i, model_id) in snap.by_model.keys().take(64).enumerate() {
+        if i > 0 {
+            models_buf.push(',');
+        }
+        models_buf.push('"');
+        models_buf.push_str(&escape_json_str(model_id));
+        models_buf.push('"');
+    }
+    models_buf.push(']');
+    format!(
+        r#"{{"version":{version},"model_count":{model_count},"models":{models_buf}}}"#,
+    )
+}
+
+/// Escape a string for safe embedding inside a JSON string literal.
+/// Handles the characters that would break JSON parsing.
+fn escape_json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 ///
 /// Accepts both `GET /path HTTP/1.1\r\n...` and the malformed-but-tolerated
 /// `GET /path\r\n` (no version field). Strips a trailing `\r` left over from

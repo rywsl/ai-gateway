@@ -141,6 +141,17 @@ pub struct ReqCtx {
     /// The value is written as-is (or 0) to the inflight hash on `register`.
     pub prompt_estimate_tokens: Option<u32>,
     pub freeze_guard: Option<RequestFreeze>,
+    /// Credit lease guard (protected mode). Mutually exclusive with
+    /// `freeze_guard`: if `lease_guard.is_some()` then this request bypassed
+    /// the step-10 `RequestFreeze`. See spec 2026-05-29 §6.4.
+    pub lease_guard: Option<gw_ledger::LeaseGuard>,
+
+    /// Credits this request observed consumed at settle time. Injected into
+    /// UsageRecord by `billing_lifecycle`. None in unprotected mode.
+    pub credits_consumed: Option<i64>,
+
+    /// `coef_table_version` used to compute `credits_consumed`.
+    pub coef_table_version_at_settle: Option<u64>,
     pub stream_slot: Option<StreamSlot>,
     pub bytes_sent_to_client: AtomicU64,
     /// RAII handle on the picked vendor key's in-flight counter. Held by the
@@ -361,6 +372,9 @@ impl ReqCtx {
             cancel_grace_active: false,
             prompt_estimate_tokens: None,
             freeze_guard: None,
+            lease_guard: None,
+            credits_consumed: None,
+            coef_table_version_at_settle: None,
             stream_slot: None,
             bytes_sent_to_client: AtomicU64::new(0),
             inflight_guard: None,

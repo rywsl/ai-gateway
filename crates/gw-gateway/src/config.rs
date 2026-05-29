@@ -64,6 +64,11 @@ pub struct Config {
     pub body_rules: BodyRulesCfg,
     #[serde(default)]
     pub health: HealthCfg,
+    /// Credit-lease protection mode (Spec 2026-05-29-credit-lease-design).
+    /// `enabled = false` (the default) keeps the legacy `frozen_micro` soft
+    /// defense path; flipping it on activates the per-Pod hard upper bound.
+    #[serde(default)]
+    pub protection: gw_ledger::ProtectionConfig,
 }
 
 #[derive(Debug, Deserialize)]

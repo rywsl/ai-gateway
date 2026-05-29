@@ -584,6 +584,52 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "Task cancel endpoint calls",
     },
+    // --- Credit lease (2026-05-29 design) ---
+    MetricSpec {
+        name: "gw_credit_lease_acquire_total",
+        kind: MetricKind::Counter,
+        help: "Lease acquire attempts in protected mode, labeled by result (ok | insufficient | no_coefs)",
+    },
+    MetricSpec {
+        name: "gw_credit_lease_expired_total",
+        kind: MetricKind::Counter,
+        help: "Requests rejected because lease TTL expired (Go push pipeline lag)",
+    },
+    MetricSpec {
+        name: "gw_credit_lease_warmup_pending_total",
+        kind: MetricKind::Counter,
+        help: "Requests on a user not yet visible in LeasePool — fell through to legacy soft defense",
+    },
+    MetricSpec {
+        name: "gw_credit_default_ceiling_used_total",
+        kind: MetricKind::Counter,
+        help: "Times the fallback output token ceiling was used during credit estimation",
+    },
+    MetricSpec {
+        name: "gw_credit_actual_exceeds_reserved_total",
+        kind: MetricKind::Counter,
+        help: "Settle observed actual credits > reserved (estimator drift signal)",
+    },
+    MetricSpec {
+        name: "gw_credit_coef_table_incomplete_total",
+        kind: MetricKind::Counter,
+        help: "coef_table commit arrived with fewer staged models than expected",
+    },
+    MetricSpec {
+        name: "gw_credit_lease_active_users",
+        kind: MetricKind::Gauge,
+        // TODO: sampler not yet wired; gauge is registered so /metrics surfaces HELP+TYPE.
+        // A follow-up task should add a background sampler that iterates LEASE_POOL and
+        // counts entries where mode() == Mode::Protected.
+        help: "Number of users currently in protected mode (sampled)",
+    },
+    MetricSpec {
+        name: "gw_credit_coef_table_version_active",
+        kind: MetricKind::Gauge,
+        // TODO: sampler not yet wired; gauge is registered so /metrics surfaces HELP+TYPE.
+        // A follow-up task should call current_coef_snapshot().version and set this gauge.
+        help: "Currently active coef_table_version",
+    },
 ];
 
 pub fn describe_all() {
