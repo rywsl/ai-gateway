@@ -754,6 +754,17 @@ impl ProxyHttp for LlmGateway {
                     let attempt = ctx.failover_attempt.saturating_add(1);
                     let decision = self.failover_executor.next_candidate(&remaining, attempt);
                     if let FailoverDecision::Retry(new_key) = decision {
+                        // Audit 2026-05-30 §1.2: settle the prior attempt before
+                        // mutating ctx for the next key. Bumps attempt_index (so
+                        // the next inflight.register uses a fresh key instead of
+                        // clobbering this attempt's) and emits its UsageRecord —
+                        // build_attempt_record reads ctx.picked_vendor_key, so this
+                        // MUST run before picked_vendor_key is overwritten below.
+                        crate::billing_lifecycle::settle_prior_attempt_spawn(
+                            ctx,
+                            self.inflight.clone(),
+                            self.ledger.clone(),
+                        );
                         if let Some(k) = ctx.picked_vendor_key.as_ref() {
                             if !ctx.retry_blacklist.iter().any(|id| id == &k.key_id) {
                                 ctx.retry_blacklist.push(k.key_id.clone());
@@ -808,6 +819,14 @@ impl ProxyHttp for LlmGateway {
 
                         match decision {
                             FailoverDecision::Retry(new_key) => {
+                                // Audit 2026-05-30 §1.2: settle the prior attempt
+                                // before mutating ctx (see egress arm above). Must
+                                // run before picked_vendor_key is overwritten.
+                                crate::billing_lifecycle::settle_prior_attempt_spawn(
+                                    ctx,
+                                    self.inflight.clone(),
+                                    self.ledger.clone(),
+                                );
                                 if let Some(k) = ctx.picked_vendor_key.as_ref() {
                                     if !ctx.retry_blacklist.iter().any(|id| id == &k.key_id) {
                                         ctx.retry_blacklist.push(k.key_id.clone());

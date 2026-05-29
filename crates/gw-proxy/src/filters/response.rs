@@ -407,9 +407,24 @@ fn handle_event(
         // Per-event accumulation (runs in both branches).
         match &ev {
             StreamEventIR::Usage(u) => {
-                ctx.usage.input_tokens = u.input_tokens;
-                ctx.usage.output_tokens = u.output_tokens;
-                ctx.usage.cached_tokens = u.cached_tokens;
+                // Audit 2026-05-30 §1.3: guard each dimension so a later partial
+                // usage frame cannot zero an earlier full one. Anthropic delivers
+                // usage twice — message_start carries input_tokens + cache_read,
+                // the terminal message_delta carries ONLY output_tokens (input=0,
+                // cache_read=None after serde defaults). Unconditional assignment
+                // here clobbered input/cached to 0/None, under-billing every
+                // Anthropic stream. Aligned with apply_extracted_to_ctx's guards.
+                // output_tokens is cumulative (last-write) for Anthropic; guarding
+                // it with > 0 is equivalent today and keeps the two paths in sync.
+                if u.input_tokens > 0 {
+                    ctx.usage.input_tokens = u.input_tokens;
+                }
+                if u.output_tokens > 0 {
+                    ctx.usage.output_tokens = u.output_tokens;
+                }
+                if u.cached_tokens.is_some() {
+                    ctx.usage.cached_tokens = u.cached_tokens;
+                }
             }
             StreamEventIR::Start { .. } | StreamEventIR::Delta { .. } => {
                 if ctx.timing.ttft.is_none() {
@@ -936,5 +951,52 @@ mod deadline_tests {
         ctx.response_deadline = Some(Duration::from_secs(1));
 
         assert!(check_deadline(&ctx).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod stream_usage_guard_tests {
+    //! Audit 2026-05-30 §1.3: a terminal Anthropic `message_delta` (which carries
+    //! only `output_tokens`) must not zero the `input_tokens` / cache-read that the
+    //! earlier `message_start` set. Before the guard, the second frame clobbered
+    //! both to 0/None, under-billing every Anthropic stream.
+    use super::*;
+    use crate::ctx::ReqCtx;
+    use gw_codec::AnyCodec;
+
+    fn anthropic_stream_ctx() -> ReqCtx {
+        ReqCtx {
+            is_stream: true,
+            upstream_codec: Some(AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)),
+            ..ReqCtx::default()
+        }
+    }
+
+    #[test]
+    fn terminal_message_delta_does_not_clobber_input_or_cache() {
+        let codec = AnyCodec::Anthropic(gw_codec::anthropic::Anthropic);
+        let mut ctx = anthropic_stream_ctx();
+
+        // Frame 1: message_start carries input + cache_read (output starts at 0).
+        let start = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":0,\"cache_creation_input_tokens\":1000,\"cache_read_input_tokens\":500}}}\n\n";
+        handle_event(&codec, start, &mut ctx, false, None);
+        assert_eq!(ctx.usage.input_tokens, 50, "message_start sets input");
+        assert_eq!(ctx.usage.cached_tokens, Some(500), "message_start sets cache_read");
+
+        // Frame 2: terminal message_delta carries ONLY output_tokens.
+        let delta = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n";
+        handle_event(&codec, delta, &mut ctx, false, None);
+
+        // Regression: input + cache_read are PRESERVED, output is updated.
+        assert_eq!(
+            ctx.usage.input_tokens, 50,
+            "input_tokens must survive the output-only message_delta (was clobbered to 0 before the fix)"
+        );
+        assert_eq!(
+            ctx.usage.cached_tokens,
+            Some(500),
+            "cache_read must survive the output-only message_delta"
+        );
+        assert_eq!(ctx.usage.output_tokens, 42, "output_tokens is updated by message_delta");
     }
 }

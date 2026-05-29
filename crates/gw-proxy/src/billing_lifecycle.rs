@@ -298,3 +298,54 @@ pub async fn on_retry(
         // docs/superpowers/specs/2026-05-29-billing-record-durability-design.md §3.6.
     }
 }
+
+/// Response-side counterpart to the connect-path settlement inlined in
+/// `LlmGateway::fail_to_connect`. Synchronously runs `on_retry_sync` (force
+/// Terminated → build the failed attempt's `UsageRecord` → bump `attempt_index`),
+/// then spawns the async inflight `mark_settled` + ledger `emit` for the OLD
+/// attempt. Extracted so the response-side failover retry arms (5xx/429 and
+/// egress) settle prior attempts identically to the connect path — without this,
+/// a header-only retryable failover never emitted the prior attempt's record and
+/// the next `inflight.register` clobbered the same `attempt_index` key
+/// (audit 2026-05-30 §1.2 / spec §5.6 AttemptManifest).
+///
+/// Takes owned `Arc`s (callers pass `self.inflight.clone()` / `self.ledger.clone()`)
+/// so the work can move into the spawn.
+pub fn settle_prior_attempt_spawn(
+    ctx: &mut ReqCtx,
+    inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
+    ledger: std::sync::Arc<gw_ledger::Ledger>,
+) {
+    use gw_ledger::inflight::SettleState;
+    let request_id = ctx.request_id.0.clone();
+    // `on_retry_sync` bumps attempt_index; the OLD attempt is therefore the
+    // post-bump value minus 1 — identical to the proven connect-path pattern.
+    if let Some(rec) = on_retry_sync(ctx) {
+        let old_attempt = ctx.attempt_index.saturating_sub(1);
+        tokio::spawn(async move {
+            if let Err(e) = inflight
+                .mark_settled(&request_id, old_attempt, SettleState::Terminated)
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    request_id = %request_id,
+                    attempt = old_attempt,
+                    "settle_prior_attempt_spawn: inflight mark_settled failed"
+                );
+            }
+            ledger
+                .emit(LedgerItem {
+                    record: rec,
+                    clear: Some(ClearKey {
+                        request_id: request_id.clone(),
+                        attempt_index: old_attempt,
+                    }),
+                })
+                .await;
+            // inflight.clear is NOT called here — the flusher DELs after
+            // XADD-confirmed delivery; a missed spawn is recovered by the
+            // startup reconciler (CrashFallback). Mirrors fail_to_connect.
+        });
+    }
+}
