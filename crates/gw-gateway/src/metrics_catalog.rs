@@ -400,7 +400,22 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_billing_emit_path_total",
         kind: MetricKind::Counter,
-        help: "UsageRecord emit attempts by path (channel / closed)",
+        help: "UsageRecord emit attempts by path (channel / closed / sync_bypass_closed)",
+    },
+    MetricSpec {
+        name: "gw_billing_inflight_clear_total",
+        kind: MetricKind::Counter,
+        help: "Outcome of the DEL inflight key step in ledger flusher / sync bypass; labels=outcome(ok|del_failed|skipped_dlq|skipped_lost)",
+    },
+    MetricSpec {
+        name: "gw_billing_flusher_panic_total",
+        kind: MetricKind::Counter,
+        help: "Single-tick panics inside the ledger flusher captured by catch_unwind. ANY non-zero value = page on-call.",
+    },
+    MetricSpec {
+        name: "gw_billing_flusher_dead_total",
+        kind: MetricKind::Counter,
+        help: "emit() observed a closed channel (flusher task gone); record falls back to sync XADD. ANY non-zero = page on-call.",
     },
     // --- Billing robustness W3-T1 ---
     MetricSpec {

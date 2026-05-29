@@ -7,6 +7,7 @@ use fred::interfaces::StreamsInterface;
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
+use gw_ledger::flusher::LedgerItem;
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
 use gw_store::redis_client::RedisCtx;
@@ -56,10 +57,26 @@ async fn batch_flush_writes_usage_stream_no_balance_decr() {
     let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
         .await
         .unwrap();
-    let ledger = Ledger::start(redis.clone(), 1024, 2, Duration::from_millis(100));
+    let ledger = Ledger::start(
+        redis.clone(),
+        "test-instance".to_string(),
+        1024,
+        2,
+        Duration::from_millis(100),
+    );
     let rec = make_record();
-    ledger.try_send(rec.clone()).unwrap();
-    ledger.try_send(rec).unwrap();
+    ledger
+        .try_send(LedgerItem {
+            record: rec.clone(),
+            clear: None,
+        })
+        .unwrap();
+    ledger
+        .try_send(LedgerItem {
+            record: rec,
+            clear: None,
+        })
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     let client = redis.pool.next();
     // (1) Stream xlen reflects both records.
@@ -88,18 +105,32 @@ async fn emit_bypasses_to_sync_xadd_when_channel_full() {
     // capacity=1 so the channel fills after the first record.
     // The flusher worker has a 60-second flush interval — it won't drain
     // before we overflow the channel with rapid try_send calls.
-    let ledger = Ledger::start(redis.clone(), 1, 100, Duration::from_secs(60));
+    let ledger = Ledger::start(
+        redis.clone(),
+        "test-instance".to_string(),
+        1,
+        100,
+        Duration::from_secs(60),
+    );
 
     // Fill the channel: first try_send may succeed (capacity=1), subsequent
     // ones will hit Full. We don't care about success/failure here — we just
     // want the channel to be at capacity when emit is called.
     for _ in 0..5 {
-        let _ = ledger.try_send(make_record());
+        let _ = ledger.try_send(LedgerItem {
+            record: make_record(),
+            clear: None,
+        });
     }
 
     // emit() must not drop the record: it should either enqueue it or bypass
     // via sync XADD. Give the channel a moment to drain before checking.
-    ledger.emit(make_record()).await;
+    ledger
+        .emit(LedgerItem {
+            record: make_record(),
+            clear: None,
+        })
+        .await;
 
     // Allow the batch flusher a moment to drain whatever was queued normally.
     tokio::time::sleep(Duration::from_millis(300)).await;

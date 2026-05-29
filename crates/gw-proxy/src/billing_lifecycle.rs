@@ -33,6 +33,7 @@ pub fn is_terminal(v: VendorExposure) -> bool {
 
 use crate::ctx::ReqCtx;
 use gw_ledger::FreezeGuard as _;
+use gw_ledger::{ClearKey, LedgerItem};
 
 /// Apply a `VendorExposure` state transition to the ReqCtx.
 ///
@@ -244,10 +245,11 @@ pub fn on_retry_sync(ctx: &mut ReqCtx) -> Option<gw_ledger::usage::UsageRecord> 
 /// Performs:
 /// 1. `on_retry_sync` (state mutation + record build)
 /// 2. `InflightLedger::mark_settled(Terminated)` for the previous attempt
-/// 3. `Ledger::emit` for the partial UsageRecord
-/// 4. `InflightLedger::clear` for the previous attempt
+/// 3. `Ledger::emit` for the partial UsageRecord, carrying the inflight
+///    `ClearKey` so the flusher DELs the key after XADD-confirmed delivery
 ///
-/// Spec §5.6.
+/// Spec §5.6 of billing-robustness; clear semantics tightened by spec
+/// `2026-05-29-billing-record-durability` §3.6.
 pub async fn on_retry(
     ctx: &mut ReqCtx,
     inflight: &gw_ledger::inflight::InflightLedger,
@@ -276,17 +278,20 @@ pub async fn on_retry(
             );
         }
 
-        // Emit must-deliver billing record for the failed attempt.
-        ledger.emit(rec).await;
+        // Emit must-deliver billing record for the failed attempt,
+        // carrying the ClearKey so the flusher DELs the inflight hash
+        // after XADD-confirmed delivery.
+        ledger
+            .emit(LedgerItem {
+                record: rec,
+                clear: Some(ClearKey {
+                    request_id: request_id.clone(),
+                    attempt_index: old_attempt,
+                }),
+            })
+            .await;
 
-        // Clear the inflight hash for the failed attempt.
-        if let Err(e) = inflight.clear(&request_id, old_attempt).await {
-            tracing::warn!(
-                error = ?e,
-                request_id = %request_id,
-                attempt = old_attempt,
-                "on_retry: inflight clear failed"
-            );
-        }
+        // inflight.clear is NOT called here — see
+        // docs/superpowers/specs/2026-05-29-billing-record-durability-design.md §3.6.
     }
 }

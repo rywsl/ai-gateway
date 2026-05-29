@@ -172,6 +172,8 @@ Rust 可能 emit **多条** `usage:records` 共享同一主键 `(request_id, att
    - 主键存在 + 新 record 的 provenance ≤ 已存 → 丢弃。
 3. CrashFallback record 永远会被同主键的真实 emit 覆盖。Rust 侧不做幂等。
 
+> **Rust-side at-least-once source (added 2026-05-29).** The primary dup window in current Rust gateway is `XADD-confirmed → flusher process death → restart → reconciler emits CrashFallback for the same (request_id, attempt_index)`. The window equals one `flush_interval_ms` (default 200 ms). Go's existing dedup rule (highest provenance level + highest `vendor_exposure_state` wins) covers this. No Go-side change required. See [`docs/superpowers/specs/2026-05-29-billing-record-durability-design.md`](../../superpowers/specs/2026-05-29-billing-record-durability-design.md) §附录 C for the formal argument.
+
 ### 2.1.9 Orphan instance 兜底（推荐 Go 侧能力，新增）
 
 Rust 启动期 reconciler 只扫自己 `instance_id` 的残留。被永久下线的 replica（`gateway:instance:<id>:heartbeat` 已 expire）的 inflight key 由 Rust 侧 24h `EXPIRE` 兜底，但在 expire 之前的窗口里不会被恢复。

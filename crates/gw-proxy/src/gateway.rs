@@ -20,8 +20,10 @@ use gw_codec::gemini::files::GeminiFilesGateway;
 use gw_core::error::codes;
 use gw_core::ids::{RequestId, TraceId};
 use gw_health::KeyHealthStore;
+use gw_ledger::ClearKey;
 use gw_ledger::FreezeGuard;
 use gw_ledger::Ledger;
+use gw_ledger::LedgerItem;
 use gw_routing::in_flight::InFlightStore;
 use gw_routing::latency::LatencyTracker;
 use gw_routing::{FailoverClass, FailoverDecision, FailoverExecutor};
@@ -1051,15 +1053,19 @@ impl ProxyHttp for LlmGateway {
                                     "fail_to_connect on_retry: inflight mark_settled failed"
                                 );
                             }
-                            ledger.emit(rec).await;
-                            if let Err(e) = inflight.clear(&request_id, old_attempt).await {
-                                tracing::warn!(
-                                    error = ?e,
-                                    request_id = %request_id,
-                                    attempt = old_attempt,
-                                    "fail_to_connect on_retry: inflight clear failed"
-                                );
-                            }
+                            ledger
+                                .emit(LedgerItem {
+                                    record: rec,
+                                    clear: Some(ClearKey {
+                                        request_id: request_id.clone(),
+                                        attempt_index: old_attempt,
+                                    }),
+                                })
+                                .await;
+                            // inflight.clear is NOT called here — see
+                            // docs/superpowers/specs/2026-05-29-billing-record-durability-design.md §3.6.
+                            // If this spawn never runs (process shutdown), the inflight key remains
+                            // and the startup reconciler emits a CrashFallback — A2 closed.
                         });
                     }
 
@@ -1238,9 +1244,9 @@ impl ProxyHttp for LlmGateway {
         )
         .await;
 
-        // W2-T6: mark_settled + clear after the UsageRecord has been sent
-        // to the ledger. If the request never reached the upstream (short-circuit
-        // before rewrite_request), `picked_vendor_key` will be None and there is
+        // mark_settled after the UsageRecord has been sent to the ledger.
+        // If the request never reached the upstream (short-circuit before
+        // rewrite_request), `picked_vendor_key` will be None and there is
         // no inflight hash to update — so we gate on vendor_key being set.
         if ctx.picked_vendor_key.is_some() {
             use crate::billing_lifecycle::VendorExposure;
@@ -1260,20 +1266,9 @@ impl ProxyHttp for LlmGateway {
                     "inflight mark_settled failed"
                 );
             }
-            // Clear runs unconditionally here. If the UsageRecord emit was dropped due to
-            // mpsc-full (the current Ledger try_send drop-on-full behavior), the inflight
-            // key is lost too — W2-T7 closes that gap with the must-deliver sync bypass.
-            if let Err(e) = self
-                .inflight
-                .clear(&ctx.request_id.0, ctx.attempt_index)
-                .await
-            {
-                tracing::warn!(
-                    error = ?e,
-                    request_id = %ctx.request_id,
-                    "inflight clear failed"
-                );
-            }
+            // inflight.clear is NOT called here — see
+            // docs/superpowers/specs/2026-05-29-billing-record-durability-design.md §3.5.
+            // The flusher DELs the key after XADD-confirmed delivery (invariant I1).
         }
 
         // Emit summary surface (always, including error paths). Bodies were
