@@ -42,6 +42,10 @@ class SoakConfig:
     drain_grace_max_s: int = 60
     n_users: int = 20
     chaos_mode: ChaosMode = "off"
+    # Kill-during-flight (spec §8.3). Probability per second of SIGKILLing the
+    # gateway container during the run. 0.0 = disabled (the default for every
+    # non-kill scenario). e2e-soak-kill sets this to 0.1.
+    kill_during_flight: float = 0.0
     gateway_url: str = "http://localhost:8000"
     livez_url: str = "http://localhost:8080/livez"
     readyz_url: str = "http://localhost:8080/readyz"
@@ -97,6 +101,9 @@ class SoakDriverReport:
     livez_non_200: int = 0
     readyz_probes: int = 0
     readyz_non_200: int = 0
+    # Kill-during-flight report (spec §8.3). None when kill mode disabled;
+    # otherwise the asdict() of soak.kill_loop.KillLoopReport.
+    kill_report: dict | None = None
 
     @classmethod
     def empty(cls, *, target_count: int) -> "SoakDriverReport":
@@ -291,6 +298,11 @@ class SoakDriver:
         queues: list[SimpleQueue] = [SimpleQueue() for _ in range(cfg.n_threads)]
         stop_event = threading.Event()
 
+        # Kill-during-flight injector (spec §8.3). No-op when disabled.
+        from soak.kill_loop import KillLoop
+        from dataclasses import asdict as _asdict
+        kill_loop = KillLoop(prob_per_s=cfg.kill_during_flight, rng_seed=self.rng_seed)
+
         t0 = time.perf_counter()
 
         # Spawn worker threads.
@@ -306,6 +318,9 @@ class SoakDriver:
             probe_stop = threading.Event()
             pool.submit(self._probe, cfg.livez_url, 10.0, probe_stop, livez_counter)
             pool.submit(self._probe, cfg.readyz_url, 10.0, probe_stop, readyz_counter)
+
+            # Start SIGKILL injector alongside the generators (no-op if p==0).
+            kill_loop.start()
 
             deadline = t0 + cfg.duration_s
             tick_interval = 1.0 / cfg.target_rps
@@ -325,6 +340,9 @@ class SoakDriver:
 
             stop_event.set()
             probe_stop.set()
+            # Stop injecting kills before drain so the gateway has a clean
+            # window to flush in-flight records + let the Go reconciler run.
+            kill_report = kill_loop.stop()
             # Workers drain on stop_event + final grace inside _thread_loop.
 
         # Measure wall time after executor joins all workers (includes drain).
@@ -340,6 +358,7 @@ class SoakDriver:
         report.livez_non_200 = livez_counter["non_200"]
         report.readyz_probes = readyz_counter["probes"]
         report.readyz_non_200 = readyz_counter["non_200"]
+        report.kill_report = _asdict(kill_report) if cfg.kill_during_flight > 0 else None
 
         latencies: list[float] = []
         for o in outcomes:

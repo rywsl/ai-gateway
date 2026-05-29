@@ -67,6 +67,11 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+    # Soak kill-during-flight mode (spec §8.3) SIGKILLs this container mid-run;
+    # `unless-stopped` lets docker-compose bring it straight back so the
+    # request generators + Go reconciler can observe crash recovery. Benign for
+    # every other scenario — the container only ever restarts if it dies.
+    restart: unless-stopped
     depends_on:
       redis:
         condition: service_healthy

@@ -153,6 +153,86 @@ def account_drain_quiescence_reached(*, window: dict) -> dict:
     )
 
 
+# ── Group 2b: kill-during-flight dedupe-aware accounting (§8.3) ──────────
+
+def account_records_equals_upstream_hits_dedupe_aware(
+    *, window: dict, hits: dict, records_stream_entries: list[dict]
+) -> dict:
+    """Spec §8.3 — durability identity under SIGKILL chaos.
+
+    A crash AFTER `usage:records` XADD but BEFORE the inflight DEL leaves the
+    inflight key present, so the Go reconciler emits a duplicate
+    `CrashFallback` record for the same `(request_id, attempt_index)`.  Go
+    dedups it against the higher-provenance sibling, so it is NOT a separate
+    upstream hit.  The strict-equality identity therefore only holds once
+    those Go-discarded duplicates are subtracted:
+
+        records_delta + dlq_delta - crashfallback_dedupes_inferred
+            == upstream_hits_total
+
+    `records_stream_entries` is the list of decoded `usage:records` payloads
+    XRANGE'd by the orchestrator.  `count_dedupes` infers the dup count from
+    `(request_id, attempt_index)` collisions (spec §8.3 provenance ranking).
+    """
+    from soak.dedupe import count_dedupes, dedupe_breakdown
+
+    rs = window.get("redis_streams") or {}
+    records = int(rs.get("usage_records_delta", 0))
+    dlq = int(rs.get("usage_records_dlq_delta", 0))
+    routes_sum = int(hits.get("routes_hit_sum", 0))
+    refused_sum = int(hits.get("refused_hit_sum", 0))
+    total = int(hits.get("total", routes_sum + refused_sum))
+
+    dedupes = count_dedupes(records_stream_entries)
+    breakdown = dedupe_breakdown(records_stream_entries)
+    diff = abs((records + dlq - dedupes) - total)
+    return _leaf(
+        "results.invariants.account_consistency.records_equals_upstream_hits_dedupe_aware",
+        kind="hard",
+        passed=(diff == 0),
+        source=("fake_web:/soak/window/report + fake_upstream:/admin/hits-total "
+                "+ redis.xrange(usage:records)"),
+        raw={
+            "records_delta": records,
+            "dlq_delta": dlq,
+            "crashfallback_dedupes_inferred": dedupes,
+            "records_minus_dedupes": records + dlq - dedupes,
+            "upstream_routes_hit_sum": routes_sum,
+            "upstream_refused_hit_sum": refused_sum,
+            "upstream_hits_total": total,
+            "diff": diff,
+            "dedupe_breakdown": breakdown,
+            "drain_observation_series": window.get("drain_observation_series", []),
+        },
+        threshold="records_delta + dlq_delta - crashfallback_dedupes_inferred == upstream_hits_total",
+    )
+
+
+def kill_loop_fired_at_least_once(*, kill_report: dict) -> dict:
+    """Spec §8.3 — the kill loop must have actually SIGKILLed the gateway.
+
+    A kill-mode run where zero kills landed proves nothing about durability
+    (it degenerates to a plain chaos run).  This is a hard invariant ONLY in
+    kill mode: if the loop was disabled (`prob_per_s == 0`) the caller does
+    not append this leaf.
+    """
+    succeeded = int(kill_report.get("kills_succeeded", 0))
+    return _leaf(
+        "results.invariants.kill_during_flight.fired_at_least_once",
+        kind="hard",
+        passed=(succeeded >= 1),
+        source="soak.kill_loop.KillLoop.report",
+        raw={
+            "prob_per_s": kill_report.get("prob_per_s"),
+            "ticks": kill_report.get("ticks"),
+            "kills_attempted": kill_report.get("kills_attempted"),
+            "kills_succeeded": succeeded,
+            "kills_failed": kill_report.get("kills_failed"),
+        },
+        threshold=">= 1",
+    )
+
+
 # ── Group 3: resource_release (§7.1.3) ───────────────────────────────────
 
 _INFLIGHT_RE = re.compile(
