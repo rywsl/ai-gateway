@@ -264,6 +264,8 @@ impl InflightLedger {
 }
 ```
 
+> **Note (2026-05-29 follow-up)**: `clear` is **not** called by the proxy. Spec [`2026-05-29-billing-record-durability`](./2026-05-29-billing-record-durability-design.md) §3.2 tightens the contract so `clear` is owned by the ledger and only fires after a confirmed XADD on `usage:records`. The `InflightLedger::clear` API itself is unchanged; only the call site moved.
+
 #### 5.4.2 Trigger 1 — 在线 watchdog(T0 emit-lag 探测,不自愈)
 
 `crates/gw-ledger/src/inflight_reaper.rs` 新增周期 task:
@@ -525,6 +527,7 @@ pub struct UsageProvenance {
 - **Tokenizer 准确度**:`prompt_estimate_tokens` 当前可能与厂商真实计数有 ±5% 偏差(各家 tokenizer 实现差异)。崩溃恢复 fallback 的准确度受此限制。改进方向:每个 vendor 维护各自 tokenizer 实现,但工程量大,本 spec 不展开。
 - **partial usage 持久化**:崩溃前流中已 parse 的 partial usage 没写 Redis,崩溃后丢失。可选优化:Settled/Terminated 转移时把 `ReqCtx.usage` snapshot 写进 InflightLedger HASH,reconciler 优先用 snapshot 而非 estimate。代价是每请求多一次 HSET,本 spec 不引入,作为后续优化。
 - **Go settler 去重表 TTL**:24h 与 InflightLedger EXPIRE 对齐,但若 Go settler 重启,dedup 表丢失,极端情况下崩溃恢复的 CrashFallback 可能被当成首次 settle。改进:Go settler 持久化 dedup 表(自决,本 spec 不规约)。
+- ~~emit fast path 持久化语义不充分(proxy 侧 `inflight.clear` 与异步 XADD 竞争,flusher panic 可能静默丢记录)~~ **closed-by** [`2026-05-29-billing-record-durability`](./2026-05-29-billing-record-durability-design.md)(proxy 侧 `inflight.clear` 移除;ledger 在 XADD 成功后独占 DEL;flusher panic 经 `catch_unwind` 隔离;`Ledger::emit` 的 Closed 分支回退 `sync_xadd`)。
 - **hostname 冲突场景**:非 k8s / 无 StatefulSet 部署时,多 replica 可能拥有相同 hostname(如直接跑在多台 VM 上的 `localhost` 默认主机名)。此时 L2 解析会让多 replica 共享 instance_id,inflight key 互踩。**缓解**:生产部署强制设 `GW_INSTANCE_ID`(L0),启动期检测到 hostname 在 L2 已存活且 heartbeat 仍新鲜 → fail-fast 报错并要求显式 instance_id 配置(implementation 阶段确定具体检测策略)。
 - **Orphan instance 兜底**:Rust 不扫其他 instance_id 的残留 key,长期 dead replica 的 24h EXPIRE 之内的 inflight key 不会被自动恢复;依赖 Go-side global reaper(`docs/go-contracts/parts/02` 列为推荐能力)。该 reaper 不属本 spec 范围。
 - **HTTP/3**:当前 Pingora 0.8 仅 HTTP/1.1 + HTTP/2,cancel 探测在 H/3 上是否同样工作未验证。
