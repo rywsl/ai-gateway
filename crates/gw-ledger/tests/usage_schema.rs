@@ -97,5 +97,8 @@ fn test_record() -> UsageRecord {
         is_stream: true,
         markup_chain_snapshot: MarkupChainSnapshot::identity(),
         operation_id: None,
+        pod_id: String::new(),
+        credits_consumed: None,
+        coef_table_version: None,
     }
 }

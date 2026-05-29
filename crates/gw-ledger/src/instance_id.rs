@@ -70,6 +70,12 @@ pub fn current() -> Option<String> {
     L1_CACHE.get().cloned()
 }
 
+/// Returns the cached instance_id without I/O. None if `resolve` has not been
+/// called yet (typically only during early bootstrap before gateway init).
+pub fn cached() -> Option<String> {
+    L1_CACHE.get().cloned()
+}
+
 pub fn heartbeat_key(instance_id: &str) -> String {
     format!("gateway:instance:{instance_id}:heartbeat")
 }

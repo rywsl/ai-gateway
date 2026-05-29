@@ -261,6 +261,9 @@ pub async fn run(
                 .map(|m| m.markup_chain)
                 .unwrap_or_else(MarkupChainSnapshot::identity),
             operation_id: ctx.operation_id.clone(),
+            pod_id: gw_ledger::instance_id::cached().unwrap_or_default(),
+            credits_consumed: ctx.credits_consumed,
+            coef_table_version: ctx.coef_table_version_at_settle,
         };
 
         // -----------------------------------------------------------------
