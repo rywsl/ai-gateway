@@ -95,6 +95,11 @@ fn handle_coef_table_commit(fields: &HashMap<String, String>) -> DispatchOutcome
     let outcome = apply_coef_commit(version, model_count);
     match outcome {
         CommitOutcome::Incomplete { staged, expected } => {
+            metrics::counter!(
+                "gw_credit_coef_table_incomplete_total",
+                "version" => version.to_string()
+            )
+            .increment(1);
             tracing::warn!(
                 target: "gw_ledger::counter_handler",
                 version,
