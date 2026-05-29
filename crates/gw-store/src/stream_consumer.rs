@@ -4,13 +4,13 @@
 //! anchored at `$` so a fresh pod only sees events published after it started.
 //! The cold-load chain in `EntityStore::*_or_load` covers the gap.
 //!
-//! Each event carries `{ns, id}` (entity stream) or `{scope, id, field, delta}`
-//! (counter stream). For entity events we **invalidate** the matching cache
-//! entry; the next `*_or_load` call will cold-load the latest version. v1
-//! ignores `v` (the version hint) — invalidate-then-reload is simpler than
-//! version-aware upsert and matches Moka's strong read-after-invalidate
-//! consistency. Counter events are observability-only in v1 and are dropped
-//! after ACK.
+//! Each event carries `{ns, id}` (entity stream) or `{ns, ...}` (counter
+//! stream). For entity events we **invalidate** the matching cache entry; the
+//! next `*_or_load` call will cold-load the latest version. v1 ignores `v`
+//! (the version hint) — invalidate-then-reload is simpler than version-aware
+//! upsert and matches Moka's strong read-after-invalidate consistency. Counter
+//! events are routed to the registered [`counter_dispatch::CounterHandler`]
+//! (installed at boot by `gw-ledger`); no handler → benign warn-and-drop.
 
 use super::entity_store::EntityStore;
 use super::redis_client::RedisCtx;
@@ -52,7 +52,30 @@ impl StreamConsumer {
 
     async fn apply(&self, stream: &str, fields: &HashMap<String, String>) {
         if stream == COUNTER_STREAM {
-            // v1: counter events are observability-only; no-op.
+            let outcome = crate::counter_dispatch::dispatch(fields);
+            match outcome {
+                crate::counter_dispatch::DispatchOutcome::UnknownNs => {
+                    tracing::debug!(
+                        target: "gw_store::stream_consumer",
+                        ns = ?fields.get("ns"),
+                        "events:counter: unknown ns; skipping"
+                    );
+                }
+                crate::counter_dispatch::DispatchOutcome::InvalidFields => {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        fields = ?fields,
+                        "events:counter: missing/invalid required fields"
+                    );
+                }
+                crate::counter_dispatch::DispatchOutcome::NoHandler => {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        "events:counter: no handler registered (gw-ledger handler not installed)"
+                    );
+                }
+                crate::counter_dispatch::DispatchOutcome::Handled => {}
+            }
             return;
         }
         // entity events: expect {ns, id}.
