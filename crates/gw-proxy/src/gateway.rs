@@ -273,6 +273,9 @@ pub struct LlmGateway {
     pub(crate) classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     pub(crate) retryable_codes: Arc<std::collections::HashSet<u16>>,
     pub(crate) error_passthrough_enabled: bool,
+    /// Ordered allow/deny rules over the upstream error message (audit §3.8).
+    /// Empty = pass every message through when enabled (prior behavior).
+    pub(crate) error_passthrough_rules: Arc<Vec<gw_core::error::rules::PassthroughRule>>,
     pub files_gateway: Arc<dyn GeminiFilesGateway>,
     pub reservation_view: Option<Arc<ReservationGlobalView>>,
     pub frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
@@ -325,6 +328,7 @@ impl LlmGateway {
         classifier: Arc<dyn gw_core::error::ErrorClassifier>,
         retryable_codes: Arc<std::collections::HashSet<u16>>,
         error_passthrough_enabled: bool,
+        error_passthrough_rules: Arc<Vec<gw_core::error::rules::PassthroughRule>>,
         reservation_view: Option<Arc<ReservationGlobalView>>,
         frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
         pg: sqlx::PgPool,
@@ -377,6 +381,7 @@ impl LlmGateway {
             classifier,
             retryable_codes,
             error_passthrough_enabled,
+            error_passthrough_rules,
             files_gateway,
             reservation_view,
             frequency_tracker,
@@ -1030,6 +1035,7 @@ impl ProxyHttp for LlmGateway {
                             client_kind,
                             &passthrough,
                             error_class,
+                            &self.error_passthrough_rules,
                         );
                         *body = Some(rendered);
                     }

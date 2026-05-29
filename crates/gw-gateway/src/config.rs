@@ -819,10 +819,42 @@ impl Default for ErrorClassificationCfg {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ErrorPassthroughCfg {
     #[serde(default)]
     pub enabled: bool,
+    /// Ordered allow/deny rules over the upstream error MESSAGE (audit
+    /// 2026-05-30 §3.8). Empty = pass every message through when `enabled`
+    /// (prior behavior). First matching rule wins.
+    #[serde(default)]
+    pub rules: Vec<ErrorPassthroughRuleCfg>,
+}
+
+/// One `[[error.passthrough.rules]]` entry: a case-insensitive substring matched
+/// against the upstream error message, plus what to do on a match.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErrorPassthroughRuleCfg {
+    /// Substring to match (case-insensitive). TOML key is `match`.
+    #[serde(rename = "match")]
+    pub needle: String,
+    #[serde(default)]
+    pub effect: gw_core::error::rules::RuleEffect,
+}
+
+impl ErrorPassthroughCfg {
+    /// Compile config rules into runtime `PassthroughRule`s. Substring rules
+    /// cannot fail to compile (no regex), so this is infallible — empty needles
+    /// are dropped (they would match everything and are almost certainly a typo).
+    pub fn compiled_rules(&self) -> Vec<gw_core::error::rules::PassthroughRule> {
+        self.rules
+            .iter()
+            .filter(|r| !r.needle.is_empty())
+            .map(|r| gw_core::error::rules::PassthroughRule {
+                needle: r.needle.clone(),
+                effect: r.effect,
+            })
+            .collect()
+    }
 }
 
 /// Per-endpoint body-rule defaults. Each key is an endpoint path pattern

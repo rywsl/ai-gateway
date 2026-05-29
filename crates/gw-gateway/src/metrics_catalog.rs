@@ -133,6 +133,11 @@ pub static METRICS: &[MetricSpec] = &[
         help: "cold entity load hit a PG pool acquire timeout (transient contention, not a missing row); label=ns",
     },
     MetricSpec {
+        name: "gw_error_passthrough_masked_total",
+        kind: MetricKind::Counter,
+        help: "upstream error message masked by an error-passthrough deny rule",
+    },
+    MetricSpec {
         name: "gw_adaptive_rpm_probe_total",
         kind: MetricKind::Counter,
         help: "adaptive RPM probe expansions after decay and quiet period",

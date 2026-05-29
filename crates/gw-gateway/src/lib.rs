@@ -121,6 +121,7 @@ struct Wired {
     classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     retryable_codes: Arc<std::collections::HashSet<u16>>,
     error_passthrough_enabled: bool,
+    error_passthrough_rules: std::sync::Arc<Vec<gw_core::error::rules::PassthroughRule>>,
     body_rules: Arc<gw_proxy::filters::upstream::BodyRulesMap>,
     /// Egress impersonation loopback handle (Task 4.6). Constructed in the
     /// bootstrap runtime because `EgressHandle::start` calls `tokio::spawn`.
@@ -257,6 +258,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.classifier,
         wired.retryable_codes,
         wired.error_passthrough_enabled,
+        wired.error_passthrough_rules,
         wired.reservation_view,
         wired.frequency_tracker,
         wired.pg.clone(),
@@ -844,7 +846,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             codes.extend(500..=599);
             Arc::new(codes)
         },
-        error_passthrough_enabled: false,
+        error_passthrough_enabled: cfg.error.passthrough.enabled,
+        error_passthrough_rules: std::sync::Arc::new(cfg.error.passthrough.compiled_rules()),
         body_rules: Arc::new(convert_body_rules(&cfg.body_rules)),
         egress,
         egress_disabled: cfg.egress.disabled,

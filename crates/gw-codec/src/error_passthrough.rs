@@ -8,6 +8,7 @@
 //! For SSE responses, wrap as `event: error\ndata: <json>\n\n`.
 
 use bytes::Bytes;
+use gw_core::error::rules::{message_allowed, PassthroughRule};
 use gw_core::error::{ErrorClass, PassthroughBody};
 use gw_core::protocol::ProtocolKind;
 use serde_json::{json, Value};
@@ -16,8 +17,9 @@ pub fn render_error_to_client(
     client: ProtocolKind,
     body: &PassthroughBody,
     fallback: ErrorClass,
+    rules: &[PassthroughRule],
 ) -> Bytes {
-    let v = json_for_protocol(client, body, fallback);
+    let v = json_for_protocol(client, body, fallback, rules);
     if body.is_sse {
         let s = format!(
             "event: error\ndata: {}\n\n",
@@ -29,9 +31,24 @@ pub fn render_error_to_client(
     }
 }
 
-fn json_for_protocol(p: ProtocolKind, b: &PassthroughBody, _fb: ErrorClass) -> Value {
+fn json_for_protocol(
+    p: ProtocolKind,
+    b: &PassthroughBody,
+    _fb: ErrorClass,
+    rules: &[PassthroughRule],
+) -> Value {
     let typ = error_type_for(p, b.upstream_status);
-    let msg = extract_message(&b.body_json);
+    // Audit 2026-05-30 §3.8: per-pattern allow/deny over the upstream message.
+    // The envelope (type + status) is always rendered; only the MESSAGE is masked
+    // when a Deny rule matches, so a denied error still surfaces as a clean,
+    // status-appropriate client error rather than leaking internal detail.
+    let raw_msg = extract_message(&b.body_json);
+    let msg = if message_allowed(&raw_msg, rules) {
+        raw_msg
+    } else {
+        metrics::counter!("gw_error_passthrough_masked_total").increment(1);
+        "upstream error".to_string()
+    };
     match p {
         ProtocolKind::OpenAi => json!({
             "error": { "type": typ, "message": msg, "code": null }
