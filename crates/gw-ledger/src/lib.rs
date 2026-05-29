@@ -21,3 +21,5 @@ pub use gw_core::permissions::MarkupChainSnapshot;
 pub use usage::{UsageRecord, UsageStatus, VendorExposureState};
 
 pub mod detailed_archive;
+pub mod protection_config;
+pub use protection_config::ProtectionConfig;

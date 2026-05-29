@@ -30,3 +30,4 @@ testcontainers.workspace = true
 testcontainers-modules.workspace = true
 serde_json.workspace = true
 metrics.workspace = true
+toml = "0.8"

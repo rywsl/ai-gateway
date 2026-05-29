@@ -183,3 +183,17 @@ max_sessions = 64
 # TTL on the in-process `TurnStateCache` (Codex per-turn state). 5 minutes
 # matches the educated guess in spec §11 #2.
 turn_state_ttl_secs = 300
+
+[protection]
+# Hard overdraft protection — credit lease layer above the legacy soft defense.
+# See docs/superpowers/specs/2026-05-29-credit-lease-design.md.
+# Kill switch. When false, Rust ignores `events:counter ns=protected_lease`
+# events and all requests use the legacy `frozen_micro` soft-defense path.
+# Go-side lease TTL, low-balance threshold, and overcommit ratio are NOT in
+# this table — they live in Go config, by design (spec §9).
+enabled = false
+# Clock-skew tolerance window (ms) when checking lease expiry.
+lease_grace_ms = 5000
+# Fallback `max_tokens` ceiling for credit estimation when the request has no
+# explicit `max_tokens` and the model's entity config also lacks a default.
+default_output_ceiling_tokens = 8192
