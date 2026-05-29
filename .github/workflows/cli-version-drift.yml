@@ -1,0 +1,34 @@
+name: cli-version-drift
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Refresh CLI version pools
+        run: python3 scripts/cli_version_drift/check.py --write || true
+
+      - uses: peter-evans/create-pull-request@v6
+        with:
+          branch: bot/cli-version-drift
+          title: "chore(impersonate): refresh CLI version pools"
+          commit-message: "chore(impersonate): refresh CLI version pools (auto)"
+          body: |
+            Refreshes Rust impersonation CLI version pools from the public npm registry.
+
+            Review the real CLI releases before merging. Script source: `scripts/cli_version_drift/check.py`.
+          labels: impersonate, automated
