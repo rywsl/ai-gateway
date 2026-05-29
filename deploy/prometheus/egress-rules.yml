@@ -1,0 +1,18 @@
+groups:
+  - name: egress-impersonate
+    rules:
+      # Gateway-side RTT includes real upstream latency; the pure-overhead 200µs
+      # SLO remains gated by the loopback microbench. This is a coarse
+      # production guard for sustained regressions.
+      - alert: EgressLoopbackRttP99Above200us
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum(rate(gw_egress_loopback_rtt_seconds_bucket[5m])) by (le)
+          ) > 0.0002
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Egress loopback RTT p99 is above 200µs"
+          description: "Gateway-side egress RTT p99 has exceeded 200µs for 10m. Check ClientPool cache tuning, hyper keep-alive tuning, profile bind sharding, then consider reverting the affected vendor to direct egress."
