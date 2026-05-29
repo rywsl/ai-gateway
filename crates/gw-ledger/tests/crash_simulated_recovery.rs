@@ -162,3 +162,88 @@ async fn reconciler_emits_crashfallback_for_un_emitted_request() {
         "reconciler must DEL the inflight key after CrashFallback emit"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers Redis)"]
+async fn reconciler_recovers_both_attempts_after_retry_crash() {
+    let node = Redis::default().start().await.unwrap();
+    let port = node.get_host_port_ipv4(6379).await.unwrap();
+    let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
+        .await
+        .unwrap();
+    let instance = "test-inst-retry-crash".to_string();
+
+    // Simulate: attempt 0 registered, retry-spawn enqueued attempt-0 record but
+    // didn't run; attempt 1 registered and also enqueued. Crash. Reconciler
+    // should emit CrashFallback for BOTH attempts (spec §4 crash matrix, retry path).
+    let inflight = InflightLedger::new((*redis.pool).clone(), instance.clone());
+    for attempt in 0..=1u32 {
+        inflight
+            .register(&InflightRegistration {
+                request_id: "req-retry-crashed".to_string(),
+                attempt_index: attempt,
+                user_id: "u".to_string(),
+                vendor_key_id: "vk".to_string(),
+                freeze_amount: 0,
+                prompt_estimate_tokens: 42,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Both inflight keys are present; no Ledger was used — both are residual from
+    // the simulated crash. Reconciler must scan and emit CrashFallback for each.
+    let emitted_count = Arc::new(AtomicUsize::new(0));
+    let emitted_attempts: Arc<std::sync::Mutex<Vec<u32>>> = Default::default();
+    let emitted_count_for_cb = emitted_count.clone();
+    let emitted_attempts_for_cb = emitted_attempts.clone();
+
+    let recovered = inflight_reconciler::run(
+        &redis.pool,
+        &instance,
+        move |rec: UsageRecord| -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
+            let counter = emitted_count_for_cb.clone();
+            let attempts = emitted_attempts_for_cb.clone();
+            Box::pin(async move {
+                assert_eq!(
+                    rec.vendor_exposure_state,
+                    VendorExposureState::CrashFallback,
+                    "reconciler must emit CrashFallback state"
+                );
+                assert_eq!(
+                    rec.request_id, "req-retry-crashed",
+                    "reconciler must preserve request_id from inflight key"
+                );
+                attempts.lock().unwrap().push(rec.attempt_index);
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        recovered, 2,
+        "reconciler returned count = 2 (one per attempt)"
+    );
+    assert_eq!(
+        emitted_count.load(Ordering::SeqCst),
+        2,
+        "callback invoked exactly twice"
+    );
+
+    let mut got = emitted_attempts.lock().unwrap().clone();
+    got.sort();
+    assert_eq!(got, vec![0, 1], "both attempt indices recovered");
+
+    // Both inflight keys DEL'd after successful emit (spec §4 + reconciler impl).
+    for attempt in 0..=1u32 {
+        let key = InflightLedger::test_key(&instance, "req-retry-crashed", attempt);
+        assert_eq!(
+            redis.pool.exists::<u64, _>(&key).await.unwrap(),
+            0,
+            "reconciler must DEL inflight key for attempt {attempt} after CrashFallback emit"
+        );
+    }
+}
