@@ -29,3 +29,8 @@ pub use coef::{
     lookup as lookup_coef, CoefSnapshot, CommitOutcome, Dim, ModelCoefs, COEF_CACHE,
     COEF_STAGING,
 };
+pub mod lease;
+pub use lease::{
+    now_ms, upsert_protected, upsert_unprotected, LeaseError, LeaseGuard, LeaseState, Mode,
+    LEASE_POOL,
+};
