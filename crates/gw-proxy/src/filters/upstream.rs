@@ -378,7 +378,10 @@ pub async fn pick_peer(
             Some(t) => t.resolve(vendor.value.id.as_ref(), picked_arc.key_id.as_ref(), pref),
             None => gw_tunnel_client::resolver::TunnelResolution::Direct,
         };
-        (resolution, pref.require_tunnel)
+        (
+            resolution,
+            pref.require_tunnel, /* GW_TUNNEL_NO_NODE emitted in the Rustls branch below */
+        )
     };
 
     let mut peer;

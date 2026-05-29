@@ -201,6 +201,10 @@ fn is_grease(value: u16) -> bool {
     value & 0x0f0f == 0x0a0a && (value >> 8) == (value & 0xff)
 }
 
+#[allow(
+    clippy::const_is_empty,
+    reason = "keeps first-run golden bootstrap loud"
+)]
 fn assert_goldens(observed: &FingerprintTuple) {
     if GOLDEN_CIPHERS.is_empty() || GOLDEN_EXTENSIONS.is_empty() || GOLDEN_GROUPS.is_empty() {
         panic!(
