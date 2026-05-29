@@ -41,12 +41,8 @@ pub fn actual_usage_credits(
 ) -> Result<i64, EstimatorError> {
     let c = lookup_coef(coef_version, model_id).ok_or(EstimatorError::UnknownModel)?;
     let mut total: i64 = 0;
-    total = total.saturating_add(
-        (usage.input_tokens as i64).saturating_mul(c.input as i64),
-    );
-    total = total.saturating_add(
-        (usage.output_tokens as i64).saturating_mul(c.output as i64),
-    );
+    total = total.saturating_add((usage.input_tokens as i64).saturating_mul(c.input as i64));
+    total = total.saturating_add((usage.output_tokens as i64).saturating_mul(c.output as i64));
     total = total.saturating_add(
         (usage.cache_read_input_tokens.unwrap_or(0) as i64).saturating_mul(c.cache_read as i64),
     );

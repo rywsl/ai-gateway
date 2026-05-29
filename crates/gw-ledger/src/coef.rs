@@ -207,7 +207,13 @@ mod tests {
         let _g = reset();
         apply_coef_entry(9, "model-a", Dim::Input, 100);
         let outcome = apply_coef_commit(9, 2);
-        assert_eq!(outcome, CommitOutcome::Incomplete { staged: 1, expected: 2 });
+        assert_eq!(
+            outcome,
+            CommitOutcome::Incomplete {
+                staged: 1,
+                expected: 2
+            }
+        );
         assert_eq!(COEF_CACHE.load().version, 0);
     }
 
@@ -220,7 +226,13 @@ mod tests {
         }));
         apply_coef_entry(5, "model-a", Dim::Input, 100);
         let outcome = apply_coef_commit(5, 1);
-        assert_eq!(outcome, CommitOutcome::Stale { committed: 5, active: 10 });
+        assert_eq!(
+            outcome,
+            CommitOutcome::Stale {
+                committed: 5,
+                active: 10
+            }
+        );
         assert_eq!(COEF_CACHE.load().version, 10);
     }
 
@@ -231,7 +243,10 @@ mod tests {
         apply_coef_commit(11, 1);
         assert_eq!(
             lookup(11, "m"),
-            Some(ModelCoefs { input: 7, ..Default::default() })
+            Some(ModelCoefs {
+                input: 7,
+                ..Default::default()
+            })
         );
     }
 
@@ -242,7 +257,10 @@ mod tests {
         // Not committed yet; lookup of staged version still returns the entry.
         assert_eq!(
             lookup(20, "m"),
-            Some(ModelCoefs { input: 5, ..Default::default() })
+            Some(ModelCoefs {
+                input: 5,
+                ..Default::default()
+            })
         );
     }
 

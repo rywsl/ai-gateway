@@ -73,9 +73,8 @@ mod tests {
         // this `cargo test` invocation has registered. Since there is at most
         // one HANDLER for the entire test binary, we accept either outcome:
         // if some other test installed one first, dispatch may return Handled.
-        let f: HashMap<String, String> = [("ns".to_string(), "x".to_string())]
-            .into_iter()
-            .collect();
+        let f: HashMap<String, String> =
+            [("ns".to_string(), "x".to_string())].into_iter().collect();
         let out = dispatch(&f);
         assert!(
             matches!(out, DispatchOutcome::NoHandler | DispatchOutcome::Handled),
@@ -106,7 +105,10 @@ mod tests {
         // ours) or whatever the other handler returns. We only assert the
         // dispatch path actually ran without InvalidFields/NoHandler.
         assert!(
-            !matches!(out, DispatchOutcome::InvalidFields | DispatchOutcome::NoHandler),
+            !matches!(
+                out,
+                DispatchOutcome::InvalidFields | DispatchOutcome::NoHandler
+            ),
             "dispatch unexpectedly returned {:?} after register_handler",
             out
         );

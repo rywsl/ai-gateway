@@ -26,8 +26,7 @@ pub use protection_config::ProtectionConfig;
 pub mod coef;
 pub use coef::{
     apply_coef_commit, apply_coef_entry, current_snapshot as current_coef_snapshot,
-    lookup as lookup_coef, CoefSnapshot, CommitOutcome, Dim, ModelCoefs, COEF_CACHE,
-    COEF_STAGING,
+    lookup as lookup_coef, CoefSnapshot, CommitOutcome, Dim, ModelCoefs, COEF_CACHE, COEF_STAGING,
 };
 pub mod lease;
 pub use lease::{

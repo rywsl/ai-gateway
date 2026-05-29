@@ -1171,7 +1171,10 @@ pub async fn run(
             // priced under). settle MUST use the same version.
             let coef_version = gw_ledger::LEASE_POOL
                 .get(&merged.effective_user_id)
-                .map(|s| s.coef_table_version.load(std::sync::atomic::Ordering::Acquire))
+                .map(|s| {
+                    s.coef_table_version
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
                 .unwrap_or(0);
 
             let credits = match gw_ledger::estimate_request_credits(
@@ -1208,11 +1211,7 @@ pub async fn run(
             };
 
             let now = gw_ledger::now_ms();
-            match gw_ledger::LeaseGuard::try_acquire(
-                &merged.effective_user_id,
-                credits,
-                now,
-            ) {
+            match gw_ledger::LeaseGuard::try_acquire(&merged.effective_user_id, credits, now) {
                 Ok(guard) => {
                     metrics::counter!(
                         "gw_credit_lease_acquire_total",
@@ -1265,8 +1264,7 @@ pub async fn run(
                     // wiped (e.g., concurrent unprotected push) between then
                     // and try_acquire. Fall through to legacy soft-defense
                     // path (step 9-10).
-                    metrics::counter!("gw_credit_lease_warmup_pending_total")
-                        .increment(1);
+                    metrics::counter!("gw_credit_lease_warmup_pending_total").increment(1);
                     // Note: do not return here. Let control flow continue to
                     // step 9 (hard caps) and step 10 (RequestFreeze).
                 }

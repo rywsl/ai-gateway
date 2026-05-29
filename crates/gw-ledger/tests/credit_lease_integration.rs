@@ -43,7 +43,13 @@ fn protected_user_with_sufficient_lease_can_acquire_then_settle() {
     install_coefs(version, model_id, 10, 20);
 
     let uid = UserId::from("u_credit_lease_int_1");
-    upsert_protected(&uid, 1_000_000, "lease-int-1".into(), version, now_ms() + 600_000);
+    upsert_protected(
+        &uid,
+        1_000_000,
+        "lease-int-1".into(),
+        version,
+        now_ms() + 600_000,
+    );
 
     // Compute credits directly (coefs are known: input=10, output=20) to avoid
     // a lookup race with parallel tests that may have displaced this version.
@@ -87,7 +93,13 @@ fn lease_expiration_triggers_lease_error_expired() {
     install_coefs(version, model_id, 10, 20);
 
     let uid = UserId::from("u_credit_lease_int_3");
-    upsert_protected(&uid, 10_000, "lease-int-3".into(), version, now_ms().saturating_sub(1));
+    upsert_protected(
+        &uid,
+        10_000,
+        "lease-int-3".into(),
+        version,
+        now_ms().saturating_sub(1),
+    );
     let err = LeaseGuard::try_acquire(&uid, 1000, now_ms()).unwrap_err();
     assert!(matches!(err, LeaseError::Expired));
 }
@@ -99,7 +111,13 @@ fn switching_back_to_unprotected_clears_state() {
     install_coefs(version, model_id, 10, 20);
 
     let uid = UserId::from("u_credit_lease_int_4");
-    upsert_protected(&uid, 10_000, "lease-int-4".into(), version, now_ms() + 600_000);
+    upsert_protected(
+        &uid,
+        10_000,
+        "lease-int-4".into(),
+        version,
+        now_ms() + 600_000,
+    );
     upsert_unprotected(&uid);
     assert_eq!(LEASE_POOL.get(&uid).unwrap().mode(), Mode::Unprotected);
 }
@@ -144,7 +162,13 @@ fn incomplete_commit_keeps_previous_active_version() {
     apply_coef_entry(try_version, "lonely-101", Dim::Input, 1);
     let outcome = apply_coef_commit(try_version, 3);
     assert!(
-        matches!(outcome, CommitOutcome::Incomplete { staged: 1, expected: 3 }),
+        matches!(
+            outcome,
+            CommitOutcome::Incomplete {
+                staged: 1,
+                expected: 3
+            }
+        ),
         "expected Incomplete, got {:?}",
         outcome
     );
@@ -167,7 +191,13 @@ fn settle_actual_above_reserved_does_not_double_charge() {
     install_coefs(version, model_id, 10, 20);
 
     let uid = UserId::from("u_credit_lease_int_8");
-    upsert_protected(&uid, 100_000, "lease-int-8".into(), version, now_ms() + 600_000);
+    upsert_protected(
+        &uid,
+        100_000,
+        "lease-int-8".into(),
+        version,
+        now_ms() + 600_000,
+    );
 
     // 50 input * 10 + 50 output * 20 = 1500. Computed directly to avoid a
     // lookup race with parallel tests that may have displaced this version.

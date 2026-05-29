@@ -449,7 +449,6 @@ fn escape_json_str(s: &str) -> String {
     out
 }
 
-
 ///
 /// Accepts both `GET /path HTTP/1.1\r\n...` and the malformed-but-tolerated
 /// `GET /path\r\n` (no version field). Strips a trailing `\r` left over from
