@@ -13,6 +13,40 @@ Sort order is by severity (HIGH → LOW), not by impact area.
 
 ---
 
+## Remediation status (2026-05-30)
+
+Fixed on branch `fix/audit-remediation-20260530` (staged commits per wave). Each section below
+corresponds to a row here.
+
+| # | Finding | Status | Commit / wave |
+|---|---------|--------|---------------|
+| 1 | Banned users / disabled keys never rejected | **Fixed** | Wave 1 (`fix(auth): admit-time security gates`) |
+| 2 | Response-side failover under-count + inflight clobber | **Fixed** | Wave 2 (`fix(billing): settle prior attempt …`) |
+| 3 | Anthropic stream usage clobber | **Fixed** | Wave 2 |
+| 4 | Half-open circuit never recovers | **Fixed** | Wave 3 (`fix(routing,health): …`) |
+| 5 | Cross-protocol health-bucket mismatch | **Fixed** | Wave 3 |
+| 6 | HMAC empty-secret fail-open | **Fixed** | Wave 1 |
+| 7 | OAuth `access_expires_at` decode mismatch | **Fixed** | Wave 5 (`fix(store,egress,proxy): …`) |
+| 8 | Adaptive-RPM enforcement dead code | **Fixed** | Wave 3 (relocated to `pick_peer::try_admit`) |
+| 9 | Cross-protocol content-encoding strip | **Fixed** | Wave 4 (`fix(codec,proxy): …`) |
+| 10 | OpenAI Responses non-stream thinking dropped | **Fixed** | Wave 4 |
+| 11 | multi_dim preset panic | **Fixed** | Wave 3 (fail-operational fallback) |
+| 12 | PG acquire-timeout false not-found | **Fixed** | Wave 5 (500ms + PoolTimedOut metric) |
+| 13 | Egress classifier proxy-timeout mislabel | **Fixed** | Wave 5 (reorder) |
+
+All thirteen are remediated. Broader normal-path panic hardening beyond the multi_dim panic (§11) was
+done as the **Wave 6b sweep** (commit `c510910`): a 24-agent read-only triage of **138** production
+panic-capable sites; adversarial verification rejected 13/15 candidates as provably safe and confirmed
+**2** reachable normal-path panics — both now fixed:
+- `gw-auth/.../adaptive.rs::try_admit` — a TOCTOU race introduced by Wave 3's adaptive-RPM enforcement
+  (insert-then-separate-get + concurrent `evict` → worker panic); fixed with an atomic DashMap `entry()`.
+- `gw-ledger/.../lease.rs::now_ms` — pre-epoch clock `expect()`; fixed with `unwrap_or_default()` (fail-closed).
+
+The low confirmed count reflects that the codebase was already largely panic-safe (locks / `OnceCell` /
+const regex / length-checked indices).
+
+---
+
 ## 1. Banned users / disabled API keys are never rejected on the business request path
 
 **Status**: open · **Severity**: HIGH (security / fail-open) · **Verified by hand**

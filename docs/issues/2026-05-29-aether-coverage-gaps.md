@@ -15,7 +15,28 @@ Sort order is by severity (HIGH → LOW).
 
 ---
 
-## 1. Client JWT revocation blacklist is never consulted on the business path
+## Remediation status (2026-05-30)
+
+Fixed on branch `fix/audit-remediation-20260530` (staged commits per wave).
+
+| # | Gap | Status | Wave |
+|---|-----|--------|------|
+| 1 | Client JWT revocation blacklist not consulted | **Fixed** | Wave 1 (jti extracted; `check_jwt` FailClosed; `GW_AUTH_JWT_REVOKED`) |
+| 2 | Disabled key / banned user not enforced | **Fixed** | Wave 1 (= functional-audit §1) |
+| 3 | Upstream auth only injected Authorization (no x-goog-api-key) | **Fixed** | Wave 5 (auth_template header-name parsing) |
+| 4 | Direct-path per-key proxy ignored | **Fixed (fail-closed)** | Wave 5 (pingora 0.8 Proxy is UDS-only → `GW_UPSTREAM_PROXY_UNSUPPORTED`; use Impersonate) |
+| 5 | Gemini tool-call id dropped | **Fixed** | Wave 4 (functionResponse.name from id→name map) |
+| 6 | No `/v1/embeddings` endpoint | **Deferred** | Blocked on a Go capability contract (which vendor keys are embeddings-capable); current safe-400 preserved |
+| 7 | prompt-cache key injection | **Deferred** | OFF-by-default optimization; CacheAffinity + body_rules cover locality; avoided risky body mutation |
+| 8 | Error passthrough all-or-nothing | **Fixed** | Wave 6 (substring allow/deny rule engine; also wired `enabled` from config) |
+| 9 | No vendor-specific rate-limit header parsing | **Fixed** | Wave 5 (`rpm_limit_header` + `detect_rpm_kind`) |
+| 10 | No endpoint-family priority ordering | **Fixed (folded)** | Wave 3 (deterministic first-accessible via `resolve_upstream_format`) |
+
+Eight of ten fixed; §6 (embeddings) and §7 (prompt-cache) are deferred with rationale above — both are
+LOW-severity net-new features that are safe today and whose hasty implementation would risk regressions
+(the explicit "don't fix one, break another" constraint). Each remains actionable as its own follow-up.
+
+---
 
 **Status**: open · **Severity**: HIGH (security / fail-open) · **Verified by hand**
 
