@@ -262,7 +262,10 @@ async fn banned_parent_rejects_active_sub_account() {
     let store = EntityStore::new();
     store
         .user
-        .insert(UserId::from("sub"), user("sub", Some("owner"), &[], 0, &[], 1.0))
+        .insert(
+            UserId::from("sub"),
+            user("sub", Some("owner"), &[], 0, &[], 1.0),
+        )
         .await;
     store
         .user

@@ -327,10 +327,16 @@ fn test_try_admit_enforces_learned_ceiling() {
 
     // GCRA burst for per_minute(1) is 1: first send admits, the next is denied.
     assert!(manager.try_admit(&key), "first send within ceiling");
-    assert!(!manager.try_admit(&key), "second send over the 1-rpm ceiling");
+    assert!(
+        !manager.try_admit(&key),
+        "second send over the 1-rpm ceiling"
+    );
 
     // Evicting the key clears both state and the cached limiter, so admission
     // is unconditional again (no stale limiter — mem-leak guard).
     manager.evict(&key);
-    assert!(manager.try_admit(&key), "post-evict → admit (limiter cleared)");
+    assert!(
+        manager.try_admit(&key),
+        "post-evict → admit (limiter cleared)"
+    );
 }

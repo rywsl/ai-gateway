@@ -119,10 +119,8 @@ mod de {
             Ts::Int(secs) => {
                 OffsetDateTime::from_unix_timestamp(secs).map_err(serde::de::Error::custom)
             }
-            Ts::Str(s) => {
-                OffsetDateTime::parse(&s, &time::format_description::well_known::Rfc3339)
-                    .map_err(serde::de::Error::custom)
-            }
+            Ts::Str(s) => OffsetDateTime::parse(&s, &time::format_description::well_known::Rfc3339)
+                .map_err(serde::de::Error::custom),
         }
     }
 }
@@ -524,7 +522,10 @@ mod oauth_row_tests {
             }
         });
         let res: Result<VendorKeyRow, _> = serde_json::from_value(payload);
-        assert!(res.is_err(), "an unparseable timestamp must fail the decode");
+        assert!(
+            res.is_err(),
+            "an unparseable timestamp must fail the decode"
+        );
     }
 
     #[test]

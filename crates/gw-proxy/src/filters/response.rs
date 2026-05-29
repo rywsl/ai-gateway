@@ -678,9 +678,7 @@ pub(crate) fn handle_non_stream_chunk(
     let cross_protocol = ctx
         .client_codec
         .as_ref()
-        .map(|client| {
-            WireFormat::from_any_codec(client) != WireFormat::from_any_codec(codec)
-        })
+        .map(|client| WireFormat::from_any_codec(client) != WireFormat::from_any_codec(codec))
         .unwrap_or(false);
     let body: BytesMut = if cross_protocol
         && ctx.resp_content_encoding != gw_codec::compression::Encoding::Identity
@@ -985,7 +983,10 @@ mod non_stream_branch_tests {
         handle_non_stream_chunk(Some(&Bytes::copy_from_slice(&gz)), true, &mut ctx);
         // Not decoded → parse_response saw gzip bytes and failed → body preserved
         // verbatim for the client (which decompresses via the intact header).
-        let accum = ctx.upstream_body_accum.as_ref().expect("compressed body preserved");
+        let accum = ctx
+            .upstream_body_accum
+            .as_ref()
+            .expect("compressed body preserved");
         assert_eq!(accum.as_ref(), &gz[..]);
         assert_eq!(ctx.usage.input_tokens, 0);
     }
@@ -1071,7 +1072,11 @@ mod stream_usage_guard_tests {
         let start = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":0,\"cache_creation_input_tokens\":1000,\"cache_read_input_tokens\":500}}}\n\n";
         handle_event(&codec, start, &mut ctx, false, None);
         assert_eq!(ctx.usage.input_tokens, 50, "message_start sets input");
-        assert_eq!(ctx.usage.cached_tokens, Some(500), "message_start sets cache_read");
+        assert_eq!(
+            ctx.usage.cached_tokens,
+            Some(500),
+            "message_start sets cache_read"
+        );
 
         // Frame 2: terminal message_delta carries ONLY output_tokens.
         let delta = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n";
@@ -1087,6 +1092,9 @@ mod stream_usage_guard_tests {
             Some(500),
             "cache_read must survive the output-only message_delta"
         );
-        assert_eq!(ctx.usage.output_tokens, 42, "output_tokens is updated by message_delta");
+        assert_eq!(
+            ctx.usage.output_tokens, 42,
+            "output_tokens is updated by message_delta"
+        );
     }
 }
