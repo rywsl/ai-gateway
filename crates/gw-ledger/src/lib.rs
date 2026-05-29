@@ -34,3 +34,5 @@ pub use lease::{
     now_ms, upsert_protected, upsert_unprotected, LeaseError, LeaseGuard, LeaseState, Mode,
     LEASE_POOL,
 };
+pub mod credit_estimator;
+pub use credit_estimator::{actual_usage_credits, estimate_request_credits, EstimatorError};
