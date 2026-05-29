@@ -1,3 +1,9 @@
+//! Self-fingerprint golden test for the real BoringSSL/wreq egress loopback.
+//!
+//! Chrome-class BoringSSL intentionally permutes ClientHello extension order,
+//! so this sentinel pins deterministic parts of the GREASE-filtered fingerprint:
+//! cipher-suite order, supported-group order, and the extension ID set.
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -15,7 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 const GOLDEN_CIPHERS: &[u16] = &[
     4865, 4866, 4867, 49195, 49199, 49196, 49200, 52393, 52392, 49171, 49172, 156, 157, 47, 53,
 ];
-const GOLDEN_EXTENSIONS: &[u16] = &[
+const GOLDEN_EXTENSION_SET: &[u16] = &[
     5, 10, 11, 13, 16, 18, 23, 27, 35, 43, 45, 51, 17513, 65037, 65281,
 ];
 const GOLDEN_GROUPS: &[u16] = &[4588, 29, 23, 24];
@@ -126,7 +132,7 @@ fn has_complete_tls_record(buf: &[u8]) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 struct FingerprintTuple {
     ciphers: Vec<u16>,
-    extensions: Vec<u16>,
+    extension_set: Vec<u16>,
     groups: Vec<u16>,
 }
 
@@ -146,8 +152,8 @@ fn fingerprint_tuple(bytes: &[u8]) -> FingerprintTuple {
                 .map(|cipher| u16::from(*cipher))
                 .filter(|value| !is_grease(*value))
                 .collect();
-            let mut extensions = hello.ext.map(extension_ids).unwrap_or_default();
-            extensions.sort_unstable();
+            let mut extension_set = hello.ext.map(extension_ids).unwrap_or_default();
+            extension_set.sort_unstable();
             let mut groups = Vec::new();
 
             if let Some(raw_exts) = hello.ext {
@@ -167,7 +173,7 @@ fn fingerprint_tuple(bytes: &[u8]) -> FingerprintTuple {
 
             return FingerprintTuple {
                 ciphers,
-                extensions,
+                extension_set,
                 groups,
             };
         }
@@ -206,16 +212,16 @@ fn is_grease(value: u16) -> bool {
     reason = "keeps first-run golden bootstrap loud"
 )]
 fn assert_goldens(observed: &FingerprintTuple) {
-    if GOLDEN_CIPHERS.is_empty() || GOLDEN_EXTENSIONS.is_empty() || GOLDEN_GROUPS.is_empty() {
+    if GOLDEN_CIPHERS.is_empty() || GOLDEN_EXTENSION_SET.is_empty() || GOLDEN_GROUPS.is_empty() {
         panic!(
-            "bootstrap self-fingerprint goldens:\nconst GOLDEN_CIPHERS: &[u16] = &{:?};\nconst GOLDEN_EXTENSIONS: &[u16] = &{:?};\nconst GOLDEN_GROUPS: &[u16] = &{:?};",
-            observed.ciphers, observed.extensions, observed.groups
+            "bootstrap self-fingerprint goldens:\nconst GOLDEN_CIPHERS: &[u16] = &{:?};\nconst GOLDEN_EXTENSION_SET: &[u16] = &{:?};\nconst GOLDEN_GROUPS: &[u16] = &{:?};",
+            observed.ciphers, observed.extension_set, observed.groups
         );
     }
 
     assert_eq!(observed.ciphers, GOLDEN_CIPHERS, "cipher suite drift");
     assert_eq!(
-        observed.extensions, GOLDEN_EXTENSIONS,
+        observed.extension_set, GOLDEN_EXTENSION_SET,
         "extension set drift"
     );
     assert_eq!(observed.groups, GOLDEN_GROUPS, "supported group drift");

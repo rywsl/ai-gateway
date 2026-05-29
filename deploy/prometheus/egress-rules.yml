@@ -1,14 +1,13 @@
 groups:
   - name: egress-impersonate
     rules:
-      # Gap #6: gateway-side RTT includes real upstream latency; the
-      # pure-overhead 200µs SLO remains gated by the loopback microbench.
-      # This alert is a coarse
-      # production guard for sustained regressions.
-      - alert: EgressLoopbackP99High
-        expr: histogram_quantile(0.99, sum(rate(gw_egress_loopback_rtt_seconds_bucket[5m])) by (le)) > 0.0002
+      # Gap #6: this gateway-side histogram includes real upstream latency.
+      # The pure-overhead 200µs SLO remains gated by the loopback microbench;
+      # this production guard only catches sustained end-to-end regressions.
+      - alert: EgressImpersonateUpstreamTtfbP99High
+        expr: histogram_quantile(0.99, sum(rate(gw_egress_loopback_rtt_seconds_bucket[5m])) by (le)) > 30
         for: 10m
-        labels: { severity: page }
+        labels: { severity: warning }
         annotations:
-          summary: "egress loopback p99 RTT > 200µs (overhead SLO, gap #6)"
-          description: "Remediation ladder: ClientPool tuning -> hyper keep-alive -> profile-bind sharding -> revert that vendor to direct egress."
+          summary: "egress impersonate upstream response-header p99 > 30s (gap #6 production guard)"
+          description: "Production RTT includes upstream latency. Remediation ladder: ClientPool tuning -> hyper keep-alive -> profile-bind sharding -> revert that vendor to direct egress."

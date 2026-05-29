@@ -131,7 +131,7 @@ def main(write: bool) -> int:
         if write:
             path.write_text(rewrite(text, target.const, refreshed))
 
-    return 1 if drift_found else 0
+    return 0 if write else int(drift_found)
 
 
 if __name__ == "__main__":

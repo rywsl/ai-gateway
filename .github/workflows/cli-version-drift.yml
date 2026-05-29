@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
 
       - name: Refresh CLI version pools
-        run: python3 scripts/cli_version_drift/check.py --write || true
+        run: python3 scripts/cli_version_drift/check.py --write
 
       - uses: peter-evans/create-pull-request@v6
         with:
