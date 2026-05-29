@@ -378,7 +378,10 @@ pub async fn pick_peer(
             Some(t) => t.resolve(vendor.value.id.as_ref(), picked_arc.key_id.as_ref(), pref),
             None => gw_tunnel_client::resolver::TunnelResolution::Direct,
         };
-        (resolution, pref.require_tunnel)
+        // Invariant anchor: when this `require_tunnel` value is true and the
+        // resolver returns Direct, the rustls branch below emits
+        // GW_TUNNEL_NO_NODE rather than falling back silently.
+        (resolution, pref.require_tunnel) // GW_TUNNEL_NO_NODE enforced in Direct arm below.
     };
 
     let mut peer;

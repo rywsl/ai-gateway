@@ -1,8 +1,10 @@
 name: header-drift
 
-# Weekly drift detection: compares the static request headers the real
-# Claude Code / Codex / Gemini CLIs send against the baselines committed
-# under scripts/capture_real_client_headers/<profile>/expected.json.
+# Weekly drift detection: compares the static application request headers the
+# real Claude Code / Codex / Gemini CLIs send against the baselines committed
+# under scripts/capture_real_client_headers/<profile>/expected.json. This does
+# not inspect TLS / HTTP-2 fingerprints; wreq/BoringSSL ClientHello drift is
+# guarded by crates/gw-egress-impersonate/tests/self_fingerprint.rs.
 #
 # Intentionally NOT triggered on push / pull_request: it depends on
 # authenticated CLI sessions and is gated behind a weekly cron plus manual
@@ -27,8 +29,10 @@ jobs:
           # so end-to-end capture cannot run in unattended CI without
           # pre-provisioned authenticated sessions (and the relevant secrets).
           # Gate any real capture behind a manual workflow_dispatch run in an
-          # authenticated environment. See:
+          # authenticated environment. This lane only covers app headers; TLS
+          # fingerprint drift is covered by the self_fingerprint test. See:
           #   scripts/capture_real_client_headers/README.md
+          #   crates/gw-egress-impersonate/tests/self_fingerprint.rs
           # Examples (operator-provided):
           #   npm install -g @anthropic-ai/claude-code
           #   npm install -g @openai/codex

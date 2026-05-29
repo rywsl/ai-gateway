@@ -44,6 +44,8 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
 | [parts/07-oauth-ldap.md](parts/07-oauth-ldap.md) | **OAuth / LDAP** | OAuth provider 配置、token exchange / refresh cache、LDAP bind 配置、group→permission mapping、`auth_configs` seed 机制 |
 | [contract-change/](contract-change/) | **契约变更日志** | 每次跨进程契约改动的索引记录(触发 spec + parts 落点 + Go 模块) |
 
+Current contract-change entries include [`contract-change/2026-05-29-vendor-validation.md`](contract-change/2026-05-29-vendor-validation.md), which defines Go write-time validation for egress impersonation vendor keys and the `identity_snapshot = NULL, version = version + 1` regenerate-identity action.
+
 ## 3. 通用约定（所有 part 共享）
 
 ### 3.1 字段命名

@@ -73,6 +73,19 @@ XADD 字段（key-value 列表）：
 - **重复 XADD 安全**：Rust invalidate 幂等。
 - **漏发 XADD**：Rust 等待 Moka TTL 到期自然 miss → 冷加载 → 拿到 PgSQL 新值。最坏陈旧 = TTL（30 min for vendor_key/pricing/model_group）。
 
+### 1.2.4.1 Vendor-key regenerate identity
+
+The Go admin action for egress impersonation identity regeneration is a normal
+`vendor_key` entity update:
+
+1. `UPDATE vendor_keys SET identity_snapshot = NULL, version = version + 1, updated_at = now() WHERE id = $1 RETURNING version`.
+2. `XADD events:entity * ns vendor_key id <id> v <new_version> op upsert`.
+
+The XADD is required. Rust does not compare PgSQL versions after a Redis
+`entity:vendor_key:<id>` hit; the `events:entity` handler deletes Redis L1 and
+invalidates Moka, forcing the next load to observe the cleared snapshot. See
+[`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md).
+
 **Redis L1 invalidate(Rust 端补口)**:
 
 Rust StreamConsumer 收到 `events:entity` 后,**在 invalidate Moka 之前**额外执行:

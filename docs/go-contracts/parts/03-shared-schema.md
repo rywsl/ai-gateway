@@ -18,6 +18,7 @@ Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开�
 | `0006_auth_configs.sql` | `auth_configs`（T1-E 落地） |
 | `0007_management_tokens.sql` | `management_tokens`（B2，T1-D 落地） |
 | `0008_signature_secret.sql` | `api_keys.signature_secret BYTEA`（HMAC 独立密钥列，KEK 加密 at rest；S-proxy-core H-1） |
+| `0009_egress_impersonation.sql` | `vendors.egress_mode JSONB` + `vendor_keys.identity_snapshot JSONB`（egress impersonation profile + persisted identity snapshot） |
 
 ### 3.1.1 公共控制列（所有 entity 表）
 
@@ -117,6 +118,9 @@ deleted_at  TIMESTAMPTZ NULL
   "display_name": "Anthropic",
   "base_urls": ["https://api.anthropic.com"],
   "auth_template": "x-api-key: {api_key}",  // 模板，{api_key} 占位
+  "egress_mode": {
+    "mode": "rustls"          // default；或 {"mode":"impersonate","profile":"claude_code_chrome131"}
+  },
   "timeout_overrides": {
     "connect_ms": 5000,
     "read_ms": 30000,
@@ -127,6 +131,15 @@ deleted_at  TIMESTAMPTZ NULL
   "contact": null
 }
 ```
+
+`egress_mode` is backed by the top-level `vendors.egress_mode` column added in migration 0009 and folded into the decoded entity by Rust. Supported values:
+
+| `mode` | Extra fields | Meaning |
+|---|---|---|
+| `rustls` | none | Default direct egress path. |
+| `impersonate` | `profile`: `claude_code_chrome131` \| `openai_codex` \| `gemini_cli` | Route through the local egress loopback with the selected client impersonation profile. |
+
+Go MUST reject writes that make an impersonated vendor key tunnel-eligible; see [`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md).
 
 ### 3.2.5 `vendor_keys.payload` — `VendorKey`（含加密 api_key）
 
@@ -151,11 +164,15 @@ deleted_at  TIMESTAMPTZ NULL
   "tags": [],
   "forced_capabilities": [],     // Vec<String>，channel-side advertised capability
   "exclusive_capability_match": false,
+  "tunnel_preference": null,      // Option<TunnelPreference>; require_tunnel conflicts with impersonate
+  "identity_snapshot": null,      // Folded from top-level vendor_keys.identity_snapshot by Rust loader
   "oauth": null                   // 可选;null = 非 OAuth 型 key,走 api_key_enc 注入
 }
 ```
 
 > **0004 列冗余说明**：migration 0004 在 `vendor_keys` 表上**同时**加了 top-level 列 `forced_capabilities JSONB` 与 `exclusive_capability_match BOOLEAN`，但 Rust 实际通过 `payload.forced_capabilities` / `payload.exclusive_capability_match` 反序列化（见 `loader.rs:101-141`）。top-level 列**仅供 Go 端建索引或查询**，不是 Rust 数据来源。Go 写入时**必须**同时写两处，否则 Rust 看不到。
+
+> **0009 identity snapshot 说明**：`identity_snapshot` 是 top-level `vendor_keys.identity_snapshot` 列，不是 Go 写入的 `payload` 字段。Rust `load_vendor_key` 用 `jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true)` 把该列折入解码 payload。Go 的 regenerate-identity admin action MUST set the column to `NULL`, bump `version`, and publish `events:entity ns=vendor_key` so Rust deletes stale Redis L2 and invalidates Moka.
 
 ### 3.2.5.1 OAuth 子结构(可选)
 

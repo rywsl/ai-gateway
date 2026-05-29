@@ -46,6 +46,7 @@ serde_json = { workspace = true }
 tempfile = "3"
 hyper = { workspace = true, features = ["client"] }
 criterion = { workspace = true }
+tls-parser = "0.12"
 
 [[bench]]
 name = "loopback_rtt"
