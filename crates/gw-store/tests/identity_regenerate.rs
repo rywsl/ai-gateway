@@ -5,15 +5,17 @@
 //! Requires Docker (testcontainers Redis + Postgres).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use fred::interfaces::KeysInterface;
 use gw_core::ids::KeyId;
 use gw_core::impersonate::{
     ensure_identity, IdentitySnapshot, ImpersonateProfile, ResolvedIdentity,
 };
 use gw_store::encrypt::{encrypt_for_test_only, KekCache};
+use gw_store::identity_persist::{IdentityPersistQueue, PgSnapshotWriter};
 use gw_store::loader::LoaderCtx;
 use gw_store::redis_client::RedisCtx;
+use gw_store::stream_consumer::apply_inline_for_test_helper;
 use gw_store::{pg_client, EntityStore};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
@@ -79,13 +81,13 @@ async fn regenerate_identity_nulls_snapshot_bumps_version_and_rederives() {
     let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{redis_port}"), 4)
         .await
         .expect("redis connect");
-    let first_store = EntityStore::with_loader(LoaderCtx {
+    let store = Arc::new(EntityStore::with_loader(LoaderCtx {
         redis: redis.clone(),
         pg: pg.clone(),
         kek: kek.clone(),
-    });
+    }));
     let key = KeyId::from(key_id);
-    let loaded_v1 = first_store
+    let loaded_v1 = store
         .vendor_key_or_load(&key)
         .await
         .expect("initial cold load");
@@ -101,17 +103,13 @@ async fn regenerate_identity_nulls_snapshot_bumps_version_and_rederives() {
         .await
         .expect("simulate Go regenerate action");
 
-    let redis_key = format!("entity:vendor_key:{key_id}");
-    let deleted: i64 = redis
-        .pool
-        .next()
-        .del::<i64, _>(&redis_key)
-        .await
-        .expect("clear stale Redis L2");
-    assert_eq!(deleted, 1, "initial load should have populated Redis L2");
+    // Simulate the `events:entity` invalidation path Go must emit after the
+    // write. This clears Redis L2 and Moka L1 through the same helper used by
+    // StreamConsumer tests; without it, the stale version-1 snapshot remains
+    // visible until cache TTL expiry.
+    apply_inline_for_test_helper(&store, "vendor_key", key_id).await;
 
-    let second_store = EntityStore::with_loader(LoaderCtx { redis, pg, kek });
-    let loaded_v2 = second_store
+    let loaded_v2 = store
         .vendor_key_or_load(&key)
         .await
         .expect("reload after regenerate");
@@ -121,15 +119,26 @@ async fn regenerate_identity_nulls_snapshot_bumps_version_and_rederives() {
         "loader must surface the regenerated storage state before ensure_identity re-derives"
     );
 
-    let (resolved, should_persist) = ensure_identity(key_id, None, profile);
+    let (resolved, should_persist) =
+        ensure_identity(key_id, loaded_v2.value.identity_snapshot.as_ref(), profile);
     assert!(
         should_persist,
         "missing snapshot after regenerate must request lazy persist"
     );
-    let rederived = Some(snapshot_from(resolved));
+    let rederived = snapshot_from(resolved);
+    let queue = IdentityPersistQueue::new(Arc::new(PgSnapshotWriter::new(pg.clone())), 128);
+    queue.schedule(key_id.to_owned(), rederived);
+    queue.flush_for_test().await;
+
+    let persisted: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT identity_snapshot FROM vendor_keys WHERE id = $1")
+            .bind(key_id)
+            .fetch_one(&pg)
+            .await
+            .expect("read persisted snapshot");
     assert!(
-        rederived.is_some(),
-        "resolved identity can be converted into a new snapshot"
+        persisted.is_some(),
+        "lazy persist must write a regenerated identity_snapshot while the column is NULL"
     );
 }
 
