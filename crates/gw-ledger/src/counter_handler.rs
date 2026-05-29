@@ -27,7 +27,7 @@ fn handle_protected_lease(fields: &HashMap<String, String>) -> DispatchOutcome {
         None => return DispatchOutcome::InvalidFields,
     };
     let mode_str = fields.get("mode").map(String::as_str).unwrap_or("");
-    let mode = match Mode::from_str(mode_str) {
+    let mode = match Mode::parse_str(mode_str) {
         Some(m) => m,
         None => return DispatchOutcome::InvalidFields,
     };
@@ -68,7 +68,7 @@ fn handle_coef_table(fields: &HashMap<String, String>) -> DispatchOutcome {
         Some(s) => s.as_str(),
         None => return DispatchOutcome::InvalidFields,
     };
-    let dim = match fields.get("dim").and_then(|s| Dim::from_str(s.as_str())) {
+    let dim = match fields.get("dim").and_then(|s| Dim::parse_str(s.as_str())) {
         Some(d) => d,
         None => return DispatchOutcome::InvalidFields,
     };

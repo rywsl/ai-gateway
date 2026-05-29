@@ -169,8 +169,7 @@ fn incomplete_commit_keeps_previous_active_version() {
                 expected: 3
             }
         ),
-        "expected Incomplete, got {:?}",
-        outcome
+        "expected Incomplete, got {outcome:?}",
     );
     // Active version must not have jumped to try_version.
     let after_active = current_coef_snapshot().version;

@@ -424,10 +424,7 @@ fn build_credit_coef_table_body() -> String {
     }
     models_buf.push(']');
     format!(
-        r#"{{"version":{version},"model_count":{model_count},"models":{models}}}"#,
-        version = version,
-        model_count = model_count,
-        models = models_buf,
+        r#"{{"version":{version},"model_count":{model_count},"models":{models_buf}}}"#,
     )
 }
 

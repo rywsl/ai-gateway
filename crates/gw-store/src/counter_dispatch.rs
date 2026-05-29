@@ -78,8 +78,7 @@ mod tests {
         let out = dispatch(&f);
         assert!(
             matches!(out, DispatchOutcome::NoHandler | DispatchOutcome::Handled),
-            "unexpected outcome before handler registration: {:?}",
-            out
+            "unexpected outcome before handler registration: {out:?}",
         );
     }
 
@@ -109,8 +108,7 @@ mod tests {
                 out,
                 DispatchOutcome::InvalidFields | DispatchOutcome::NoHandler
             ),
-            "dispatch unexpectedly returned {:?} after register_handler",
-            out
+            "dispatch unexpectedly returned {out:?} after register_handler",
         );
     }
 }

@@ -29,7 +29,7 @@ impl Mode {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "unprotected" => Some(Mode::Unprotected),
             "protected" => Some(Mode::Protected),
@@ -320,8 +320,8 @@ mod tests {
 
     #[test]
     fn mode_from_str_accepts_known_strings() {
-        assert_eq!(Mode::from_str("protected"), Some(Mode::Protected));
-        assert_eq!(Mode::from_str("unprotected"), Some(Mode::Unprotected));
-        assert!(Mode::from_str("garbage").is_none());
+        assert_eq!(Mode::parse_str("protected"), Some(Mode::Protected));
+        assert_eq!(Mode::parse_str("unprotected"), Some(Mode::Unprotected));
+        assert!(Mode::parse_str("garbage").is_none());
     }
 }

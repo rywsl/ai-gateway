@@ -22,7 +22,7 @@ pub enum Dim {
 }
 
 impl Dim {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "input" => Some(Dim::Input),
             "output" => Some(Dim::Output),

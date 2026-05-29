@@ -22,13 +22,12 @@ pub fn estimate_request_credits(
     est_input_tokens: u32,
     max_output_tokens: u32,
 ) -> Result<i64, EstimatorError> {
-    let coefs = lookup_coef(coef_version, model_id).ok_or_else(|| {
-        if coef_version == 0 {
-            EstimatorError::UnknownCoefVersion
-        } else {
-            EstimatorError::UnknownModel
-        }
-    })?;
+    let err_kind = if coef_version == 0 {
+        EstimatorError::UnknownCoefVersion
+    } else {
+        EstimatorError::UnknownModel
+    };
+    let coefs = lookup_coef(coef_version, model_id).ok_or(err_kind)?;
     let input = (est_input_tokens as i64).saturating_mul(coefs.input as i64);
     let output = (max_output_tokens as i64).saturating_mul(coefs.output as i64);
     Ok(input.saturating_add(output))
