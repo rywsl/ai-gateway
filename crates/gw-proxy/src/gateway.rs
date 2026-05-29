@@ -694,6 +694,16 @@ impl ProxyHttp for LlmGateway {
         // (substituted) outbound body. Stream / same-protocol traffic is
         // unaffected.
         if !ctx.is_stream {
+            // Audit 2026-05-30 §1.9: capture the upstream response content-encoding
+            // BEFORE any strip, every attempt, so handle_non_stream_chunk can
+            // decode the body to plaintext before cross-protocol re-render. Always
+            // recaptured here, so it is never stale across a retry.
+            ctx.resp_content_encoding = gw_codec::compression::parse_content_encoding(
+                upstream_response
+                    .headers
+                    .get("content-encoding")
+                    .and_then(|v| v.to_str().ok()),
+            );
             let cross_protocol = match (ctx.client_codec.as_ref(), ctx.upstream_codec.as_ref()) {
                 (Some(client), Some(upstream)) => {
                     gw_codec::cross_render::WireFormat::from_any_codec(client)

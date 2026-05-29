@@ -227,6 +227,11 @@ pub struct ReqCtx {
     pub signature_received: Option<Vec<u8>>,
     pub signature_timestamp: Option<String>,
     pub req_content_encoding: gw_codec::compression::Encoding,
+    /// Upstream RESPONSE content-encoding, captured in `response_filter` before
+    /// the cross-protocol header strip so `handle_non_stream_chunk` can decode
+    /// the body to plaintext before re-render (audit 2026-05-30 §1.9). Recaptured
+    /// every response_filter invocation (per attempt), so never stale on retry.
+    pub resp_content_encoding: gw_codec::compression::Encoding,
     /// HMAC secret bytes from `ApiKeyEntry.signature_secret`. Empty when
     /// `signature_required = false`.
     pub signature_secret: Vec<u8>,
@@ -396,6 +401,7 @@ impl ReqCtx {
             signature_received: None,
             signature_timestamp: None,
             req_content_encoding: gw_codec::compression::Encoding::Identity,
+            resp_content_encoding: gw_codec::compression::Encoding::Identity,
             signature_secret: Vec::new(),
             mgmt: false,
             required_caps: None,

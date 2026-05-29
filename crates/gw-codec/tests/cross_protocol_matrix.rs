@@ -128,6 +128,21 @@ fn assert_matrix_case(from: WireFormat, to: WireFormat) {
             "from={from} to={to}: thinking should be dropped (target lacks supports_thinking)"
         );
     }
+
+    // Audit 2026-05-30 §1.10: OpenAI-Responses has no separate thinking channel,
+    // so a source that carried thinking must surface it as `reasoning` after the
+    // round-trip (collapsed, not silently dropped). source_ir_for populates
+    // thinking only for Anthropic / OpenAiResponses sources.
+    let source_had_thinking = matches!(
+        from,
+        WireFormat::AnthropicMessages | WireFormat::OpenAiResponses
+    );
+    if to == WireFormat::OpenAiResponses && source_had_thinking {
+        assert!(
+            parsed.reasoning.is_some(),
+            "from={from} to=OpenAiResponses: thinking must survive as reasoning, not be dropped"
+        );
+    }
 }
 
 macro_rules! cross_protocol_case {

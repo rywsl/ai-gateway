@@ -108,6 +108,11 @@ pub static METRICS: &[MetricSpec] = &[
         help: "model group referenced an unknown multi_dim routing preset; fell back to fixed_order",
     },
     MetricSpec {
+        name: "gw_codec_content_decode_failure_total",
+        kind: MetricKind::Counter,
+        help: "cross-protocol non-stream upstream body failed content-encoding decode; label=encoding",
+    },
+    MetricSpec {
         name: "gw_adaptive_rpm_probe_total",
         kind: MetricKind::Counter,
         help: "adaptive RPM probe expansions after decay and quiet period",

@@ -26,6 +26,7 @@ use gw_core::ir::{
 };
 use serde_json::value::RawValue;
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 // ─── Request direction ────────────────────────────────────────────────────
 
@@ -75,6 +76,23 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
     fn try_from(ir: &RequestIR<'a>) -> Result<Self, Self::Error> {
         let mut system_instruction: Option<GeminiSystemInstruction<'a>> = None;
         let mut contents: Vec<GeminiContent<'a>> = Vec::with_capacity(ir.messages.len());
+        // Audit 2026-05-30 §3.5: Gemini's functionResponse REQUIRES a `name` (the
+        // originating function). Map each prior tool_call id -> its function name
+        // so a MessageIR::Tool result can correlate back, instead of emitting an
+        // empty name. One pass over the messages; later Tool arms look up by id.
+        let tool_id_to_name: HashMap<Cow<'a, str>, Cow<'a, str>> = ir
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                MessageIR::Assistant {
+                    tool_calls: Some(tcs),
+                    ..
+                } => Some(tcs.iter()),
+                _ => None,
+            })
+            .flatten()
+            .map(|tc| (tc.id.clone(), tc.name.clone()))
+            .collect();
         for m in &ir.messages {
             match m {
                 MessageIR::System { content } => {
@@ -117,19 +135,25 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
                     });
                 }
                 MessageIR::Tool {
-                    tool_call_id: _,
+                    tool_call_id,
                     content,
                 } => {
-                    // Tool results lower to a `functionResponse` part. Gemini
-                    // does not carry a per-call id — we drop `tool_call_id`.
-                    // Body text → `response.content` so consumers see the
-                    // free-form result string.
+                    // Tool results lower to a `functionResponse` part. Gemini's
+                    // functionResponse.name is required and must be the
+                    // originating function name — resolve it from the recorded
+                    // tool_call id (audit 2026-05-30 §3.5). Fall back to the id
+                    // itself only when no prior call is found (best-effort, e.g.
+                    // a truncated history), rather than emitting an empty name.
+                    let name: Cow<'a, str> = tool_id_to_name
+                        .get(tool_call_id.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| tool_call_id.clone());
                     let body = content_to_text(content).into_owned();
                     contents.push(GeminiContent {
                         role: Some(Cow::Borrowed("user")),
                         parts: vec![GeminiPart::FunctionResponse {
                             function_response: GeminiFunctionResponse {
-                                name: Cow::Borrowed(""),
+                                name,
                                 response: serde_json::json!({ "content": body }),
                             },
                         }],

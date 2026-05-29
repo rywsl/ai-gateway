@@ -352,6 +352,17 @@ fn codec_for(k: ProtocolKind) -> AnyCodec {
     }
 }
 
+/// Stable metric label for a content-encoding. Exhaustive (no catch-all) so a
+/// new `Encoding` variant is a compile error here rather than a silent mislabel.
+fn enc_label(enc: gw_codec::compression::Encoding) -> &'static str {
+    use gw_codec::compression::Encoding;
+    match enc {
+        Encoding::Identity => "identity",
+        Encoding::Gzip => "gzip",
+        Encoding::Br => "br",
+    }
+}
+
 fn find_event_boundary(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\n\n")
 }
@@ -658,6 +669,39 @@ pub(crate) fn handle_non_stream_chunk(
         ctx.upstream_body_accum = Some(body);
         return;
     };
+    // Audit 2026-05-30 §1.9: on the cross-protocol path, response_filter strips
+    // content-encoding (the re-rendered body will be plaintext). Decode the
+    // upstream body to plaintext HERE — before parse_response AND before any
+    // verbatim fallback — so the forwarded/parsed bytes match the stripped
+    // header. Same-protocol keeps the header and forwards compressed bytes
+    // verbatim (client decompresses), so it is intentionally NOT decoded here.
+    let cross_protocol = ctx
+        .client_codec
+        .as_ref()
+        .map(|client| {
+            WireFormat::from_any_codec(client) != WireFormat::from_any_codec(codec)
+        })
+        .unwrap_or(false);
+    let body: BytesMut = if cross_protocol
+        && ctx.resp_content_encoding != gw_codec::compression::Encoding::Identity
+    {
+        match gw_codec::compression::decode(ctx.resp_content_encoding, &body) {
+            Ok(plain) => BytesMut::from(&plain[..]),
+            Err(_e) => {
+                // Corrupt/undecodable upstream body: nothing better to forward
+                // (the header is already stripped). Surface via a metric and
+                // fall through with the original bytes rather than panicking.
+                metrics::counter!(
+                    "gw_codec_content_decode_failure_total",
+                    "encoding" => enc_label(ctx.resp_content_encoding),
+                )
+                .increment(1);
+                body
+            }
+        }
+    } else {
+        body
+    };
     let codec_kind = codec.kind();
     let codec_shape = codec.api_shape();
     // `parse_response` borrows from `body`; both the successful `ResponseIR`
@@ -898,6 +942,52 @@ mod non_stream_branch_tests {
         assert_eq!(ctx.usage.cache_creation_tokens, Some(1000));
         assert!(ctx.usage.thinking_tokens.is_none());
         assert!(ctx.usage.multimodal_input_tokens.is_none());
+    }
+
+    // Audit 2026-05-30 §1.9: on the cross-protocol path the content-encoding
+    // header is stripped, so the body must be decoded before parse — otherwise
+    // parse_response sees gzip bytes (fails) and the client gets undecodable
+    // bytes with no encoding header.
+    #[test]
+    fn cross_protocol_gzip_body_is_decoded_before_parse() {
+        let plain = br#"{"id":"x","object":"chat.completion","created":0,"model":"gpt","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}"#;
+        let gz = gw_codec::compression::encode(gw_codec::compression::Encoding::Gzip, plain)
+            .expect("gzip encode");
+        let mut ctx = ReqCtx {
+            is_stream: false,
+            // cross-protocol: client Anthropic, upstream OpenAi.
+            client_codec: Some(AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)),
+            upstream_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            resp_content_encoding: gw_codec::compression::Encoding::Gzip,
+            ..ReqCtx::default()
+        };
+        handle_non_stream_chunk(Some(&Bytes::copy_from_slice(&gz)), true, &mut ctx);
+        // Decode-before-parse worked: usage was extracted from the OpenAI JSON,
+        // proving the gzip body was inflated rather than fed compressed to parse.
+        assert_eq!(ctx.usage.input_tokens, 11);
+        assert_eq!(ctx.usage.output_tokens, 4);
+    }
+
+    // Same-protocol gzip must NOT be decoded here (header is preserved; the
+    // client decompresses). The compressed body is forwarded verbatim.
+    #[test]
+    fn same_protocol_gzip_body_not_decoded() {
+        let plain = br#"{"id":"x","object":"chat.completion","created":0,"model":"gpt","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}"#;
+        let gz = gw_codec::compression::encode(gw_codec::compression::Encoding::Gzip, plain)
+            .expect("gzip encode");
+        let mut ctx = ReqCtx {
+            is_stream: false,
+            client_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            upstream_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            resp_content_encoding: gw_codec::compression::Encoding::Gzip,
+            ..ReqCtx::default()
+        };
+        handle_non_stream_chunk(Some(&Bytes::copy_from_slice(&gz)), true, &mut ctx);
+        // Not decoded → parse_response saw gzip bytes and failed → body preserved
+        // verbatim for the client (which decompresses via the intact header).
+        let accum = ctx.upstream_body_accum.as_ref().expect("compressed body preserved");
+        assert_eq!(accum.as_ref(), &gz[..]);
+        assert_eq!(ctx.usage.input_tokens, 0);
     }
 }
 

@@ -248,14 +248,31 @@ impl<'a> TryFrom<&ResponseIR<'a>> for OpenAiResponsesResponse<'a> {
 
         // Reasoning item comes first if present (OpenAI's own clients render in
         // this order, and tools depending on item ordering observe it).
+        //
+        // Audit 2026-05-30 §1.10: render BOTH ir.thinking and ir.reasoning here.
+        // The OpenAI-Responses wire has no separate "thinking" channel, so an
+        // Anthropic-origin extended-thinking block (ir.thinking) is collapsed
+        // into reasoning summary parts rather than silently dropped. This is
+        // lossy-but-honest: a round-trip through Responses preserves the text as
+        // `reasoning`, not a distinct `thinking` channel.
+        let mut summary: Vec<ReasoningSummaryPart<'a>> = Vec::new();
+        if let Some(thinking) = ir.thinking.as_ref() {
+            for block in &thinking.blocks {
+                if !block.text.is_empty() {
+                    summary.push(ReasoningSummaryPart::SummaryText {
+                        text: block.text.clone(),
+                    });
+                }
+            }
+        }
         if let Some(reasoning) = ir.reasoning.as_ref() {
-            let summary = if reasoning.summary.is_empty() {
-                Vec::new()
-            } else {
-                vec![ReasoningSummaryPart::SummaryText {
+            if !reasoning.summary.is_empty() {
+                summary.push(ReasoningSummaryPart::SummaryText {
                     text: reasoning.summary.clone(),
-                }]
-            };
+                });
+            }
+        }
+        if !summary.is_empty() || ir.reasoning.is_some() {
             output.push(ResponseOutputItem::Reasoning {
                 id: Cow::Borrowed(""),
                 summary,
