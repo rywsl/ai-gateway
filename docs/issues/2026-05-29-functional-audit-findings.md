@@ -420,3 +420,23 @@ is lost — diagnostic only, hence LOW.
 timeout flag).
 
 **Tests**: add a classifier unit test for the dual-flag (proxy + timeout) error → `GW_UPSTREAM_PROXY_ERROR`.
+
+---
+
+## Verification (2026-05-30)
+
+Final gates on `fix/audit-remediation-20260530`:
+
+- `cargo build --release -p gw-gateway` — ✅
+- `cargo clippy --workspace --all-targets -- -D warnings` — ✅ clean
+- `cargo fmt --all -- --check` — ✅
+- `cargo test --workspace` — **709 passed, 11 ignored**. The single non-pass is
+  `gw-ledger ... credit_lease_integration::coefs_for_six_dim_actual_usage`, the **pre-existing parallelism
+  flake** documented in [`2026-05-29-credit-lease-followups.md`](2026-05-29-credit-lease-followups.md) §3
+  (shares global `COEF_CACHE`/`COEF_STAGING`). It passes `--test-threads=1` (`8 passed; 0 failed`), and this
+  branch touches no coef/credit-lease test or source — not a regression.
+- `bash scripts/check-invariants.sh` — ✅ all active invariants hold.
+- `make e2e-soak-smoke` — **could not run in this environment**: the Docker image build for the `fake-web`
+  stage fails downloading the Rust 1.88 toolchain (`tls handshake eof` to static.rust-lang.org) — a builder
+  network restriction, not a code issue. The billing/routing accounting paths the soak exercises are covered
+  by the in-process unit + integration suites above. Re-run the soak where the Docker builder has network.
