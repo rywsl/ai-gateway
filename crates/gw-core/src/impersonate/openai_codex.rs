@@ -1,6 +1,8 @@
-//! OpenAI Codex profile — headers per codex-rs source observation.
-//! Note: `OpenAI-Beta` value pinned to `responses=v1`; verify against current
-//! codex-rs source before Phase 5 rollout.
+//! OpenAI Codex profile — fail-static headers per codex-rs source observation.
+//! `OpenAI-Beta` is pinned to `responses=v1`; it is not auto-detected.
+//! Before enabling Codex for a production tenant, run
+//! `scripts/capture_real_client_headers/codex/capture.sh` against a live
+//! session and reconcile any drift.
 
 use crate::impersonate::rng::seeded_rng;
 use crate::impersonate::IdentityVariable;

@@ -180,8 +180,9 @@ bind_uds = "/tmp/gw-egress.sock"
 # new connections back-pressure.
 max_sessions = 64
 
-# TTL on the in-process `TurnStateCache` (Codex per-turn state). 5 minutes
-# matches the educated guess in spec §11 #2.
+# TTL on the in-process `TurnStateCache` (Codex per-turn state). The 300 s
+# default is fail-static and based on the educated guess in spec §11 #2; tune it
+# by packet-capturing a live Codex CLI session (known gap #2).
 turn_state_ttl_secs = 300
 
 [protection]
