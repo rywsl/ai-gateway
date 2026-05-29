@@ -423,9 +423,7 @@ fn build_credit_coef_table_body() -> String {
         models_buf.push('"');
     }
     models_buf.push(']');
-    format!(
-        r#"{{"version":{version},"model_count":{model_count},"models":{models_buf}}}"#,
-    )
+    format!(r#"{{"version":{version},"model_count":{model_count},"models":{models_buf}}}"#,)
 }
 
 /// Escape a string for safe embedding inside a JSON string literal.
