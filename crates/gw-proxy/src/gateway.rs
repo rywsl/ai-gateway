@@ -236,6 +236,10 @@ pub struct LlmGateway {
     pub(crate) cancel_grace_ms: u64,
     /// Hard-cap configuration (ADR-024). Threaded from `cfg.auth.*` at boot.
     pub(crate) hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
+    /// Credit-lease protection-mode config (Spec 2026-05-29-credit-lease-design).
+    /// Read by `request_filter` step 8.5 to decide whether the request goes
+    /// through the lease branch or the legacy soft-defense path.
+    pub(crate) protection_cfg: gw_ledger::ProtectionConfig,
     pub(crate) classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     pub(crate) retryable_codes: Arc<std::collections::HashSet<u16>>,
     pub(crate) error_passthrough_enabled: bool,
@@ -287,6 +291,7 @@ impl LlmGateway {
         response_deadline_ms: u64,
         cancel_grace_ms: u64,
         hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
+        protection_cfg: gw_ledger::ProtectionConfig,
         classifier: Arc<dyn gw_core::error::ErrorClassifier>,
         retryable_codes: Arc<std::collections::HashSet<u16>>,
         error_passthrough_enabled: bool,
@@ -338,6 +343,7 @@ impl LlmGateway {
             response_deadline_ms,
             cancel_grace_ms,
             hard_cap_cfg,
+            protection_cfg,
             classifier,
             retryable_codes,
             error_passthrough_enabled,
@@ -465,6 +471,7 @@ impl ProxyHttp for LlmGateway {
             self.capability_resolver.as_ref(),
             &self.mgmt_blacklist,
             &self.hard_cap_cfg,
+            &self.protection_cfg,
             self.files_gateway.as_ref(),
             Some(filters::request::GeminiFilesRoutingDeps {
                 store: &self.store,

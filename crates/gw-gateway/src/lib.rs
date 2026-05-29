@@ -114,6 +114,10 @@ struct Wired {
     cancel_grace_ms: u64,
     /// Hard-cap configuration (ADR-024). From `cfg.auth.*`.
     hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
+    /// Credit-lease protection-mode config (Spec 2026-05-29-credit-lease-design).
+    /// Threaded into `request_filter` so step 8.5 can decide whether to admit
+    /// via the lease branch or fall through to the legacy soft-defense path.
+    protection_cfg: gw_ledger::ProtectionConfig,
     classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     retryable_codes: Arc<std::collections::HashSet<u16>>,
     error_passthrough_enabled: bool,
@@ -249,6 +253,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.response_deadline_ms,
         wired.cancel_grace_ms,
         wired.hard_cap_cfg,
+        wired.protection_cfg.clone(),
         wired.classifier,
         wired.retryable_codes,
         wired.error_passthrough_enabled,
@@ -831,6 +836,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             max_input_tokens: cfg.auth.hard_cap_max_input_tokens,
             max_cost_micro: cfg.auth.hard_cap_max_cost_micro,
         },
+        protection_cfg: cfg.protection.clone(),
         classifier: Arc::new(gw_core::error::DefaultClassifier),
         retryable_codes: {
             let mut codes = std::collections::HashSet::new();
