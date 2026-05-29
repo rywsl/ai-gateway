@@ -43,6 +43,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
 | [parts/06-subscription-video.md](parts/06-subscription-video.md) | **Subscription / Video** | 订阅套餐、用户订阅、视频任务状态机、`operation_id` 关联、订阅 entitlement 到 Rust permission merge 的投影规则 |
 | [parts/07-oauth-ldap.md](parts/07-oauth-ldap.md) | **OAuth / LDAP** | OAuth provider 配置、token exchange / refresh cache、LDAP bind 配置、group→permission mapping、`auth_configs` seed 机制 |
 | [contract-change/](contract-change/) | **契约变更日志** | 每次跨进程契约改动的索引记录(触发 spec + parts 落点 + Go 模块) |
+| [contract-change/2026-05-29-vendor-validation.md](contract-change/2026-05-29-vendor-validation.md) | **Vendor validation** | EI-8 Go 写入期拒绝 tunnel+impersonate 冲突；EI-7 Go 管理动作清空 `vendor_keys.identity_snapshot` 并递增 `version` 以触发 Rust cache miss + 重新派生 |
 
 Current contract-change entries include [`contract-change/2026-05-29-vendor-validation.md`](contract-change/2026-05-29-vendor-validation.md), which defines Go write-time validation for egress impersonation vendor keys and the `identity_snapshot = NULL, version = version + 1` regenerate-identity action.
 

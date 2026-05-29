@@ -52,8 +52,8 @@ XADD 字段（key-value 列表）：
 | `user` | `users` | `EntityStore.user` | `UserEntry` | 5 min TTL |
 | `user_group` | `user_groups` | `EntityStore.user_group` | `UserGroup` | 5 min TTL |
 | `apikey` | `api_keys` | `EntityStore.apikey` | `ApiKeyEntry` | 5 min TTL |
-| `vendor` | `vendors` | `EntityStore.vendor` | `Vendor` | 30 min TTL |
-| `vendor_key` | `vendor_keys` | `EntityStore.vendor_key` | `VendorKey`（含 `api_key_enc` 解密前形态，见 [parts/03 §3.4](03-shared-schema.md#34-加密-payload-aes-256-gcm)） | 30 min TTL |
+| `vendor` | `vendors` | `EntityStore.vendor` | `Vendor` | 30 min TTL；`egress_mode` 写入契约见 [parts/03 §3.2.4](03-shared-schema.md#324-vendorspayload--vendor) |
+| `vendor_key` | `vendor_keys` | `EntityStore.vendor_key` | `VendorKey`（含 `api_key_enc` 解密前形态、`tunnel_preference`、`identity_snapshot` 折叠字段，见 [parts/03 §3.2.5](03-shared-schema.md#325-vendor_keyspayload--vendorkey含加密-api_key) / [§3.4](03-shared-schema.md#34-加密-payload-aes-256-gcm)） | 30 min TTL |
 | `model_group` | `model_groups` | `EntityStore.model_group` | `ModelGroup` | 30 min TTL |
 | `pricing` | `pricings` | `EntityStore.pricing` | `Pricing` | 30 min TTL，但 Rust 实际只读 estimate_pricing；过渡期保留 |
 | `jwks` | `jwks` | `EntityStore.jwks` | `JwksEntry` | 1 h TTL |
@@ -99,6 +99,21 @@ DEL entity:{ns}:{id}
 幂等性:任意 pod 收到 `events:entity` → DEL Redis L1 → Moka invalidate;多 pod 同时收同一事件即多次 DEL,无害。
 
 启动期 Redis L1 陈旧不在本补口范围:Rust 启动锚点是 `$`,启动前的事件不消费;Redis L1 中陈旧 entity 在 TTL 内仍可能命中(最长 30 min for vendor_key / pricing / model_group)。如要彻底解决,需要 Go 主动 DEL 或 Rust 全量预热(留 follow-up,不在本契约范围)。
+
+**egress-impersonate 管理动作补充（0009）**:
+
+- Go 写 `vendors.egress_mode = {"mode":"impersonate", ...}` 或写 `vendor_keys.payload.tunnel_preference` 前，必须执行 EI-8 write-time exclusion：同一 vendor 不得同时存在 impersonate egress 与 tunnel-eligible key（`tunnel_preference.require_tunnel = true` 或 Go 侧 node mapping）。Rust 请求路径仍以 `GW_TUNNEL_IMPERSONATE_CONFLICT` fail-closed 兜底。
+- Go 的 regenerate-identity 管理动作必须执行：
+
+```sql
+UPDATE vendor_keys
+   SET identity_snapshot = NULL,
+       version = version + 1,
+       updated_at = now()
+ WHERE id = $id;
+```
+
+随后按本节写顺序发出 `XADD events:entity * ns vendor_key id <id> v <new_version> op upsert`。Rust 收到事件后 DEL `entity:vendor_key:<id>` + invalidate Moka；下一次请求冷加载到 `identity_snapshot = NULL`，通过 `ensure_identity` 重新派生并由 Rust lazy-persist 在 `IS NULL` guard 下回写。完整契约见 [`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md)。
 
 ### 1.2.5 删除语义
 

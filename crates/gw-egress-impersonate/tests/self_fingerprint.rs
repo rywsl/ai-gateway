@@ -1,187 +1,228 @@
+//! Self-fingerprint golden test for the real BoringSSL/wreq egress loopback.
+//!
+//! Chrome-class BoringSSL intentionally permutes ClientHello extension order,
+//! so this sentinel pins deterministic parts of the GREASE-filtered fingerprint:
+//! cipher-suite order, supported-group order, and the extension ID set.
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use gw_egress_impersonate::{EgressBind, EgressHandle};
-use http_body_util::{BodyExt, Empty};
-use hyper::Request;
+use gw_egress_impersonate::handle::{EgressBind, EgressHandle};
+use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use tls_parser::{
     parse_tls_extensions, parse_tls_plaintext, TlsExtension, TlsMessage, TlsMessageHandshake,
+    TlsRecordType,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
-const PROFILE: &str = "claude_code_chrome131";
-
-// Chrome/BoringSSL permutes extension order. Pin the GREASE-filtered extension
-// set, while preserving order for cipher suites and supported groups.
-const EXPECTED_CIPHERS: &[u16] = &[
+const GOLDEN_CIPHERS: &[u16] = &[
     4865, 4866, 4867, 49195, 49199, 49196, 49200, 52393, 52392, 49171, 49172, 156, 157, 47, 53,
 ];
-const EXPECTED_EXTENSIONS: &[u16] = &[
+const GOLDEN_EXTENSION_SET: &[u16] = &[
     5, 10, 11, 13, 16, 18, 23, 27, 35, 43, 45, 51, 17513, 65037, 65281,
 ];
-const EXPECTED_SUPPORTED_GROUPS: &[u16] = &[4588, 29, 23, 24];
+const GOLDEN_GROUPS: &[u16] = &[4588, 29, 23, 24];
 
 #[tokio::test]
-async fn loopback_emits_stable_claude_code_chrome131_client_hello() {
-    let upstream = TcpListener::bind("127.0.0.1:0")
+async fn egress_clienthello_matches_golden() {
+    let recorder = TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind upstream capture listener");
-    let upstream_addr = upstream.local_addr().expect("upstream local_addr");
-    let capture = tokio::spawn(capture_client_hello(upstream));
+        .expect("bind recorder");
+    let recorder_addr = recorder.local_addr().expect("recorder local_addr");
+    let capture = tokio::spawn(async move { record_client_hello(recorder).await });
 
     let egress_addr = reserve_loopback_addr().await;
-    let handle = EgressHandle::start(EgressBind::Tcp(egress_addr), 16);
-    wait_for_egress(egress_addr).await;
+    let egress = EgressHandle::start(EgressBind::Tcp(egress_addr), 16);
+    wait_for_egress(egress_addr, &egress).await;
 
-    let request = Request::builder()
-        .method("GET")
-        .uri("/")
-        .header("Host", "localhost")
-        .header("X-Egress-Target", upstream_addr.to_string())
-        .header("X-Egress-Profile", PROFILE)
-        .body(Empty::<Bytes>::new())
-        .expect("valid loopback request");
-    let egress_request = tokio::spawn(send_h1(egress_addr, request));
+    let send = tokio::spawn(async move {
+        let _ = send_egress_request(egress_addr, recorder_addr).await;
+    });
 
-    let raw = tokio::time::timeout(Duration::from_secs(5), capture)
+    let client_hello = tokio::time::timeout(Duration::from_secs(5), capture)
         .await
-        .expect("timed out waiting for upstream ClientHello")
-        .expect("capture task panicked")
-        .expect("capture ClientHello");
+        .expect("timed out waiting for ClientHello")
+        .expect("recorder task panicked")
+        .expect("record ClientHello");
+    let observed = fingerprint_tuple(&client_hello);
 
-    let fingerprint = parse_client_hello(&raw);
-    assert_eq!(fingerprint.ciphers, EXPECTED_CIPHERS);
-    assert_eq!(fingerprint.extensions, EXPECTED_EXTENSIONS);
-    assert_eq!(fingerprint.supported_groups, EXPECTED_SUPPORTED_GROUPS);
+    let _ = send.await;
+    drop(egress);
 
-    let _ = egress_request.await;
-    handle.shutdown(Duration::from_secs(1)).await;
+    assert_goldens(&observed);
 }
 
 async fn reserve_loopback_addr() -> SocketAddr {
-    let probe = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind egress probe");
-    let addr = probe.local_addr().expect("egress probe local_addr");
+    let probe = TcpListener::bind("127.0.0.1:0").await.expect("probe bind");
+    let addr = probe.local_addr().expect("probe local_addr");
     drop(probe);
     addr
 }
 
-async fn wait_for_egress(addr: SocketAddr) {
+async fn wait_for_egress(addr: SocketAddr, handle: &EgressHandle) {
     for _ in 0..50 {
         if TcpStream::connect(addr).await.is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("egress listener never became ready at {addr}");
+
+    panic!(
+        "egress listener never became ready for {:?}",
+        handle.bind_addr()
+    );
 }
 
-async fn send_h1(
-    addr: SocketAddr,
-    request: Request<Empty<Bytes>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let stream = TcpStream::connect(addr).await?;
+async fn send_egress_request(
+    egress_addr: SocketAddr,
+    recorder_addr: SocketAddr,
+) -> anyhow::Result<()> {
+    let stream = TcpStream::connect(egress_addr).await?;
     let io = TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
     tokio::spawn(async move {
         let _ = conn.await;
     });
-    match sender.send_request(request).await {
-        Ok(response) => {
-            let _ = response.into_body().collect().await;
-        }
-        Err(_e) => {}
-    }
+
+    let req = hyper::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("X-Egress-Target", recorder_addr.to_string())
+        .header("X-Egress-Profile", "claude_code_chrome131")
+        .body(Full::new(Bytes::new()))?;
+
+    let resp = sender.send_request(req).await?;
+    let _ = resp.into_body().collect().await?;
     Ok(())
 }
 
-async fn capture_client_hello(
-    listener: TcpListener,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+async fn record_client_hello(listener: TcpListener) -> anyhow::Result<Vec<u8>> {
     let (mut stream, _) = listener.accept().await?;
-    let mut header = [0_u8; 5];
-    stream.read_exact(&mut header).await?;
-    let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
-    let mut payload = vec![0_u8; record_len];
-    stream.read_exact(&mut payload).await?;
+    let mut buf = vec![0; 16 * 1024];
+    let mut len = 0;
 
-    let mut raw = header.to_vec();
-    raw.extend_from_slice(&payload);
-    let _ = stream.shutdown().await;
-    Ok(raw)
+    loop {
+        let read = stream.read(&mut buf[len..]).await?;
+        if read == 0 {
+            anyhow::bail!("recorder connection closed before ClientHello was complete");
+        }
+        len += read;
+
+        if has_complete_tls_record(&buf[..len]) {
+            buf.truncate(len);
+            return Ok(buf);
+        }
+
+        if len == buf.len() {
+            anyhow::bail!("ClientHello exceeded {} bytes", buf.len());
+        }
+    }
 }
 
-#[derive(Debug)]
-struct Fingerprint {
+fn has_complete_tls_record(buf: &[u8]) -> bool {
+    buf.len() >= 5 && {
+        let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+        buf.len() >= 5 + record_len
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FingerprintTuple {
     ciphers: Vec<u16>,
-    extensions: Vec<u16>,
-    supported_groups: Vec<u16>,
+    extension_set: Vec<u16>,
+    groups: Vec<u16>,
 }
 
-fn parse_client_hello(raw: &[u8]) -> Fingerprint {
-    let (_, plaintext) = parse_tls_plaintext(raw).expect("parse TLS plaintext");
-    let hello = plaintext
-        .msg
-        .iter()
-        .find_map(|msg| match msg {
-            TlsMessage::Handshake(TlsMessageHandshake::ClientHello(hello)) => Some(hello),
-            _ => None,
-        })
-        .expect("TLS record contains ClientHello");
+fn fingerprint_tuple(bytes: &[u8]) -> FingerprintTuple {
+    let (_, plaintext) = parse_tls_plaintext(bytes).expect("parse TLS plaintext");
+    assert_eq!(
+        plaintext.hdr.record_type,
+        TlsRecordType::Handshake,
+        "expected handshake record"
+    );
 
-    let ext_raw = hello.ext.expect("ClientHello extensions present");
-    let (_, extensions) = parse_tls_extensions(ext_raw).expect("parse ClientHello extensions");
+    for msg in plaintext.msg {
+        if let TlsMessage::Handshake(TlsMessageHandshake::ClientHello(hello)) = msg {
+            let ciphers = hello
+                .ciphers
+                .iter()
+                .map(|cipher| u16::from(*cipher))
+                .filter(|value| !is_grease(*value))
+                .collect();
+            let mut extension_set = hello.ext.map(extension_ids).unwrap_or_default();
+            extension_set.sort_unstable();
+            let mut groups = Vec::new();
 
-    let supported_groups = extensions
-        .iter()
-        .find_map(|ext| match ext {
-            TlsExtension::EllipticCurves(groups) => Some(
-                groups
-                    .iter()
-                    .map(|group| group.0)
-                    .filter(|v| !is_grease(*v))
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .expect("supported_groups extension present");
+            if let Some(raw_exts) = hello.ext {
+                let (_, exts) =
+                    parse_tls_extensions(raw_exts).expect("parse ClientHello extensions");
+                for ext in exts {
+                    if let TlsExtension::EllipticCurves(curves) = &ext {
+                        groups.extend(
+                            curves
+                                .iter()
+                                .map(|curve| curve.0)
+                                .filter(|value| !is_grease(*value)),
+                        );
+                    }
+                }
+            }
 
-    let mut extension_ids: Vec<u16> = extension_ids(ext_raw)
-        .into_iter()
-        .filter(|v| !is_grease(*v))
-        .collect();
-    extension_ids.sort_unstable();
-
-    Fingerprint {
-        ciphers: hello
-            .ciphers
-            .iter()
-            .map(|cipher| cipher.0)
-            .filter(|v| !is_grease(*v))
-            .collect(),
-        extensions: extension_ids,
-        supported_groups,
+            return FingerprintTuple {
+                ciphers,
+                extension_set,
+                groups,
+            };
+        }
     }
+
+    panic!("TLS record did not contain a ClientHello");
 }
 
-fn extension_ids(mut raw: &[u8]) -> Vec<u16> {
+fn extension_ids(mut exts: &[u8]) -> Vec<u16> {
     let mut ids = Vec::new();
-    while raw.len() >= 4 {
-        let id = u16::from_be_bytes([raw[0], raw[1]]);
-        let len = u16::from_be_bytes([raw[2], raw[3]]) as usize;
-        ids.push(id);
-        raw = raw
-            .get(4 + len..)
-            .expect("extension length stays inside ClientHello extension block");
+    while !exts.is_empty() {
+        assert!(
+            exts.len() >= 4,
+            "truncated ClientHello extension header: {exts:?}"
+        );
+        let id = u16::from_be_bytes([exts[0], exts[1]]);
+        let len = u16::from_be_bytes([exts[2], exts[3]]) as usize;
+        assert!(
+            exts.len() >= 4 + len,
+            "truncated ClientHello extension {id}: {exts:?}"
+        );
+        if !is_grease(id) {
+            ids.push(id);
+        }
+        exts = &exts[4 + len..];
     }
-    assert!(raw.is_empty(), "trailing partial extension bytes: {raw:?}");
     ids
 }
 
 fn is_grease(value: u16) -> bool {
-    (value & 0x0f0f) == 0x0a0a && (value >> 8) == (value & 0x00ff)
+    value & 0x0f0f == 0x0a0a && (value >> 8) == (value & 0xff)
+}
+
+#[allow(
+    clippy::const_is_empty,
+    reason = "keeps first-run golden bootstrap loud"
+)]
+fn assert_goldens(observed: &FingerprintTuple) {
+    if GOLDEN_CIPHERS.is_empty() || GOLDEN_EXTENSION_SET.is_empty() || GOLDEN_GROUPS.is_empty() {
+        panic!(
+            "bootstrap self-fingerprint goldens:\nconst GOLDEN_CIPHERS: &[u16] = &{:?};\nconst GOLDEN_EXTENSION_SET: &[u16] = &{:?};\nconst GOLDEN_GROUPS: &[u16] = &{:?};",
+            observed.ciphers, observed.extension_set, observed.groups
+        );
+    }
+
+    assert_eq!(observed.ciphers, GOLDEN_CIPHERS, "cipher suite drift");
+    assert_eq!(
+        observed.extension_set, GOLDEN_EXTENSION_SET,
+        "extension set drift"
+    );
+    assert_eq!(observed.groups, GOLDEN_GROUPS, "supported group drift");
 }

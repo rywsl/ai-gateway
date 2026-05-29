@@ -18,7 +18,7 @@ Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开�
 | `0006_auth_configs.sql` | `auth_configs`（T1-E 落地） |
 | `0007_management_tokens.sql` | `management_tokens`（B2，T1-D 落地） |
 | `0008_signature_secret.sql` | `api_keys.signature_secret BYTEA`（HMAC 独立密钥列，KEK 加密 at rest；S-proxy-core H-1） |
-| `0009_egress_impersonation.sql` | `vendors.egress_mode JSONB` + `vendor_keys.identity_snapshot JSONB`（egress impersonation profile + persisted identity snapshot） |
+| `0009_egress_impersonation.sql` | `vendors.egress_mode` JSONB + `vendor_keys.identity_snapshot` JSONB（egress-impersonate 身份持久化） |
 
 ### 3.1.1 公共控制列（所有 entity 表）
 
@@ -118,9 +118,6 @@ deleted_at  TIMESTAMPTZ NULL
   "display_name": "Anthropic",
   "base_urls": ["https://api.anthropic.com"],
   "auth_template": "x-api-key: {api_key}",  // 模板，{api_key} 占位
-  "egress_mode": {
-    "mode": "rustls"          // default；或 {"mode":"impersonate","profile":"claude_code_chrome131"}
-  },
   "timeout_overrides": {
     "connect_ms": 5000,
     "read_ms": 30000,
@@ -128,18 +125,21 @@ deleted_at  TIMESTAMPTZ NULL
     "stream_total_ms": 600000
   },
   "default_proxy": null,         // Option<Url>
-  "contact": null
+  "contact": null,
+  "egress_mode": { "mode": "rustls" }
 }
 ```
 
-`egress_mode` is backed by the top-level `vendors.egress_mode` column added in migration 0009 and folded into the decoded entity by Rust. Supported values:
+`egress_mode` 由 migration 0009 引入，默认 `{"mode":"rustls"}`。启用 impersonate 时 Go 写入：
 
-| `mode` | Extra fields | Meaning |
-|---|---|---|
-| `rustls` | none | Default direct egress path. |
-| `impersonate` | `profile`: `claude_code_chrome131` \| `openai_codex` \| `gemini_cli` | Route through the local egress loopback with the selected client impersonation profile. |
+```json
+{
+  "mode": "impersonate",
+  "profile": "claude_code_chrome131"
+}
+```
 
-Go MUST reject writes that make an impersonated vendor key tunnel-eligible; see [`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md).
+支持的 `profile` 字面量与 `gw_core::impersonate::ImpersonateProfile` 的 serde tag 对齐。Go 控制面写入 `mode = impersonate` 前必须执行 vendor-validation 契约：不得与 tunnel-eligible keys 同时启用（见 [`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md)）。
 
 ### 3.2.5 `vendor_keys.payload` — `VendorKey`（含加密 api_key）
 
@@ -164,15 +164,27 @@ Go MUST reject writes that make an impersonated vendor key tunnel-eligible; see 
   "tags": [],
   "forced_capabilities": [],     // Vec<String>，channel-side advertised capability
   "exclusive_capability_match": false,
-  "tunnel_preference": null,      // Option<TunnelPreference>; require_tunnel conflicts with impersonate
-  "identity_snapshot": null,      // Folded from top-level vendor_keys.identity_snapshot by Rust loader
-  "oauth": null                   // 可选;null = 非 OAuth 型 key,走 api_key_enc 注入
+  "tunnel_preference": null,      // Option<TunnelPreference>，见下文
+  "oauth": null,                  // 可选;null = 非 OAuth 型 key,走 api_key_enc 注入
+  "identity_snapshot": null       // Rust loader 从 top-level 列折叠进 payload；Go 不直接写 payload 内字段
 }
 ```
 
 > **0004 列冗余说明**：migration 0004 在 `vendor_keys` 表上**同时**加了 top-level 列 `forced_capabilities JSONB` 与 `exclusive_capability_match BOOLEAN`，但 Rust 实际通过 `payload.forced_capabilities` / `payload.exclusive_capability_match` 反序列化（见 `loader.rs:101-141`）。top-level 列**仅供 Go 端建索引或查询**，不是 Rust 数据来源。Go 写入时**必须**同时写两处，否则 Rust 看不到。
 
-> **0009 identity snapshot 说明**：`identity_snapshot` 是 top-level `vendor_keys.identity_snapshot` 列，不是 Go 写入的 `payload` 字段。Rust `load_vendor_key` 用 `jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true)` 把该列折入解码 payload。Go 的 regenerate-identity admin action MUST set the column to `NULL`, bump `version`, and publish `events:entity ns=vendor_key` so Rust deletes stale Redis L2 and invalidates Moka.
+> **0009 `identity_snapshot` 列说明**：`vendor_keys.identity_snapshot` 是 top-level JSONB 列，不是 Go 写入 `payload` 的字段。Rust `load_vendor_key` 用 `jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true)` 将该列折叠进反序列化 payload。Rust 首次 impersonated dispatch 通过 `PgSnapshotWriter::write_if_null` 懒写该列；Go 的 regenerate-identity 管理动作必须 `SET identity_snapshot = NULL, version = version + 1` 并发出 `events:entity ns=vendor_key`，详见 [`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md)。
+
+#### `tunnel_preference` 子结构(可选)
+
+```json
+{
+  "preferred_node_ids": ["node-a"],
+  "require_tunnel": false,
+  "prefer_low_latency": false
+}
+```
+
+`require_tunnel = true` 表示没有匹配 tunnel node 时 Rust 必须 fail-closed（`GW_TUNNEL_NO_NODE`），不能静默回落 Direct。Go 控制面必须同时执行 EI-8 vendor-validation：任何 tunnel-eligible key（`require_tunnel = true` 或 Go 侧 node mapping）不得与所属 vendor 的 `egress_mode = impersonate` 同时存在。
 
 ### 3.2.5.1 OAuth 子结构(可选)
 
