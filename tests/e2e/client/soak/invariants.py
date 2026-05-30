@@ -235,8 +235,18 @@ def kill_loop_fired_at_least_once(*, kill_report: dict) -> dict:
 
 # ── Group 3: resource_release (§7.1.3) ───────────────────────────────────
 
+# Match in-flight *gauges* only. The metric name must contain `in_flight` /
+# `inflight` but must NOT be a monotonic counter — Prometheus counters always
+# carry a `_total` suffix on the name (before any `{labels}`). Without the
+# `_total` exclusion this swept up `gw_billing_inflight_clear_total`, a
+# cumulative counter that is *expected* to be non-zero at drain (it counts how
+# many inflight ledger keys were cleared), producing a false "leaked gauge".
+# The negative lookahead `(?!_total\b)` rejects a name whose remaining tail is
+# exactly `_total` at the metric-name boundary (end-of-name = `{` or whitespace).
 _INFLIGHT_RE = re.compile(
-    r"^(?P<series>gw_[a-zA-Z0-9_]*in_?flight[a-zA-Z0-9_]*(\{[^}]*\})?)\s+(?P<v>[-+0-9eE.]+)\s*$",
+    r"^(?P<series>gw_[a-zA-Z0-9_]*in_?flight"
+    r"(?:(?!_total(?:\{|\s))[a-zA-Z0-9_])*"
+    r"(\{[^}]*\})?)\s+(?P<v>[-+0-9eE.]+)\s*$",
     re.MULTILINE,
 )
 

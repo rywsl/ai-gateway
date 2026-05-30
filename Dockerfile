@@ -30,6 +30,18 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY config ./config
 
+# The `rust:1.88-bookworm` base image already ships the 1.88 toolchain. The
+# repo `rust-toolchain.toml` declares `components = ["rustfmt", "clippy"]`,
+# which makes rustup reach out to static.rust-lang.org to download those
+# components on the first cargo invocation. That download is (a) unnecessary —
+# neither rustfmt nor clippy is needed to `cargo build` — and (b) flaky behind
+# some networks (rustup's downloader intermittently hits "tls handshake eof"
+# even when plain HTTPS to the same host succeeds). Strip the components line
+# in-image so the build uses the pre-installed toolchain with no network round
+# trip. The host/CI rust-toolchain.toml is untouched (it still pins the
+# components for the fmt/clippy gates).
+RUN sed -i '/^components = /d' rust-toolchain.toml
+
 # Build the release binary.
 RUN cargo build --release --locked -p gw-gateway \
  && strip /build/target/release/gw-gateway

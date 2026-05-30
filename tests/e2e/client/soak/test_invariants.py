@@ -155,6 +155,24 @@ gw_proxy_streams_in_flight 0
     ] == 2.0
 
 
+def test_all_in_flight_gauges_zero_ignores_inflight_counters():
+    # Regression: monotonic `_total` counters whose name contains `inflight`
+    # (e.g. gw_billing_inflight_clear_total) are NOT in-flight gauges and are
+    # *expected* to be non-zero at drain. They must not be swept into the
+    # leaked-gauge check. The genuine gauges below are all zero, so the
+    # invariant must PASS despite the non-zero counters.
+    metrics_text = """\
+gw_billing_inflight_clear_total{outcome="ok"} 154
+gw_billing_inflight_register_failure_total 3
+gw_billing_inflight_recovered_total 0
+gw_routing_inflight_per_key{key_id="vk-1"} 0
+gw_proxy_streams_in_flight 0
+"""
+    leaf = resource_all_in_flight_gauges_zero(metrics_text)
+    assert leaf["passed"] is True, leaf["raw"]["non_zero_gauges"]
+    assert leaf["raw"]["non_zero_gauges"] == {}
+
+
 def test_rss_growth_pass():
     leaf = resource_rss_growth_under_threshold(
         before_bytes=100 * 1024 * 1024,
@@ -314,7 +332,7 @@ def test_soft_completion_rate_ok():
 def test_soft_records_to_2xx_warn_on_double_emit():
     rpt = SoakDriverReport.empty(target_count=100)
     rpt.by_status = {200: 10}
-    leaf = soft_records_to_2xx_ratio(rpt, records_delta=15)
+    leaf = soft_records_to_2xx_ratio(rpt, chaos_mode="off", records_delta=15)
     assert leaf["status"] == "warn"
     assert leaf["raw"]["ratio"] == 1.5
 

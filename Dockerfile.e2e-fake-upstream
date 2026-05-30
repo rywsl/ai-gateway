@@ -16,6 +16,12 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY config ./config
 
+# See main Dockerfile: drop the `components` line so rustup uses the base
+# image's pre-installed 1.88 toolchain instead of downloading rustfmt/clippy
+# from static.rust-lang.org (unnecessary for `cargo build`, flaky on some
+# networks). Host/CI rust-toolchain.toml is untouched.
+RUN sed -i '/^components = /d' rust-toolchain.toml
+
 RUN cargo build --release --locked -p e2e-fake-upstream \
  && strip /build/target/release/fake_upstream
 
