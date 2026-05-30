@@ -14,8 +14,11 @@ When you make a change that crosses any of these boundaries, update the matching
 | A behaviour that looks like a bug but is deliberate (fail-closed, generic error message, pair-header requirement, etc.) | [`docs/architecture.md`](docs/architecture.md) §Deliberate behaviours |
 | Deferred gap → implemented | Remove from [`docs/architecture.md`](docs/architecture.md) §Known gaps; if it was tracked in a spec or plan under `docs/superpowers/`, mark it landed there too |
 | Cross-process touchpoint with Go (Redis stream payload, `counter:*` key, PgSQL entity payload JSONB schema, encrypted column shape, KEK rotation) | [`docs/go-contracts/`](docs/go-contracts/main.md) — `main.md` + the relevant `parts/0{1,2,3}-*.md`. Adding a new touchpoint requires a new part or extending an existing one. |
+| The agent entry-point file you are reading (`CLAUDE.md` **or** `AGENTS.md`) | The other one. [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md) are byte-identical except the H1 title; any edit to either **must** be mirrored to the other in the **same commit**. |
 
 PRs that touch code in these areas without updating the index are incomplete.
+
+> **`CLAUDE.md` ⇄ `AGENTS.md` are kept in lockstep.** They share one body so that any agent — whichever entry-point file it reads — sees the same rules. The only intended difference is the first-line title. Edit both together, every time; a divergence between them is a bug.
 
 ## What this gateway does
 
