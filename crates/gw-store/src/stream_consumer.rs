@@ -136,6 +136,7 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "vendor_key" => store.invalidate_vendor_key(&KeyId::from(id)).await,
         "model_group" => store.model_group.invalidate(&Group::from(id)).await,
         "pricing" => store.pricing.invalidate(&ModelName::from(id)).await,
+        "model" => store.model.invalidate(&ModelName::from(id)).await,
         "jwks" => store.jwks.invalidate(&Kid::from(id)).await,
         "ipblock" => store.ipblock.invalidate(&id.to_string()).await,
         "proxy_node" => {
@@ -280,6 +281,42 @@ impl ManagedLoop for StreamConsumer {
 #[doc(hidden)]
 pub async fn apply_inline_for_test_helper(store: &Arc<EntityStore>, ns: &str, id: &str) {
     apply_entity_event(store, ns, id).await;
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use gw_core::entity::Model;
+    use gw_core::versioned::Versioned;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_model() {
+        let store = Arc::new(EntityStore::new());
+        let model_name = ModelName::from("gpt-test");
+        let model = Model {
+            name: model_name.clone(),
+            capabilities: vec!["chat".to_string()],
+        };
+        let versioned = Arc::new(Versioned {
+            version: 1,
+            value: Arc::new(model),
+        });
+
+        store.model.insert(model_name.clone(), versioned).await;
+        assert!(
+            store.model.get(&model_name).await.is_some(),
+            "pre-condition: cache entry must be present before invalidation"
+        );
+
+        apply_entity_event(&store, "model", "gpt-test").await;
+
+        assert!(
+            store.model.get(&model_name).await.is_none(),
+            "cache entry must be absent after invalidation"
+        );
+    }
 }
 
 #[cfg(test)]
