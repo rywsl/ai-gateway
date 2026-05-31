@@ -11,3 +11,5 @@ tests/e2e/client/.venv/
 **/__pycache__/
 **/.pytest_cache/
 tests/e2e/client/.soak_report/
+
+.claude/worktrees/
