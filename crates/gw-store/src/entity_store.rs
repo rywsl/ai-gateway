@@ -18,11 +18,26 @@ use gw_core::entity::*;
 use gw_core::ids::*;
 use gw_core::versioned::Versioned;
 use moka::future::Cache;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
 pub type VendorKeyInvalidationHook = Arc<dyn Fn(&KeyId) + Send + Sync + 'static>;
+
+/// Async rebuild hook for the hot-reloadable JWT validator (R7b). Registered
+/// by `gw-gateway` bootstrap (which owns the `gw-auth::JwtValidator` type that
+/// `gw-store` cannot name without a dependency cycle). Fired by the
+/// `events:entity ns=auth_config id=global` arm to reload `AuthConfig.global`
+/// and swap the live validator. The store is passed as an argument (not
+/// captured) so the hook never forms an `Arc<EntityStore>` reference cycle.
+pub type AuthConfigRebuildHook = Arc<
+    dyn Fn(Arc<EntityStore>, String) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Default per-cold-load deadline. Bootstrap can override this via
 /// `EntityStore::with_loader_and_timeout` (wired from
@@ -129,6 +144,7 @@ pub struct EntityStore {
     /// `gateway_cold_load_timeout_total{ns}`. Defaults to 2s.
     cold_load_timeout: Duration,
     vendor_key_invalidation_hooks: Vec<VendorKeyInvalidationHook>,
+    auth_config_rebuild_hook: Option<AuthConfigRebuildHook>,
 }
 
 impl Default for EntityStore {
@@ -211,11 +227,24 @@ impl EntityStore {
             loader,
             cold_load_timeout,
             vendor_key_invalidation_hooks: Vec::new(),
+            auth_config_rebuild_hook: None,
         }
     }
 
     pub fn on_vendor_key_invalidate(&mut self, hook: VendorKeyInvalidationHook) {
         self.vendor_key_invalidation_hooks.push(hook);
+    }
+
+    /// Register the hot-reload hook fired when `auth_config` (`global`) changes
+    /// (R7b). One validator → one hook; a second registration replaces the
+    /// first. Must be called before the store is wrapped in `Arc` (it takes
+    /// `&mut self`), same as [`on_vendor_key_invalidate`].
+    pub fn on_auth_config_rebuild(&mut self, hook: AuthConfigRebuildHook) {
+        self.auth_config_rebuild_hook = Some(hook);
+    }
+
+    pub(crate) fn auth_config_rebuild_hook(&self) -> Option<AuthConfigRebuildHook> {
+        self.auth_config_rebuild_hook.clone()
     }
 
     pub async fn invalidate_vendor_key(&self, key_id: &KeyId) {

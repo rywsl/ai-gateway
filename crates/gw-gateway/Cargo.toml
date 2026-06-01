@@ -58,6 +58,7 @@ hex.workspace = true
 url.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
+arc-swap.workspace = true
 hostname = { workspace = true }
 uuid.workspace = true
 

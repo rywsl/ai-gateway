@@ -207,9 +207,12 @@ pub struct LlmGateway {
     pub task_enabled: bool,
     pub task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
     pub task_billing_config: Option<gw_billing::TaskBillingConfig>,
-    /// JWT claim validator (iss/aud/nbf, T1-E). `None` until T1-E builds it
-    /// from `AuthConfig.global`; auth falls back to signature-only checks.
-    pub jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
+    /// JWT claim validator (iss/aud/nbf, T1-E), hot-reloadable (R7b). Swapped
+    /// in place by the `events:entity ns=auth_config id=global` arm so
+    /// `AuthConfig.global` rotation takes effect without a restart. A `None`
+    /// inside the handle ⇒ auth falls back to signature-only checks
+    /// (legacy `verify_jwt`), byte-identical to the pre-R7b `None` field.
+    pub jwt_validator: Arc<arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator>>,
     /// Shared selection-strategy instances (T0-B). One `StrategyAny` per kind,
     /// dispatched via `StrategySet::pick_for`.
     pub strategies: Arc<gw_routing::strategy::set::StrategySet>,
@@ -308,7 +311,7 @@ impl LlmGateway {
         task_enabled: bool,
         task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
         task_billing_config: Option<gw_billing::TaskBillingConfig>,
-        jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
+        jwt_validator: Arc<arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator>>,
         strategies: Arc<gw_routing::strategy::set::StrategySet>,
         failover_executor: FailoverExecutor,
         capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
@@ -486,6 +489,11 @@ impl ProxyHttp for LlmGateway {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        // R7b: snapshot the current JWT validator per-request. `load_full` is
+        // lock-free and yields an owned `Option<Arc<JwtValidator>>` safe to hold
+        // across the `.await` below; a concurrent hot-reload swaps the handle so
+        // the next request observes the new validator without a restart.
+        let jwt_validator = self.jwt_validator.load_full();
         let short_circuit = filters::request::run(
             session,
             ctx,
@@ -501,7 +509,7 @@ impl ProxyHttp for LlmGateway {
             self.task_enabled,
             self.task_contract.as_deref(),
             self.task_billing_config,
-            self.jwt_validator.as_ref(),
+            jwt_validator.as_ref(),
             self.capability_resolver.as_ref(),
             &self.mgmt_blacklist,
             &self.hard_cap_cfg,
