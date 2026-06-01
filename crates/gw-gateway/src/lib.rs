@@ -85,9 +85,10 @@ struct Wired {
     business_port: u16,
     admin_upstream_url: url::Url,
     // --- Fields wired during bootstrap ---
-    /// JWT claim validator (T1-E). `None` until T1-E builds it from
-    /// `AuthConfig.global`.
-    jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>>,
+    /// Hot-reloadable JWT claim validator (T1-E + R7b). The handle holds `None`
+    /// until `AuthConfig.global` is loaded; the `events:entity ns=auth_config`
+    /// arm swaps it in place so policy rotation needs no restart.
+    jwt_validator: Arc<arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator>>,
     /// Shared selection-strategy instances (T0-B).
     strategies: Arc<gw_routing::strategy::set::StrategySet>,
     /// Capability resolver (T3-C). `None` until wired.
@@ -136,6 +137,61 @@ struct Wired {
     /// Per-conversation turn-state cache (Task 4.6).
     turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
     pg: sqlx::PgPool,
+}
+
+/// Build a hybrid [`gw_auth::jwt::JwtValidator`] from an `AuthConfig`, wiring
+/// the production `EntityStoreJwksResolver`. Shared by boot wiring and the R7b
+/// hot-reload path so both produce an identically-constructed validator.
+fn build_validator_from_auth_config(
+    store: &Arc<EntityStore>,
+    cfg: &gw_core::entity::AuthConfig,
+) -> gw_auth::jwt::JwtValidator {
+    let vcfg = gw_auth::jwt::JwtValidatorConfig {
+        static_secret_hs256: cfg.static_secret_hs256.clone(),
+        static_pem_rs256: cfg.static_pem_rs256.clone(),
+        expected_iss: cfg.expected_iss.clone(),
+        expected_aud: cfg.expected_aud.clone(),
+        leeway_secs: cfg.leeway_secs,
+        require_nbf: cfg.require_nbf,
+    };
+    let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
+    v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
+        store: store.clone(),
+    }));
+    v
+}
+
+/// R7b hot-reload: reload `auth_config` `id`, rebuild the validator, and swap
+/// it into `handle`. KEEP-OLD-ON-FAIL — a reload miss / parse error / cold-load
+/// timeout (all surfaced as `None`) leaves the existing validator in place and
+/// only warns; the handle is never reset to `None` on a transient failure. A
+/// genuinely deleted config is indistinguishable from a miss at this layer
+/// (`load_auth_config` filters `deleted_at IS NULL`), so keep-old covers it too.
+async fn rebuild_jwt_validator_and_swap(
+    store: &Arc<EntityStore>,
+    id: &str,
+    handle: &arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator>,
+) {
+    match store.auth_config_or_load(id).await {
+        Some(cfg_v) => {
+            handle.store(Some(Arc::new(build_validator_from_auth_config(
+                store,
+                &cfg_v.value,
+            ))));
+            tracing::info!(
+                target: "gw_gateway",
+                id = %id,
+                "JwtValidator hot-reloaded from auth_config (R7b)"
+            );
+        }
+        None => {
+            tracing::warn!(
+                target: "gw_gateway",
+                id = %id,
+                "auth_config reload returned None (miss/parse/timeout/deleted); keeping existing JwtValidator (R7b keep-old-on-fail)"
+            );
+        }
+    }
 }
 
 /// Library entrypoint. The bin's `main` calls this after installing the
@@ -338,6 +394,24 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         store_inner.on_vendor_key_invalidate(Arc::new(move |key_id| {
             adaptive_for_evict.evict(key_id);
         }));
+    }
+    // R7b: hot-reloadable JWT validator. The handle is shared between the
+    // request path (`LlmGateway.jwt_validator`) and the rebuild hook below; the
+    // boot-time validator is stored into it once `AuthConfig.global` loads.
+    let jwt_validator: Arc<arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator>> =
+        Arc::new(arc_swap::ArcSwapOption::new(None));
+    {
+        let swap_for_hook = jwt_validator.clone();
+        store_inner.on_auth_config_rebuild(Arc::new(
+            move |store: Arc<EntityStore>,
+                  id: String|
+                  -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                let swap = swap_for_hook.clone();
+                Box::pin(async move {
+                    rebuild_jwt_validator_and_swap(&store, &id, &swap).await;
+                })
+            },
+        ));
     }
     let store = Arc::new(store_inner);
     let health = Arc::new(KeyHealthStore::default());
@@ -578,42 +652,31 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         "stream consumer started (events:entity, events:counter) with XREADGROUP invalidate-on-event"
     );
 
-    // T1-E (G6) — build the hybrid JwtValidator if AuthConfig.global is
-    // available. Absent → validator stays None and request_filter falls back
-    // to the legacy `verify_jwt` so deployments without AuthConfig keep
-    // working with v1 semantics (exp-only, JWKS-by-kid).
-    let jwt_validator: Option<Arc<gw_auth::jwt::JwtValidator>> = match store
-        .auth_config_or_load("global")
-        .await
-    {
+    // T1-E (G6) + R7b — populate the hot-reloadable validator handle from
+    // AuthConfig.global. Absent → handle stays None and request_filter falls
+    // back to the legacy `verify_jwt` (exp-only, JWKS-by-kid); a later
+    // `events:entity ns=auth_config id=global` then hot-loads it without a
+    // restart. Construction is identical to the rebuild path.
+    match store.auth_config_or_load("global").await {
         Some(cfg_v) => {
-            let vcfg = gw_auth::jwt::JwtValidatorConfig {
-                static_secret_hs256: cfg_v.value.static_secret_hs256.clone(),
-                static_pem_rs256: cfg_v.value.static_pem_rs256.clone(),
-                expected_iss: cfg_v.value.expected_iss.clone(),
-                expected_aud: cfg_v.value.expected_aud.clone(),
-                leeway_secs: cfg_v.value.leeway_secs,
-                require_nbf: cfg_v.value.require_nbf,
-            };
-            let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
-            v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
-                store: store.clone(),
-            }));
+            jwt_validator.store(Some(Arc::new(build_validator_from_auth_config(
+                &store,
+                &cfg_v.value,
+            ))));
             tracing::info!(
                 target: "gw_gateway",
-                "JwtValidator wired from AuthConfig.global (G6, T1-E)"
+                "JwtValidator wired from AuthConfig.global (G6, T1-E); hot-reloadable via events:entity ns=auth_config (R7b)"
             );
-            Some(Arc::new(v))
         }
         None => {
             tracing::warn!(
                 target: "gw_gateway",
                 "auth_configs.global missing; falling back to legacy JWT exp-only validation. \
-                 Populate the `global` row via the management plane to enable iss/aud/nbf checks (0006_auth_configs)."
+                 Populate the `global` row via the management plane to enable iss/aud/nbf checks (0006_auth_configs). \
+                 The validator will hot-load on the next events:entity ns=auth_config id=global (R7b)."
             );
-            None
         }
-    };
+    }
 
     // G13 (T3-C) — production capability resolver backed by the EntityStore.
     // `Model.capabilities` / `ApiKeyEntry.force_capabilities` /
@@ -967,5 +1030,71 @@ mod adaptive_rpm_tests {
 
         let state = manager.state.get(&key_id).expect("state retained");
         assert!(state.confidence.value < 1.0);
+    }
+}
+
+#[cfg(test)]
+mod r7b_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rebuild_swaps_in_new_validator_on_success() {
+        // Pre-populate the auth_config cache so `auth_config_or_load` hits
+        // without a wired loader, standing in for a fresh cold-load after a
+        // rotation event.
+        let store = Arc::new(EntityStore::new());
+        let cfg = gw_core::entity::AuthConfig {
+            leeway_secs: 45,
+            static_secret_hs256: Some(b"r7b-rotated-secret".to_vec()),
+            ..Default::default()
+        };
+        store
+            .auth_config
+            .insert(
+                "global".to_string(),
+                Arc::new(gw_core::versioned::Versioned {
+                    version: 7,
+                    value: Arc::new(cfg),
+                }),
+            )
+            .await;
+
+        let handle: arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator> =
+            arc_swap::ArcSwapOption::new(None);
+        assert!(
+            handle.load_full().is_none(),
+            "pre-condition: no validator installed yet"
+        );
+
+        rebuild_jwt_validator_and_swap(&store, "global", &handle).await;
+
+        assert!(
+            handle.load_full().is_some(),
+            "successful reload must install the rebuilt validator (R7b hot-reload)"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_keeps_old_validator_on_reload_failure() {
+        // A loaderless store makes `auth_config_or_load` always return `None`,
+        // standing in for a transient reload failure / cache miss.
+        let store = Arc::new(EntityStore::new());
+        let old = Arc::new(gw_auth::jwt::JwtValidator::new(
+            gw_auth::jwt::JwtValidatorConfig::default(),
+        ));
+        let old_ptr = Arc::as_ptr(&old);
+        let handle: arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator> =
+            arc_swap::ArcSwapOption::new(Some(old));
+
+        rebuild_jwt_validator_and_swap(&store, "global", &handle).await;
+
+        let current = handle
+            .load_full()
+            .expect("validator must be retained on reload failure (keep-old-on-fail)");
+        assert_eq!(
+            Arc::as_ptr(&current),
+            old_ptr,
+            "transient reload failure must NOT swap the validator (keep-old-on-fail)"
+        );
     }
 }

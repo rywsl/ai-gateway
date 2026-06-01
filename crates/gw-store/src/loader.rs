@@ -203,7 +203,15 @@ struct VendorKeyRow {
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
 const USER_GROUP_SQL: &str =
     "SELECT payload, version FROM user_groups WHERE id = $1 AND deleted_at IS NULL";
-const API_KEY_SQL: &str = "SELECT jsonb_set(payload, '{signature_secret}', COALESCE(to_jsonb(signature_secret), 'null'::jsonb), true) AS payload, version FROM api_keys WHERE id = $1 AND deleted_at IS NULL";
+// `signature_secret` is a dedicated BYTEA column folded into the payload so the
+// generic `load_entity` closure (which only sees `payload`) can populate
+// `ApiKeyEntry.signature_secret: Option<Vec<u8>>`. serde_json deserializes
+// `Vec<u8>` from a JSON ARRAY OF INTEGER BYTES, NOT a string — so the column must
+// be projected as `[b0,b1,...]`, not `to_jsonb(bytea)` (which yields a "\\x.."
+// hex STRING and fails the whole-row decode, dropping every HMAC-signing key from
+// auth). Build the byte array with get_byte over the byte length; NULL -> null
+// (None), present -> array (matches Go's alm_bytea_to_jsonb_bytes in 00037).
+const API_KEY_SQL: &str = "SELECT jsonb_set(payload, '{signature_secret}', CASE WHEN signature_secret IS NULL THEN 'null'::jsonb ELSE COALESCE((SELECT jsonb_agg(get_byte(signature_secret, i) ORDER BY i) FROM generate_series(0, length(signature_secret) - 1) AS g(i)), '[]'::jsonb) END, true) AS payload, version FROM api_keys WHERE id = $1 AND deleted_at IS NULL";
 const IP_BLOCK_SQL: &str =
     "SELECT payload, version FROM ip_blocks WHERE id = $1 AND deleted_at IS NULL";
 const VENDOR_SQL: &str =

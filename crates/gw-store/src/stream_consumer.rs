@@ -136,6 +136,20 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "vendor_key" => store.invalidate_vendor_key(&KeyId::from(id)).await,
         "model_group" => store.model_group.invalidate(&Group::from(id)).await,
         "pricing" => store.pricing.invalidate(&ModelName::from(id)).await,
+        "model" => store.model.invalidate(&ModelName::from(id)).await,
+        "auth_config" => {
+            store.auth_config.invalidate(&id.to_string()).await;
+            if id == "global" {
+                match store.auth_config_rebuild_hook() {
+                    Some(hook) => hook(store.clone(), id.to_string()).await,
+                    None => tracing::debug!(
+                        target: "gw_store::stream_consumer",
+                        id = %id,
+                        "auth_config rebuild hook not registered; cache invalidated only"
+                    ),
+                }
+            }
+        }
         "jwks" => store.jwks.invalidate(&Kid::from(id)).await,
         "ipblock" => store.ipblock.invalidate(&id.to_string()).await,
         "proxy_node" => {
@@ -283,6 +297,42 @@ pub async fn apply_inline_for_test_helper(store: &Arc<EntityStore>, ns: &str, id
 }
 
 #[cfg(test)]
+mod model_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use gw_core::entity::Model;
+    use gw_core::versioned::Versioned;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_model() {
+        let store = Arc::new(EntityStore::new());
+        let model_name = ModelName::from("gpt-test");
+        let model = Model {
+            name: model_name.clone(),
+            capabilities: vec!["chat".to_string()],
+        };
+        let versioned = Arc::new(Versioned {
+            version: 1,
+            value: Arc::new(model),
+        });
+
+        store.model.insert(model_name.clone(), versioned).await;
+        assert!(
+            store.model.get(&model_name).await.is_some(),
+            "pre-condition: cache entry must be present before invalidation"
+        );
+
+        apply_entity_event(&store, "model", "gpt-test").await;
+
+        assert!(
+            store.model.get(&model_name).await.is_none(),
+            "cache entry must be absent after invalidation"
+        );
+    }
+}
+
+#[cfg(test)]
 mod proxy_node_tests {
     use super::*;
     use crate::entity_store::EntityStore;
@@ -404,5 +454,66 @@ mod vendor_key_hook_tests {
         apply_inline_for_test_helper(&store, "vendor_key", "vk-evict-hook").await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod auth_config_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn auth_config_global_event_fires_rebuild_hook() {
+        let mut store_inner = EntityStore::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        store_inner.on_auth_config_rebuild(Arc::new(
+            move |_store: Arc<EntityStore>,
+                  id: String|
+                  -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                let observed = observed.clone();
+                Box::pin(async move {
+                    assert_eq!(id, "global", "rebuild hook must receive the event id");
+                    observed.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+        ));
+        let store = Arc::new(store_inner);
+
+        apply_entity_event(&store, "auth_config", "global").await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "ns=auth_config id=global must fire the validator rebuild hook"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_config_non_global_event_does_not_rebuild() {
+        let mut store_inner = EntityStore::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        store_inner.on_auth_config_rebuild(Arc::new(
+            move |_store: Arc<EntityStore>,
+                  _id: String|
+                  -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                let observed = observed.clone();
+                Box::pin(async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+        ));
+        let store = Arc::new(store_inner);
+
+        apply_entity_event(&store, "auth_config", "tenant-acme").await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "only id=global rebuilds the global validator"
+        );
     }
 }
