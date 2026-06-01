@@ -476,14 +476,17 @@ Go 端运维如要硬删除（超长归档），应当先确认无 Rust 在飞�
 
 ```json
 {
-  "ciphertext": "<base64>",       // 加密后字节
-  "nonce": "<base64>",            // 96-bit 随机 IV，每条独立
-  "auth_tag": "<base64>",         // 128-bit GCM tag
-  "kek_kid": "kek_v1"             // KEK 标识，用于轮换匹配
+  "ciphertext": [13, 118, 93, ...],   // 加密后字节，JSON 整数数组（Vec<u8>，非 base64）
+  "nonce": [1, 2, 3, ...],            // 96-bit 随机 IV，每条独立，整数数组
+  "auth_tag": [100, 0, 68, ...],      // 128-bit GCM tag，整数数组
+  "kek_kid": "primary"               // KEK 标识，用于轮换匹配；默认/规范 kid 见下
 }
 ```
 
 字段顺序不限；Rust 端用 `serde` 按字段名反序列化（权威类型见 `crates/gw-store/src/encrypt.rs::EncryptedKey`）。
+**`ciphertext` / `nonce` / `auth_tag` 是 `Vec<u8>`，serde 仅接受 JSON 整数数组 `[b0,b1,…]`，不接受 base64 字符串**（写入方必须按整数数组落库，否则整行 `EncryptedKey` 反序列化失败、该 vendor_key 不可用）。
+
+**`kek_kid` 规范值：** 网关只把 `cfg.kms.key_id` 对应的一个 KEK 装入 `KekCache`（`config/default.toml` 默认 `key_id = "primary"`，见 `crates/gw-gateway/src/kms.rs`）。因此 Go 写入 `api_key_enc.kek_kid` 必须等于网关运行用的 `kms.key_id`；默认部署下即 `"primary"`。轮换期下文以 `primary` / `<new-kid>` 表述（早先示例中的 `kek_v1`/`kek_v2` 仅为轮换占位说明，非默认字面量）。
 
 ### 3.4.2 加密算法
 
