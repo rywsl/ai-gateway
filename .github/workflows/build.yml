@@ -1,0 +1,27 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install boring-sys system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential pkg-config perl libssl-dev libclang-dev
+
+      - name: Setup Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Compile gw-gateway
+        run: cargo build --release -p gw-gateway
+
+      - name: Build docker image
+        run: docker build -t alm-gateway:ci .
