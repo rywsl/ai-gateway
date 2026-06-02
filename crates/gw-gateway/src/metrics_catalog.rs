@@ -105,7 +105,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_routing_unknown_preset_total",
         kind: MetricKind::Counter,
-        help: "model group referenced an unknown multi_dim routing preset; fell back to fixed_order",
+        help: "model group referenced an unknown multi_dim routing preset; fell back to fixed_order; label=code (GW_ROUTING_UNKNOWN_PRESET)",
     },
     MetricSpec {
         name: "gw_codec_content_decode_failure_total",

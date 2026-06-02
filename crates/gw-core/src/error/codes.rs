@@ -25,6 +25,18 @@ pub const GW_REQUEST_CONTENT_REJECTED: &str = "GW_REQUEST_CONTENT_REJECTED";
 pub const GW_REQUEST_MODEL_NOT_FOUND: &str = "GW_REQUEST_MODEL_NOT_FOUND";
 pub const GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL: &str = "GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL";
 pub const GW_ROUTING_NO_AVAILABLE_CHANNEL: &str = "GW_ROUTING_NO_AVAILABLE_CHANNEL";
+/// A model group references a `multi_dim` routing preset name that is absent
+/// from this pod's `[routing.presets]` config. NOT a returned client envelope:
+/// the runtime path is deliberately fail-operational (falls back to
+/// `fixed_order` — see architecture.md §Deliberate behaviours / Audit
+/// 2026-05-30 §2.1), because control-plane skew (preset in DB, not yet rolled
+/// to every pod's config) is a normal, transient state and a per-request
+/// `panic!`/5xx is a worse failure mode than a deterministic fallback. This
+/// stable code exists so the warn-once + `gw_routing_unknown_preset_total`
+/// diagnostic has a catalogued identifier for ops drilldown (functional-audit
+/// #11). Operator typos that ship in a pod's OWN config are instead caught
+/// fail-closed at boot by `Config::validate` (degenerate / malformed presets).
+pub const GW_ROUTING_UNKNOWN_PRESET: &str = "GW_ROUTING_UNKNOWN_PRESET";
 pub const GW_UPSTREAM_TIMEOUT: &str = "GW_UPSTREAM_TIMEOUT";
 pub const GW_UPSTREAM_5XX: &str = "GW_UPSTREAM_5XX";
 pub const GW_UPSTREAM_4XX: &str = "GW_UPSTREAM_4XX";

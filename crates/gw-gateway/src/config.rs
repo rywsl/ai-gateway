@@ -1025,18 +1025,36 @@ impl Config {
             if name.trim().is_empty() {
                 anyhow::bail!("invalid config: routing.presets contains an empty preset name");
             }
-            for (field, value) in [
+            let dims = [
                 ("health", preset.health),
                 ("latency", preset.latency),
                 ("cost", preset.cost),
                 ("inflight", preset.inflight),
                 ("error_rate", preset.error_rate),
-            ] {
+                ("reservation", preset.reservation),
+            ];
+            for (field, value) in dims {
                 if !value.is_finite() || value < 0.0 {
                     anyhow::bail!(
                         "invalid config: routing.presets.{name}.{field} must be finite and >= 0.0"
                     );
                 }
+            }
+            // functional-audit #11 (load-time preset cross-validation): a preset
+            // whose weights are all zero is a misconfiguration (operator typo /
+            // half-filled table) — it silently normalizes to a uniform vector
+            // (`DimWeights::normalized` -> `uniform()`), masking the intended
+            // routing policy. Reject it at boot so the pod fails closed on its
+            // OWN malformed config, rather than routing on an unintended preset.
+            // (Cross-pod control-plane skew — preset present in DB but not in
+            // this pod's config — remains fail-operational at request time; see
+            // `StrategySet::pick_for` + `GW_ROUTING_UNKNOWN_PRESET`.)
+            let weight_sum: f64 = dims.iter().map(|(_, v)| *v).sum();
+            if weight_sum <= f64::EPSILON {
+                anyhow::bail!(
+                    "invalid config: routing.presets.{name} has all-zero weights; \
+                     at least one dimension weight must be > 0"
+                );
             }
         }
 
@@ -1481,6 +1499,41 @@ custom = { health = 0.1, latency = 0.2, cost = 0.3, inflight = 0.4, error_rate =
         let overrides = r#"
 [routing.presets]
 bad = { health = -1.0, latency = 0.0, cost = 0.0, inflight = 0.0, error_rate = 0.0 }
+"#;
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("routing preset parse");
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn routing_presets_reject_all_zero_weights() {
+        // functional-audit #11: an all-zero preset silently normalizes to a
+        // uniform vector, masking the operator's intended policy. The pod must
+        // fail closed at boot on its own malformed config.
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+[routing.presets]
+empty = { health = 0.0, latency = 0.0, cost = 0.0, inflight = 0.0, error_rate = 0.0, reservation = 0.0 }
+"#;
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("routing preset parse");
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn routing_presets_reject_negative_reservation_weight() {
+        // `reservation` was previously omitted from the per-field finite/>=0
+        // check; functional-audit #11 hardening now covers it.
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+[routing.presets]
+bad = { health = 1.0, latency = 0.0, cost = 0.0, inflight = 0.0, error_rate = 0.0, reservation = -2.0 }
 "#;
         let cfg: Config = Figment::new()
             .merge(Toml::string(defaults))

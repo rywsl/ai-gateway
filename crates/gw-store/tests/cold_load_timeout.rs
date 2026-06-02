@@ -50,3 +50,24 @@ async fn timeout_passes_through_err_as_none() {
     .await;
     assert!(out.is_none(), "loader Err must resolve to None");
 }
+
+/// Functional-audit #12: a `PoolTimedOut` is transient pool contention, not a
+/// missing row. It must resolve to `None` (so the caller does not cache or
+/// serve a stale value) while taking the distinct
+/// `gateway_pool_acquire_timeout_total` accounting path rather than being read
+/// as a genuine "entity not found". Returning `None` here is the same terminal
+/// value a real miss would yield, but the wrapper's downcast branch is what
+/// keeps the two observably distinct (separate counter + log). This test pins
+/// the `None` contract so a future refactor of the downcast arm cannot
+/// regress a pool timeout into surfacing as an error/panic.
+#[tokio::test]
+async fn pool_timed_out_resolves_to_none_not_found() {
+    let out = with_cold_load_timeout("test_ns", Duration::from_secs(1), async {
+        Err::<u32, anyhow::Error>(anyhow::Error::new(sqlx::Error::PoolTimedOut))
+    })
+    .await;
+    assert!(
+        out.is_none(),
+        "PoolTimedOut must resolve to None (transient), not surface as an error"
+    );
+}

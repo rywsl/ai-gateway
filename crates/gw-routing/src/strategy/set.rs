@@ -144,12 +144,17 @@ impl StrategySet {
                 // surface the misconfig via a warn-once + metric.
                 if UNKNOWN_PRESETS_WARNED.insert(preset.clone()) {
                     tracing::warn!(
+                        code = gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
                         preset = %preset,
                         "unknown multi_dim routing preset referenced by a model group; \
                          falling back to fixed_order. Add it to [routing.presets] on this pod."
                     );
                 }
-                metrics::counter!("gw_routing_unknown_preset_total").increment(1);
+                metrics::counter!(
+                    "gw_routing_unknown_preset_total",
+                    "code" => gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
+                )
+                .increment(1);
                 &self.fixed_order
             }),
         }
