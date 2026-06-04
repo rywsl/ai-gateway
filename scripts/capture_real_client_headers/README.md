@@ -54,7 +54,6 @@ script prints `DRIFT in <profile> headers`, shows the `diff`, and exits 1.
 ## OAuth caveat
 
 The CLIs authenticate via interactive OAuth, so CI cannot run end-to-end
-unattended. The `header-drift` GitHub workflow installs mitmproxy and wires up
-the diff step, but the CLI install + authenticated capture must be performed by
-an operator (manual `workflow_dispatch` in an authenticated environment, or a
-local run as above).
+unattended. The GitLab pipeline does not run this drift check yet; the CLI
+install + authenticated capture must be performed by an operator in a local
+authenticated environment.
