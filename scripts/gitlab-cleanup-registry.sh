@@ -3,23 +3,24 @@ set -eu
 
 : "${CI_API_V4_URL:?CI_API_V4_URL is required}"
 : "${CI_PROJECT_ID:?CI_PROJECT_ID is required}"
-: "${CI_REGISTRY_IMAGE:?CI_REGISTRY_IMAGE is required}"
 
 TOKEN_HEADER="JOB-TOKEN: ${CI_JOB_TOKEN:-}"
 if [ -n "${GITLAB_CLEANUP_TOKEN:-}" ]; then
   TOKEN_HEADER="PRIVATE-TOKEN: ${GITLAB_CLEANUP_TOKEN}"
 fi
 
-prefix="${CI_REGISTRY_IMAGE#${CI_REGISTRY}/}"
-location_prefix="${CI_REGISTRY_IMAGE}"
+registry_host="${REGISTRY_HOST:-${CI_REGISTRY:?CI_REGISTRY is required}}"
+registry_image="${GATEWAY_IMAGE:-${CI_REGISTRY_IMAGE:?CI_REGISTRY_IMAGE is required}}"
+prefix="${registry_image#${registry_host}/}"
+location_prefix="${registry_image}"
 repositories_url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/registry/repositories?per_page=100"
 
-echo "Looking up registry repositories for ${CI_REGISTRY_IMAGE}"
+echo "Looking up registry repositories for ${registry_image}"
 repos_json="$(curl --silent --show-error --fail --header "${TOKEN_HEADER}" "${repositories_url}")"
 
 repo_ids="$(printf '%s' "${repos_json}" | jq -r --arg prefix "${prefix}" --arg location_prefix "${location_prefix}" '
   .[]
-  | select((.path | startswith($prefix)) or (.location | startswith($location_prefix)))
+  | select((.path == $prefix) or (.location == $location_prefix))
   | .id
 ')"
 

@@ -1,14 +1,10 @@
 stages:
   - build
   - push
-  - deploy
 
 variables:
-  DOCKER_TLS_CERTDIR: ""
-  DOCKER_HOST: tcp://docker:2375
-  DOCKER_DRIVER: overlay2
-  K8S_NAMESPACE: cnewxus-prod
-  GATEWAY_IMAGE: "$CI_REGISTRY_IMAGE"
+  REGISTRY_HOST: "gitlab.ailinkmax.com:5050"
+  GATEWAY_IMAGE: "gitlab.ailinkmax.com:5050/ailinkmax/cnxus-rust"
 
 rust-build:
   stage: build
@@ -21,24 +17,29 @@ rust-build:
 
 push-image:
   stage: push
-  image: docker:29
-  services:
-    - name: docker:29-dind
-      alias: docker
+  image:
+    name: gcr.io/kaniko-project/executor:v1.24.0-debug
+    entrypoint: [""]
   needs:
     - rust-build
   rules:
     - if: '$CI_COMMIT_BRANCH'
   before_script:
-    - docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD"
-  script:
-    - docker build --pull -f Dockerfile -t "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA" .
-    - docker push "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - mkdir -p /kaniko/.docker
     - |
+      cat > /kaniko/.docker/config.json <<EOF
+      {"auths":{"$REGISTRY_HOST":{"username":"$CI_REGISTRY_USER","password":"$CI_REGISTRY_PASSWORD"}}}
+      EOF
+  script:
+    - |
+      destinations="--destination $GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA"
       if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
-        docker tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA" "$GATEWAY_IMAGE:latest"
-        docker push "$GATEWAY_IMAGE:latest"
+        destinations="$destinations --destination $GATEWAY_IMAGE:latest"
       fi
+      /kaniko/executor \
+        --context "$CI_PROJECT_DIR" \
+        --dockerfile "$CI_PROJECT_DIR/Dockerfile" \
+        $destinations
 
 cleanup-registry:
   stage: push
@@ -52,21 +53,3 @@ cleanup-registry:
     - apk add --no-cache curl jq
   script:
     - ./scripts/gitlab-cleanup-registry.sh
-
-deploy-xg1:
-  stage: deploy
-  image:
-    name: bitnami/kubectl:1.30
-    entrypoint: [""]
-  needs:
-    - push-image
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-  before_script:
-    - mkdir -p .kube
-    - echo "$K3S_XG1_KUBECONFIG_B64" | base64 -d > .kube/config
-    - export KUBECONFIG="$PWD/.kube/config"
-  script:
-    - kubectl -n "$K8S_NAMESPACE" set image deployment/rust-gateway rust-gateway="$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA"
-    - kubectl -n "$K8S_NAMESPACE" rollout status deployment/rust-gateway --timeout=300s
-    - kubectl -n "$K8S_NAMESPACE" run gateway-smoke-$CI_PIPELINE_ID --rm -i --restart=Never --image=curlimages/curl:8.10.1 --command -- curl -fsS http://rust-gateway:8080/readyz
