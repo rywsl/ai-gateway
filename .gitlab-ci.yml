@@ -2,6 +2,12 @@ stages:
   - build
   - push
 
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: never
+
 variables:
   REGISTRY_HOST: "gitlab.ailinkmax.com:5050"
   GATEWAY_IMAGE: "gitlab.ailinkmax.com:5050/ailinkmax/cnxus-rust"
@@ -23,7 +29,7 @@ push-image:
   needs:
     - rust-build
   rules:
-    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   before_script:
     - mkdir -p /kaniko/.docker
     - |
