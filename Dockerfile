@@ -1,5 +1,7 @@
 # ----- Builder stage -----
-FROM rust:1.88-bookworm AS builder
+ARG RUST_IMAGE=rust:1.88-bookworm
+ARG DEBIAN_IMAGE=debian:bookworm-slim
+FROM ${RUST_IMAGE} AS builder
 WORKDIR /build
 
 # pingora pulls in `libz-ng-sys` via `cmake`, plus assorted *-sys crates that
@@ -47,7 +49,7 @@ RUN cargo build --release --locked -p gw-gateway \
  && strip /build/target/release/gw-gateway
 
 # ----- Runtime stage -----
-FROM debian:bookworm-slim AS runtime
+FROM ${DEBIAN_IMAGE} AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates libssl3 curl \
  && rm -rf /var/lib/apt/lists/*
