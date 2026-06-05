@@ -11,6 +11,9 @@ workflow:
 variables:
   REGISTRY_HOST: "gitlab.ailinkmax.com:5050"
   GATEWAY_IMAGE: "gitlab.ailinkmax.com:5050/ailinkmax/cnxus-rust"
+  STORAGE_DRIVER: "vfs"
+  BUILDAH_FORMAT: "docker"
+  BUILDAH_ISOLATION: "chroot"
 
 rust-build:
   stage: build
@@ -23,39 +26,18 @@ rust-build:
 
 push-image:
   stage: push
-  image:
-    name: gcr.io/kaniko-project/executor:v1.24.0-debug
-    entrypoint: [""]
+  image: quay.io/buildah/stable:latest
   needs:
     - rust-build
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   before_script:
-    - mkdir -p /kaniko/.docker
-    - |
-      cat > /kaniko/.docker/config.json <<EOF
-      {"auths":{"$REGISTRY_HOST":{"username":"$CI_REGISTRY_USER","password":"$CI_REGISTRY_PASSWORD"}}}
-      EOF
+    - buildah login -u "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
   script:
+    - buildah build --file "$CI_PROJECT_DIR/Dockerfile" --tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA" "$CI_PROJECT_DIR"
+    - buildah push "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA"
     - |
-      destinations="--destination $GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA"
       if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
-        destinations="$destinations --destination $GATEWAY_IMAGE:latest"
+        buildah tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA" "$GATEWAY_IMAGE:latest"
+        buildah push "$GATEWAY_IMAGE:latest"
       fi
-      /kaniko/executor \
-        --context "$CI_PROJECT_DIR" \
-        --dockerfile "$CI_PROJECT_DIR/Dockerfile" \
-        $destinations
-
-cleanup-registry:
-  stage: push
-  image: alpine:3.20
-  needs:
-    - push-image
-  allow_failure: true
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-  before_script:
-    - apk add --no-cache curl jq
-  script:
-    - ./scripts/gitlab-cleanup-registry.sh
