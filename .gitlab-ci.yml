@@ -41,6 +41,17 @@ rust-build:
   script:
     - cargo build --release --locked -p gw-gateway
 
+rust-build-tunnel:
+  stage: build
+  image: rust:1.88-bookworm
+  needs:
+    - lint-test
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends cmake build-essential pkg-config perl libssl-dev libclang-dev jq
+  script:
+    - cargo build --release --locked --features tunnel -p gw-gateway
+
 push-image:
   stage: push
   image: quay.io/buildah/stable:latest
@@ -57,4 +68,22 @@ push-image:
       if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
         buildah tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA" "$GATEWAY_IMAGE:latest"
         buildah push "$GATEWAY_IMAGE:latest"
+      fi
+
+push-tunnel-image:
+  stage: push
+  image: quay.io/buildah/stable:latest
+  needs:
+    - rust-build-tunnel
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | buildah login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - buildah build --build-arg CARGO_FEATURES="--features tunnel" --file "$CI_PROJECT_DIR/Dockerfile" --tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA-tunnel" "$CI_PROJECT_DIR"
+    - buildah push "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA-tunnel"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        buildah tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA-tunnel" "$GATEWAY_IMAGE:latest-tunnel"
+        buildah push "$GATEWAY_IMAGE:latest-tunnel"
       fi

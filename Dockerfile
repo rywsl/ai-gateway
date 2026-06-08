@@ -45,7 +45,8 @@ COPY config ./config
 RUN sed -i '/^components = /d' rust-toolchain.toml
 
 # Build the release binary.
-RUN cargo build --release --locked -p gw-gateway \
+ARG CARGO_FEATURES=""
+RUN cargo build --release --locked -p gw-gateway ${CARGO_FEATURES} \
  && strip /build/target/release/gw-gateway
 
 # ----- Runtime stage -----
