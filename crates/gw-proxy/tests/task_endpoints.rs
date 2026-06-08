@@ -42,13 +42,16 @@ fn task_record(id: TaskId, status: TaskStatus) -> TaskRecord {
     }
 }
 
+type FreezeCalls = Arc<Mutex<Vec<(String, TaskId, i64, Option<i64>)>>>;
+type ReleaseCalls = Arc<Mutex<Vec<(String, TaskId, i64)>>>;
+
 #[derive(Clone, Default)]
 struct MemoryTaskContract {
     submitted: Arc<Mutex<Vec<TaskRecord>>>,
     records: Arc<Mutex<std::collections::HashMap<TaskId, TaskRecord>>>,
     cancelled: Arc<Mutex<Vec<(TaskId, CancelReason)>>>,
-    freezes: Arc<Mutex<Vec<(String, TaskId, i64, Option<i64>)>>>,
-    releases: Arc<Mutex<Vec<(String, TaskId, i64)>>>,
+    freezes: FreezeCalls,
+    releases: ReleaseCalls,
 }
 
 impl MemoryTaskContract {
