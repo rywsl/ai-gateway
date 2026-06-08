@@ -314,8 +314,10 @@ Client                    Gateway (gw-proxy)           Redis                    
   │                           │                          │                          │
   │ POST /v1/tasks            │                          │                          │
   ├──────────────────────────►│                          │                          │
-  │                           │ auth, balance, freeze    │                          │
+  │                           │ auth, balance            │                          │
   │                           │ calculate_freeze_amount  │                          │
+  │                           │ INCRBY task_frozen_micro │                          │
+  │                           ├─────────────────────────►│                          │
   │                           │ HSET entity:task:<id>    │                          │
   │                           ├─────────────────────────►│                          │
   │                           │ XADD tasks:queue         │                          │
@@ -330,13 +332,16 @@ Client                    Gateway (gw-proxy)           Redis                    
   │                           │                          │◄─────────────────────────┤
   │                           │                          │                          │
   │                           │                          │   upstream HTTP call     │
+  │                           │                          │   poll status/poll URL   │
   │                           │                          │   (reqwest, with timeout)│
   │                           │                          │                          │
   │                           │                          │ settle(succeeded/failed) │
   │                           │                          │◄─────────────────────────┤
   │                           │                          │ HSET status + output     │
   │                           │                          │ ZREM tasks:leases        │
-  │                           │                          │ release frozen_micro     │
+  │                           │                          │ INCRBY task_frozen_micro │
+  │                           │                          │ INCRBY deducted_micro    │
+  │                           │                          │ XADD usage:records       │
   │                           │                          │                          │
   │ GET /v1/tasks/:id         │                          │                          │
   ├──────────────────────────►│                          │                          │
@@ -352,9 +357,9 @@ Client                    Gateway (gw-proxy)           Redis                    
 
 | Loop | Module | Cadence | Purpose |
 |------|--------|---------|---------|
-| `ExecLoop` | `gw-task-runtime::exec_loop` | Continuous `XREADGROUP` block | Claim tasks from `tasks:queue`, acquire concurrency permit (global/vendor/model/key semaphores), execute upstream HTTP call via `reqwest`, settle as succeeded or failed. |
+| `ExecLoop` | `gw-task-runtime::exec_loop` | Continuous `XREADGROUP` block | Claim tasks from `tasks:queue`, acquire concurrency permit (global/vendor/model/key semaphores), execute upstream HTTP call via `reqwest`, poll generic JSON LRO status URLs with exponential backoff, settle as succeeded or failed. |
 | `CancelLoop` | `gw-task-runtime::cancel_loop` | Continuous `XREADGROUP` block on `tasks:cancel` | Read cancel events, look up the task's in-flight `CancellationToken` in the shared `RunningTaskRegistry`, cancel the token, then settle as `Cancelled` with `actual_micro=0`. |
-| `WatchdogLoop` | `gw-task-runtime::watchdog_loop` | Periodic (configurable interval) | `ZRANGEBYSCORE tasks:leases 0 <now_ms>` to find expired leases, then `TaskContract::recover_lease` per expired ID. Recovered tasks re-enter the queue. |
+| `WatchdogLoop` | `gw-task-runtime::watchdog_loop` | Periodic (configurable interval) | Acquire `lock:tasks:watchdog` with `SET NX PX` before scanning; the leader uses `ZRANGEBYSCORE tasks:leases 0 <now_ms>` to find expired leases, then `TaskContract::recover_lease` per expired ID. Recovered tasks re-enter the queue. |
 | `HeartbeatLoop` | `gw-task-runtime::heartbeat_loop` | Periodic (`loops.heartbeat_interval_ms`) | Renew `lease_until_ms` on all in-flight tasks via `TaskContract::update_running`. Also refreshes the worker registration hash `entity:worker:<uuid>.last_heartbeat_ms`. |
 
 ### 7.2 Task state machine
