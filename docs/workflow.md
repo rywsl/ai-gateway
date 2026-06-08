@@ -130,7 +130,7 @@ Spec: [`docs/spec/06-billing-ledger.md`](spec/06-billing-ledger.md).
     - **Load** — `TaskContract::load(task_id)`. `None` returns `404 GW_TASK_NOT_FOUND`. Success returns the serialized `TaskRecord`.
     - **Watch** — `TaskContract::watch(task_id)`. Returns a single SSE `status` event with the current task state.
     - **Cancel** — `TaskContract::settle(task_id, Cancelled, actual_micro=0)`. Returns the settled `TaskRecord`.
-    The short-circuit bypasses `upstream_peer`, `upstream_request_filter`, and all response filters. The freeze guard is released in the same filter invocation (no logging-phase release needed).
+    The short-circuit bypasses `upstream_peer`, `upstream_request_filter`, and all response filters. Task freeze is Redis-backed through `TaskContract`, not `ctx.freeze_guard`, so there is no logging-phase request-freeze release for task submits.
 18. **Gemini Files short-circuit** — `POST /v1beta/files`, `GET /v1beta/files`, `GET /v1beta/files/{file_id}`, and `DELETE /v1beta/files/{file_id}` are detected before management routing but continue through normal business auth, scoped IP checks, permission merge, balance, RPM, hard caps, and freeze. After those gates, `filters::gemini_files` selects a Gemini-capable vendor key through the same `ModelGroup` + `get_candidate_keys` + `StrategySet` routing path using synthetic model `gemini-files`, then `HttpGeminiFilesGateway` proxies directly to Gemini Files (`/upload/v1beta/files` for upload, `/v1beta/files...` for list/get/delete). Upload forwards the captured multipart bytes without transforming file content; successful upload records `gemini_file_mapping.file_uri -> vendor_key_id`, get/delete look up that mapping to avoid cross-vendor file migration, delete removes the mapping only after upstream success, and missing mappings return a gateway 404. This path bypasses `upstream_peer`, `upstream_request_filter`, and response filters just like task endpoints.
 
 ### 2.3 `upstream_peer`
@@ -264,7 +264,7 @@ Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 ke
 | Health `/readyz` | 200 once `READY=true` (flipped after `Wired` handoff) | `gw-gateway::health` |
 | Health `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience`, `/healthz/strategies` | Mgmt-verified (`Authorization: Mgmt mt_<id>.<secret>`, scope ≥ `AdminRead`, FailClosed blacklist). 200 returns the `snapshot_json` body; verify failures map to `GW_AUTH_MGMT_TOKEN_*`. `/healthz/strategies` returns per-(key, format) p50 TTFT for `LatencyFirst` debugging. | `gw-gateway::health` |
 
-`FreezeGuard::release` (in logging) is the *only* point where Rust mutates `frozen_micro` downward. Go (the billing service) writes `deducted_micro` / `balance_micro` based on `usage:records`. Rust never computes cost — enforced by the `no_cost_micro` invariant.
+For synchronous requests, `FreezeGuard::release` (in logging) is the point where Rust mutates `frozen_micro` downward. Go (the billing service) writes request-path `deducted_micro` / `balance_micro` based on `usage:records`. The async task path is separate: `RedisTaskContract::settle` releases `task_frozen_micro`, increments scalar `deducted_micro` by task-domain `actual_micro`, and emits `task_usage_v1` on `usage:records`.
 
 ### 6.1 Task metrics
 
