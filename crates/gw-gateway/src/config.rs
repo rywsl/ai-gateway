@@ -816,7 +816,7 @@ pub struct ErrorClassificationCfg {
 }
 
 fn default_retryable_status_codes() -> Vec<u16> {
-    vec![429, 500, 502, 503, 504]
+    vec![401, 402, 403, 429, 500, 502, 503, 504]
 }
 
 impl Default for ErrorClassificationCfg {
@@ -1613,7 +1613,7 @@ mod error_cfg_tests {
             .expect("default.toml parses");
         assert_eq!(
             cfg.error.classification.retryable_status_codes,
-            vec![429, 500, 502, 503, 504]
+            vec![401, 402, 403, 429, 500, 502, 503, 504]
         );
         assert!(!cfg.error.passthrough.enabled);
     }

@@ -1001,7 +1001,9 @@ impl ProxyHttp for LlmGateway {
             }
             match gw_routing::classify_for_failover(status, ctx.body_started, &self.retryable_codes)
             {
-                class @ (FailoverClass::Retryable5xx | FailoverClass::Retryable429) => {
+                class @ (FailoverClass::Retryable5xx
+                | FailoverClass::Retryable429
+                | FailoverClass::SwitchKey4xx) => {
                     if let Some(candidates) = ctx.picked_candidates.as_ref() {
                         let remaining = remaining_failover_candidates(candidates, ctx);
                         let attempt = ctx.failover_attempt.saturating_add(1);

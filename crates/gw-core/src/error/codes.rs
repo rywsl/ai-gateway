@@ -26,6 +26,9 @@ pub const GW_REQUEST_CONTENT_REJECTED: &str = "GW_REQUEST_CONTENT_REJECTED";
 pub const GW_REQUEST_MODEL_NOT_FOUND: &str = "GW_REQUEST_MODEL_NOT_FOUND";
 pub const GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL: &str = "GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL";
 pub const GW_ROUTING_NO_AVAILABLE_CHANNEL: &str = "GW_ROUTING_NO_AVAILABLE_CHANNEL";
+pub const GW_ROUTING_NO_FALLBACK_LEFT: &str = "GW_ROUTING_NO_FALLBACK_LEFT";
+pub const GW_ROUTING_FAILOVER_TIMEOUT: &str = "GW_ROUTING_FAILOVER_TIMEOUT";
+pub const GW_ROUTING_STREAM_NOT_RETRIABLE: &str = "GW_ROUTING_STREAM_NOT_RETRIABLE";
 /// A model group references a `multi_dim` routing preset name that is absent
 /// from this pod's `[routing.presets]` config. NOT a returned client envelope:
 /// the runtime path is deliberately fail-operational (falls back to

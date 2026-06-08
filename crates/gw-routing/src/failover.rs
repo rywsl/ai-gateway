@@ -16,7 +16,9 @@ pub enum FailoverClass {
     Retryable5xx,
     /// 429 status, body not yet started → retryable
     Retryable429,
-    /// Any non-retryable status (2xx, 3xx, 4xx except 429)
+    /// Auth/quota 4xx status where another key may still succeed.
+    SwitchKey4xx,
+    /// Any non-retryable status (2xx, 3xx, other 4xx)
     NotRetryable,
     /// Body streaming has already started → cannot retry
     BodyAlreadyStarted,
@@ -46,7 +48,9 @@ pub fn classify_for_failover(
         return FailoverClass::NotRetryable;
     }
 
-    if status == 429 {
+    if matches!(status, 401 | 402 | 403) {
+        FailoverClass::SwitchKey4xx
+    } else if status == 429 {
         FailoverClass::Retryable429
     } else {
         FailoverClass::Retryable5xx
@@ -96,6 +100,7 @@ pub fn record_failover_metric(class: FailoverClass, strategy_name: &str) {
     let reason = match class {
         FailoverClass::Retryable5xx => "upstream_5xx",
         FailoverClass::Retryable429 => "upstream_429",
+        FailoverClass::SwitchKey4xx => "upstream_4xx_switch_key",
         FailoverClass::NotRetryable => "not_retryable",
         FailoverClass::BodyAlreadyStarted => "body_started",
     };
@@ -115,7 +120,9 @@ mod tests {
     use secrecy::SecretString;
 
     fn default_retryable() -> HashSet<u16> {
-        [429, 500, 502, 503, 504].into_iter().collect()
+        [401, 402, 403, 429, 500, 502, 503, 504]
+            .into_iter()
+            .collect()
     }
 
     fn make_test_key(key_id: &str) -> Arc<VendorKey> {
@@ -170,6 +177,17 @@ mod tests {
             classify_for_failover(429, false, &codes),
             FailoverClass::Retryable429
         );
+    }
+
+    #[test]
+    fn test_classify_auth_quota_4xx_switches_key() {
+        let codes = default_retryable();
+        for status in [401, 402, 403] {
+            assert_eq!(
+                classify_for_failover(status, false, &codes),
+                FailoverClass::SwitchKey4xx
+            );
+        }
     }
 
     #[test]

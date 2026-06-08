@@ -970,10 +970,14 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         adapter_registry,
         quota_state_updates: Some(quota_state_updates),
         retryable_codes: {
-            let mut codes = std::collections::HashSet::new();
-            codes.insert(429);
-            codes.extend(500..=599);
-            Arc::new(codes)
+            Arc::new(
+                cfg.error
+                    .classification
+                    .retryable_status_codes
+                    .iter()
+                    .copied()
+                    .collect(),
+            )
         },
         error_passthrough_enabled: cfg.error.passthrough.enabled,
         error_passthrough_rules: std::sync::Arc::new(cfg.error.passthrough.compiled_rules()),
