@@ -364,7 +364,7 @@ where
                     });
                 }
                 Some(ProviderTaskState::Failed) => {
-                    return Err(anyhow!("upstream task failed: {}", payload));
+                    return Err(anyhow!("upstream task failed: {payload}"));
                 }
                 Some(ProviderTaskState::Pending) => {
                     backoff = (backoff * 2).min(self.cfg.poll_max_backoff);
