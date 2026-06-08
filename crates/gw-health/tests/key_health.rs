@@ -59,13 +59,14 @@ fn cooldown_isolated_across_api_formats() {
 fn record_under_floor_does_not_trip_circuit() {
     let s = KeyHealthStore::default();
     let k = KeyId::from("k-under-floor");
-    // 19 failures < 20-sample floor.
+    // 19 failures < 20-sample floor. Use a status that records a failure but
+    // does not trigger the payload-driven cooldown path.
     for _ in 0..19 {
         s.record(
             &k,
             ProtocolKind::OpenAi,
             OutcomeKind::Failure {
-                http_status: 500,
+                http_status: 400,
                 retry_after_secs: None,
             },
         );
