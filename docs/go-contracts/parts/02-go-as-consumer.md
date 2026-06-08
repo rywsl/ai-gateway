@@ -2,7 +2,7 @@
 
 > 本 part 描述所有 **Rust 主动写入、Go 被动消费**的契约面。读完即可在 Go 端实施 consumer / settler / drainer。索引见 [main.md](../main.md)。
 >
-> 本文件吸收了原 `docs/superpowers/specs/2026-05-19-billing-c-epsilon-go-contract.md` 的契约描述部分（§2 usage:records、§4 base/deducted、§5 events:counter、§6 settled_billing）。原文件随本 PR 删除——历史 commit 内可追溯。
+> 本文件吸收了原 `docs/go-contracts/main.md` 的契约描述部分（§2 usage:records、§4 base/deducted、§5 events:counter、§6 settled_billing）。原文件随本 PR 删除——历史 commit 内可追溯。
 
 ---
 
@@ -24,7 +24,7 @@
 
 ### 2.1.2 Payload schema — `UsageRecord`
 
-权威 Rust 类型见 `crates/gw-ledger/src/usage.rs` 与 [C-α §ADR-Cα-1](../../superpowers/specs/2026-05-19-billing-c-alpha-usage-record.md#adr-cα-1-改名--字段重塑)。JSON 形态：
+权威 Rust 类型见 `crates/gw-ledger/src/usage.rs` 与 [C-α](../../spec/06-billing-ledger.md)。JSON 形态：
 
 ```json
 {
@@ -172,7 +172,7 @@ Rust 可能 emit **多条** `usage:records` 共享同一主键 `(request_id, att
    - 主键存在 + 新 record 的 provenance ≤ 已存 → 丢弃。
 3. CrashFallback record 永远会被同主键的真实 emit 覆盖。Rust 侧不做幂等。
 
-> **Rust-side at-least-once source (added 2026-05-29).** The primary dup window in current Rust gateway is `XADD-confirmed → flusher process death → restart → reconciler emits CrashFallback for the same (request_id, attempt_index)`. The window equals one `flush_interval_ms` (default 200 ms). Go's existing dedup rule (highest provenance level + highest `vendor_exposure_state` wins) covers this. No Go-side change required. See [`docs/superpowers/specs/2026-05-29-billing-record-durability-design.md`](../../superpowers/specs/2026-05-29-billing-record-durability-design.md) §附录 C for the formal argument.
+> **Rust-side at-least-once source (added 2026-05-29).** The primary dup window in current Rust gateway is `XADD-confirmed → flusher process death → restart → reconciler emits CrashFallback for the same (request_id, attempt_index)`. The window equals one `flush_interval_ms` (default 200 ms). Go's existing dedup rule (highest provenance level + highest `vendor_exposure_state` wins) covers this. No Go-side change required. See [`docs/spec/06-billing-ledger.md`](../../spec/06-billing-ledger.md) for the formal argument.
 
 ### 2.1.9 Orphan instance 兜底（推荐 Go 侧能力，新增）
 
@@ -207,7 +207,7 @@ DLQ 条目在 UsageRecord 之外再加一层元数据：
 }
 ```
 
-> Rust 当前实现是 G11 v1（单 Redis stream fallback）。v2 三层兜底（内存 + 磁盘 + 周期 drain + 启动恢复）见 [`docs/superpowers/specs/2026-05-19-billing-c-delta-stream-dlq.md`](../../superpowers/specs/2026-05-19-billing-c-delta-stream-dlq.md)，本契约保留兼容（Go drainer 只需处理 `dlq_meta` + `usage_record` 包裹）。
+> Rust 当前实现是 G11 v1（单 Redis stream fallback）。v2 三层兜底（内存 + 磁盘 + 周期 drain + 启动恢复）见 [`docs/spec/06-billing-ledger.md`](../../spec/06-billing-ledger.md)，本契约保留兼容（Go drainer 只需处理 `dlq_meta` + `usage_record` 包裹）。
 
 ### 2.2.3 Go drainer 义务（必需）
 
@@ -319,7 +319,7 @@ v2 三层兜底（C-δ）下，record 落入 DLQ 之前可能经过不同的缓�
 
 ### 2.3.1 角色
 
-- Rust：writer（单向），按 [`docs/workflow.md`](../workflow.md) §filter chain 的 5 个触发点 XADD
+- Rust：writer（单向），按 [`docs/workflow.md`](../../workflow.md) §filter chain 的 5 个触发点 XADD
 - Go：**必需 consumer**（不再"可选"）；长期归档（180 天合规）责任方
 
 ### 2.3.2 Stream 定义
@@ -330,7 +330,7 @@ v2 三层兜底（C-δ）下，record 落入 DLQ 之前可能经过不同的缓�
 | Writer | Rust `gw-ledger::flusher`（`crates/gw-ledger/src/flusher.rs`），独立 flusher pool 异步 XADD |
 | Reader | Go drainer（**必需**）|
 | 推荐 consumer group | `go-archive-drainer` |
-| MAXLEN | Rust 写时 `MAXLEN ~ <配置值>`（参 `[detailed_log]` 表，详见 [`docs/architecture.md`](../architecture.md) §4.1） |
+| MAXLEN | Rust 写时 `MAXLEN ~ <配置值>`（参 `[detailed_log]` 表，详见 [`docs/architecture.md`](../../architecture.md) §4.1） |
 | 保留期 | Go 端实现 180 天（法律合规）；Rust 无保留期参数 |
 
 ### 2.3.3 Redis Stream entry 字段集
@@ -505,7 +505,7 @@ payload    bytes  encoding 决定如何解码；解码后是 JSON
   2. async: HINCRBY counter:user:<uid>:frozen_micro -est
 ```
 
-详见 [C-γ §ADR-Cγ-3](../../superpowers/specs/2026-05-19-billing-c-gamma-balance-split.md#adr-cγ-3-frozen-同步到-redis)。
+详见 [C-γ](../../spec/06-billing-ledger.md)。
 
 ### 2.5.2 Go 读取语义
 
@@ -596,13 +596,13 @@ INCRBY counter:user:<uid>:daily_tokens:<UTC_today> <input + output tokens>
 EXPIRE counter:user:<uid>:daily_tokens:<UTC_today> 172800   // 48h
 ```
 
-详见 G3 + [`docs/architecture.md`](../architecture.md) §9 Known gaps。Rust **不**写 `events:counter` 通知 Go（这是 observational 计数，不是权威结算）。
+详见 G3 + [`docs/architecture.md`](../../architecture.md) §9 Known gaps。Rust **不**写 `events:counter` 通知 Go（这是 observational 计数，不是权威结算）。
 
 ### 2.6.2 Go 报表可读
 
 Go 端如需"今日 token 消耗排行"等报表，直接 GET 即可。**禁止**写入。
 
-> 注意：UTC midnight 边界存在 < 0.001% 的请求错日（[`docs/architecture.md`](../architecture.md) §8 Deliberate behaviours）；Go 端报表可接受此误差。
+> 注意：UTC midnight 边界存在 < 0.001% 的请求错日（[`docs/architecture.md`](../../architecture.md) §8 Deliberate behaviours）；Go 端报表可接受此误差。
 
 ## 2.7 监控义务
 

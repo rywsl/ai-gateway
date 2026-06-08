@@ -1,9 +1,9 @@
 # Egress-impersonate — known gaps
 
 Operational follow-ups carried out of the egress-impersonate landing (Phases 1–5 of
-[`docs/superpowers/plans/2026-05-28-egress-impersonation.md`](../superpowers/plans/2026-05-28-egress-impersonation.md)).
-This file is the operational counterpart of §11 of
-[`docs/superpowers/specs/2026-05-28-egress-impersonation-design.md`](../superpowers/specs/2026-05-28-egress-impersonation-design.md);
+[`docs/spec/07-vendor-integration.md`](../spec/07-vendor-integration.md)).
+This file is the operational counterpart of the egress-impersonation section of
+[`docs/spec/07-vendor-integration.md`](../spec/07-vendor-integration.md);
 update it when an item is resolved or a new gap surfaces in production.
 
 | # | Area | Symptom / question | Mitigation in v1 | Resolution path |

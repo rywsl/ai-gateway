@@ -3,8 +3,8 @@
 > **Status**: 契约变更记录(active)
 > **日期**: 2026-05-22
 > **触发 spec**:
->   - [`docs/superpowers/specs/2026-05-22-go-onboarding-blockers-design.md`](../../superpowers/specs/2026-05-22-go-onboarding-blockers-design.md) — B1 非流式 / B2 Mgmt Token
->   - [`docs/superpowers/specs/2026-05-22-go-onboarding-gaps-design.md`](../../superpowers/specs/2026-05-22-go-onboarding-gaps-design.md) — G1..G6
+>   - [`docs/go-contracts/main.md`](../main.md) — B1 非流式 / B2 Mgmt Token
+>   - [`docs/go-contracts/main.md`](../main.md) — G1..G6
 >
 > **本文件作用**:把两份 spec 引入的 Go 控制面侧契约新增 / 修改集中索引化,作为"日志条目"存档。每条改动标明**触发 ADR + parts 落点 + Rust 落点**。
 >
@@ -135,7 +135,7 @@ CREATE INDEX management_tokens_user_id_idx ON management_tokens ((payload->>'use
 ````
 # Part 04 — Proxy Nodes(Hub / Tunnel 节点契约)
 
-> 本 part 描述 **Rust 网关 tunnel client 与 Go Hub 之间** 的代理节点契约。索引见 [main.md](../main.md)。本 part 引入 = [`docs/superpowers/specs/2026-05-22-go-onboarding-gaps-design.md`](../../superpowers/specs/2026-05-22-go-onboarding-gaps-design.md) §1 + [`docs/superpowers/specs/2026-05-22-tunnel-t-design.md`](../../superpowers/specs/2026-05-22-tunnel-t-design.md) ADR-T-3。
+> 本 part 描述 **Rust 网关 tunnel client 与 Go Hub 之间** 的代理节点契约。索引见 [main.md](../main.md)。本 part 引入 = [`docs/go-contracts/main.md`](../main.md) + [`docs/spec/09-tunnel.md`](../../spec/09-tunnel.md)。
 
 ## 4.1 概览
 
@@ -198,11 +198,11 @@ ID = `node_id`(前缀 `pn_`)。
 | 90s 未收 | status → draining + XADD |
 | 300s 未收 | status → offline + XADD |
 
-Rust 自身**不**做超时判定;以 Go 写的 status 为准(参 [gaps spec ADR-G1-4](../../superpowers/specs/2026-05-22-go-onboarding-gaps-design.md#adr-g1-4-status-转换不在-rust-触发))。
+Rust 自身**不**做超时判定;以 Go 写的 status 为准(参 [gaps spec](../main.md))。
 
 ## 4.4 Rust 读路径
 
-详见 [`docs/superpowers/specs/2026-05-22-go-onboarding-gaps-design.md`](../../superpowers/specs/2026-05-22-go-onboarding-gaps-design.md) ADR-G1-1 / G1-3 与 [`2026-05-22-tunnel-t-design.md`](../../superpowers/specs/2026-05-22-tunnel-t-design.md) ADR-T-2 / T-3。要点:
+详见 [`docs/go-contracts/main.md`](../main.md) 与 [`docs/spec/09-tunnel.md`](../../spec/09-tunnel.md)。要点:
 
 - `TunnelStack` 启动期冷加载 `proxy_nodes` 全表;
 - `StreamConsumer` 收到 ns=`proxy_node` 事件 → 触发 `TunnelStack::refresh()`(全量重读 status != offline 的节点)→ ArcSwap;
@@ -218,7 +218,7 @@ Go 端:
 | `proxy_node_status_distribution{status}` | `offline` 比例 > 20% → 告警 |
 | `proxy_node_upsert_total` | counter |
 
-Rust 端 `gateway_tunnel_*` 详见 [`docs/superpowers/specs/2026-05-22-tunnel-t-design.md`](../../superpowers/specs/2026-05-22-tunnel-t-design.md) §遥测段。
+Rust 端 `gateway_tunnel_*` 详见 [`docs/spec/09-tunnel.md`](../../spec/09-tunnel.md)。
 
 ## 4.6 migration 0005 模板(已 merged,本节供历史对照)
 

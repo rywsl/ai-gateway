@@ -2,7 +2,7 @@
 
 > **Status**: 契约变更记录(active)
 > **日期**: 2026-05-24
-> **触发 spec**: [`docs/superpowers/specs/2026-05-23-v2-cleanup-overview-design.md`](../../superpowers/specs/2026-05-23-v2-cleanup-overview-design.md) §2 S-contracts — S-contracts(Go 侧文档收口)
+> **触发 spec**: [`docs/architecture.md`](../../architecture.md) — S-contracts(Go 侧文档收口)
 > **范围**: Documentation-only(零 Rust 代码变更)
 >
 > **本文件作用**: 索引 S-contracts sub-spec 引入的 3 项 Go 侧契约变更。每条改动标明 **触发来源 + parts 落点 + 受影响 Go 模块**。

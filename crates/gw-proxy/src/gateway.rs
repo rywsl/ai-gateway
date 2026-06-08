@@ -1146,7 +1146,7 @@ impl ProxyHttp for LlmGateway {
                                 })
                                 .await;
                             // inflight.clear is NOT called here — see
-                            // docs/superpowers/specs/2026-05-29-billing-record-durability-design.md §3.6.
+                            // docs/spec/06-billing-ledger.md.
                             // If this spawn never runs (process shutdown), the inflight key remains
                             // and the startup reconciler emits a CrashFallback — A2 closed.
                         });
@@ -1350,7 +1350,7 @@ impl ProxyHttp for LlmGateway {
                 );
             }
             // inflight.clear is NOT called here — see
-            // docs/superpowers/specs/2026-05-29-billing-record-durability-design.md §3.5.
+            // docs/spec/06-billing-ledger.md.
             // The flusher DELs the key after XADD-confirmed delivery (invariant I1).
         }
 

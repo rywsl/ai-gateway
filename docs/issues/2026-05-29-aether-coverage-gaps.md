@@ -184,7 +184,7 @@ or `AnyCodec::detect` and short-circuits to a 400 `GW_REQUEST_PROTOCOL_UNKNOWN` 
 
 **Why it matters**: image/video cross-format conversion is arguably out-of-scope for a chat-IR gateway (image already
 flows as opaque passthrough). But **embeddings is a genuine data-plane gap**: the v1 design spec
-(`docs/superpowers/specs/2026-05-18-llm-gateway-design.md:1070`) lists `/v1/embeddings` as "v1 mandatory", yet there
+(`docs/architecture.md`) lists `/v1/embeddings` as "v1 mandatory", yet there
 is no detection / codec / routing and no descope record in-repo. LOW because the effect is a clean 400 on an
 unsupported endpoint (no crash / corruption / security issue).
 

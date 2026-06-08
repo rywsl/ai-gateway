@@ -7,7 +7,7 @@
 //! for vendor lookup, and an `UpstreamErrorAnalyzer` trait skeleton (full
 //! K-B vendor analyzers ship in Phase 3).
 //!
-//! Spec: `docs/superpowers/specs/2026-05-19-adapter-a-t0-trait-v2.md`.
+//! Spec: `docs/spec/07-vendor-integration.md`.
 
 pub mod analyzer;
 pub mod ctx;

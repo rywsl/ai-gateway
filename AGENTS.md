@@ -12,7 +12,8 @@ When you make a change that crosses any of these boundaries, update the matching
 | Pingora filters (order, behaviour, `ReqCtx` fields), ledger / detailed-log emission, error-handler fanout | [`docs/workflow.md`](docs/workflow.md) |
 | `scripts/check-invariants.sh` lints (activated, retired, or renamed) | [`docs/architecture.md`](docs/architecture.md) §Invariants |
 | A behaviour that looks like a bug but is deliberate (fail-closed, generic error message, pair-header requirement, etc.) | [`docs/architecture.md`](docs/architecture.md) §Deliberate behaviours |
-| Deferred gap → implemented | Remove from [`docs/architecture.md`](docs/architecture.md) §Known gaps; if it was tracked in a spec or plan under `docs/superpowers/`, mark it landed there too |
+| A subsystem's as-built behaviour (codec, routing, key-health, ratelimit, auth, billing, vendor, task, tunnel) | The matching domain spec under [`docs/spec/`](docs/spec/) (`01`–`09`) |
+| Deferred gap → implemented, or a new gap discovered | [`docs/ROADMAP.md`](docs/ROADMAP.md) — remove the implemented item, or add the new one with a priority tag |
 | Cross-process touchpoint with Go (Redis stream payload, `counter:*` key, PgSQL entity payload JSONB schema, encrypted column shape, KEK rotation) | [`docs/go-contracts/`](docs/go-contracts/main.md) — `main.md` + the relevant `parts/0{1,2,3}-*.md`. Adding a new touchpoint requires a new part or extending an existing one. |
 | The agent entry-point file you are reading (`CLAUDE.md` **or** `AGENTS.md`) | The other one. [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md) are byte-identical except the H1 title; any edit to either **must** be mirrored to the other in the **same commit**. |
 
@@ -31,42 +32,26 @@ Capability surface highlights:
 - **Permissions**: 5-tier merge (global → user-group → user → sub-account → api-key); model-permission regex with a 100 ms per-call ReDoS budget + auto-disable.
 - **Routing**: 8 strategies (`FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky`). Multi-dim per-(key, format) health, sliding-window cooldown, per-key in-flight cap.
 - **Capability**: model → required capabilities → matching keys via `gw-capability::CapabilityResolver`.
-- **Tunnel**: optional WebSocket transport to remote proxy nodes (`--features tunnel`). When `cfg.tunnel.enabled = true`, `pick_peer` consults `TunnelStack::resolve` per-request; otherwise the byte-identical Direct path runs. `VendorKey.tunnel_preference.require_tunnel = true` makes a missing node a hard `GW_TUNNEL_NO_NODE` rather than a silent Direct fallback. Boot-time only — flipping `enabled` requires restart. See [`docs/superpowers/specs/2026-05-22-tunnel-t-design.md`](docs/superpowers/specs/2026-05-22-tunnel-t-design.md) and `[tunnel]` in `config/default.toml`.
-- **Egress impersonation**: optional TLS-fingerprint + browser-header impersonation for vendor keys whose `egress_mode = Impersonate { profile }`. Routes the upstream connection through an in-process loopback (UDS by default) running on `wreq` + BoringSSL, which presents a Chrome-class JA3/JA4 fingerprint, HTTP/2 SETTINGS, and a per-identity static-header set (Claude Code / OpenAI Codex / Gemini CLI). Direct vendors are byte-identical to before (no rustls regression). Off by default at the workspace level (`[egress].disabled = true` is the kill-switch); enable per-vendor by setting `egress_mode`. See [`docs/superpowers/specs/2026-05-28-egress-impersonation-design.md`](docs/superpowers/specs/2026-05-28-egress-impersonation-design.md) and `[egress]` in `config/default.toml`.
-- **Credit lease (hard overdraft protection)**: optional `[protection]` layer above the legacy soft `frozen_micro` defense. When enabled and Go pushes a user into protected mode (`events:counter ns=protected_lease`), Rust holds a per-Pod scalar credit pool and hard-rejects requests with `GW_QUOTA_LEASE_INSUFFICIENT` / `GW_QUOTA_LEASE_EXPIRED` (fail-closed on TTL). Go's outstanding ledger guarantees `Σ outstanding ≤ balance × (1 + overcommit_ratio)`. See [`docs/superpowers/specs/2026-05-29-credit-lease-design.md`](docs/superpowers/specs/2026-05-29-credit-lease-design.md) and [`docs/go-contracts/contract-change/2026-05-29-credit-lease.md`](docs/go-contracts/contract-change/2026-05-29-credit-lease.md).
-- **Soak / chaos harness**: a 50,000-req / 60-s end-to-end soak (3 protocols × stream/non-stream × `off|light|heavy` upstream chaos) driven from `tests/e2e/client/soak/`. Hard invariants cover process liveness, strict-equality account consistency (`usage:records + dlq == fake_upstream_hits_total` at drain steady state), resource gauge release, error-code catalog compliance, and chaos causal reconciliation. Reports are AI-consumable JSON+JSONL at `tests/e2e/client/.soak_report/`. See [`docs/superpowers/specs/2026-05-22-chaos-soak-design.md`](docs/superpowers/specs/2026-05-22-chaos-soak-design.md). Gateway code is not touched — soak only consumes existing surfaces (§C1).
-- **Observability**: `usage:records` (billing), `usage:detailed` (wire-fidelity archive — 5 per-surface XADD per request, tiered compression raw/lz4/zstd, no redaction, drop-on-outage; Go drainer mandatory), Prometheus `/metrics`, `/livez` + `/readyz`, admin `/healthz/*` (token-gated). Billing robustness (lifecycle state machine, InflightLedger crash recovery, T0 emit-lag watchdog, per-attempt UsageRecord) per spec [`2026-05-24-billing-robustness-design.md`](docs/superpowers/specs/2026-05-24-billing-robustness-design.md).
+- **Tunnel**: optional WebSocket transport to remote proxy nodes (`--features tunnel`). When `cfg.tunnel.enabled = true`, `pick_peer` consults `TunnelStack::resolve` per-request; otherwise the byte-identical Direct path runs. `VendorKey.tunnel_preference.require_tunnel = true` makes a missing node a hard `GW_TUNNEL_NO_NODE` rather than a silent Direct fallback. Boot-time only — flipping `enabled` requires restart. See [`docs/spec/09-tunnel.md`](docs/spec/09-tunnel.md) and `[tunnel]` in `config/default.toml`.
+- **Egress impersonation**: optional TLS-fingerprint + browser-header impersonation for vendor keys whose `egress_mode = Impersonate { profile }`. Routes the upstream connection through an in-process loopback (UDS by default) running on `wreq` + BoringSSL, which presents a Chrome-class JA3/JA4 fingerprint, HTTP/2 SETTINGS, and a per-identity static-header set (Claude Code / OpenAI Codex / Gemini CLI). Direct vendors are byte-identical to before (no rustls regression). Off by default at the workspace level (`[egress].disabled = true` is the kill-switch); enable per-vendor by setting `egress_mode`. See [`docs/spec/07-vendor-integration.md`](docs/spec/07-vendor-integration.md) and `[egress]` in `config/default.toml`.
+- **Credit lease (hard overdraft protection)**: optional `[protection]` layer above the legacy soft `frozen_micro` defense. When enabled and Go pushes a user into protected mode (`events:counter ns=protected_lease`), Rust holds a per-Pod scalar credit pool and hard-rejects requests with `GW_QUOTA_LEASE_INSUFFICIENT` / `GW_QUOTA_LEASE_EXPIRED` (fail-closed on TTL). Go's outstanding ledger guarantees `Σ outstanding ≤ balance × (1 + overcommit_ratio)`. See [`docs/spec/06-billing-ledger.md`](docs/spec/06-billing-ledger.md) and [`docs/go-contracts/contract-change/2026-05-29-credit-lease.md`](docs/go-contracts/contract-change/2026-05-29-credit-lease.md).
+- **Soak / chaos harness**: a 50,000-req / 60-s end-to-end soak (3 protocols × stream/non-stream × `off|light|heavy` upstream chaos) driven from `tests/e2e/client/soak/`. Hard invariants cover process liveness, strict-equality account consistency (`usage:records + dlq == fake_upstream_hits_total` at drain steady state), resource gauge release, error-code catalog compliance, and chaos causal reconciliation. Reports are AI-consumable JSON+JSONL at `tests/e2e/client/.soak_report/`. See [`docs/architecture.md`](docs/architecture.md). Gateway code is not touched — soak only consumes existing surfaces (§C1).
+- **Observability**: `usage:records` (billing), `usage:detailed` (wire-fidelity archive — 5 per-surface XADD per request, tiered compression raw/lz4/zstd, no redaction, drop-on-outage; Go drainer mandatory), Prometheus `/metrics`, `/livez` + `/readyz`, admin `/healthz/*` (token-gated). Billing robustness (lifecycle state machine, InflightLedger crash recovery, T0 emit-lag watchdog, per-attempt UsageRecord) per [`docs/spec/06-billing-ledger.md`](docs/spec/06-billing-ledger.md).
 
 For the dependency DAG, traits, persistence namespaces, KEK rotation, and the full list of invariants & deliberate behaviours, read [`docs/architecture.md`](docs/architecture.md). For the request lifecycle (bootstrap, every filter phase, error fanout, streaming, cache invalidation), read [`docs/workflow.md`](docs/workflow.md).
-
-## v2 cleanup status
-
-All six Rust-side v2 sub-specs have landed. Production code paths no longer contain `unimplemented!()` / `todo!()` / `TODO(v2)` / "wave-X follow-up" / "for v1" markers. `scripts/check-invariants.sh` enforces this via `no_v1_markers_in_prod` (gate mode: `error`).
-
-Tracking:
-- Overview + Go-vs-Rust split + sub-spec index: [`docs/superpowers/specs/2026-05-23-v2-cleanup-overview-design.md`](docs/superpowers/specs/2026-05-23-v2-cleanup-overview-design.md)
-- Sub-specs:
-  - `S-codec` ✅ — non-stream response + cross-protocol re-render + tool-call block mapping + SSE cross-block accumulator
-  - `S-routing` ✅ — `latency_first` / `cost_first` / `load_balance` realization + 5xx/429 retry executor
-  - `S-ledger` ✅ — Phase 6 atomic freeze release + DEDUCT GC + detailed-log real sink (drop-on-outage) + Rust half of billing-c-delta DLQ
-  - `S-proxy-core` ✅ — CapabilityResolver injection + HMAC body verify + TPM deferred deduction + response deadline + `forced_params` mutation tracking
-  - `S-admin-tunnel` ✅ — mgmt-routing + `/admin/*` verify-then-route + tunnel health probe + `/healthz/tunnel` + transport-alive gauge sampler
-  - `S-contracts` ✅ — Go-side DLQ replay, ghost-freeze reconciliation, `exclusive_capability_match` index activation (Go contract doc only)
-
-**Operational rule**: the `no_v1_markers_in_prod` lint in `scripts/check-invariants.sh` now runs in `error` mode. Any new `unimplemented!()` / `todo!()` / `TODO(v2)` / "for v1" marker in `crates/` will fail CI. If a feature can't land in the current PR, decline to write the placeholder and surface the dependency instead.
 
 ## Source layout
 
 ```
-crates/                  Rust workspace (15 crates; see docs/architecture.md §Workspace layout)
+crates/                  Rust workspace (21 crates; see docs/architecture.md §Workspace layout)
 config/default.toml      figment base layer; per-machine override at config/local.toml (gitignored)
 docs/
   architecture.md        Layered architecture, crates, traits, persistence, invariants
   workflow.md            Bootstrap + Pingora filter chain + error fanout
   dev-setup.md           Per-machine dev setup (Docker, Postgres, Redis)
-  go-contracts/          Rust ↔ Go cross-process contracts (main.md + parts/01-03)
-  superpowers/specs/     Authoritative design specs
-  superpowers/plans/     Implementation plans + status
+  go-contracts/          Rust ↔ Go cross-process contracts (main.md + parts/01-07)
+  spec/                  As-built domain standard (01-protocol-codec … 09-tunnel) — authoritative
+  ROADMAP.md             Unbuilt + divergent items, priority-tagged (runtime-risk > capability-gap > doc-divergence)
   issues/                Operational gotchas (e.g. fred + redis:7 XREADGROUP parse warn,
                          egress-impersonate known gaps)
 scripts/check-invariants.sh   Layering / namespace / retired-symbol lints
@@ -175,7 +160,7 @@ Ports: `8000` business proxy, `9090` Prometheus `/metrics`, `8080` health (`/liv
 - **Rust 1.88.0** is pinned in `rust-toolchain.toml`. The bump from 1.86 was driven by `wreq` (egress-impersonate transitive) which requires a newer compiler; Pingora 0.8 + `getrandom 0.4`'s `wasip3` target manifest is still satisfied.
 - **`GW_KMS__KEK_HEX` must contain at least one a–f character.** Figment's env deserializer tries integer coercion first, so an all-digit 64-char hex string round-trips as `i64` and fails the hex parser. `python3 secrets.token_hex(32)` is fine; hand-rolled values must include a letter.
 - **No sqlx offline cache.** v1 uses runtime-checked `sqlx::query` / `sqlx::raw_sql` exclusively — there is no `.sqlx/` directory and no `cargo sqlx prepare` step. When the codebase migrates to `query!` macros the workflow will be added in `docs/dev-setup.md`.
-- Migrations live at `crates/gw-store/migrations/0001_initial.sql`, `0002_gemini_file_mapping.sql`, `0003_model_mapping.sql` and are **not auto-applied**; for a host Postgres run them with `psql -f`.
+- Migrations live under `crates/gw-store/migrations/` (`0001_initial.sql`, `0002_gemini_file_mapping.sql`, `0003_model_mapping.sql`, `0004_capabilities.sql`, `0004_task_worker.sql` — note the duplicate `0004_` prefix, `0005_proxy_nodes.sql`, `0006_auth_configs.sql`, `0007_management_tokens.sql`, `0008_signature_secret.sql`, `0009_egress_impersonation.sql`) and are **not auto-applied**; for a host Postgres run them with `psql -f`.
 - **boring-sys system deps.** The egress-impersonate stack pulls `wreq` → `boring-sys`, which bundles BoringSSL and runs bindgen at build time. The Docker builder installs `cmake`, `build-essential`, `pkg-config`, `perl`, `libssl-dev`, `libclang-dev` for this. A host build needs the same set (or the equivalent for your distro) on `$PATH`. Without `libclang-dev` the bindgen step fails; without `build-essential` (a C++ toolchain) the BoringSSL build fails.
 
 ## Configuration
@@ -193,4 +178,4 @@ Figment layers, low → high precedence: `config/default.toml` → `config/local
 
 ## What this file is not
 
-Not the design spec — those live under `docs/superpowers/specs/`. Not the implementation status — `docs/superpowers/plans/` tracks that. Not deep architecture — [`docs/architecture.md`](docs/architecture.md) and [`docs/workflow.md`](docs/workflow.md) are. Keep this file small; if you find yourself adding more than a paragraph here, the right home is probably `docs/`.
+Not the as-built design — those live under [`docs/spec/`](docs/spec/). Not the roadmap — [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks unbuilt and divergent work. Not deep architecture — [`docs/architecture.md`](docs/architecture.md) and [`docs/workflow.md`](docs/workflow.md) are. Keep this file small; if you find yourself adding more than a paragraph here, the right home is probably `docs/`.

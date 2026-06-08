@@ -1,8 +1,7 @@
 //! Tiered compression for `usage:detailed` archive payloads.
 //!
 //! Picks one of three encodings based on uncompressed JSON size; matches the
-//! decision table in `docs/superpowers/specs/2026-05-23-detailed-log-complete-design.md`
-//! §ADR-D-3.
+//! decision table in `docs/spec/06-billing-ledger.md`.
 
 /// Encoding tag written to the `encoding` field on each Redis stream entry.
 /// Consumers branch on this before decompressing.

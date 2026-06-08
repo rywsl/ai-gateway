@@ -2,7 +2,7 @@
 
 > Rust 网关与 Go 管理面 / 计费面之间所有跨进程契约的**单一来源**。任何修改 schema、stream、Redis namespace、PgSQL 表的 PR，**必须**在同一 commit 内更新本文档及对应 part。
 
-- **文档状态**：v1（吸收并取代原 `docs/superpowers/specs/2026-05-19-billing-c-epsilon-go-contract.md`，该文件本 PR 内删除；α/β/γ/δ 仍是 Rust 侧实现 spec，与本契约配合存在）
+- **文档状态**：v1（吸收并取代原 `docs/go-contracts/main.md`，该文件本 PR 内删除；α/β/γ/δ 仍是 Rust 侧实现 spec，与本契约配合存在）
 - **作者**：Rust 网关团队（Claude + 用户协作）
 - **覆盖面**：Rust 与 Go 之间所有 Redis stream / Redis key / PgSQL 表 / 加密 payload 接触点。**不**覆盖：Rust 内部实现、Go 内部公式（如 BillingPricing）、Aether 历史路径迁移。
 
@@ -142,11 +142,11 @@ Rust 端对应指标（前缀 `gateway_*`）在 [`docs/architecture.md`](../arch
 - 主架构：[`docs/architecture.md`](../architecture.md)（持久化 §5、路由 §3、KEK §4.3、invariant §7）
 - 请求流：[`docs/workflow.md`](../workflow.md)（Pingora filter chain，含每条 Redis 写时机）
 - 设计 spec（Rust 侧实现细节）：
-  - C-α UsageRecord：[`docs/superpowers/specs/2026-05-19-billing-c-alpha-usage-record.md`](../superpowers/specs/2026-05-19-billing-c-alpha-usage-record.md)
-  - C-β EstimatePricing：[`docs/superpowers/specs/2026-05-19-billing-c-beta-estimate-pricing.md`](../superpowers/specs/2026-05-19-billing-c-beta-estimate-pricing.md)
-  - C-γ 余额读写分工：[`docs/superpowers/specs/2026-05-19-billing-c-gamma-balance-split.md`](../superpowers/specs/2026-05-19-billing-c-gamma-balance-split.md)
-  - C-δ Stream DLQ：[`docs/superpowers/specs/2026-05-19-billing-c-delta-stream-dlq.md`](../superpowers/specs/2026-05-19-billing-c-delta-stream-dlq.md)
-  - 主设计：[`docs/superpowers/specs/2026-05-18-llm-gateway-design.md`](../superpowers/specs/2026-05-18-llm-gateway-design.md)（ADR-013/014/015/016/017）
+  - C-α UsageRecord：[`docs/spec/06-billing-ledger.md`](../spec/06-billing-ledger.md)
+  - C-β EstimatePricing：[`docs/spec/06-billing-ledger.md`](../spec/06-billing-ledger.md)
+  - C-γ 余额读写分工：[`docs/spec/06-billing-ledger.md`](../spec/06-billing-ledger.md)
+  - C-δ Stream DLQ：[`docs/spec/06-billing-ledger.md`](../spec/06-billing-ledger.md)
+  - 主设计：[`docs/architecture.md`](../architecture.md)
 - 代码锚点：
   - `crates/gw-store/src/stream_consumer.rs`（events:entity / events:counter 消费）
   - `crates/gw-store/src/loader.rs`（PgSQL 冷加载 + Redis 写回）

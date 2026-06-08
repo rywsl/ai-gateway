@@ -918,7 +918,7 @@ impl Default for QuotaProbeCfg {
 }
 
 /// Billing-robustness knobs. Spec:
-/// [`docs/superpowers/specs/2026-05-24-billing-robustness-design.md`].
+/// [`docs/spec/06-billing-ledger.md`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct BillingCfg {
     /// Window (ms) after a cancel trigger during which the gateway continues

@@ -161,7 +161,7 @@ Go 端必须：
 1. `INCRBY counter:user:<uid>:<field> <delta>` 得到 `new_value`；
 2. 立即 `XADD events:counter * ns user_balance uid <uid> op incrby field <field> delta <delta> value_after <new_value> ts_ms <now_ms>`。
 
-第 1 步是真相源，第 2 步是通知。第 2 步漏发 → Rust 缓存陈旧，但 Rust 启动期会 HGET 对齐，且 freeze 机制本身就能容忍 deducted 短期偏低（详见 [`docs/superpowers/specs/2026-05-19-billing-c-gamma-balance-split.md`](../../superpowers/specs/2026-05-19-billing-c-gamma-balance-split.md) §ADR-Cγ-1 表）。
+第 1 步是真相源，第 2 步是通知。第 2 步漏发 → Rust 缓存陈旧，但 Rust 启动期会 HGET 对齐，且 freeze 机制本身就能容忍 deducted 短期偏低（详见 [`docs/spec/06-billing-ledger.md`](../../spec/06-billing-ledger.md)）。
 
 ### 1.3.5 value_after 必须单调（同 field 内）
 
@@ -196,7 +196,7 @@ Rust 在 freeze 估算路径用此 entity，**保证 freeze 金额 ≥ 真实可
 }
 ```
 
-字段含义参 [`docs/superpowers/specs/2026-05-19-billing-c-beta-estimate-pricing.md`](../../superpowers/specs/2026-05-19-billing-c-beta-estimate-pricing.md) §ADR-Cβ-1。Rust 用：
+字段含义参 [`docs/spec/06-billing-ledger.md`](../../spec/06-billing-ledger.md)。Rust 用：
 
 ```
 freeze = (input_tokens_est + max_tokens_capped) * conservative_per_token_micro * safety_factor

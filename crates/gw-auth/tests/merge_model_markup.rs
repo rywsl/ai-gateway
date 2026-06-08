@@ -1,7 +1,7 @@
 //! G5 (T2-B) — `Pricing.model_markup` must land in
 //! `MarkupChainSnapshot.model_markup` instead of the legacy 1.0 placeholder.
 //!
-//! ADR ref: docs/superpowers/specs/2026-05-21-known-gaps-design.md §ADR-G5-1.
+//! ADR ref: docs/ROADMAP.md.
 //!
 //! Rust still does not compute cost (`no_cost_micro` invariant); the chain is
 //! emitted verbatim into `UsageRecord.markup_chain_snapshot` and Go multiplies.

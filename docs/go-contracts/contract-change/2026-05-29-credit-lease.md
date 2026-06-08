@@ -2,7 +2,7 @@
 
 > **Status**: 契约变更记录(Awaiting Go-side implementation)
 > **日期**: 2026-05-29
-> **触发来源**: Rust 侧 spec [`docs/superpowers/specs/2026-05-29-credit-lease-design.md`](../../superpowers/specs/2026-05-29-credit-lease-design.md)
+> **触发来源**: Rust 侧 spec [`docs/spec/06-billing-ledger.md`](../../spec/06-billing-ledger.md)
 > **范围**: Rust 网关新增"积分租约"硬防层。Go 管理面 / 计费面 需要新增 outstanding ledger 维护、模式切换决策、价格表 → 积分系数表换算、两条新 ns 推流。
 >
 > **本文件作用**:把 Rust spec 中所有"Go 必须做的事"显式列出,定义契约 shape、Go 侧职责、与 Rust 证据的对应关系。Go 端实现完成后,在每个章节末尾把 status 从 `Awaiting Go-side implementation` 改为 `landed`。
@@ -89,7 +89,7 @@ push_lease_credits = min(
 
 ### 1.6 Rust evidence
 
-- Spec: `docs/superpowers/specs/2026-05-29-credit-lease-design.md` §5.1.1, §6.1
+- Spec: `docs/spec/06-billing-ledger.md`
 - 消费点(待实现): `crates/gw-ledger/src/lease.rs::LeasePool::on_event`
 - StreamConsumer 接入(已存在): `crates/gw-store/src/redis_client.rs` events:counter consumer
 
@@ -153,7 +153,7 @@ Pod 启动时,StreamConsumer 从该消费组的 last-id 重读。新部署的 Ru
 
 ### 2.6 Rust evidence
 
-- Spec: `docs/superpowers/specs/2026-05-29-credit-lease-design.md` §5.1.2, §5.1.3, §6.2
+- Spec: `docs/spec/06-billing-ledger.md`
 - 消费点(待实现): `crates/gw-ledger/src/coef.rs::ModelCoefCache::on_event`
 
 ---
@@ -253,7 +253,7 @@ for each user with outstanding entries:
 
 ### 4.2 字段语义
 
-- `pod_id`:Rust 进程的 instance_id(L0 env / L1 OnceLock / L2 Redis,见 [`2026-05-24-billing-robustness-design.md`](../../superpowers/specs/2026-05-24-billing-robustness-design.md) §5.4.1)。**从本 spec 起所有 record 都必填**,旧 record 兼容性靠"缺失视为 unknown_pod"处理。
+- `pod_id`:Rust 进程的 instance_id(L0 env / L1 OnceLock / L2 Redis,见 [`docs/spec/06-billing-ledger.md`](../../spec/06-billing-ledger.md))。**从本 spec 起所有 record 都必填**,旧 record 兼容性靠"缺失视为 unknown_pod"处理。
 - `credits_consumed`:Rust 在 protected 模式下用 `coef_table_version` 对应的系数表把真实 6 维 usage 反算出的 credits 总和。仅 protected 模式有值。
 - `coef_table_version`:`credits_consumed` 计算所基于的版本号。Go 验证版本与当前 outstanding 记录的版本一致——若不一致(理论上发生在 Rust 持久 lease 未续期 而 Go 已切版本),Go 仍按 `credits_consumed` 减 outstanding,但记 `go_credit_version_mismatch_total`。
 
@@ -294,7 +294,7 @@ on usage_records record:
 
 ### 4.6 Rust evidence
 
-- Spec: `docs/superpowers/specs/2026-05-29-credit-lease-design.md` §10.2
+- Spec: `docs/spec/06-billing-ledger.md`
 - Schema(待扩展): `crates/gw-ledger/src/usage.rs`
 - 填充点(待实现): `crates/gw-proxy/src/billing_lifecycle.rs`(在 protected 模式下注入 `credits_consumed`)
 

@@ -295,7 +295,7 @@ pub async fn on_retry(
             .await;
 
         // inflight.clear is NOT called here — see
-        // docs/superpowers/specs/2026-05-29-billing-record-durability-design.md §3.6.
+        // docs/spec/06-billing-ledger.md.
     }
 }
 

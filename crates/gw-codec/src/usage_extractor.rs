@@ -1,6 +1,6 @@
 //! 6-dim usage extraction with per-dimension provenance.
 //!
-//! Authoritative spec: docs/superpowers/specs/2026-05-24-billing-robustness-design.md §5.2
+//! Authoritative spec: docs/spec/06-billing-ledger.md
 
 use gw_core::usage::UsageSnapshot;
 

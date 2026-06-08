@@ -157,7 +157,7 @@ sample. The circuit is left stuck in `HalfOpen`, and `is_available()` (`66-89`) 
 unconditionally. The only production circuit transitions are `Closed→Open`, `Open→HalfOpen`, `HalfOpen→Closed` —
 there is **no `HalfOpen→Open`**. `clear_cooldown` explicitly does not touch the circuit, and the quota probe only
 probes keys with an active cooldown deadline, so neither recovers a HalfOpen-stuck key. This diverges from the K-A
-spec (`docs/superpowers/specs/2026-05-19-key-health-k-a-state-machine.md:282`: "半开失败一次就回 open 60s").
+spec (`docs/spec/03-key-health.md`: "半开失败一次就回 open 60s").
 
 **Normal trigger**: a bad upstream minute (≥20 samples, >50% failures) trips the circuit Open for 60 s; after 60 s
 the first request wins the half-open CAS and is routed to the still-degraded upstream; that one request fails; the

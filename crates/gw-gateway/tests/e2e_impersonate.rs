@@ -1,8 +1,6 @@
 //! Task 6.1 — E2E Impersonation through fake-upstream.
 //!
-//! Spec: `docs/superpowers/specs/2026-05-28-egress-impersonation-design.md`,
-//! plan §Phase 6.1 (`docs/superpowers/plans/2026-05-28-egress-impersonation.md`,
-//! lines 3712–3781).
+//! Spec: `docs/spec/07-vendor-integration.md`.
 //!
 //! # What is exercised
 //!

@@ -1,7 +1,7 @@
 //! Locks ProtocolKind / ApiShape wire forms against silent drift.
 //!
 //! Two wire forms are intentional cross-process contract — see
-//! `docs/superpowers/specs/2026-05-28-systemic-fixes-design.md` §6.
+//! `docs/architecture.md`.
 
 use gw_core::protocol::{ApiShape, ProtocolKind};
 

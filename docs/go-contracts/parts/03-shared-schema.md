@@ -108,7 +108,7 @@ deleted_at  TIMESTAMPTZ NULL
 }
 ```
 
-> 字段命名差异：`ApiKeyEntry.force_capabilities` (singular `force_`) vs `VendorKey.forced_capabilities` (plural `forced_`)。这是 [G13 已知 gap](../architecture.md#21-crate-responsibilities)，Go 端需 schema 适配。
+> 字段命名差异：`ApiKeyEntry.force_capabilities` (singular `force_`) vs `VendorKey.forced_capabilities` (plural `forced_`)。这是 [G13 已知 gap](../../architecture.md#21-crate-responsibilities)，Go 端需 schema 适配。
 
 ### 3.2.4 `vendors.payload` — `Vendor`
 
@@ -282,7 +282,7 @@ UPDATE vendor_keys
 | Rust（caller-side） | `ApiKeyEntry` | `force_capabilities` | `SmallVec<[String;4]>` |
 | Go（caller-side） | `ApiKeyEntry` | `force_capabilities` | `[]string` |
 
-`VendorKey.forced_capabilities`（复数 `forced_`）与 `ApiKeyEntry.force_capabilities`（单数 `force_`）的命名/类型不对称是 **刻意的**，记录在 [`docs/architecture.md`](../architecture.md) §8 Deliberate behaviours。两者由不同 wave 引入（T4-B vs T0-C），不做追齐 rename。Go 端需保持各自表的字段名不变。
+`VendorKey.forced_capabilities`（复数 `forced_`）与 `ApiKeyEntry.force_capabilities`（单数 `force_`）的命名/类型不对称是 **刻意的**，记录在 [`docs/architecture.md`](../../architecture.md) §8 Deliberate behaviours。两者由不同 wave 引入（T4-B vs T0-C），不做追齐 rename。Go 端需保持各自表的字段名不变。
 
 #### 同步规则
 
@@ -359,7 +359,7 @@ ID = CIDR 字符串（与 `cidr` 字段同值，方便 Rust invalidate）。
 }
 ```
 
-Capability 字符串由 `gw-capability::Capability` enum 解析，详见 [`docs/superpowers/specs/2026-05-21-known-gaps-design.md`](../superpowers/specs/2026-05-21-known-gaps-design.md) ADR-G13-1。未知 capability 字符串 Rust 端忽略 + warn。
+Capability 字符串由 `gw-capability::Capability` enum 解析，详见 [`docs/ROADMAP.md`](../../ROADMAP.md)。未知 capability 字符串 Rust 端忽略 + warn。
 
 ### 3.2.11 `model_mapping`（0003，非 entity）
 
@@ -411,7 +411,7 @@ ID = `token_id`（前缀 `mt_`）。Rust 行为：
 - Rust（`crates/gw-auth/src/mgmt.rs`）用 `mt_<id>` 作为 entity key 经 `EntityStore::mgmt_token_or_load` 拉取；将 `<secret>` SHA-256 后与 `payload.hash` constant-time 比对；
 - `scope` 用 `MgmtScope::covers(required)` 判定（`admin_full ⊇ admin_read ⊇ user_self`）；
 - 撤销走 [`mgmt_token:blacklist:<token_id>`](02-go-as-consumer.md#29-mgmt_tokenblacklisttoken_id-redis-key)（FailClosed `EXISTS` 查询）；
-- 失败码：`GW_AUTH_MGMT_TOKEN_{MISSING, INVALID, EXPIRED, DISABLED, REVOKED, SCOPE_DENIED}`（参 [docs/architecture.md](../architecture.md) §6 health endpoints 与 [docs/workflow.md](../workflow.md) §2.2 step 1）。
+- 失败码：`GW_AUTH_MGMT_TOKEN_{MISSING, INVALID, EXPIRED, DISABLED, REVOKED, SCOPE_DENIED}`（参 [docs/architecture.md](../../architecture.md) §6 health endpoints 与 [docs/workflow.md](../../workflow.md) §2.2 step 1）。
 
 权威 Rust 类型定义见 `crates/gw-core/src/entity.rs::{MgmtScope, ManagementTokenEntry}`。
 
@@ -521,7 +521,7 @@ Go 端运维如要硬删除（超长归档），应当先确认无 Rust 在飞�
 
 ## 3.5 KEK 轮换状态机
 
-详见 [`docs/architecture.md`](../architecture.md) §4.3 + `crates/gw-store/src/encrypt.rs::KekCache`。
+详见 [`docs/architecture.md`](../../architecture.md) §4.3 + `crates/gw-store/src/encrypt.rs::KekCache`。
 
 ### 3.5.1 状态图
 
@@ -608,7 +608,7 @@ Healthy(K_new)
 | `vendor_key_kek_kid_distribution` | Go 端：按 `payload->'api_key_enc'->>'kek_kid'` group by | 轮换期监控 |
 | `pgsql_schema_drift_detected_total` | Go 端 CI：实际 column set vs migration 声明 | > 0 → 告警 |
 
-Rust 端对应指标 `gateway_entity_*` / `gateway_vendor_key_decrypt_failures_total` 详见 [`docs/architecture.md`](../architecture.md) §9。
+Rust 端对应指标 `gateway_entity_*` / `gateway_vendor_key_decrypt_failures_total` 详见 [`docs/architecture.md`](../../architecture.md) §9。
 
 ## 3.8 演进规则
 

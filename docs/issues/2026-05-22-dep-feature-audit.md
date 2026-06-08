@@ -95,7 +95,7 @@ documentation-vs-reality discrepancy operators would notice.
   green, `Cargo.lock` no longer contains `reqwest`, and
   `bash scripts/check-invariants.sh` passes.
 - **#1 + #5 — promoted to a design spec.**
-  [`docs/superpowers/specs/2026-05-22-tunnel-t-design.md`](../superpowers/specs/2026-05-22-tunnel-t-design.md)
+  [`docs/spec/09-tunnel.md`](../spec/09-tunnel.md)
   defines how `gw-tunnel-client` plugs into `upstream_peer`, persists
   proxy nodes, threads `VendorKey.tunnel_preference`, and resolves the
   hickory rustls 0.21 / pingora rustls 0.23 double-link. Spec ADR-T-6

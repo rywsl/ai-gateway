@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Invariant lint harness for the v2 integration.
-# Authoritative spec: docs/superpowers/specs/2026-05-20-v2-integration-design.md §3 / §5.2.
+# Authoritative spec: docs/architecture.md.
 #
 # Each check below is one §5.2 lint. Checks that are GREEN at the current
 # phase run unconditionally. Checks whose target code has not landed yet are
@@ -455,7 +455,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # no_detailed_redaction — detailed archive must not reintroduce redaction.
-# Spec: docs/superpowers/specs/2026-05-23-detailed-log-complete-design.md §10.2
+# Spec: docs/spec/06-billing-ledger.md
 # ---------------------------------------------------------------------------
 echo "[no_detailed_redaction] redaction helpers must not appear in gw-ledger/gw-proxy"
 hits=$(grep -RnE 'redact_body|redact_headers|redact_message_content|redacted_preview|REDACT_HEADER_DENYLIST|REDACT_HEADER_ALLOWLIST' \
@@ -469,7 +469,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # no_detailed_truncation — body preview / hard cap constants must not return.
-# Spec: docs/superpowers/specs/2026-05-23-detailed-log-complete-design.md §10.2
+# Spec: docs/spec/06-billing-ledger.md
 # ---------------------------------------------------------------------------
 echo "[no_detailed_truncation] truncation constants must not appear in gw-ledger/gw-proxy"
 hits=$(grep -RnE 'PREVIEW_MAX_BYTES|MAX_DETAILED_LOG_BYTES' \
@@ -484,7 +484,7 @@ fi
 # ---------------------------------------------------------------------------
 # no_legacy_usage_source — billing-robustness W4 retires usage_source field.
 # UsageRecord must use vendor_exposure_state + usage_provenance + attempt_index.
-# Spec: docs/superpowers/specs/2026-05-23-billing-robustness-w4-design.md §3
+# Spec: docs/spec/06-billing-ledger.md
 # ---------------------------------------------------------------------------
 echo "[no_legacy_usage_source] legacy usage_source field must not appear in gw-ledger/gw-proxy"
 if grep -rn "usage_source\s*:" crates/gw-ledger/src crates/gw-proxy/src 2>/dev/null | grep -v test | grep -v "//" | grep -q .; then
@@ -498,13 +498,13 @@ echo "[wire_enum_lock] ProtocolKind / ApiShape wire forms locked"
 if cargo test -p gw-core --test wire_enum_lock --quiet >/dev/null 2>&1; then
     ok "ProtocolKind / ApiShape wire forms locked"
 else
-    bad "wire enum drift — see docs/superpowers/specs/2026-05-28-systemic-fixes-design.md §6"
+    bad "wire enum drift — see docs/architecture.md"
 fi
 
 # ---------------------------------------------------------------------------
 # no_cached_body — ctx.cached_body removed in Phase B (2026-05-28).
 # Use ctx.body (RequestBodyView) instead.
-# Spec: docs/superpowers/specs/2026-05-28-systemic-fixes-design.md §4
+# Spec: docs/architecture.md
 # ---------------------------------------------------------------------------
 echo "[no_cached_body] ctx.cached_body removed in Phase B (2026-05-28); use ctx.body (RequestBodyView) instead"
 if rg -n 'cached_body' --type rust crates/ >/dev/null 2>&1; then

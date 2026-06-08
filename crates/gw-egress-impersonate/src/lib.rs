@@ -1,6 +1,6 @@
 //! In-process BoringSSL/wreq impersonating egress.
 //!
-//! Spec: `docs/superpowers/specs/2026-05-28-egress-impersonation-design.md`.
+//! Spec: `docs/spec/07-vendor-integration.md`.
 //! Pingora rustls (default path) and this crate's boring backend coexist in
 //! one binary; this crate runs a loopback HTTP/1 listener that the gateway
 //! targets when `Vendor.egress_mode == Impersonate{..}`.

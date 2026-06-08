@@ -1,6 +1,6 @@
 //! Detailed archive — per-surface, wire-fidelity request/response capture.
 //!
-//! Spec: `docs/superpowers/specs/2026-05-23-detailed-log-complete-design.md`.
+//! Spec: `docs/spec/06-billing-ledger.md`.
 //! Each Pingora filter that completes a surface calls `DetailedArchive::try_send`
 //! with a [`CapturedSurface`]; a background flusher pool encodes (raw/lz4/zstd)
 //! and XADDs to `usage:detailed`.

@@ -1,6 +1,6 @@
 //! ManagedLoop — self-healing background-loop contract.
 //!
-//! See `docs/superpowers/specs/2026-05-28-systemic-fixes-design.md` §5.
+//! See `docs/architecture.md`.
 
 use async_trait::async_trait;
 use std::sync::Arc;

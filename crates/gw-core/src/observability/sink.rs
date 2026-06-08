@@ -2,7 +2,7 @@
 //!
 //! All non-trivial error events (short-circuit bail, upstream connect failure,
 //! codec parse warn, background worker recover/fatal) call [`observe`].
-//! See `docs/superpowers/specs/2026-05-28-systemic-fixes-design.md` §3.
+//! See `docs/architecture.md`.
 
 use std::fmt;
 

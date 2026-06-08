@@ -8,7 +8,7 @@
 //! tunnel frame payload).
 //!
 //! ADR-T-2, ADR-T-3, ADR-T-4 in
-//! `docs/superpowers/specs/2026-05-22-tunnel-t-design.md`.
+//! `docs/spec/09-tunnel.md`.
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;

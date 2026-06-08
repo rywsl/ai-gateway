@@ -1,5 +1,5 @@
 //! Integration tests for the credit-lease layer (lease + coef + estimator).
-//! Spec: `docs/superpowers/specs/2026-05-29-credit-lease-design.md`.
+//! Spec: `docs/spec/06-billing-ledger.md`.
 //!
 //! These exercise the modules through their public re-exports as a request
 //! lifecycle would. Each test uses high, unique `coef_table_version` numbers

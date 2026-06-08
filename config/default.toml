@@ -72,7 +72,7 @@ key_id = "primary"
 
 [detailed_log]
 # Wire-fidelity request/response archive. Spec:
-# docs/superpowers/specs/2026-05-23-detailed-log-complete-design.md
+# docs/spec/06-billing-ledger.md
 enabled = true
 stream = "usage:detailed"
 maxlen = 10_000_000
@@ -107,7 +107,7 @@ required = false
 # binding in its moka cache. Production default is 30 min — long enough to
 # outlive most chat sessions, short enough that abandoned conversations
 # don't pin keys forever. Override via `GW_ROUTING__STICKY_TTL_SECS=<n>`.
-# ADR-S4 (docs/superpowers/specs/2026-05-22-e2e-skip-closure-design.md).
+# See docs/architecture.md.
 sticky_ttl_secs = 1800
 
 [routing.reservation]
@@ -187,7 +187,7 @@ turn_state_ttl_secs = 300
 
 [protection]
 # Hard overdraft protection — credit lease layer above the legacy soft defense.
-# See docs/superpowers/specs/2026-05-29-credit-lease-design.md.
+# See docs/spec/06-billing-ledger.md.
 # Kill switch. When false, Rust ignores `events:counter ns=protected_lease`
 # events and all requests use the legacy `frozen_micro` soft-defense path.
 # Go-side lease TTL, low-balance threshold, and overcommit ratio are NOT in

@@ -240,7 +240,7 @@ Field evidence:
 
 ### 5.2 Rust evidence
 
-- Split background / preset inventory: `docs/superpowers/specs/2026-05-19-gap-inventory.md:106-112`
+- Split background / preset inventory: `docs/ROADMAP.md`
 - Shared enum contract: `crates/gw-core/src/entity.rs:233-244`
 - `ModelGroup` payload field: `crates/gw-core/src/entity.rs:246-249`
 - Weighted scoring: `crates/gw-routing/src/pipeline/multi_dim.rs`

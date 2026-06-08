@@ -1,6 +1,6 @@
 //! `RequestBodyView` — explicit raw/decoded/outbound state.
 //!
-//! See `docs/superpowers/specs/2026-05-28-systemic-fixes-design.md` §4.
+//! See `docs/architecture.md`.
 //!
 //! Note on `max_bytes`: `gw_codec::compression::decode` does not enforce a
 //! size limit internally; callers that need one should check

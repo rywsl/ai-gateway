@@ -1,5 +1,5 @@
 -- 0004_capabilities.sql — model + vendor_key capability metadata for T3-C.
--- See ADR-G13-1 in docs/superpowers/specs/2026-05-21-known-gaps-design.md.
+-- See docs/ROADMAP.md (capability resolver / exclusive_capability_match).
 --
 -- Adds the per-model entity that T3-C's CapabilityResolver reads via
 -- EntityStore::model_or_load (loader landing in T3-C). The table follows

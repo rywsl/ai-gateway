@@ -4,7 +4,7 @@ Recorded 2026-05-29 after the credit-lease feature merge (15 commits, `credit-le
 
 These are known gaps, deferred items, and pre-existing issues surfaced (but not introduced) during implementation. Each is independently actionable; none blocks the credit-lease feature itself from shipping. Severity reflects estimated user/operator impact, not engineering effort.
 
-Related spec: [`docs/superpowers/specs/2026-05-29-credit-lease-design.md`](../superpowers/specs/2026-05-29-credit-lease-design.md)
+Related spec: [`docs/spec/06-billing-ledger.md`](../spec/06-billing-ledger.md)
 Related contract: [`docs/go-contracts/contract-change/2026-05-29-credit-lease.md`](../go-contracts/contract-change/2026-05-29-credit-lease.md)
 
 ---

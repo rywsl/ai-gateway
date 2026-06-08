@@ -32,7 +32,7 @@ const DLQ_MAXLEN: u64 = 100_000;
 /// inflight clear instruction. The flusher (or `sync_xadd` bypass) DELs
 /// `billing:inflight:<instance>:<request_id>:<attempt>` after — and only
 /// after — the corresponding `record` is XADD-confirmed on
-/// `usage:records`. See `docs/superpowers/specs/2026-05-29-billing-record-durability-design.md` §3.2 (DEL rule).
+/// `usage:records`. See `docs/spec/06-billing-ledger.md` (DEL rule).
 #[derive(Clone, Debug)]
 pub struct LedgerItem {
     pub record: UsageRecord,
@@ -310,8 +310,8 @@ async fn dlq_xadd(redis: &RedisCtx, wrapped: String) -> Result<(), String> {
 
 async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
     // Drain into parallel vectors: (payload, clear_opt). Per spec
-    // `docs/superpowers/specs/2026-05-29-billing-record-durability-design.md`
-    // §3.2 (DEL rule), the flusher only DELs the inflight key after the
+    // `docs/spec/06-billing-ledger.md`
+    // (DEL rule), the flusher only DELs the inflight key after the
     // matching record's XADD on `usage:records` is confirmed; DLQ / serialize-
     // fail / queue-fail paths leave the key alone so the reconciler can
     // surface them via CrashFallback.
