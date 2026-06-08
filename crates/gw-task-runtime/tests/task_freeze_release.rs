@@ -85,11 +85,7 @@ async fn normal_release_updates_lease_status_and_counter_atomically() {
 
     let score: Option<i64> = pool.next().zscore(&leases_key, task_id).await.unwrap();
     let status: String = pool.next().hget(&task_key, "status").await.unwrap();
-    let counter: i64 = pool
-        .next()
-        .get(&counter_key)
-        .await
-        .unwrap();
+    let counter: i64 = pool.next().get(&counter_key).await.unwrap();
     assert_eq!(score, None);
     assert_eq!(status, "released");
     assert_eq!(counter, 4_000);
@@ -139,11 +135,7 @@ async fn double_release_is_idempotent_and_counter_changes_once() {
         ReleaseOutcome::AlreadyReleased
     );
 
-    let counter: i64 = pool
-        .next()
-        .get(&counter_key)
-        .await
-        .unwrap();
+    let counter: i64 = pool.next().get(&counter_key).await.unwrap();
     assert_eq!(counter, 4_000);
 }
 
@@ -167,11 +159,7 @@ async fn unknown_task_returns_already_released_and_leaves_counter_unchanged() {
     let outcome = releaser.release(&uid, task_id, 1_000).await.unwrap();
     assert_eq!(outcome, ReleaseOutcome::AlreadyReleased);
 
-    let counter: i64 = pool
-        .next()
-        .get(&counter_key)
-        .await
-        .unwrap();
+    let counter: i64 = pool.next().get(&counter_key).await.unwrap();
     assert_eq!(counter, 5_000);
 }
 
