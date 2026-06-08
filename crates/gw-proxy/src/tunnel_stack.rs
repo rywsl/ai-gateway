@@ -31,6 +31,12 @@ use tokio::task::JoinHandle;
 pub enum TunnelPeerError {
     /// `ReconnectingTransport::current()` returned `None`.
     NoLive { node_id: String },
+    /// `SafeDnsResolver` resolved the target to a blocked/private address.
+    DnsBlocked {
+        host: String,
+        port: u16,
+        blocked_ip: std::net::IpAddr,
+    },
     /// `target_filter::assert_target_allowed` rejected the host:port.
     TargetDenied { host: String, port: u16 },
 }
@@ -148,6 +154,20 @@ impl TunnelStack {
         host: &str,
         port: u16,
     ) -> Result<HttpPeer, TunnelPeerError> {
+        if let Err(err) = self.dns.resolve(host).await {
+            metrics::counter!(
+                "gw_tunnel_open_total",
+                "node_id" => node_id.to_owned(),
+                "result" => "dns_blocked",
+            )
+            .increment(1);
+            return Err(TunnelPeerError::DnsBlocked {
+                host: host.to_owned(),
+                port,
+                blocked_ip: err.0,
+            });
+        }
+
         // Take one snapshot for the entire method so that a concurrent
         // reload_nodes() cannot cause the two node-lookup sites to disagree.
         let snapshot = self.nodes.load_full();
@@ -248,6 +268,8 @@ impl TunnelStack {
 mod tests {
     use super::*;
     use gw_tunnel_client::resolver::ProxyNodeView;
+    use gw_tunnel_client::safe_dns::{set_override, OverrideGuard};
+    use std::net::{IpAddr, Ipv4Addr};
 
     fn dummy_url() -> url::Url {
         "wss://node.example.com:443/tunnel".parse().unwrap()
@@ -304,5 +326,28 @@ mod tests {
         };
         let r = stack.resolve("openai", "k", &pref);
         assert_eq!(r, TunnelResolution::Use("a".into()));
+    }
+
+    #[tokio::test]
+    async fn peer_for_node_rejects_blocked_dns_before_transport() {
+        let _guard = OverrideGuard::new();
+        set_override(
+            "blocked.example.com",
+            vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
+        );
+        let stack = empty_stack(vec![view("n1", 10, &["openai"])]);
+
+        let err = stack
+            .peer_for_node("n1", "blocked.example.com", 443)
+            .await
+            .expect_err("blocked DNS must fail before tunnel liveness");
+        assert!(matches!(
+            err,
+            TunnelPeerError::DnsBlocked {
+                host,
+                port: 443,
+                ..
+            } if host == "blocked.example.com"
+        ));
     }
 }

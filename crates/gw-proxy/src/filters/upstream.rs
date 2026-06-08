@@ -513,6 +513,23 @@ pub async fn pick_peer(
                             )
                             .await;
                         }
+                        Err(crate::tunnel_stack::TunnelPeerError::DnsBlocked { .. }) => {
+                            metrics::counter!(
+                                "gw_tunnel_resolve_total",
+                                "result" => "dns_blocked"
+                            )
+                            .increment(1);
+                            return emit_envelope_and_bail(
+                                session,
+                                ctx,
+                                envelope_for(
+                                    codes::GW_TUNNEL_DNS_BLOCKED,
+                                    "tunnel target DNS resolved to blocked address",
+                                    502,
+                                ),
+                            )
+                            .await;
+                        }
                         Err(crate::tunnel_stack::TunnelPeerError::TargetDenied { .. }) => {
                             metrics::counter!("gw_tunnel_resolve_total", "result" => "denied")
                                 .increment(1);
