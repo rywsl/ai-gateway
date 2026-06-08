@@ -42,6 +42,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
 | [parts/05-wallet-payment.md](parts/05-wallet-payment.md) | **Wallet / Payment** | 钱包余额计数器、`wallets` / `payments` 表、支付状态枚举、webhook 归一化 payload、`usage:records` 与冻结/解冻衔接 |
 | [parts/06-subscription-video.md](parts/06-subscription-video.md) | **Subscription / Video** | 订阅套餐、用户订阅、视频任务状态机、`operation_id` 关联、订阅 entitlement 到 Rust permission merge 的投影规则 |
 | [parts/07-oauth-ldap.md](parts/07-oauth-ldap.md) | **OAuth / LDAP** | OAuth provider 配置、token exchange / refresh cache、LDAP bind 配置、group→permission mapping、`auth_configs` seed 机制 |
+| [parts/08-control-plane.md](parts/08-control-plane.md) | **Control Plane** | Rust↔Go 透明控制平面:配置下行(`config_*` + `events:entity ns=config`)、能力/状态上行(`gateway:instance:<id>:{capability,effective,runtime}`)、命令通道(`commands:gateway` + `cmd_ack`)。**目标契约(design 阶段)** |
 | [contract-change/](contract-change/) | **契约变更日志** | 每次跨进程契约改动的索引记录(触发 spec + parts 落点 + Go 模块) |
 | [contract-change/2026-05-29-vendor-validation.md](contract-change/2026-05-29-vendor-validation.md) | **Vendor validation** | EI-8 Go 写入期拒绝 tunnel+impersonate 冲突；EI-7 Go 管理动作清空 `vendor_keys.identity_snapshot` 并递增 `version` 以触发 Rust cache miss + 重新派生 |
 
@@ -79,6 +80,7 @@ PgSQL 同步表则携带 `version BIGINT`（详见 Part 03）。
 | `usage:records` | Rust Ledger flusher | Go settler | `go-billing-settler`（推荐） |
 | `usage:records:dlq` | Rust flusher（主路径失败） | Go drainer（可选） | `go-billing-dlq`（推荐） |
 | `usage:detailed` | Rust DetailedArchive flusher pool | Go drainer（**必需**） | `go-archive-drainer`（推荐） |
+| `commands:gateway` | **Go** | Rust StreamConsumer | `group:<instance_id>`（每副本独立 group,广播,SP-C） |
 
 **XREADGROUP 锚点**：Rust 启动期对 `events:*` 用 `$`（参 `crates/gw-store/src/stream_consumer.rs:41`），仅消费启动后事件；启动前状态靠冷加载链获取。Go consumer 自决（settle 通常从 `0` 开始消费全量）。
 
@@ -169,6 +171,7 @@ Rust 端对应指标（前缀 `gateway_*`）在 [`docs/architecture.md`](../arch
 | KEK 轮换状态机 | parts/03 §3.5 + architecture.md §4.3 |
 | 新增 counter:* key | parts/01 §1.4 或 parts/02 §2.5 |
 | 新增 Redis 黑名单 namespace（`jwt:blacklist` / `mgmt_token:blacklist` 等） | parts/01 §1.6 或 parts/02 §2.9 |
+| 控制平面接触点（`config_*` 表 / `events:entity ns=config` / `gateway:instance:<id>:{capability,effective,runtime,cmd_ack}` / `commands:gateway`） | parts/08 + 对应 [SP design doc](../design/) |
 | 任何新跨进程接触点 | 新加 part 或扩展现有 part；同步本文件 §2 |
 
 CLAUDE.md `§Sync rule` 应在本文件上线同 PR 内追加一行 `go-contracts/` 触发器（详见 §收尾 / 实施）。
