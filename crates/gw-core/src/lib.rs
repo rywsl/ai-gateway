@@ -13,16 +13,4 @@ pub mod traits;
 pub mod usage;
 pub mod versioned;
 
-pub mod ratelimit {
-    /// Owned by RL-Core (2026-05-19-ratelimit-rl-core.md). 此处仅占位，待 RL-Core 落地后整体替换为 use rl_core::*。
-    #[non_exhaustive]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub enum RateLimitKind {
-        Rpm,
-        Tpm,
-        Daily,
-        Monthly,
-        Concurrent,
-        Unknown,
-    }
-}
+pub mod ratelimit;

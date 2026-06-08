@@ -10,7 +10,7 @@ use super::class::{
 };
 use super::ir::ErrorIR;
 use super::ErrorCategory;
-use crate::ratelimit::RateLimitKind;
+use crate::ratelimit::{detect_rate_limit_kind, RateLimitKind};
 
 pub struct DefaultClassifier;
 
@@ -95,7 +95,7 @@ impl ErrorClassifier for DefaultClassifier {
         ctx: &ClassifyCtx<'_>,
         http_status: u16,
         headers: &dyn HeadersAccessor,
-        _vendor_payload: Option<&serde_json::Value>,
+        vendor_payload: Option<&serde_json::Value>,
     ) -> ClassifierOutcome {
         let retry_after = headers
             .get("retry-after")
@@ -157,20 +157,23 @@ impl ErrorClassifier for DefaultClassifier {
                 }),
                 ..Default::default()
             },
-            429 => ClassifierOutcome {
-                class: ErrorClass::RateLimitedUpstream(RateLimitKind::Unknown),
-                retryable: Retryability::CrossKey,
-                cooldown: Some(CooldownDirective {
-                    reason_code: 7,
-                    ttl_secs: retry_after.unwrap_or(60),
-                    reset_consecutive: false,
-                }),
-                rate_limit_hint: Some(RateLimitHint {
-                    kind: RateLimitKind::Unknown,
-                    retry_after_secs: retry_after,
-                }),
-                ..Default::default()
-            },
+            429 => {
+                let kind = detect_rate_limit_kind(headers, vendor_payload);
+                ClassifierOutcome {
+                    class: ErrorClass::RateLimitedUpstream(kind),
+                    retryable: Retryability::CrossKey,
+                    cooldown: Some(CooldownDirective {
+                        reason_code: 7,
+                        ttl_secs: retry_after.unwrap_or(60),
+                        reset_consecutive: false,
+                    }),
+                    rate_limit_hint: Some(RateLimitHint {
+                        kind,
+                        retry_after_secs: retry_after,
+                    }),
+                    ..Default::default()
+                }
+            }
             529 => ClassifierOutcome {
                 class: ErrorClass::UpstreamTransient,
                 retryable: Retryability::CrossKey,

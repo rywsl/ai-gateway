@@ -18,6 +18,16 @@ impl HeadersAccessor for H {
     }
 }
 
+struct TokenLimitHeaders;
+impl HeadersAccessor for TokenLimitHeaders {
+    fn get(&self, name: &str) -> Option<&str> {
+        match name {
+            "anthropic-ratelimit-tokens-remaining" => Some("0"),
+            _ => None,
+        }
+    }
+}
+
 fn ctx() -> ClassifyCtx<'static> {
     ClassifyCtx {
         key_id: "k1",
@@ -142,6 +152,17 @@ fn unused_param_rate_limit_kind_present() {
     let oc = DefaultClassifier.classify_upstream(&ctx(), 429, &H { rh: None }, None);
     let hint = oc.rate_limit_hint.as_ref().unwrap();
     assert_eq!(hint.kind, RateLimitKind::Unknown);
+}
+
+#[test]
+fn upstream_429_rate_limit_hint_uses_detected_kind() {
+    let oc = DefaultClassifier.classify_upstream(&ctx(), 429, &TokenLimitHeaders, None);
+    assert_eq!(
+        oc.class,
+        ErrorClass::RateLimitedUpstream(RateLimitKind::Tpm)
+    );
+    let hint = oc.rate_limit_hint.as_ref().unwrap();
+    assert_eq!(hint.kind, RateLimitKind::Tpm);
 }
 
 #[allow(dead_code)]

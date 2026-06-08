@@ -18,7 +18,9 @@ use gw_auth::ratelimit::adaptive::AdaptiveRpmManager;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_codec::gemini::files::GeminiFilesGateway;
 use gw_core::error::codes;
+use gw_core::error::HeadersAccessor;
 use gw_core::ids::{RequestId, TraceId};
+use gw_core::ratelimit::{detect_rate_limit_kind, RateLimitKind};
 use gw_health::KeyHealthStore;
 use gw_ledger::ClearKey;
 use gw_ledger::FreezeGuard;
@@ -181,6 +183,14 @@ fn detect_rpm_kind(resp: &ResponseHeader) -> bool {
     ]
     .iter()
     .any(|h| header_u32(resp, h).is_some())
+}
+
+struct ResponseHeaderAccessor<'a>(&'a ResponseHeader);
+
+impl HeadersAccessor for ResponseHeaderAccessor<'_> {
+    fn get(&self, name: &str) -> Option<&str> {
+        self.0.headers.get(name)?.to_str().ok()
+    }
 }
 
 pub struct LlmGateway {
@@ -589,6 +599,7 @@ impl ProxyHttp for LlmGateway {
             &self.strategies,
             &self.latency_tracker,
             &self.adaptive_rpm,
+            &self.ratelimit,
             &self.egress,
             self.egress_disabled,
             #[cfg(feature = "tunnel")]
@@ -851,14 +862,19 @@ impl ProxyHttp for LlmGateway {
         if let (None, Some(status)) = (egress_class.as_ref(), ctx.upstream_status) {
             if status == 429 {
                 if let Some(key) = ctx.picked_vendor_key.as_ref() {
-                    self.adaptive_rpm.observe_429(
+                    let rate_limit_kind =
+                        detect_rate_limit_kind(&ResponseHeaderAccessor(upstream_response), None);
+                    self.adaptive_rpm.observe_429_with_kind(
                         &key.key_id,
+                        rate_limit_kind,
                         key.rpm_limit,
                         rpm_limit_header(upstream_response),
                         key.rpm_limit,
                         header_u32(upstream_response, "retry-after"),
                     );
-                    if detect_rpm_kind(upstream_response) {
+                    if matches!(rate_limit_kind, RateLimitKind::Rpm)
+                        || detect_rpm_kind(upstream_response)
+                    {
                         metrics::counter!("gw_adaptive_rpm_rpm_detected_total").increment(1);
                     }
                 }

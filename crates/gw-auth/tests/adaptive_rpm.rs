@@ -1,5 +1,6 @@
 use gw_auth::ratelimit::adaptive::{AdaptiveCfg, AdaptiveRpmManager, Confidence, KeyAdaptiveState};
 use gw_core::ids::KeyId;
+use gw_core::ratelimit::RateLimitKind;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -80,6 +81,34 @@ fn test_observe_429_with_header_learns_after_2() {
     assert_eq!(state.consistent_observations, 2);
     assert_eq!(state.last_observed_limit, Some(60));
     assert!(state.last_429_at_ms > 0);
+}
+
+#[test]
+fn test_observe_429_with_kind_skips_known_non_rpm_limits() {
+    let manager = AdaptiveRpmManager::new(AdaptiveCfg::default());
+    let key_id = KeyId::from("vendor-key-non-rpm");
+
+    for kind in [
+        RateLimitKind::Tpm,
+        RateLimitKind::Daily,
+        RateLimitKind::Monthly,
+        RateLimitKind::Concurrent,
+    ] {
+        manager.observe_429_with_kind(&key_id, kind, 120, Some(60), 120, Some(30));
+    }
+
+    assert!(manager.state.get(&key_id).is_none());
+}
+
+#[test]
+fn test_observe_429_with_kind_keeps_unknown_fallback_learnable() {
+    let manager = AdaptiveRpmManager::new(AdaptiveCfg::default());
+    let key_id = KeyId::from("vendor-key-unknown-fallback");
+
+    manager.observe_429_with_kind(&key_id, RateLimitKind::Unknown, 120, Some(60), 120, None);
+    manager.observe_429_with_kind(&key_id, RateLimitKind::Unknown, 120, Some(60), 120, None);
+
+    assert_eq!(manager.state.get(&key_id).unwrap().learned_rpm, Some(60));
 }
 
 #[test]

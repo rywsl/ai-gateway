@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use gw_core::ids::KeyId;
+use gw_core::ratelimit::RateLimitKind;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,6 +43,33 @@ impl AdaptiveRpmManager {
         current_local_rpm: u32,
         retry_after_secs: Option<u32>,
     ) {
+        self.observe_429_with_kind(
+            key_id,
+            RateLimitKind::Unknown,
+            configured_rpm,
+            header_limit,
+            current_local_rpm,
+            retry_after_secs,
+        );
+    }
+
+    pub fn observe_429_with_kind(
+        &self,
+        key_id: &KeyId,
+        kind: RateLimitKind,
+        configured_rpm: u32,
+        header_limit: Option<u32>,
+        current_local_rpm: u32,
+        retry_after_secs: Option<u32>,
+    ) {
+        if !matches!(kind, RateLimitKind::Rpm | RateLimitKind::Unknown) {
+            metrics::counter!(
+                "gw_adaptive_rpm_observe_skipped_total",
+                "kind" => rate_limit_kind_label(kind),
+            )
+            .increment(1);
+            return;
+        }
         metrics::counter!("gw_adaptive_rpm_observe_total").increment(1);
         let now = now_ms();
         let observed_limit = header_limit.unwrap_or(current_local_rpm);
@@ -178,6 +206,18 @@ impl AdaptiveRpmManager {
         // Also drop the cached limiter so an evicted key doesn't leave a stale
         // RateLimiter in the cache forever (audit 2026-05-30 §1.8 mem-leak fix).
         self.limiters.remove(key_id);
+    }
+}
+
+fn rate_limit_kind_label(kind: RateLimitKind) -> &'static str {
+    match kind {
+        RateLimitKind::Rpm => "rpm",
+        RateLimitKind::Tpm => "tpm",
+        RateLimitKind::Daily => "daily",
+        RateLimitKind::Monthly => "monthly",
+        RateLimitKind::Concurrent => "concurrent",
+        RateLimitKind::Unknown => "unknown",
+        _ => "unknown",
     }
 }
 

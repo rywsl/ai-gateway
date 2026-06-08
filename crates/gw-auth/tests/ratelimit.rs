@@ -1,7 +1,7 @@
 //! Tests for [`gw_auth::ratelimit`].
 
 use gw_auth::ratelimit::RateLimitGuard;
-use gw_core::ids::UserId;
+use gw_core::ids::{KeyId, UserId};
 use gw_core::permissions::{MarkupChainSnapshot, MergedPermissions};
 use std::collections::HashSet;
 
@@ -89,4 +89,56 @@ fn tpm_zero_limit_disables_enforcement() {
     let p = perm(60); // tpm_limit = 0
     g.deduct_tpm(&uid, &p, 999_999)
         .expect("tpm_limit=0 means enforcement off");
+}
+
+#[test]
+fn key_rpm_limit_rejects_with_stable_code() {
+    let g = RateLimitGuard::new();
+    let key = KeyId::from("vendor-key-rpm-1");
+
+    g.check_key(&key, 1).expect("first request within key rpm");
+    let err = g.check_key(&key, 1).unwrap_err();
+
+    assert_eq!(err.status, 429);
+    assert_eq!(&*err.code, "GW_QUOTA_RPM_KEY_EXCEEDED");
+    assert_eq!(err.retry_after_secs, Some(60));
+}
+
+#[test]
+fn key_rpm_zero_disables_enforcement() {
+    let g = RateLimitGuard::new();
+    let key = KeyId::from("vendor-key-unlimited");
+
+    for _ in 0..100 {
+        g.check_key(&key, 0)
+            .expect("configured key rpm 0 means unlimited");
+    }
+}
+
+#[test]
+fn key_rpm_buckets_are_per_key() {
+    let g = RateLimitGuard::new();
+    let a = KeyId::from("vendor-key-a");
+    let b = KeyId::from("vendor-key-b");
+
+    g.check_key(&a, 1).expect("a first request ok");
+    assert!(g.check_key(&a, 1).is_err(), "a should be exhausted");
+
+    g.check_key(&b, 1)
+        .expect("b has an independent one-request bucket");
+}
+
+#[test]
+fn key_rpm_override_and_reset_rebuild_limiter() {
+    let g = RateLimitGuard::new();
+    let key = KeyId::from("vendor-key-override");
+
+    g.override_key_rpm(&key, 1);
+    g.check_key(&key, 60)
+        .expect("first request under override should pass");
+    assert!(g.check_key(&key, 60).is_err(), "override rpm=1 should bind");
+
+    g.reset_key_rpm(&key);
+    g.check_key(&key, 60)
+        .expect("reset should rebuild from configured rpm");
 }

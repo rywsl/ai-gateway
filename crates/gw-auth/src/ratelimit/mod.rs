@@ -28,6 +28,8 @@ pub struct RateLimitGuard {
     pub per_user: DashMap<UserId, Arc<DefaultDirectRateLimiter>>,
     pub per_user_tpm: DashMap<UserId, Arc<DefaultDirectRateLimiter>>,
     pub per_user_streams: DashMap<UserId, Arc<AtomicUsize>>,
+    pub per_key: DashMap<KeyId, (u32, Arc<DefaultDirectRateLimiter>)>,
+    pub per_key_overrides: DashMap<KeyId, u32>,
     pub total_streams: Arc<AtomicUsize>,
 }
 
@@ -43,6 +45,8 @@ impl RateLimitGuard {
             per_user: DashMap::new(),
             per_user_tpm: DashMap::new(),
             per_user_streams: DashMap::new(),
+            per_key: DashMap::new(),
+            per_key_overrides: DashMap::new(),
             total_streams: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -62,6 +66,48 @@ impl RateLimitGuard {
             }
         }
         Ok(RateLimitTicket)
+    }
+
+    pub fn check_key(
+        &self,
+        key_id: &KeyId,
+        configured_rpm: u32,
+    ) -> Result<RateLimitTicket, ErrorIR<'static>> {
+        let limit = self
+            .per_key_overrides
+            .get(key_id)
+            .map(|v| *v)
+            .unwrap_or(configured_rpm);
+        if limit == 0 {
+            return Ok(RateLimitTicket);
+        }
+
+        let limiter = {
+            let mut entry = self.per_key.entry(key_id.clone()).or_insert_with(|| {
+                let q = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
+                (limit, Arc::new(RateLimiter::direct(q)))
+            });
+            if entry.0 != limit {
+                let q = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
+                *entry = (limit, Arc::new(RateLimiter::direct(q)));
+            }
+            entry.1.clone()
+        };
+
+        if limiter.check().is_err() {
+            return Err(key_rpm_err());
+        }
+        Ok(RateLimitTicket)
+    }
+
+    pub fn override_key_rpm(&self, key_id: &KeyId, rpm: u32) {
+        self.per_key_overrides.insert(key_id.clone(), rpm);
+        self.per_key.remove(key_id);
+    }
+
+    pub fn reset_key_rpm(&self, key_id: &KeyId) {
+        self.per_key_overrides.remove(key_id);
+        self.per_key.remove(key_id);
     }
 
     pub fn check_stream_slot(
@@ -120,6 +166,7 @@ impl RateLimitGuard {
     }
 }
 
+#[derive(Debug)]
 pub struct RateLimitTicket;
 
 pub struct StreamSlot {
@@ -142,6 +189,20 @@ fn rpm_err() -> ErrorIR<'static> {
         upstream_status: None,
         code: Cow::Borrowed(codes::GW_QUOTA_RPM_EXCEEDED),
         message: Cow::Borrowed("rpm exceeded"),
+        retryable: true,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: Some(60),
+    }
+}
+
+fn key_rpm_err() -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::ClientQuota,
+        status: 429,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_QUOTA_RPM_KEY_EXCEEDED),
+        message: Cow::Borrowed("vendor key rpm exceeded"),
         retryable: true,
         upstream_raw: None,
         request_id: "",

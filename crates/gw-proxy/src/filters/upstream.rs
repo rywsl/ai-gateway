@@ -107,6 +107,7 @@ pub async fn pick_peer(
     strategies: &Arc<StrategySet>,
     latency_tracker: &Arc<LatencyTracker>,
     adaptive_rpm: &Arc<gw_auth::ratelimit::adaptive::AdaptiveRpmManager>,
+    ratelimit: &Arc<gw_auth::ratelimit::RateLimitGuard>,
     egress: &Arc<gw_egress_impersonate::EgressHandle>,
     egress_disabled: bool,
     #[cfg(feature = "tunnel")] tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
@@ -342,6 +343,9 @@ pub async fn pick_peer(
         }
     };
     let picked_arc = Arc::clone(picked);
+    if let Err(err) = ratelimit.check_key(&picked_arc.key_id, picked_arc.rpm_limit) {
+        return emit_envelope_and_bail(session, ctx, err).await;
+    }
 
     let vendor = match store.vendor_or_load(&picked_arc.vendor_id).await {
         Some(v) => v,
