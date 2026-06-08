@@ -5,13 +5,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context};
 use fred::clients::RedisPool;
-use fred::interfaces::LuaInterface;
+use fred::interfaces::{KeysInterface, LuaInterface};
+use fred::types::{Expiration, SetOptions};
 use gw_task::scripts::RECOVER_LEASE_LUA;
 use gw_task::{TaskContract, TaskError, TaskId};
 use tokio_util::sync::CancellationToken;
 
 #[allow(async_fn_in_trait)]
 pub trait LeaseRecoveryStore: Clone + Send + Sync + 'static {
+    async fn try_acquire_watchdog_leader(&self, ttl: Duration) -> anyhow::Result<bool>;
+
     async fn recover_expired(&self, now_ms: u64, limit: usize) -> anyhow::Result<Vec<TaskId>>;
 }
 
@@ -20,6 +23,7 @@ pub struct RedisLeaseRecoveryStore {
     pool: RedisPool,
     leases_key: String,
     queue_key: String,
+    watchdog_lock_key: String,
     lease_seconds: u64,
     script_sha: String,
 }
@@ -44,6 +48,7 @@ impl RedisLeaseRecoveryStore {
             pool,
             leases_key: format!("{prefix}tasks:leases"),
             queue_key: format!("{prefix}tasks:queue"),
+            watchdog_lock_key: format!("{prefix}lock:tasks:watchdog"),
             lease_seconds,
             script_sha,
         })
@@ -51,6 +56,23 @@ impl RedisLeaseRecoveryStore {
 }
 
 impl LeaseRecoveryStore for RedisLeaseRecoveryStore {
+    async fn try_acquire_watchdog_leader(&self, ttl: Duration) -> anyhow::Result<bool> {
+        let ttl_ms = ttl.as_millis().max(1).min(i64::MAX as u128) as i64;
+        let result: Option<String> = self
+            .pool
+            .next()
+            .set(
+                &self.watchdog_lock_key,
+                "1",
+                Some(Expiration::PX(ttl_ms)),
+                Some(SetOptions::NX),
+                false,
+            )
+            .await
+            .context("acquire task watchdog leader lock")?;
+        Ok(result.is_some())
+    }
+
     async fn recover_expired(&self, now_ms: u64, limit: usize) -> anyhow::Result<Vec<TaskId>> {
         let client = self.pool.next();
         let keys = vec![self.leases_key.as_str(), self.queue_key.as_str()];
@@ -83,6 +105,7 @@ impl LeaseRecoveryStore for RedisLeaseRecoveryStore {
 #[derive(Clone, Debug)]
 pub struct WatchdogLoopConfig {
     pub check_interval: Duration,
+    pub leader_ttl: Duration,
     pub recover_limit: usize,
     pub cancellation_token: CancellationToken,
 }
@@ -91,6 +114,7 @@ impl Default for WatchdogLoopConfig {
     fn default() -> Self {
         Self {
             check_interval: Duration::from_secs(5),
+            leader_ttl: Duration::from_secs(10),
             recover_limit: 100,
             cancellation_token: CancellationToken::new(),
         }
@@ -132,6 +156,13 @@ where
     }
 
     pub async fn run_once(&self) -> anyhow::Result<usize> {
+        if !self
+            .recovery
+            .try_acquire_watchdog_leader(self.cfg.leader_ttl)
+            .await?
+        {
+            return Ok(0);
+        }
         let now = now_ms();
         let expired = self
             .recovery

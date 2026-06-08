@@ -27,11 +27,10 @@ async fn make_pool(url: &str) -> RedisPool {
 }
 
 fn keys(uid: &UserId, task_id: &str) -> (String, String, String) {
-    let tag = format!("{{user:{}}}", uid.as_ref());
     (
-        format!("{tag}:tasks:leases"),
-        format!("{tag}:entity:task:{task_id}"),
-        format!("{tag}:counter:task_frozen_micro"),
+        "tasks:leases".to_string(),
+        format!("entity:task:{task_id}"),
+        format!("counter:user:{}:task_frozen_micro", uid.as_ref()),
     )
 }
 
@@ -41,7 +40,7 @@ fn lua_script_contains_single_atomic_release_sequence() {
     assert!(script.contains("redis.call('ZREM'"));
     assert!(script.contains("return 'already_released'"));
     assert!(script.contains("redis.call('HSET'"));
-    assert!(script.contains("redis.call('HINCRBY'"));
+    assert!(script.contains("redis.call('INCRBY'"));
     assert!(script.contains("return 'ok'"));
     assert_eq!(script.matches("redis.call(").count(), 3);
 }
@@ -77,7 +76,7 @@ async fn normal_release_updates_lease_status_and_counter_atomically() {
         .unwrap();
     let _: () = pool
         .next()
-        .hset(&counter_key, ("frozen_micro", 5_000_i64))
+        .set(&counter_key, 5_000_i64, None, None, false)
         .await
         .unwrap();
 
@@ -88,7 +87,7 @@ async fn normal_release_updates_lease_status_and_counter_atomically() {
     let status: String = pool.next().hget(&task_key, "status").await.unwrap();
     let counter: i64 = pool
         .next()
-        .hget(&counter_key, "frozen_micro")
+        .get(&counter_key)
         .await
         .unwrap();
     assert_eq!(score, None);
@@ -127,7 +126,7 @@ async fn double_release_is_idempotent_and_counter_changes_once() {
         .unwrap();
     let _: () = pool
         .next()
-        .hset(&counter_key, ("frozen_micro", 5_000_i64))
+        .set(&counter_key, 5_000_i64, None, None, false)
         .await
         .unwrap();
 
@@ -142,7 +141,7 @@ async fn double_release_is_idempotent_and_counter_changes_once() {
 
     let counter: i64 = pool
         .next()
-        .hget(&counter_key, "frozen_micro")
+        .get(&counter_key)
         .await
         .unwrap();
     assert_eq!(counter, 4_000);
@@ -161,7 +160,7 @@ async fn unknown_task_returns_already_released_and_leaves_counter_unchanged() {
     let (_, _, counter_key) = keys(&uid, task_id);
     let _: () = pool
         .next()
-        .hset(&counter_key, ("frozen_micro", 5_000_i64))
+        .set(&counter_key, 5_000_i64, None, None, false)
         .await
         .unwrap();
 
@@ -170,7 +169,7 @@ async fn unknown_task_returns_already_released_and_leaves_counter_unchanged() {
 
     let counter: i64 = pool
         .next()
-        .hget(&counter_key, "frozen_micro")
+        .get(&counter_key)
         .await
         .unwrap();
     assert_eq!(counter, 5_000);

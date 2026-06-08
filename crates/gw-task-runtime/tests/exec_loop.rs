@@ -59,6 +59,25 @@ impl MemoryContract {
 }
 
 impl TaskContract for MemoryContract {
+    async fn freeze_task(
+        &self,
+        _user_id: &str,
+        _task_id: &TaskId,
+        _amount: i64,
+        _available_balance_micro: Option<i64>,
+    ) -> Result<(), TaskError> {
+        Ok(())
+    }
+
+    async fn release_task_freeze(
+        &self,
+        _user_id: &str,
+        _task_id: &TaskId,
+        _amount: i64,
+    ) -> Result<(), TaskError> {
+        Ok(())
+    }
+
     async fn submit(&self, record: TaskRecord) -> Result<TaskId, TaskError> {
         let id = record.id;
         self.inner.lock().await.record = Some(record);
@@ -239,6 +258,26 @@ async fn http_server(status: u16, body: &'static str, delay: Duration) -> Socket
     addr
 }
 
+async fn polling_http_server(responses: Vec<(u16, &'static str)>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind polling test server");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        for (status, body) in responses {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    addr
+}
+
 fn config() -> ExecLoopConfig {
     ExecLoopConfig {
         consumer_name: "worker-test".to_string(),
@@ -315,6 +354,44 @@ async fn test_exec_loop_settles_on_success() {
             .and_then(|value| value.get("result"))
             .and_then(|value| value.as_str()),
         Some("done")
+    );
+}
+
+#[tokio::test]
+async fn test_exec_loop_polls_provider_task_until_terminal() {
+    let addr = polling_http_server(vec![
+        (
+            202,
+            r#"{"provider_task_id":"provider-poll","status":"running","status_url":"/poll/provider-poll"}"#,
+        ),
+        (
+            200,
+            r#"{"provider_task_id":"provider-poll","status":"succeeded","result":"done"}"#,
+        ),
+    ])
+    .await;
+    let contract = MemoryContract::enqueue(sample_record(format!("http://{addr}/submit"))).await;
+    let mut cfg = config();
+    cfg.poll_initial_backoff = Duration::from_millis(1);
+    cfg.poll_max_backoff = Duration::from_millis(1);
+    let loop_ = ExecLoop::new(contract.clone(), reqwest::Client::new(), cfg);
+
+    loop_.run_once().await.expect("run once");
+
+    let settlements = contract.settlements().await;
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].0, TaskStatus::Succeeded);
+    assert_eq!(
+        settlements[0]
+            .1
+            .as_ref()
+            .and_then(|value| value.get("result"))
+            .and_then(|value| value.as_str()),
+        Some("done")
+    );
+    assert_eq!(
+        contract.loaded().await.provider_task_id.as_deref(),
+        Some("provider-poll")
     );
 }
 

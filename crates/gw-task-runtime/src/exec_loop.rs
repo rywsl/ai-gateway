@@ -62,6 +62,8 @@ pub struct ExecLoopConfig {
     pub idle_sleep: Duration,
     pub default_timeout: TaskTimeouts,
     pub timeouts: HashMap<TaskTimeoutKey, TaskTimeouts>,
+    pub poll_initial_backoff: Duration,
+    pub poll_max_backoff: Duration,
     pub global_concurrency: usize,
     pub per_vendor_concurrency: usize,
     pub per_model_concurrency: usize,
@@ -76,6 +78,8 @@ impl Default for ExecLoopConfig {
             idle_sleep: Duration::from_millis(100),
             default_timeout: TaskTimeouts::default(),
             timeouts: HashMap::new(),
+            poll_initial_backoff: Duration::from_secs(1),
+            poll_max_backoff: Duration::from_secs(30),
             global_concurrency: 128,
             per_vendor_concurrency: 32,
             per_model_concurrency: 32,
@@ -278,7 +282,7 @@ where
         let body = upstream_body(record);
         let response = self
             .http
-            .post(url)
+            .post(&url)
             .timeout(submit_timeout)
             .json(&body)
             .send()
@@ -301,20 +305,72 @@ where
         if !status.is_success() {
             return Err(anyhow!("upstream status {}: {}", status.as_u16(), text));
         }
-        let payload = if text.trim().is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&text).context("decode upstream task response json")?
+        let mut payload = parse_response_payload(&text)?;
+        let mut current_provider_task_id = provider_task_id(&payload);
+        let Some(mut current_poll_url) = poll_url(&url, record, &payload)? else {
+            return Ok(UpstreamSuccess {
+                payload,
+                provider_task_id: current_provider_task_id,
+            });
         };
-        let provider_task_id = payload
-            .get("provider_task_id")
-            .or_else(|| payload.get("id"))
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned);
-        Ok(UpstreamSuccess {
-            payload,
-            provider_task_id,
-        })
+        if !should_poll(status, &payload) {
+            return Ok(UpstreamSuccess {
+                payload,
+                provider_task_id: current_provider_task_id,
+            });
+        }
+
+        let mut backoff = self.cfg.poll_initial_backoff;
+        loop {
+            tokio::time::sleep(backoff).await;
+            let response = self
+                .http
+                .get(&current_poll_url)
+                .timeout(submit_timeout)
+                .send()
+                .await
+                .map_err(|err| {
+                    if err.is_timeout() {
+                        anyhow!(
+                            "upstream poll timeout after {} ms",
+                            submit_timeout.as_millis()
+                        )
+                    } else {
+                        anyhow!(err).context("poll upstream task")
+                    }
+                })?;
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .context("read upstream poll response")?;
+            if !status.is_success() {
+                return Err(anyhow!(
+                    "upstream poll status {}: {}",
+                    status.as_u16(),
+                    text
+                ));
+            }
+            payload = parse_response_payload(&text)?;
+            current_provider_task_id = provider_task_id(&payload).or(current_provider_task_id);
+            if let Some(next_poll_url) = poll_url(&url, record, &payload)? {
+                current_poll_url = next_poll_url;
+            }
+            match provider_task_state(&payload) {
+                Some(ProviderTaskState::Succeeded) | None => {
+                    return Ok(UpstreamSuccess {
+                        payload,
+                        provider_task_id: current_provider_task_id,
+                    });
+                }
+                Some(ProviderTaskState::Failed) => {
+                    return Err(anyhow!("upstream task failed: {}", payload));
+                }
+                Some(ProviderTaskState::Pending) => {
+                    backoff = (backoff * 2).min(self.cfg.poll_max_backoff);
+                }
+            }
+        }
     }
 }
 
@@ -332,6 +388,78 @@ fn settle_amount(record: &TaskRecord, succeeded: bool, elapsed: Duration) -> i64
 struct UpstreamSuccess {
     payload: serde_json::Value,
     provider_task_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderTaskState {
+    Pending,
+    Succeeded,
+    Failed,
+}
+
+fn parse_response_payload(text: &str) -> anyhow::Result<serde_json::Value> {
+    if text.trim().is_empty() {
+        Ok(serde_json::json!({}))
+    } else {
+        serde_json::from_str(text).context("decode upstream task response json")
+    }
+}
+
+fn provider_task_id(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("provider_task_id")
+        .or_else(|| payload.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn provider_task_state(payload: &serde_json::Value) -> Option<ProviderTaskState> {
+    let status = payload
+        .get("status")
+        .or_else(|| payload.get("state"))
+        .and_then(serde_json::Value::as_str)?
+        .to_ascii_lowercase();
+    match status.as_str() {
+        "queued" | "pending" | "running" | "in_progress" | "processing" => {
+            Some(ProviderTaskState::Pending)
+        }
+        "succeeded" | "completed" | "complete" | "done" | "success" => {
+            Some(ProviderTaskState::Succeeded)
+        }
+        "failed" | "cancelled" | "canceled" | "error" => Some(ProviderTaskState::Failed),
+        _ => None,
+    }
+}
+
+fn should_poll(status: reqwest::StatusCode, payload: &serde_json::Value) -> bool {
+    matches!(
+        provider_task_state(payload),
+        Some(ProviderTaskState::Pending)
+    ) || (status == reqwest::StatusCode::ACCEPTED && provider_task_id(payload).is_some())
+}
+
+fn poll_url(
+    submit_url: &str,
+    record: &TaskRecord,
+    payload: &serde_json::Value,
+) -> anyhow::Result<Option<String>> {
+    let raw = payload
+        .get("status_url")
+        .or_else(|| payload.get("poll_url"))
+        .or_else(|| record.input_payload.get("poll_url"))
+        .and_then(serde_json::Value::as_str);
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return Ok(Some(raw.to_string()));
+    }
+    let base = reqwest::Url::parse(submit_url).context("parse submit url for poll")?;
+    Ok(Some(
+        base.join(raw)
+            .with_context(|| format!("resolve poll url {raw}"))?
+            .to_string(),
+    ))
 }
 
 fn upstream_url(record: &TaskRecord) -> anyhow::Result<String> {

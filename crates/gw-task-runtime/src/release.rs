@@ -10,8 +10,9 @@ pub const TASK_FREEZE_RELEASE_LUA: &str = include_str!("lua/task_freeze_release.
 /// Redis-backed implementation of [`TaskFreezeRelease`].
 ///
 /// The release operation is a single Lua script, keeping lease removal,
-/// task status mutation, and frozen-counter decrement atomic. All keys share
-/// a `{user:<uid>}` hash tag so Redis Cluster places them in one slot.
+/// task status mutation, and frozen-counter decrement atomic. Keys match the
+/// task contract namespace: `tasks:leases`, `entity:task:*`, and scalar
+/// `counter:user:*:task_frozen_micro`.
 #[derive(Clone)]
 pub struct RedisTaskFreezeRelease {
     pool: RedisPool,
@@ -44,10 +45,9 @@ impl TaskFreezeRelease for RedisTaskFreezeRelease {
         task_id: &str,
         frozen_amount: u64,
     ) -> Result<ReleaseOutcome, anyhow::Error> {
-        let tag = format!("{{user:{}}}", uid.as_ref());
-        let leases_key = format!("{tag}:tasks:leases");
-        let task_key = format!("{tag}:entity:task:{task_id}");
-        let counter_key = format!("{tag}:counter:task_frozen_micro");
+        let leases_key = "tasks:leases".to_string();
+        let task_key = format!("entity:task:{task_id}");
+        let counter_key = format!("counter:user:{}:task_frozen_micro", uid.as_ref());
         let amount = frozen_amount.to_string();
 
         let client = self.pool.next();

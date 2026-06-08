@@ -19,6 +19,16 @@ fn test_settle_lua_atomic_state_transition() {
     assert!(SETTLE_LUA.contains("ZREM"));
     assert!(SETTLE_LUA.contains("KEYS[1]"));
     assert!(SETTLE_LUA.contains("KEYS[2]"));
+    assert!(
+        SETTLE_LUA.contains("INCRBY")
+            && SETTLE_LUA.contains("KEYS[3]")
+            && SETTLE_LUA.contains("KEYS[4]"),
+        "settle must release task freeze and deduct actual balance via scalar counters"
+    );
+    assert!(
+        SETTLE_LUA.contains("XADD") && SETTLE_LUA.contains("KEYS[5]"),
+        "settle must emit a usage record atomically"
+    );
     assert!(SETTLE_LUA.contains("ARGV["));
 }
 

@@ -1,5 +1,5 @@
 use fred::clients::RedisPool;
-use fred::interfaces::{ClientLike, HashesInterface, StreamsInterface};
+use fred::interfaces::{ClientLike, HashesInterface, KeysInterface, StreamsInterface};
 use fred::types::{ConnectionConfig, PerformanceConfig, ReconnectPolicy, RedisConfig, RedisValue};
 use gw_task::{
     redis_contract::RedisTaskContract, TaskContract, TaskId, TaskKind, TaskRecord, TaskStatus,
@@ -142,4 +142,50 @@ async fn test_claim_xreadgroup() {
     assert_eq!(claimed.record.id, record.id);
     assert_eq!(claimed.record.status, TaskStatus::Running);
     assert_eq!(claimed.record.worker_id.as_deref(), Some("worker-1"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker (testcontainers Redis)"]
+async fn test_settle_releases_freeze_deducts_and_emits_usage() {
+    let pool = docker_pool().await;
+    let contract = RedisTaskContract::new(pool.clone()).await.unwrap();
+    let record = sample_record();
+
+    contract
+        .freeze_task(
+            &record.user_id,
+            &record.id,
+            record.frozen_micro,
+            Some(10_000),
+        )
+        .await
+        .unwrap();
+    contract.submit(record.clone()).await.unwrap();
+    contract.claim("worker-1").await.unwrap().unwrap();
+    contract
+        .settle(
+            &record.id,
+            TaskStatus::Succeeded,
+            Some(serde_json::json!({"ok": true})),
+            None,
+            77,
+        )
+        .await
+        .unwrap();
+
+    let task_frozen: Option<i64> = pool
+        .next()
+        .get(format!("counter:user:{}:task_frozen_micro", record.user_id))
+        .await
+        .unwrap();
+    let deducted: Option<i64> = pool
+        .next()
+        .get(format!("counter:user:{}:deducted_micro", record.user_id))
+        .await
+        .unwrap();
+    let usage_len: i64 = pool.next().xlen("usage:records").await.unwrap();
+
+    assert_eq!(task_frozen.unwrap_or_default(), 0);
+    assert_eq!(deducted.unwrap_or_default(), 77);
+    assert_eq!(usage_len, 1);
 }

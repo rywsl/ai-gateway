@@ -47,6 +47,8 @@ struct MemoryTaskContract {
     submitted: Arc<Mutex<Vec<TaskRecord>>>,
     records: Arc<Mutex<std::collections::HashMap<TaskId, TaskRecord>>>,
     cancelled: Arc<Mutex<Vec<(TaskId, CancelReason)>>>,
+    freezes: Arc<Mutex<Vec<(String, TaskId, i64, Option<i64>)>>>,
+    releases: Arc<Mutex<Vec<(String, TaskId, i64)>>>,
 }
 
 impl MemoryTaskContract {
@@ -58,6 +60,38 @@ impl MemoryTaskContract {
 }
 
 impl TaskContract for MemoryTaskContract {
+    async fn freeze_task(
+        &self,
+        user_id: &str,
+        task_id: &TaskId,
+        amount: i64,
+        available_balance_micro: Option<i64>,
+    ) -> Result<(), TaskError> {
+        self.freezes.lock().unwrap().push((
+            user_id.to_string(),
+            *task_id,
+            amount,
+            available_balance_micro,
+        ));
+        if available_balance_micro.is_some_and(|balance| balance < amount) {
+            return Err(TaskError::QuotaExceeded);
+        }
+        Ok(())
+    }
+
+    async fn release_task_freeze(
+        &self,
+        user_id: &str,
+        task_id: &TaskId,
+        amount: i64,
+    ) -> Result<(), TaskError> {
+        self.releases
+            .lock()
+            .unwrap()
+            .push((user_id.to_string(), *task_id, amount));
+        Ok(())
+    }
+
     async fn submit(&self, record: TaskRecord) -> Result<TaskId, TaskError> {
         let id = record.id;
         self.submitted.lock().unwrap().push(record.clone());
@@ -190,7 +224,15 @@ async fn test_freeze_guard_freezes_on_submit() {
     let submitted = contract.submitted.lock().unwrap();
     assert_eq!(submitted.len(), 1);
     assert_eq!(submitted[0].frozen_micro, 2_000);
-    assert_eq!(frozen_balance(user_id), 2_000);
+    assert_eq!(
+        contract.freezes.lock().unwrap().as_slice(),
+        &[(user_id.to_string(), submitted[0].id, 2_000, Some(10_000))]
+    );
+    assert_eq!(
+        frozen_balance(user_id),
+        0,
+        "task submit must use Redis-backed contract freeze, not process-local DEDUCT"
+    );
 }
 
 #[tokio::test]

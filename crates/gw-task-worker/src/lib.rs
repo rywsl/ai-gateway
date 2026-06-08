@@ -425,6 +425,7 @@ pub async fn run() -> anyhow::Result<()> {
         recovery,
         WatchdogLoopConfig {
             check_interval: cfg.watchdog_interval(),
+            leader_ttl: WatchdogLoopConfig::default().leader_ttl,
             recover_limit: cfg.loops.recover_limit,
             cancellation_token: shutdown.clone(),
         },

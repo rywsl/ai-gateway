@@ -48,6 +48,21 @@ pub enum TaskError {
 
 #[allow(async_fn_in_trait)]
 pub trait TaskContract {
+    async fn freeze_task(
+        &self,
+        user_id: &str,
+        task_id: &TaskId,
+        amount: i64,
+        available_balance_micro: Option<i64>,
+    ) -> Result<(), TaskError>;
+
+    async fn release_task_freeze(
+        &self,
+        user_id: &str,
+        task_id: &TaskId,
+        amount: i64,
+    ) -> Result<(), TaskError>;
+
     async fn submit(&self, record: TaskRecord) -> Result<TaskId, TaskError>;
 
     async fn load(&self, id: &TaskId) -> Result<Option<TaskRecord>, TaskError>;

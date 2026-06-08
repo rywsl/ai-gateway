@@ -3,11 +3,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fred::clients::RedisPool;
 use fred::error::RedisError;
-use fred::interfaces::{HashesInterface, LuaInterface, SortedSetsInterface, StreamsInterface};
+use fred::interfaces::{
+    HashesInterface, KeysInterface, LuaInterface, SetsInterface, SortedSetsInterface,
+    StreamsInterface,
+};
 use fred::types::{MultipleZaddValues, RedisMap, RedisValue, XReadResponse};
 
 use crate::contract::{CancelReason, ClaimedTask, SettleOutcome, TaskContract, TaskError};
-use crate::scripts::{RECOVER_LEASE_LUA, SETTLE_LUA, SUBMIT_LUA};
+use crate::scripts::{RECOVER_LEASE_LUA, SETTLE_LUA, SUBMIT_LUA, TASK_FREEZE_LUA};
 use crate::types::{TaskId, TaskKind, TaskRecord, TaskStatus};
 
 const DEFAULT_TASK_TTL_SECONDS: u64 = 86_400;
@@ -16,6 +19,7 @@ const TASK_GROUP: &str = "tasks-workers";
 
 #[derive(Clone, Debug)]
 struct ScriptShas {
+    task_freeze: String,
     submit: String,
     settle: String,
     recover_lease: String,
@@ -44,6 +48,10 @@ impl RedisTaskContract {
             .script_load(SUBMIT_LUA)
             .await
             .map_storage("load submit lua")?;
+        let task_freeze = client
+            .script_load(TASK_FREEZE_LUA)
+            .await
+            .map_storage("load task freeze lua")?;
         let settle = client
             .script_load(SETTLE_LUA)
             .await
@@ -56,6 +64,7 @@ impl RedisTaskContract {
             pool,
             prefix: prefix.into(),
             scripts: ScriptShas {
+                task_freeze,
                 submit,
                 settle,
                 recover_lease,
@@ -68,6 +77,7 @@ impl RedisTaskContract {
     pub fn from_loaded_shas(
         pool: RedisPool,
         prefix: impl Into<String>,
+        task_freeze_sha: impl Into<String>,
         submit_sha: impl Into<String>,
         settle_sha: impl Into<String>,
         recover_lease_sha: impl Into<String>,
@@ -76,6 +86,7 @@ impl RedisTaskContract {
             pool,
             prefix: prefix.into(),
             scripts: ScriptShas {
+                task_freeze: task_freeze_sha.into(),
                 submit: submit_sha.into(),
                 settle: settle_sha.into(),
                 recover_lease: recover_lease_sha.into(),
@@ -108,6 +119,22 @@ impl RedisTaskContract {
 
     fn leases_key(&self) -> String {
         self.key("tasks:leases")
+    }
+
+    fn usage_records_key(&self) -> String {
+        self.key("usage:records")
+    }
+
+    fn task_frozen_counter_key(&self, user_id: &str) -> String {
+        self.key(format!("counter:user:{user_id}:task_frozen_micro"))
+    }
+
+    fn deducted_counter_key(&self, user_id: &str) -> String {
+        self.key(format!("counter:user:{user_id}:deducted_micro"))
+    }
+
+    fn task_frozen_set_key(&self, user_id: &str) -> String {
+        self.key(format!("counter:user:{user_id}:task_frozen_tasks"))
     }
 
     async fn evalsha_or_eval<T>(
@@ -164,6 +191,73 @@ impl RedisTaskContract {
 }
 
 impl TaskContract for RedisTaskContract {
+    async fn freeze_task(
+        &self,
+        user_id: &str,
+        task_id: &TaskId,
+        amount: i64,
+        available_balance_micro: Option<i64>,
+    ) -> Result<(), TaskError> {
+        if amount < 0 {
+            return Err(TaskError::InvalidPayload(
+                "task freeze amount must be non-negative".to_string(),
+            ));
+        }
+        if amount == 0 {
+            return Ok(());
+        }
+        let keys = vec![
+            self.task_frozen_counter_key(user_id),
+            self.task_frozen_set_key(user_id),
+        ];
+        let args = vec![
+            task_id.to_string(),
+            amount.to_string(),
+            available_balance_micro
+                .map(|balance| balance.to_string())
+                .unwrap_or_default(),
+        ];
+        let result: String = self
+            .evalsha_or_eval(
+                &self.scripts.task_freeze,
+                TASK_FREEZE_LUA,
+                keys,
+                args,
+                "eval task freeze lua",
+            )
+            .await?;
+        match result.as_str() {
+            "ok" => Ok(()),
+            "insufficient" => Err(TaskError::QuotaExceeded),
+            other => Err(TaskError::Storage(format!(
+                "task freeze lua returned {other}"
+            ))),
+        }
+    }
+
+    async fn release_task_freeze(
+        &self,
+        user_id: &str,
+        task_id: &TaskId,
+        amount: i64,
+    ) -> Result<(), TaskError> {
+        if amount <= 0 {
+            return Ok(());
+        }
+        let client = self.pool.next();
+        let counter_key = self.task_frozen_counter_key(user_id);
+        let set_key = self.task_frozen_set_key(user_id);
+        let _: i64 = client
+            .incr_by(counter_key, -amount)
+            .await
+            .map_storage("release task freeze counter")?;
+        let _: i64 = client
+            .srem(set_key, task_id.to_string())
+            .await
+            .map_storage("release task freeze marker")?;
+        Ok(())
+    }
+
     async fn submit(&self, record: TaskRecord) -> Result<TaskId, TaskError> {
         let task_id = record.id.to_string();
         let lease_until_ms = record
@@ -393,18 +487,30 @@ impl TaskContract for RedisTaskContract {
         record.output_payload = output_payload;
         record.error_message = error_message;
         record.actual_micro = Some(actual_micro);
+        record.billing_record_id = Some(format!("task:{}", record.id));
         record.ended_ts_ms = Some(now_ms());
         record.updated_at_ms = record.ended_ts_ms.unwrap_or(record.updated_at_ms);
+        let usage_payload = task_usage_payload(&record, terminal_status, actual_micro)?;
         let mut args = vec![
             id.to_string(),
             status_wire(terminal_status)?,
             record.updated_at_ms.to_string(),
+            record.frozen_micro.to_string(),
+            actual_micro.to_string(),
+            usage_payload,
         ];
         for (field, value) in record_to_fields(&record)? {
             args.push(field);
             args.push(value);
         }
-        let keys = vec![self.task_key(id), self.leases_key()];
+        let keys = vec![
+            self.task_key(id),
+            self.leases_key(),
+            self.task_frozen_counter_key(&record.user_id),
+            self.deducted_counter_key(&record.user_id),
+            self.usage_records_key(),
+            self.task_frozen_set_key(&record.user_id),
+        ];
         let result: String = self
             .evalsha_or_eval(
                 &self.scripts.settle,
@@ -516,6 +622,38 @@ fn record_to_fields(record: &TaskRecord) -> Result<Vec<(String, String)>, TaskEr
             (key.clone(), encoded)
         })
         .collect())
+}
+
+fn task_usage_payload(
+    record: &TaskRecord,
+    terminal_status: TaskStatus,
+    actual_micro: i64,
+) -> Result<String, TaskError> {
+    let payload = serde_json::json!({
+        "schema": "task_usage_v1",
+        "ts_ms": record.updated_at_ms,
+        "task_id": record.id.to_string(),
+        "request_id": record.request_id.clone().unwrap_or_default(),
+        "trace_id": record.trace_id.clone().unwrap_or_default(),
+        "user_id": record.user_id.clone(),
+        "child_id": record.child_id.clone(),
+        "api_key_id": record.api_key_id.clone(),
+        "client_protocol": record.client_protocol.clone(),
+        "model": record.model.clone(),
+        "vendor_id": record.vendor_id.clone(),
+        "vendor_key_id": record.vendor_key_hint.clone(),
+        "status": status_wire(terminal_status)?,
+        "task_kind": kind_wire(record.kind)?,
+        "provider_task_id": record.provider_task_id.clone(),
+        "frozen_micro": record.frozen_micro,
+        "released_micro": record.frozen_micro,
+        "actual_micro": actual_micro,
+        "billing_record_id": record.billing_record_id.clone(),
+        "duration_seconds": record.duration_seconds,
+        "source": "gw-task-worker",
+    });
+    serde_json::to_string(&payload)
+        .map_err(|err| TaskError::InvalidPayload(format!("serialize task usage: {err}")))
 }
 
 fn fields_to_record(fields: HashMap<String, String>) -> Result<TaskRecord, TaskError> {

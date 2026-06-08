@@ -2,8 +2,6 @@ use crate::ctx::ReqCtx;
 use bytes::Bytes;
 use gw_billing::formulas::{calculate_freeze_amount, TaskBillingConfig};
 use gw_core::error::codes;
-use gw_core::ids::UserId;
-use gw_store::deduction::{DeductionState, DEDUCT};
 use gw_task::{CancelReason, TaskContract, TaskError, TaskId, TaskKind, TaskRecord, TaskStatus};
 use pingora::http::ResponseHeader;
 use pingora::Result;
@@ -11,8 +9,6 @@ use pingora_proxy::Session;
 use serde_json::json;
 use std::borrow::Cow;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +120,11 @@ impl From<TaskError> for TaskHttpError {
     fn from(value: TaskError) -> Self {
         match value {
             TaskError::NotFound(_) => Self::not_found(),
+            TaskError::QuotaExceeded => {
+                metrics::counter!("gw_task_gw_freeze_total", "result" => "insufficient")
+                    .increment(1);
+                Self::freeze_failed("insufficient task balance")
+            }
             TaskError::InvalidPayload(message) => Self::submit_failed(message),
             other => Self::submit_failed(other.to_string()),
         }
@@ -164,16 +165,21 @@ async fn submit_endpoint_impl<C: TaskContract + Sync>(
     if frozen_micro < 0 {
         return Err(TaskHttpError::freeze_failed("task freeze amount invalid"));
     }
+    let task_id = TaskId::new_v4();
     if frozen_micro > 0 {
-        try_freeze_task(
-            request.user_id,
-            frozen_micro,
-            request.available_balance_micro,
-        )?;
+        contract
+            .freeze_task(
+                request.user_id,
+                &task_id,
+                frozen_micro,
+                request.available_balance_micro,
+            )
+            .await
+            .map_err(TaskHttpError::from)?;
         metrics::counter!("gw_task_gw_freeze_total", "result" => "ok").increment(1);
     }
     let record = TaskRecord {
-        id: TaskId::new_v4(),
+        id: task_id,
         schema_version: 1,
         kind,
         status: TaskStatus::Queued,
@@ -219,7 +225,9 @@ async fn submit_endpoint_impl<C: TaskContract + Sync>(
         Ok(id) => id,
         Err(err) => {
             if frozen_micro > 0 {
-                release_local_task_freeze(request.user_id, frozen_micro);
+                let _ = contract
+                    .release_task_freeze(request.user_id, &task_id, frozen_micro)
+                    .await;
             }
             return Err(TaskHttpError::from(err));
         }
@@ -234,54 +242,6 @@ async fn submit_endpoint_impl<C: TaskContract + Sync>(
             "expires_at": expires_at,
         }),
     })
-}
-
-fn try_freeze_task(
-    user_id: &str,
-    amount: i64,
-    available_balance_micro: Option<i64>,
-) -> std::result::Result<(), TaskHttpError> {
-    if available_balance_micro.is_some_and(|balance| balance < amount) {
-        metrics::counter!("gw_task_gw_freeze_total", "result" => "insufficient").increment(1);
-        return Err(TaskHttpError::freeze_failed("insufficient task balance"));
-    }
-    let uid = UserId::from(user_id);
-    let state = DEDUCT
-        .entry(uid)
-        .or_insert_with(|| {
-            Arc::new(DeductionState {
-                base_micro: AtomicI64::new(available_balance_micro.unwrap_or(0)),
-                deducted_micro: AtomicI64::new(0),
-                frozen_micro: AtomicI64::new(0),
-            })
-        })
-        .clone();
-    loop {
-        let frozen = state.frozen_micro.load(Ordering::Acquire);
-        let real = state.base_micro.load(Ordering::Acquire)
-            - state.deducted_micro.load(Ordering::Acquire)
-            - frozen;
-        if real < amount {
-            metrics::counter!("gw_task_gw_freeze_total", "result" => "insufficient").increment(1);
-            return Err(TaskHttpError::freeze_failed("insufficient task balance"));
-        }
-        if state
-            .frozen_micro
-            .compare_exchange(frozen, frozen + amount, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return Ok(());
-        }
-    }
-}
-
-fn release_local_task_freeze(user_id: &str, amount: i64) {
-    if let Some(state) = DEDUCT
-        .get(&UserId::from(user_id))
-        .map(|entry| entry.clone())
-    {
-        state.frozen_micro.fetch_sub(amount, Ordering::AcqRel);
-    }
 }
 
 pub async fn load_endpoint<C: TaskContract + Sync>(

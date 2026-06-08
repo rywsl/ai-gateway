@@ -44,6 +44,25 @@ impl MemoryContract {
 }
 
 impl TaskContract for MemoryContract {
+    async fn freeze_task(
+        &self,
+        _user_id: &str,
+        _task_id: &TaskId,
+        _amount: i64,
+        _available_balance_micro: Option<i64>,
+    ) -> Result<(), TaskError> {
+        Ok(())
+    }
+
+    async fn release_task_freeze(
+        &self,
+        _user_id: &str,
+        _task_id: &TaskId,
+        _amount: i64,
+    ) -> Result<(), TaskError> {
+        Ok(())
+    }
+
     async fn submit(&self, record: TaskRecord) -> Result<TaskId, TaskError> {
         let id = record.id;
         self.insert(record).await;
@@ -148,16 +167,38 @@ impl CancelSource for MemoryCancelSource {
 #[derive(Clone, Default)]
 struct MemoryRecoveryStore {
     expired: Arc<Mutex<Vec<TaskId>>>,
+    leader_acquired: Arc<Mutex<bool>>,
+    recover_calls: Arc<Mutex<usize>>,
 }
 
 impl MemoryRecoveryStore {
+    fn leader() -> Self {
+        Self {
+            leader_acquired: Arc::new(Mutex::new(true)),
+            ..Self::default()
+        }
+    }
+
     async fn expire(&self, id: TaskId) {
         self.expired.lock().await.push(id);
+    }
+
+    async fn deny_leader(&self) {
+        *self.leader_acquired.lock().await = false;
+    }
+
+    async fn recover_calls(&self) -> usize {
+        *self.recover_calls.lock().await
     }
 }
 
 impl LeaseRecoveryStore for MemoryRecoveryStore {
+    async fn try_acquire_watchdog_leader(&self, _ttl: Duration) -> anyhow::Result<bool> {
+        Ok(*self.leader_acquired.lock().await)
+    }
+
     async fn recover_expired(&self, _now_ms: u64, _limit: usize) -> anyhow::Result<Vec<TaskId>> {
+        *self.recover_calls.lock().await += 1;
         Ok(std::mem::take(&mut *self.expired.lock().await))
     }
 }
@@ -299,7 +340,7 @@ async fn test_cancel_releases_freeze() {
 #[tokio::test]
 async fn test_watchdog_recovers_expired_lease() {
     let contract = MemoryContract::default();
-    let recovery = MemoryRecoveryStore::default();
+    let recovery = MemoryRecoveryStore::leader();
     let task = sample_record(TaskStatus::Running);
     contract.insert(task.clone()).await;
     recovery.expire(task.id).await;
@@ -312,6 +353,26 @@ async fn test_watchdog_recovers_expired_lease() {
         contract.load(&task.id).await.unwrap().unwrap().status,
         TaskStatus::Queued
     );
+}
+
+#[tokio::test]
+async fn test_watchdog_skips_scan_when_not_leader() {
+    let contract = MemoryContract::default();
+    let recovery = MemoryRecoveryStore::leader();
+    let task = sample_record(TaskStatus::Running);
+    contract.insert(task.clone()).await;
+    recovery.expire(task.id).await;
+    recovery.deny_leader().await;
+
+    let loop_ = WatchdogLoop::new(
+        contract.clone(),
+        recovery.clone(),
+        WatchdogLoopConfig::default(),
+    );
+
+    assert_eq!(loop_.run_once().await.expect("watchdog once"), 0);
+    assert_eq!(recovery.recover_calls().await, 0);
+    assert!(contract.recovered().await.is_empty());
 }
 
 #[tokio::test]
