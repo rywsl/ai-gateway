@@ -91,16 +91,20 @@ impl TunnelStack {
                 ticker.tick().await;
                 let nodes = stack.nodes.load_full();
                 for node in nodes.iter() {
-                    let present = stack
-                        .transports
-                        .get(&node.id)
-                        .map(|t| t.current().is_some())
-                        .unwrap_or(false);
+                    let current = stack.transports.get(&node.id).and_then(|t| t.current());
+                    let present = current.as_ref().is_some_and(|t| t.is_alive());
                     metrics::gauge!(
                         "gw_tunnel_transport_present",
                         "node_id" => node.id.clone()
                     )
                     .set(if present { 1.0 } else { 0.0 });
+                    if let Some(age) = current.as_ref().map(|t| t.last_pong_age().as_secs_f64()) {
+                        metrics::gauge!(
+                            "gw_tunnel_last_pong_age_seconds",
+                            "node_id" => node.id.clone()
+                        )
+                        .set(age);
+                    }
                 }
             }
         })
@@ -108,21 +112,17 @@ impl TunnelStack {
 
     /// Snapshot for the `/healthz/tunnel` admin endpoint. Returns each
     /// known node's id together with whether a live transport exists.
-    /// `last_pong_age_secs` is `None` until T3 adds the pong tracker.
     pub fn health_snapshot(&self) -> Vec<TunnelNodeHealth> {
         let nodes = self.nodes.load_full();
         nodes
             .iter()
             .map(|n| {
-                let transport_present = self
-                    .transports
-                    .get(&n.id)
-                    .map(|t| t.current().is_some())
-                    .unwrap_or(false);
+                let current = self.transports.get(&n.id).and_then(|t| t.current());
+                let transport_present = current.as_ref().is_some_and(|t| t.is_alive());
                 TunnelNodeHealth {
                     node_id: n.id.clone(),
                     transport_present,
-                    last_pong_age_secs: None,
+                    last_pong_age_secs: current.as_ref().map(|t| t.last_pong_age().as_secs_f64()),
                 }
             })
             .collect()
@@ -349,5 +349,21 @@ mod tests {
                 ..
             } if host == "blocked.example.com"
         ));
+    }
+
+    #[test]
+    fn health_snapshot_reads_last_pong_age() {
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tunnel_stack.rs"))
+                .expect("read tunnel_stack source");
+        let prod_src = src.split("#[cfg(test)]").next().unwrap_or(&src);
+        assert!(
+            prod_src.contains("last_pong_age().as_secs_f64()"),
+            "health_snapshot must expose live transport pong age"
+        );
+        assert!(
+            !prod_src.contains("last_pong_age_secs: None,"),
+            "health_snapshot must not hard-code null pong age"
+        );
     }
 }
