@@ -11,9 +11,19 @@ use gw_core::ids::UserId;
 use gw_core::usage::UsageSnapshot;
 use gw_ledger::{
     actual_usage_credits, apply_coef_commit, apply_coef_entry, current_coef_snapshot,
-    estimate_request_credits, now_ms, upsert_protected, upsert_unprotected, CommitOutcome, Dim,
-    LeaseError, LeaseGuard, Mode, LEASE_POOL,
+    estimate_request_credits, now_ms, upsert_protected, upsert_unprotected, CoefSnapshot,
+    CommitOutcome, Dim, LeaseError, LeaseGuard, Mode, COEF_CACHE, COEF_STAGING, LEASE_POOL,
 };
+use std::sync::{Arc, Mutex, MutexGuard};
+
+static COEF_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn reset_coef_state() -> MutexGuard<'static, ()> {
+    let guard = COEF_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    COEF_CACHE.store(Arc::new(CoefSnapshot::empty()));
+    COEF_STAGING.clear();
+    guard
+}
 
 /// Push a complete (version, model) coef set and commit.
 ///
@@ -38,6 +48,7 @@ fn install_coefs(version: u64, model_id: &str, input: u64, output: u64) {
 
 #[test]
 fn protected_user_with_sufficient_lease_can_acquire_then_settle() {
+    let _coef_guard = reset_coef_state();
     let version = 1_000_001u64;
     let model_id = "credit-lease-int-model-1";
     install_coefs(version, model_id, 10, 20);
@@ -56,7 +67,7 @@ fn protected_user_with_sufficient_lease_can_acquire_then_settle() {
     let credits: i64 = 100 * 10 + 200 * 20; // 5000
     assert_eq!(credits, 100 * 10 + 200 * 20);
 
-    let guard = LeaseGuard::try_acquire(&uid, credits, now_ms()).unwrap();
+    let guard = LeaseGuard::try_acquire(&uid, credits, now_ms(), 0).unwrap();
     let pool_state = LEASE_POOL.get(&uid).unwrap();
     assert_eq!(pool_state.credits(), 1_000_000 - credits);
 
@@ -69,6 +80,7 @@ fn protected_user_with_sufficient_lease_can_acquire_then_settle() {
 
 #[test]
 fn protected_user_low_lease_rejects_request() {
+    let _coef_guard = reset_coef_state();
     let version = 1_000_002u64;
     let model_id = "credit-lease-int-model-2";
     install_coefs(version, model_id, 10, 20);
@@ -80,7 +92,7 @@ fn protected_user_low_lease_rejects_request() {
     // We compute the expected value directly (coefs are known) to avoid a
     // lookup race with parallel tests that may have displaced this version.
     let credits: i64 = 100 * 10 + 100 * 20; // 3000
-    let err = LeaseGuard::try_acquire(&uid, credits, now_ms()).unwrap_err();
+    let err = LeaseGuard::try_acquire(&uid, credits, now_ms(), 0).unwrap_err();
     assert!(matches!(err, LeaseError::Insufficient { .. }));
     // Lease pool unchanged on failure.
     assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 100);
@@ -88,6 +100,7 @@ fn protected_user_low_lease_rejects_request() {
 
 #[test]
 fn lease_expiration_triggers_lease_error_expired() {
+    let _coef_guard = reset_coef_state();
     let version = 1_000_003u64;
     let model_id = "credit-lease-int-model-3";
     install_coefs(version, model_id, 10, 20);
@@ -100,12 +113,13 @@ fn lease_expiration_triggers_lease_error_expired() {
         version,
         now_ms().saturating_sub(1),
     );
-    let err = LeaseGuard::try_acquire(&uid, 1000, now_ms()).unwrap_err();
+    let err = LeaseGuard::try_acquire(&uid, 1000, now_ms(), 0).unwrap_err();
     assert!(matches!(err, LeaseError::Expired));
 }
 
 #[test]
 fn switching_back_to_unprotected_clears_state() {
+    let _coef_guard = reset_coef_state();
     let version = 1_000_004u64;
     let model_id = "credit-lease-int-model-4";
     install_coefs(version, model_id, 10, 20);
@@ -124,6 +138,7 @@ fn switching_back_to_unprotected_clears_state() {
 
 #[test]
 fn complete_coef_push_swaps_active_snapshot() {
+    let _coef_guard = reset_coef_state();
     let version = 1_000_005u64;
     let model_a = "credit-lease-int-alpha-5";
     let model_b = "credit-lease-int-beta-5";
@@ -147,6 +162,7 @@ fn complete_coef_push_swaps_active_snapshot() {
 
 #[test]
 fn incomplete_commit_keeps_previous_active_version() {
+    let _coef_guard = reset_coef_state();
     // First, commit a baseline at a version above all other tests in this file
     // (max is 1_000_009) so it's guaranteed to activate, not go Stale.
     let baseline_version = 1_000_100u64;
@@ -185,6 +201,7 @@ fn incomplete_commit_keeps_previous_active_version() {
 
 #[test]
 fn settle_actual_above_reserved_does_not_double_charge() {
+    let _coef_guard = reset_coef_state();
     let version = 1_000_008u64;
     let model_id = "credit-lease-int-model-8";
     install_coefs(version, model_id, 10, 20);
@@ -201,7 +218,7 @@ fn settle_actual_above_reserved_does_not_double_charge() {
     // 50 input * 10 + 50 output * 20 = 1500. Computed directly to avoid a
     // lookup race with parallel tests that may have displaced this version.
     let reserved: i64 = 50 * 10 + 50 * 20; // 1500
-    let guard = LeaseGuard::try_acquire(&uid, reserved, now_ms()).unwrap();
+    let guard = LeaseGuard::try_acquire(&uid, reserved, now_ms(), 0).unwrap();
     assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 100_000 - reserved);
 
     // Settle with HIGHER actual than reserved (e.g., output tokens exceeded
@@ -213,6 +230,7 @@ fn settle_actual_above_reserved_does_not_double_charge() {
 
 #[test]
 fn coefs_for_six_dim_actual_usage() {
+    let _coef_guard = reset_coef_state();
     let version = 1_000_009u64;
     let model_id = "credit-lease-int-model-9";
     apply_coef_entry(version, model_id, Dim::Input, 1);

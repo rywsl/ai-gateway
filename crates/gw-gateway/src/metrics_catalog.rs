@@ -273,6 +273,16 @@ pub static METRICS: &[MetricSpec] = &[
         help: "usage records routed to usage:records:dlq on primary XADD failure; label=outcome (success/error)",
     },
     MetricSpec {
+        name: "gw_usage_dlq_emergency_file_total",
+        kind: MetricKind::Counter,
+        help: "Emergency JSONL fallback writes for usage-record DLQ failures; labels=outcome(success|error)",
+    },
+    MetricSpec {
+        name: "gw_usage_dlq_retry_queue_total",
+        kind: MetricKind::Counter,
+        help: "In-memory retry queue outcomes after Redis DLQ write failure; labels=outcome(enqueued|full|closed)",
+    },
+    MetricSpec {
         name: "gw_sticky_bind_total",
         kind: MetricKind::Counter,
         help: "sticky strategy bound a new (conversation_id -> key_id) entry",
@@ -522,6 +532,16 @@ pub static METRICS: &[MetricSpec] = &[
         name: "gateway_usage_flush_errors_total",
         kind: MetricKind::Counter,
         help: "Pipelined usage flush RTT failures (entire batch routed to DLQ)",
+    },
+    MetricSpec {
+        name: "gw_frozen_delta_enqueue_total",
+        kind: MetricKind::Counter,
+        help: "RequestFreeze frozen_micro delta enqueue outcomes; labels=outcome(ok|full|no_sink)",
+    },
+    MetricSpec {
+        name: "gw_frozen_delta_redis_total",
+        kind: MetricKind::Counter,
+        help: "Redis counter:user:<uid>:frozen_micro sync outcomes; labels=outcome(ok|error)",
     },
     // --- Deduct GC ---
     MetricSpec {

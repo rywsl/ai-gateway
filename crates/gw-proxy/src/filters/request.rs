@@ -28,12 +28,12 @@ use gw_auth::AuthCtx;
 use gw_billing::TaskBillingConfig;
 use gw_codec::cli::CliCodec;
 use gw_codec::gemini::files::GeminiFilesGateway;
-use gw_core::entity::ApiKeyEntry;
+use gw_core::entity::{ApiKeyEntry, EstimatePricing};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, ModelName, UserId};
 use gw_core::protocol::ApiShape;
 use gw_store::counter_store::daily_tokens_key;
-use gw_store::deduction::{UserCircuit, USER_CIRCUIT};
+use gw_store::deduction::{DeductionState, UserCircuit, DEDUCT, USER_CIRCUIT};
 use gw_store::{CounterStore, EntityStore};
 use pingora::Result;
 use pingora_proxy::Session;
@@ -767,6 +767,7 @@ pub async fn run(
     // ---------------------------------------------------------------------
     let pricing = store.pricing_or_load(&model_name).await;
     ctx.pricing = pricing.clone();
+    let estimate_pricing = store.estimate_pricing_or_load(&model_name).await;
 
     // ---------------------------------------------------------------------
     // 5. Merge permissions across the five-tier hierarchy.
@@ -857,25 +858,15 @@ pub async fn run(
     }
 
     // ---------------------------------------------------------------------
-    // 7. Balance enforcement. Read the payer's `balance_micro` counter from
-    //     Redis and reject when it has fallen to zero or below. This is the
-    //     primary zero-balance gate; the USER_CIRCUIT check below is a
-    //     fast-path short-circuit that catches users whose circuit was tripped
-    //     open in a prior request (e.g. by the ledger flusher on a debit
-    //     that drove balance negative).
-    //
-    //     The Redis read is on the hot path but the read is a single GET
-    //     against the connection pool — at typical Redis RTTs (<1ms LAN)
-    //     this is well within the gateway's per-request budget. On Redis
-    //     failure we choose to admit (fail-open) so a transient Redis blip
-    //     does not block all paying users; the freeze guard still bounds
-    //     loss to the freeze estimate.
+    // 7. Balance enforcement. Read the payer's available balance model:
+    //     `base_micro - deducted_micro - frozen_micro`. Go owns base/deducted;
+    //     Rust owns frozen via the async scalar INCRBY worker. The local DEDUCT
+    //     snapshot is kept in sync so task/request freeze paths share the same
+    //     in-process view.
     // ---------------------------------------------------------------------
-    let balance = counters
-        .get("user", merged.effective_user_id.as_ref(), "balance_micro")
-        .await
-        .unwrap_or(0);
-    if balance <= 0 {
+    let balance = available_balance_micro(counters, &merged.effective_user_id).await;
+    sync_local_balance_snapshot(&merged.effective_user_id, balance);
+    if balance.available <= 0 {
         let err = ErrorIR {
             category: ErrorCategory::ClientQuota,
             status: 402,
@@ -1030,7 +1021,7 @@ pub async fn run(
                         trace_id: ctx.trace_id.as_ref(),
                         request_id: ctx.request_id.as_ref(),
                         billing_config: task_billing_config,
-                        available_balance_micro: Some(balance),
+                        available_balance_micro: Some(balance.available),
                     },
                 )
                 .await
@@ -1150,11 +1141,14 @@ pub async fn run(
         let day = day_key_utc(OffsetDateTime::now_utc());
         let key = daily_tokens_key(&merged.effective_user_id, &day);
         let consumed = counters.get_str_key(&key).await.unwrap_or(0).max(0) as u64;
-        // freeze_estimate is computed at step 9; pre-compute a conservative
-        // upper bound here using the same flat formula so the gate is closed
-        // before USER_CIRCUIT and RPM consume budget.
-        let freeze_est = freeze_estimate(est_input_tokens, merged.markup_chain.product);
-        if check_daily_quota(consumed, freeze_est, daily_quota).is_err() {
+        // Estimate tokens, not money. `freeze_estimate_with_pricing` returns
+        // micro-units and must not be reused for a token quota.
+        let quota_estimate_tokens = daily_quota_estimated_tokens(
+            est_input_tokens,
+            req_max_tokens.map(u64::from),
+            estimate_pricing.as_ref().map(|p| p.value.as_ref()),
+        );
+        if check_daily_quota(consumed, quota_estimate_tokens, daily_quota).is_err() {
             let err = ErrorIR {
                 category: ErrorCategory::ClientQuota,
                 status: 403,
@@ -1295,7 +1289,12 @@ pub async fn run(
             };
 
             let now = gw_ledger::now_ms();
-            match gw_ledger::LeaseGuard::try_acquire(&merged.effective_user_id, credits, now) {
+            match gw_ledger::LeaseGuard::try_acquire(
+                &merged.effective_user_id,
+                credits,
+                now,
+                protection_cfg.lease_grace_ms,
+            ) {
                 Ok(guard) => {
                     metrics::counter!(
                         "gw_credit_lease_acquire_total",
@@ -1309,19 +1308,7 @@ pub async fn run(
                 }
                 Err(gw_ledger::LeaseError::Expired) => {
                     metrics::counter!("gw_credit_lease_expired_total").increment(1);
-                    let err = ErrorIR {
-                        category: ErrorCategory::ClientQuota,
-                        status: 402,
-                        upstream_status: None,
-                        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_EXPIRED),
-                        message: Cow::Borrowed(
-                            "lease expired; ops should investigate Go push pipeline",
-                        ),
-                        retryable: false,
-                        upstream_raw: None,
-                        request_id: "",
-                        retry_after_secs: None,
-                    };
+                    let err = lease_expired_error();
                     bail!(session, ctx, &err, &request_id)
                 }
                 Err(gw_ledger::LeaseError::Insufficient { .. }) => {
@@ -1366,7 +1353,17 @@ pub async fn run(
     // freeze-estimate uses a flat 1 micro per estimated token times the
     // markup product. The freeze is released in `logging`; Go computes the
     // real cost from the UsageRecord.
-    let freeze_estimate_micro = freeze_estimate(est_input_tokens, merged.markup_chain.product);
+    let freeze_estimate = freeze_estimate_with_pricing(
+        est_input_tokens,
+        req_max_tokens.map(u64::from),
+        merged.markup_chain.product,
+        estimate_pricing
+            .as_ref()
+            .map(|p| (p.value.as_ref(), p.version)),
+    );
+    let freeze_estimate_micro = freeze_estimate.amount_micro;
+    ctx.estimate_pricing_version = freeze_estimate.estimate_pricing_version;
+    ctx.prompt_estimate_tokens = Some(est_input_tokens);
     if let Err(err) = check_cost(freeze_estimate_micro, hard_cap_cfg) {
         bail!(session, ctx, &err, &request_id)
     }
@@ -1509,8 +1506,110 @@ pub fn extract_cli_request_hints(
     }
 }
 
-/// Estimate a conservative freeze (in micro-units) before pricing is loaded.
-/// We use a flat 1 micro per estimated token times the markup product.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreezeEstimate {
+    pub amount_micro: u64,
+    pub estimate_pricing_version: u64,
+}
+
+/// Estimate a conservative freeze (in micro-units). `EstimatePricing` is a
+/// Rust-side admission estimate, not a per-token cost contract.
+pub fn freeze_estimate_with_pricing(
+    est_input_tokens: u32,
+    request_max_tokens: Option<u64>,
+    markup: f32,
+    pricing: Option<(&EstimatePricing, u64)>,
+) -> FreezeEstimate {
+    if let Some((pricing, version)) = pricing {
+        return FreezeEstimate {
+            amount_micro: gw_ledger::estimate_pricing::compute_freeze_estimate(
+                pricing,
+                est_input_tokens as u64,
+                request_max_tokens,
+                normalize_markup(markup),
+            )
+            .max(1),
+            estimate_pricing_version: version,
+        };
+    }
+    FreezeEstimate {
+        amount_micro: freeze_estimate(est_input_tokens, markup),
+        estimate_pricing_version: 0,
+    }
+}
+
+fn normalize_markup(markup: f32) -> f64 {
+    let bounded = markup.max(1.0) as f64;
+    (bounded * 1_000_000.0).round() / 1_000_000.0
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AvailableBalance {
+    base_micro: i64,
+    deducted_micro: i64,
+    frozen_micro: i64,
+    available: i64,
+}
+
+async fn available_balance_micro(counters: &CounterStore, uid: &UserId) -> AvailableBalance {
+    let id = uid.as_ref();
+    let base_micro = counters.get("user", id, "base_micro").await.unwrap_or(0);
+    let deducted_micro = counters
+        .get("user", id, "deducted_micro")
+        .await
+        .unwrap_or(0);
+    let frozen_micro = counters.get("user", id, "frozen_micro").await.unwrap_or(0);
+    AvailableBalance {
+        base_micro,
+        deducted_micro,
+        frozen_micro,
+        available: base_micro
+            .saturating_sub(deducted_micro)
+            .saturating_sub(frozen_micro),
+    }
+}
+
+fn sync_local_balance_snapshot(uid: &UserId, balance: AvailableBalance) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let state = DEDUCT
+        .entry(uid.clone())
+        .or_insert_with(|| {
+            Arc::new(DeductionState {
+                base_micro: AtomicI64::new(0),
+                deducted_micro: AtomicI64::new(0),
+                frozen_micro: AtomicI64::new(0),
+            })
+        })
+        .clone();
+    state
+        .base_micro
+        .store(balance.base_micro, Ordering::Release);
+    state
+        .deducted_micro
+        .store(balance.deducted_micro, Ordering::Release);
+    state
+        .frozen_micro
+        .store(balance.frozen_micro, Ordering::Release);
+}
+
+fn daily_quota_estimated_tokens(
+    est_input_tokens: u32,
+    request_max_tokens: Option<u64>,
+    pricing: Option<&EstimatePricing>,
+) -> u64 {
+    let input_tokens = est_input_tokens as u64;
+    let Some(pricing) = pricing else {
+        return input_tokens;
+    };
+    let max_output_by_hard_cap = (pricing.hard_cap_tokens as u64).saturating_sub(input_tokens);
+    let output_cap = request_max_tokens
+        .unwrap_or(pricing.default_max_tokens as u64)
+        .min(max_output_by_hard_cap);
+    input_tokens.saturating_add(output_cap)
+}
+
+/// Legacy fallback estimate before `entity:estimate_pricing` is available.
+/// We use a flat 1 micro per estimated input token times the markup product.
 fn freeze_estimate(est_input_tokens: u32, markup: f32) -> u64 {
     let base = est_input_tokens as u64;
     let with_markup = (base as f32 * markup.max(1.0)) as u64;
@@ -1576,6 +1675,20 @@ fn model_whitelist_regex_denied_error(message: &'static str) -> ErrorIR<'static>
     }
 }
 
+fn lease_expired_error() -> ErrorIR<'static> {
+    ErrorIR {
+        category: ErrorCategory::UpstreamError,
+        status: 503,
+        upstream_status: None,
+        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_EXPIRED),
+        message: Cow::Borrowed("lease expired; ops should investigate Go push pipeline"),
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    }
+}
+
 /// Emit an error via the client codec and return a short-circuit `Err` so the
 /// `?` operator unwinds. Callers use the `bail!` macro, which appends the
 /// `unreachable!()` in a single place rather than at every call site.
@@ -1590,6 +1703,58 @@ async fn emit_and_bail(
     error_emit::send_error(session, &codec, &scoped).await;
     ctx.phase_end();
     Err(short_circuit(err.status))
+}
+
+#[cfg(test)]
+mod lease_expired_tests {
+    use super::*;
+    use gw_core::ids::ModelName;
+
+    #[test]
+    fn lease_expired_error_is_503_ops_signal() {
+        let err = lease_expired_error();
+
+        assert_eq!(
+            err.status, 503,
+            "lease-expired is an ops signal, codes.rs says 503"
+        );
+        assert_eq!(err.code, Cow::Borrowed(codes::GW_QUOTA_LEASE_EXPIRED));
+        assert_eq!(err.category, ErrorCategory::UpstreamError);
+    }
+
+    #[test]
+    fn daily_quota_estimate_counts_tokens_not_micro_units() {
+        let pricing = EstimatePricing {
+            model: ModelName::from("gpt-4o"),
+            conservative_per_token_micro: 60,
+            safety_factor: 2.0,
+            default_max_tokens: 100,
+            hard_cap_tokens: 1_000,
+        };
+
+        assert_eq!(
+            daily_quota_estimated_tokens(1_000, Some(500), Some(&pricing)),
+            1_000
+        );
+        assert_eq!(
+            freeze_estimate_with_pricing(1_000, Some(500), 1.0, Some((&pricing, 9))).amount_micro,
+            120_000
+        );
+    }
+
+    #[test]
+    fn daily_quota_estimate_uses_default_output_cap() {
+        let pricing = EstimatePricing {
+            model: ModelName::from("gpt-4o"),
+            conservative_per_token_micro: 10,
+            safety_factor: 1.0,
+            default_max_tokens: 100,
+            hard_cap_tokens: 150,
+        };
+
+        assert_eq!(daily_quota_estimated_tokens(20, None, Some(&pricing)), 120);
+        assert_eq!(daily_quota_estimated_tokens(20, None, None), 20);
+    }
 }
 
 #[cfg(test)]

@@ -87,6 +87,7 @@ impl RequestFreeze {
         state
             .frozen_micro
             .fetch_add(amount as i64, Ordering::AcqRel);
+        crate::flusher::enqueue_frozen_delta(&uid, amount as i64);
         Self {
             uid,
             freeze_amount: amount,
@@ -120,6 +121,7 @@ impl FreezeGuard for RequestFreeze {
         self.state
             .frozen_micro
             .fetch_sub(self.freeze_amount as i64, Ordering::AcqRel);
+        crate::flusher::enqueue_frozen_delta(&self.uid, -(self.freeze_amount as i64));
     }
 }
 
@@ -132,6 +134,7 @@ impl Drop for RequestFreeze {
             self.state
                 .frozen_micro
                 .fetch_sub(self.freeze_amount as i64, Ordering::AcqRel);
+            crate::flusher::enqueue_frozen_delta(&self.uid, -(self.freeze_amount as i64));
             metrics::counter!("gateway_freeze_leak_recovered_total").increment(1);
         }
     }

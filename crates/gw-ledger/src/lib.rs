@@ -3,7 +3,9 @@
 //! pipeline, and detailed-archive writer.
 
 pub mod deduct_gc;
+pub mod dlq;
 pub mod encoding;
+pub mod estimate_pricing;
 pub mod flusher;
 pub mod freeze;
 pub mod inflight;

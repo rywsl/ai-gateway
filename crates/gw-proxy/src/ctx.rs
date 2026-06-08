@@ -140,6 +140,7 @@ pub struct ReqCtx {
     /// Populated by the freeze estimator when available; `None` otherwise.
     /// The value is written as-is (or 0) to the inflight hash on `register`.
     pub prompt_estimate_tokens: Option<u32>,
+    pub estimate_pricing_version: u64,
     pub freeze_guard: Option<RequestFreeze>,
     /// Credit lease guard (protected mode). Mutually exclusive with
     /// `freeze_guard`: if `lease_guard.is_some()` then this request bypassed
@@ -376,6 +377,7 @@ impl ReqCtx {
             cancel_cause: None,
             cancel_grace_active: false,
             prompt_estimate_tokens: None,
+            estimate_pricing_version: 0,
             freeze_guard: None,
             lease_guard: None,
             credits_consumed: None,

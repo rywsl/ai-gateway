@@ -5,6 +5,7 @@
 //! `events:counter` echo back to Rust).
 
 use gw_core::ids::UserId;
+use gw_ledger::flusher::install_frozen_delta_sender_for_tests;
 use gw_ledger::{FreezeGuard, FreezeKind, RequestFreeze, TaskFreeze};
 use gw_store::deduction::DEDUCT;
 use std::sync::atomic::Ordering;
@@ -74,4 +75,21 @@ fn task_freeze_without_releaser_is_idempotent_for_tests() {
     assert_eq!(g.freeze_amount(), 1000);
     g.release();
     g.release();
+}
+
+#[tokio::test]
+async fn request_freeze_enqueues_redis_frozen_deltas() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let _sender_guard = install_frozen_delta_sender_for_tests(tx);
+    let uid = UserId::from("u-freeze-delta");
+
+    let g = RequestFreeze::new(uid.clone(), 700);
+    let first = rx.recv().await.unwrap();
+    assert_eq!(first.uid, uid);
+    assert_eq!(first.delta_micro, 700);
+
+    g.release();
+    let second = rx.recv().await.unwrap();
+    assert_eq!(second.uid, UserId::from("u-freeze-delta"));
+    assert_eq!(second.delta_micro, -700);
 }

@@ -109,9 +109,14 @@ impl LeaseGuard {
 
     /// Acquire `requested` credits from the user's lease. Returns
     /// `LeaseError::NoLease` if the user has no protected lease entry,
-    /// `LeaseError::Expired` if the lease TTL has passed, or
+    /// `LeaseError::Expired` if the lease TTL plus grace has passed, or
     /// `LeaseError::Insufficient` if the available pool < requested.
-    pub fn try_acquire(uid: &UserId, requested: i64, now_ms_val: u64) -> Result<Self, LeaseError> {
+    pub fn try_acquire(
+        uid: &UserId,
+        requested: i64,
+        now_ms_val: u64,
+        grace_ms: u64,
+    ) -> Result<Self, LeaseError> {
         let state = match LEASE_POOL.get(uid) {
             Some(s) => Arc::clone(&*s),
             None => return Err(LeaseError::NoLease),
@@ -120,7 +125,7 @@ impl LeaseGuard {
             return Err(LeaseError::NoLease);
         }
         let expires_at = state.expires_at_ms.load(Ordering::Acquire);
-        if now_ms_val > expires_at {
+        if now_ms_val > expires_at.saturating_add(grace_ms) {
             return Err(LeaseError::Expired);
         }
         loop {
@@ -236,7 +241,7 @@ mod tests {
         let uid = fresh_uid("acquire_ok");
         upsert_protected(&uid, 1000, "lease-1".into(), 9, now_ms() + 60_000);
 
-        let guard = LeaseGuard::try_acquire(&uid, 300, now_ms()).unwrap();
+        let guard = LeaseGuard::try_acquire(&uid, 300, now_ms(), 0).unwrap();
         assert_eq!(guard.reserved(), 300);
         assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 700);
         drop(guard);
@@ -247,7 +252,7 @@ mod tests {
         let uid = fresh_uid("acquire_insufficient");
         upsert_protected(&uid, 100, "lease-2".into(), 9, now_ms() + 60_000);
 
-        let err = LeaseGuard::try_acquire(&uid, 200, now_ms()).unwrap_err();
+        let err = LeaseGuard::try_acquire(&uid, 200, now_ms(), 0).unwrap_err();
         assert!(matches!(err, LeaseError::Insufficient { .. }));
         assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 100);
     }
@@ -258,7 +263,29 @@ mod tests {
         let past = now_ms().saturating_sub(10_000);
         upsert_protected(&uid, 1000, "lease-3".into(), 9, past);
 
-        let err = LeaseGuard::try_acquire(&uid, 100, now_ms()).unwrap_err();
+        let err = LeaseGuard::try_acquire(&uid, 100, now_ms(), 0).unwrap_err();
+        assert!(matches!(err, LeaseError::Expired));
+    }
+
+    #[test]
+    fn try_acquire_within_grace_window_succeeds() {
+        let uid = fresh_uid("within_grace");
+        let just_past = now_ms().saturating_sub(2_000);
+        upsert_protected(&uid, 1000, "lease-grace".into(), 9, just_past);
+
+        let guard = LeaseGuard::try_acquire(&uid, 100, now_ms(), 5_000).unwrap();
+
+        assert_eq!(guard.reserved(), 100);
+    }
+
+    #[test]
+    fn try_acquire_beyond_grace_window_expires() {
+        let uid = fresh_uid("beyond_grace");
+        let long_past = now_ms().saturating_sub(10_000);
+        upsert_protected(&uid, 1000, "lease-grace2".into(), 9, long_past);
+
+        let err = LeaseGuard::try_acquire(&uid, 100, now_ms(), 5_000).unwrap_err();
+
         assert!(matches!(err, LeaseError::Expired));
     }
 
@@ -266,7 +293,7 @@ mod tests {
     fn try_acquire_no_lease_returns_error() {
         let uid = fresh_uid("no_lease");
         // Do NOT upsert; user has no LeasePool entry.
-        let err = LeaseGuard::try_acquire(&uid, 100, now_ms()).unwrap_err();
+        let err = LeaseGuard::try_acquire(&uid, 100, now_ms(), 0).unwrap_err();
         assert!(matches!(err, LeaseError::NoLease));
     }
 
@@ -275,7 +302,7 @@ mod tests {
         let uid = fresh_uid("unprotected_user");
         upsert_protected(&uid, 1000, "lease-x".into(), 9, now_ms() + 60_000);
         upsert_unprotected(&uid);
-        let err = LeaseGuard::try_acquire(&uid, 100, now_ms()).unwrap_err();
+        let err = LeaseGuard::try_acquire(&uid, 100, now_ms(), 0).unwrap_err();
         assert!(matches!(err, LeaseError::NoLease));
     }
 
@@ -284,7 +311,7 @@ mod tests {
         let uid = fresh_uid("settle_under");
         upsert_protected(&uid, 1000, "lease-4".into(), 9, now_ms() + 60_000);
 
-        let guard = LeaseGuard::try_acquire(&uid, 500, now_ms()).unwrap();
+        let guard = LeaseGuard::try_acquire(&uid, 500, now_ms(), 0).unwrap();
         assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 500);
         guard.settle_actual(200);
         assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 800);
@@ -295,7 +322,7 @@ mod tests {
         let uid = fresh_uid("settle_over");
         upsert_protected(&uid, 1000, "lease-5".into(), 9, now_ms() + 60_000);
 
-        let guard = LeaseGuard::try_acquire(&uid, 300, now_ms()).unwrap();
+        let guard = LeaseGuard::try_acquire(&uid, 300, now_ms(), 0).unwrap();
         guard.settle_actual(500);
         assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 700);
     }
@@ -305,7 +332,7 @@ mod tests {
         let uid = fresh_uid("release_idem");
         upsert_protected(&uid, 1000, "lease-6".into(), 9, now_ms() + 60_000);
 
-        let guard = LeaseGuard::try_acquire(&uid, 100, now_ms()).unwrap();
+        let guard = LeaseGuard::try_acquire(&uid, 100, now_ms(), 0).unwrap();
         guard.release();
         guard.release();
         guard.release();

@@ -12,8 +12,8 @@ use secrecy::SecretString;
 use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
-    ApiKeyEntry, AuthConfig, IpBlockEntry, JwksEntry, ManagementTokenEntry, Model, ModelGroup,
-    OAuthCredentials, Pricing, ProxyNode, UserEntry, UserGroup, Vendor, VendorKey,
+    ApiKeyEntry, AuthConfig, EstimatePricing, IpBlockEntry, JwksEntry, ManagementTokenEntry, Model,
+    ModelGroup, OAuthCredentials, Pricing, ProxyNode, UserEntry, UserGroup, Vendor, VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -88,7 +88,8 @@ where
 fn ttl_for(ns: &str) -> u64 {
     match ns {
         "user" | "user_group" | "apikey" | "ipblock" | "management_token" => 300,
-        "vendor" | "vendor_key" | "model_group" | "pricing" | "model" | "proxy_node" => 1800,
+        "vendor" | "vendor_key" | "model_group" | "pricing" | "estimate_pricing" | "model"
+        | "proxy_node" => 1800,
         "jwks" | "auth_config" => 3600,
         _ => 300,
     }
@@ -226,6 +227,8 @@ const MODEL_GROUP_SQL: &str =
     "SELECT payload, version FROM model_groups WHERE id = $1 AND deleted_at IS NULL";
 const PRICING_SQL: &str =
     "SELECT payload, version FROM pricings WHERE id = $1 AND deleted_at IS NULL";
+const ESTIMATE_PRICING_SQL: &str =
+    "SELECT payload, version FROM estimate_pricings WHERE id = $1 AND deleted_at IS NULL";
 const JWKS_SQL: &str = "SELECT payload, version FROM jwks WHERE id = $1 AND deleted_at IS NULL";
 const MODEL_SQL: &str = "SELECT payload, version FROM models WHERE id = $1 AND deleted_at IS NULL";
 const PROXY_NODE_SQL: &str =
@@ -342,6 +345,20 @@ pub async fn load_pricing(ctx: &LoaderCtx, id: &ModelName) -> anyhow::Result<Ver
     load_entity(ctx, "pricing", id.as_ref(), PRICING_SQL, |v| {
         serde_json::from_value::<Pricing>(v.clone()).map_err(Into::into)
     })
+    .await
+}
+
+pub async fn load_estimate_pricing(
+    ctx: &LoaderCtx,
+    id: &ModelName,
+) -> anyhow::Result<Versioned<EstimatePricing>> {
+    load_entity(
+        ctx,
+        "estimate_pricing",
+        id.as_ref(),
+        ESTIMATE_PRICING_SQL,
+        |v| serde_json::from_value::<EstimatePricing>(v.clone()).map_err(Into::into),
+    )
     .await
 }
 

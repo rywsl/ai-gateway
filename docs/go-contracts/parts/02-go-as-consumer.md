@@ -201,17 +201,18 @@ DLQ 条目在 UsageRecord 之外再加一层元数据：
   "dlq_meta": {
     "first_failure_ts_ms": 1716345678901,
     "primary_failure_reason": "<error string>",
-    "retry_count_before_dlq": 3
+    "retry_count_before_dlq": 3,
+    "dlq_layer": "redis"
   },
   "usage_record": { /* 完整 UsageRecord，schema 同 §2.1.2 */ }
 }
 ```
 
-> Rust 当前实现是 G11 v1（单 Redis stream fallback）。v2 三层兜底（内存 + 磁盘 + 周期 drain + 启动恢复）见 [`docs/spec/06-billing-ledger.md`](../../spec/06-billing-ledger.md)，本契约保留兼容（Go drainer 只需处理 `dlq_meta` + `usage_record` 包裹）。
+> Rust 当前实现为 C-δ 三层兜底：Redis DLQ → 内存 retry queue → emergency JSONL，并在不可恢复时尝试 `usage:records:dlq:permanent_failed`。Go drainer 处理统一的 `dlq_meta` + `usage_record` 包裹。
 
 ### 2.2.3 Go drainer 义务（必需）
 
-> v1 期间 drainer 标记为"推荐"。v2 起 **必需**：Rust 三层兜底（C-δ）保证 record 最终落到 `usage:records:dlq`，Go 端不实现 drainer = 资金泄漏。
+> Go drainer **必需**：Rust 三层兜底（C-δ）保证 record 最终落到 `usage:records:dlq` 或 emergency/permanent-failed surface，Go 端不实现 drainer = 资金泄漏。
 
 #### Consumer group 创建
 
@@ -488,7 +489,7 @@ payload    bytes  encoding 决定如何解码；解码后是 JSON
 
 | Key | `counter:user:<uid>:frozen_micro` |
 |---|---|
-| Writer | Rust（freeze 时 +est, release 时 -est），异步 HINCRBY |
+| Writer | Rust（freeze 时 +est, release 时 -est），异步 INCRBY |
 | Reader | Rust（available 计算 + 启动期对齐） + Go（balance 审计 / 透支检测） |
 | TTL | 无（永久 key，Rust 不设 EXPIRE） |
 
@@ -498,11 +499,11 @@ payload    bytes  encoding 决定如何解码；解码后是 JSON
 请求到达：
   1. compute estimate (Part 01 §1.5)
   2. local: state.frozen_micro.fetch_add(estimate)        // 本地 AtomicI64，实时
-  3. async: HINCRBY counter:user:<uid>:frozen_micro +est  // 异步刷 Redis（mpsc 队列）
+  3. async: INCRBY counter:user:<uid>:frozen_micro +est   // 异步刷 Redis（mpsc 队列）
 
 请求结束：
   1. local: state.frozen_micro.fetch_sub(estimate)
-  2. async: HINCRBY counter:user:<uid>:frozen_micro -est
+  2. async: INCRBY counter:user:<uid>:frozen_micro -est
 ```
 
 详见 [C-γ](../../spec/06-billing-ledger.md)。
@@ -543,7 +544,7 @@ Go 端周期任务，建议 **5 min** 间隔。额外触发点：Go 检测到某
 当前 Rust 代码（`gw-store/src/deduction.rs`）使用单个 `frozen_micro` AtomicI64，所有副本共享同一 Redis key。要支持按副本回收，Rust 需改为写 **副本级子键**：
 
 ```
-HINCRBY counter:user:{user:<uid>}:frozen_micro:<replica_id> <delta>
+INCRBY counter:user:{user:<uid>}:frozen_micro:<replica_id> <delta>
 ```
 
 其中 `replica_id` 是 Rust pod 唯一标识（如 Kubernetes Pod UID 或 `HOSTNAME`）。Go 读 frozen 总量时需 SUM 所有 `frozen_micro:*` 子键。

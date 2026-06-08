@@ -6,19 +6,61 @@ use crate::coef::{apply_coef_commit, apply_coef_entry, CommitOutcome, Dim};
 use crate::lease::{upsert_protected, upsert_unprotected, Mode};
 use gw_core::ids::UserId;
 use gw_store::counter_dispatch::{register_handler, CounterHandler, DispatchOutcome};
+use gw_store::deduction::{DeductionState, DEDUCT};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 struct LedgerCounterHandler;
 
 impl CounterHandler for LedgerCounterHandler {
     fn handle(&self, ns: &str, fields: &HashMap<String, String>) -> DispatchOutcome {
         match ns {
+            "user_balance" => handle_user_balance(fields),
             "protected_lease" => handle_protected_lease(fields),
             "coef_table" => handle_coef_table(fields),
             "coef_table_commit" => handle_coef_table_commit(fields),
             _ => DispatchOutcome::UnknownNs,
         }
     }
+}
+
+fn handle_user_balance(fields: &HashMap<String, String>) -> DispatchOutcome {
+    if fields.get("op").map(String::as_str) != Some("incrby") {
+        return DispatchOutcome::InvalidFields;
+    }
+    let uid = match fields.get("uid").or_else(|| fields.get("user_id")) {
+        Some(s) => UserId::from(s.as_str()),
+        None => return DispatchOutcome::InvalidFields,
+    };
+    let field = match fields.get("field").map(String::as_str) {
+        Some("base_micro") => "base_micro",
+        Some("deducted_micro") => "deducted_micro",
+        _ => return DispatchOutcome::InvalidFields,
+    };
+    let value_after = match fields
+        .get("value_after")
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        Some(v) => v,
+        None => return DispatchOutcome::InvalidFields,
+    };
+    let state = DEDUCT
+        .entry(uid)
+        .or_insert_with(|| {
+            Arc::new(DeductionState {
+                base_micro: AtomicI64::new(0),
+                deducted_micro: AtomicI64::new(0),
+                frozen_micro: AtomicI64::new(0),
+            })
+        })
+        .clone();
+    match field {
+        "base_micro" => state.base_micro.store(value_after, Ordering::Release),
+        "deducted_micro" => state.deducted_micro.store(value_after, Ordering::Release),
+        _ => unreachable!("validated above"),
+    }
+    DispatchOutcome::Handled
 }
 
 fn handle_protected_lease(fields: &HashMap<String, String>) -> DispatchOutcome {
@@ -138,6 +180,7 @@ mod tests {
     use super::*;
     use crate::coef::{current_snapshot, COEF_CACHE, COEF_STAGING, TEST_COEF_LOCK};
     use crate::lease::{Mode, LEASE_POOL};
+    use gw_store::deduction::DEDUCT;
     use std::sync::Arc;
 
     fn fields(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -241,6 +284,75 @@ mod tests {
         let h = LedgerCounterHandler;
         let f = fields(&[("ns", "unrelated")]);
         assert_eq!(h.handle("unrelated", &f), DispatchOutcome::UnknownNs);
+    }
+
+    #[test]
+    fn user_balance_updates_base_and_deducted_from_value_after() {
+        let uid = UserId::from("u_handler_balance");
+        DEDUCT.remove(&uid);
+        let h = LedgerCounterHandler;
+
+        let base = fields(&[
+            ("ns", "user_balance"),
+            ("uid", "u_handler_balance"),
+            ("op", "incrby"),
+            ("field", "base_micro"),
+            ("delta", "500"),
+            ("value_after", "5000"),
+            ("ts_ms", "1"),
+        ]);
+        assert_eq!(h.handle("user_balance", &base), DispatchOutcome::Handled);
+
+        let deducted = fields(&[
+            ("ns", "user_balance"),
+            ("uid", "u_handler_balance"),
+            ("op", "incrby"),
+            ("field", "deducted_micro"),
+            ("delta", "100"),
+            ("value_after", "1200"),
+            ("ts_ms", "2"),
+        ]);
+        assert_eq!(
+            h.handle("user_balance", &deducted),
+            DispatchOutcome::Handled
+        );
+
+        let state = DEDUCT.get(&uid).unwrap().clone();
+        assert_eq!(state.base_micro.load(Ordering::Acquire), 5000);
+        assert_eq!(state.deducted_micro.load(Ordering::Acquire), 1200);
+        assert_eq!(state.frozen_micro.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn user_balance_rejects_non_incrby_op_and_frozen_field() {
+        let h = LedgerCounterHandler;
+        let bad_op = fields(&[
+            ("ns", "user_balance"),
+            ("uid", "u_handler_balance_bad_op"),
+            ("op", "set"),
+            ("field", "base_micro"),
+            ("delta", "500"),
+            ("value_after", "5000"),
+            ("ts_ms", "1"),
+        ]);
+        assert_eq!(
+            h.handle("user_balance", &bad_op),
+            DispatchOutcome::InvalidFields
+        );
+
+        let frozen = fields(&[
+            ("ns", "user_balance"),
+            ("uid", "u_handler_balance_frozen"),
+            ("op", "incrby"),
+            ("field", "frozen_micro"),
+            ("delta", "500"),
+            ("value_after", "5000"),
+            ("ts_ms", "1"),
+        ]);
+        assert_eq!(
+            h.handle("user_balance", &frozen),
+            DispatchOutcome::InvalidFields
+        );
     }
 
     #[test]

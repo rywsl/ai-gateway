@@ -15,18 +15,31 @@
 //! dropping; `try_send` retains the original drop-on-full behaviour for
 //! callers that explicitly opt out of the blocking fallback.
 
+use crate::dlq::{DlqEnvelope, DlqLayer, EmergencyDlqWriter};
 use crate::usage::UsageRecord;
+use arc_swap::ArcSwapOption;
 use fred::interfaces::{KeysInterface, StreamsInterface};
 use fred::types::{XCap, XCapKind, XCapTrim};
 use futures::FutureExt;
+use gw_core::ids::UserId;
 use gw_store::redis_client::RedisCtx;
+use once_cell::sync::Lazy;
 use std::panic::AssertUnwindSafe;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
 const USAGE_STREAM: &str = "usage:records";
 const DLQ_STREAM: &str = "usage:records:dlq";
+const DLQ_PERMANENT_FAILED_STREAM: &str = "usage:records:dlq:permanent_failed";
 const DLQ_MAXLEN: u64 = 100_000;
+const DLQ_RETRY_CAPACITY: usize = 4096;
+const FROZEN_DELTA_CAPACITY: usize = 65_536;
+
+static FROZEN_DELTA_TX: Lazy<ArcSwapOption<mpsc::Sender<FrozenDelta>>> =
+    Lazy::new(ArcSwapOption::empty);
 
 /// Channel-internal envelope: the wire `UsageRecord` plus an optional
 /// inflight clear instruction. The flusher (or `sync_xadd` bypass) DELs
@@ -49,6 +62,7 @@ pub struct Ledger {
     pub tx: mpsc::Sender<LedgerItem>,
     redis: RedisCtx,
     instance_id: String,
+    dlq_fallback: DlqFallback,
 }
 
 impl Ledger {
@@ -59,9 +73,37 @@ impl Ledger {
         batch_size: usize,
         flush_interval: Duration,
     ) -> Self {
+        Self::start_with_emergency_dir(
+            redis,
+            instance_id,
+            channel_capacity,
+            batch_size,
+            flush_interval,
+            PathBuf::from("data/ledger"),
+        )
+    }
+
+    pub fn start_with_emergency_dir(
+        redis: RedisCtx,
+        instance_id: String,
+        channel_capacity: usize,
+        batch_size: usize,
+        flush_interval: Duration,
+        emergency_dlq_dir: impl Into<PathBuf>,
+    ) -> Self {
         let (tx, mut rx) = mpsc::channel::<LedgerItem>(channel_capacity);
+        let (dlq_retry_tx, dlq_retry_rx) = mpsc::channel::<DlqEnvelope>(DLQ_RETRY_CAPACITY);
+        let (frozen_tx, frozen_rx) = mpsc::channel::<FrozenDelta>(FROZEN_DELTA_CAPACITY);
+        FROZEN_DELTA_TX.store(Some(Arc::new(frozen_tx)));
+        let dlq_fallback = DlqFallback {
+            writer: Arc::new(EmergencyDlqWriter::new(emergency_dlq_dir.into())),
+            retry_tx: dlq_retry_tx,
+        };
+        spawn_dlq_retry_worker(redis.clone(), dlq_retry_rx, dlq_fallback.writer.clone());
+        spawn_frozen_delta_worker(redis.clone(), frozen_rx);
         let worker_redis = redis.clone();
         let worker_instance = instance_id.clone();
+        let worker_dlq = dlq_fallback.clone();
         tokio::spawn(async move {
             let mut buf: Vec<LedgerItem> = Vec::with_capacity(batch_size);
             let mut ticker = interval(flush_interval);
@@ -74,7 +116,7 @@ impl Ledger {
                                 if buf.len() >= batch_size {
                                     let mut taken = std::mem::take(&mut buf);
                                     let result = AssertUnwindSafe(
-                                        flush(&worker_redis, &worker_instance, &mut taken)
+                                        flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
                                     ).catch_unwind().await;
                                     if let Err(_panic) = result {
                                         metrics::counter!("gw_billing_flusher_panic_total").increment(1);
@@ -89,7 +131,7 @@ impl Ledger {
                                 if !buf.is_empty() {
                                     let mut taken = std::mem::take(&mut buf);
                                     let _ = AssertUnwindSafe(
-                                        flush(&worker_redis, &worker_instance, &mut taken)
+                                        flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
                                     ).catch_unwind().await;
                                     // No metric on graceful-shutdown final flush panic — process is exiting anyway.
                                 }
@@ -101,7 +143,7 @@ impl Ledger {
                         if !buf.is_empty() {
                             let mut taken = std::mem::take(&mut buf);
                             let result = AssertUnwindSafe(
-                                flush(&worker_redis, &worker_instance, &mut taken)
+                                flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
                             ).catch_unwind().await;
                             if let Err(_panic) = result {
                                 metrics::counter!("gw_billing_flusher_panic_total").increment(1);
@@ -119,6 +161,7 @@ impl Ledger {
             tx,
             redis,
             instance_id,
+            dlq_fallback,
         }
     }
 
@@ -136,6 +179,7 @@ impl Ledger {
             tx,
             redis,
             instance_id,
+            dlq_fallback: default_dlq_fallback(),
         }
     }
 
@@ -159,12 +203,14 @@ impl Ledger {
                     }
                     Err(e) => {
                         tracing::error!(error = ?e, "must-deliver sync XADD bypass failed; routing to DLQ");
-                        let payload = serde_json::to_string(&item_back.record)
-                            .unwrap_or_else(|_| "{}".to_string());
-                        let wrapped = wrap_for_dlq(&payload, "sync_xadd_bypass_failed", 0);
-                        if dlq_xadd(&self.redis, wrapped).await.is_err() {
-                            metrics::counter!("gateway_usage_records_lost_total").increment(1);
-                        }
+                        let envelope = DlqEnvelope::new(
+                            item_back.record.clone(),
+                            format!("sync_xadd_bypass_failed: {e}"),
+                            0,
+                            DlqLayer::Redis,
+                            now_ms(),
+                        );
+                        route_to_dlq(&self.redis, &envelope, &self.dlq_fallback).await;
                         if item_back.clear.is_some() {
                             metrics::counter!(
                                 "gw_billing_inflight_clear_total",
@@ -194,12 +240,14 @@ impl Ledger {
                     }
                     Err(e) => {
                         tracing::error!(error = ?e, "Closed-branch sync XADD failed; routing to DLQ");
-                        let payload = serde_json::to_string(&item_back.record)
-                            .unwrap_or_else(|_| "{}".to_string());
-                        let wrapped = wrap_for_dlq(&payload, "flusher_dead", 0);
-                        if dlq_xadd(&self.redis, wrapped).await.is_err() {
-                            metrics::counter!("gateway_usage_records_lost_total").increment(1);
-                        }
+                        let envelope = DlqEnvelope::new(
+                            item_back.record.clone(),
+                            format!("flusher_dead: {e}"),
+                            0,
+                            DlqLayer::Redis,
+                            now_ms(),
+                        );
+                        route_to_dlq(&self.redis, &envelope, &self.dlq_fallback).await;
                         if item_back.clear.is_some() {
                             metrics::counter!(
                                 "gw_billing_inflight_clear_total",
@@ -223,6 +271,132 @@ impl Ledger {
             metrics::counter!("gateway_usage_channel_full_total").increment(1);
         })
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct FrozenDelta {
+    pub uid: UserId,
+    pub delta_micro: i64,
+}
+
+pub fn enqueue_frozen_delta(uid: &UserId, delta_micro: i64) {
+    let Some(tx) = FROZEN_DELTA_TX.load_full() else {
+        metrics::counter!("gw_frozen_delta_enqueue_total", "outcome" => "no_sink").increment(1);
+        return;
+    };
+    match tx.try_send(FrozenDelta {
+        uid: uid.clone(),
+        delta_micro,
+    }) {
+        Ok(()) => {
+            metrics::counter!("gw_frozen_delta_enqueue_total", "outcome" => "ok").increment(1);
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            metrics::counter!("gw_frozen_delta_enqueue_total", "outcome" => "full").increment(1);
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            metrics::counter!("gw_frozen_delta_enqueue_total", "outcome" => "no_sink").increment(1);
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn install_frozen_delta_sender_for_tests(
+    tx: mpsc::Sender<FrozenDelta>,
+) -> FrozenDeltaSenderGuard {
+    let previous = FROZEN_DELTA_TX.swap(Some(Arc::new(tx)));
+    FrozenDeltaSenderGuard { previous }
+}
+
+#[doc(hidden)]
+pub struct FrozenDeltaSenderGuard {
+    previous: Option<Arc<mpsc::Sender<FrozenDelta>>>,
+}
+
+impl Drop for FrozenDeltaSenderGuard {
+    fn drop(&mut self) {
+        FROZEN_DELTA_TX.store(self.previous.take());
+    }
+}
+
+fn spawn_frozen_delta_worker(redis: RedisCtx, mut rx: mpsc::Receiver<FrozenDelta>) {
+    tokio::spawn(async move {
+        while let Some(delta) = rx.recv().await {
+            let key = frozen_counter_key(&delta.uid);
+            let client = redis.pool.next();
+            match client.incr_by::<i64, _>(&key, delta.delta_micro).await {
+                Ok(_) => {
+                    metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "ok")
+                        .increment(1);
+                }
+                Err(err) => {
+                    metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "error")
+                        .increment(1);
+                    tracing::warn!(
+                        target: "gw_ledger",
+                        error = %err,
+                        key,
+                        "frozen_micro Redis sync failed"
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn frozen_counter_key(uid: &UserId) -> String {
+    format!("counter:user:{}:frozen_micro", uid.as_ref())
+}
+
+#[derive(Clone)]
+struct DlqFallback {
+    writer: Arc<EmergencyDlqWriter>,
+    retry_tx: mpsc::Sender<DlqEnvelope>,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn spawn_dlq_retry_worker(
+    redis: RedisCtx,
+    mut rx: mpsc::Receiver<DlqEnvelope>,
+    writer: Arc<EmergencyDlqWriter>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(30));
+        while let Some(mut envelope) = rx.recv().await {
+            ticker.tick().await;
+            envelope.dlq_meta.retry_count_before_dlq =
+                envelope.dlq_meta.retry_count_before_dlq.saturating_add(1);
+            if dlq_xadd(&redis, &envelope).await.is_ok() {
+                continue;
+            }
+            let disk_envelope = envelope.with_layer(DlqLayer::Disk);
+            if let Err(err) = writer.append(&disk_envelope) {
+                metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error")
+                    .increment(1);
+                tracing::error!(
+                    target: "gw_ledger",
+                    error = %err,
+                    "DLQ retry failed and emergency JSONL write failed"
+                );
+                if permanent_failed_xadd(
+                    &redis,
+                    &disk_envelope,
+                    &format!("retry_dlq_and_emergency_file_failed: {err}"),
+                )
+                .await
+                .is_err()
+                {
+                    metrics::counter!("gateway_usage_records_lost_total").increment(1);
+                }
+            }
+        }
+    });
 }
 
 /// Build the Redis key for an inflight billing hash.
@@ -271,27 +445,10 @@ fn dlq_cap() -> XCap {
         .expect("XCap::try_from infallible for (MaxLen, AlmostExact, u64)")
 }
 
-/// Wrap a serialized usage-record payload with `dlq_meta` for the DLQ stream.
-///
-/// The wrapper is a JSON object `{ "payload": <original>, "dlq_meta": { ... } }`
-/// where `<original>` is the parsed original payload (so consumers can decode
-/// it back into `UsageRecord`).
-fn wrap_for_dlq(original_payload: &str, failure_reason: &str, retry_count: u32) -> String {
-    let inner: serde_json::Value =
-        serde_json::from_str(original_payload).unwrap_or(serde_json::Value::Null);
-    let wrapped = serde_json::json!({
-        "payload": inner,
-        "dlq_meta": {
-            "failure_reason": failure_reason,
-            "retry_count": retry_count,
-        },
-    });
-    wrapped.to_string()
-}
-
 /// Best-effort XADD to the DLQ stream. Returns Ok on success; on failure the
 /// record is fully dropped and the caller bumps `gw_usage_records_lost_total`.
-async fn dlq_xadd(redis: &RedisCtx, wrapped: String) -> Result<(), String> {
+async fn dlq_xadd(redis: &RedisCtx, envelope: &DlqEnvelope) -> Result<(), String> {
+    let wrapped = serde_json::to_string(envelope).map_err(|e| format!("serialize dlq: {e}"))?;
     let client = redis.pool.next();
     let r: Result<String, _> = client
         .xadd(DLQ_STREAM, false, dlq_cap(), "*", ("payload", wrapped))
@@ -308,18 +465,103 @@ async fn dlq_xadd(redis: &RedisCtx, wrapped: String) -> Result<(), String> {
     }
 }
 
-async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
+async fn permanent_failed_xadd(
+    redis: &RedisCtx,
+    envelope: &DlqEnvelope,
+    reason: &str,
+) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "permanent_failure_reason": reason,
+        "dlq_envelope": envelope,
+    })
+    .to_string();
+    let client = redis.pool.next();
+    client
+        .xadd::<String, _, _, _, _>(
+            DLQ_PERMANENT_FAILED_STREAM,
+            false,
+            dlq_cap(),
+            "*",
+            ("payload", payload),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+async fn route_to_dlq(redis: &RedisCtx, envelope: &DlqEnvelope, fallback: &DlqFallback) {
+    if dlq_xadd(redis, &envelope.with_layer(DlqLayer::Redis))
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    match fallback
+        .retry_tx
+        .try_send(envelope.with_layer(DlqLayer::Mem))
+    {
+        Ok(()) => {
+            metrics::counter!("gw_usage_dlq_retry_queue_total", "outcome" => "enqueued")
+                .increment(1);
+            return;
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            metrics::counter!("gw_usage_dlq_retry_queue_total", "outcome" => "full").increment(1);
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            metrics::counter!("gw_usage_dlq_retry_queue_total", "outcome" => "closed").increment(1);
+        }
+    }
+    match fallback.writer.append(&envelope.with_layer(DlqLayer::Disk)) {
+        Ok(()) => {
+            metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "success")
+                .increment(1);
+        }
+        Err(err) => {
+            metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error")
+                .increment(1);
+            tracing::error!(
+                target: "gw_ledger",
+                error = %err,
+                "emergency DLQ JSONL write failed"
+            );
+            if permanent_failed_xadd(redis, envelope, &format!("emergency_file_failed: {err}"))
+                .await
+                .is_err()
+            {
+                metrics::counter!("gateway_usage_records_lost_total").increment(1);
+            }
+        }
+    }
+}
+
+fn default_dlq_fallback() -> DlqFallback {
+    let (retry_tx, _rx) = mpsc::channel(1);
+    DlqFallback {
+        writer: Arc::new(EmergencyDlqWriter::new("data/ledger")),
+        retry_tx,
+    }
+}
+
+async fn flush(
+    redis: &RedisCtx,
+    instance_id: &str,
+    dlq_fallback: &DlqFallback,
+    buf: &mut Vec<LedgerItem>,
+) {
     // Drain into parallel vectors: (payload, clear_opt). Per spec
     // `docs/spec/06-billing-ledger.md`
     // (DEL rule), the flusher only DELs the inflight key after the
     // matching record's XADD on `usage:records` is confirmed; DLQ / serialize-
     // fail / queue-fail paths leave the key alone so the reconciler can
     // surface them via CrashFallback.
+    let mut records: Vec<UsageRecord> = Vec::with_capacity(buf.len());
     let mut payloads: Vec<String> = Vec::with_capacity(buf.len());
     let mut clears: Vec<Option<ClearKey>> = Vec::with_capacity(buf.len());
     for item in buf.drain(..) {
         match serde_json::to_string(&item.record) {
             Ok(p) => {
+                records.push(item.record);
                 payloads.push(p);
                 clears.push(item.clear);
             }
@@ -340,7 +582,7 @@ async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
     let client = redis.pool.next();
     let pipe = client.pipeline();
     // Track per-record queue failures so we can DLQ those individually.
-    let mut queue_failed: Vec<(usize, String, String)> = Vec::new();
+    let mut queue_failed: Vec<(usize, String)> = Vec::new();
     let mut queued_indices: Vec<usize> = Vec::with_capacity(payloads.len());
     for (idx, payload) in payloads.iter().enumerate() {
         if let Err(e) = pipe
@@ -355,7 +597,7 @@ async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
         {
             tracing::warn!(target: "gw_ledger", error = %e, "usage flush: xadd queue failed");
             metrics::counter!("gateway_usage_queue_errors_total").increment(1);
-            queue_failed.push((idx, payload.clone(), e.to_string()));
+            queue_failed.push((idx, e.to_string()));
         } else {
             queued_indices.push(idx);
         }
@@ -379,10 +621,14 @@ async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
             // Drain ALL queued records to DLQ.
             let reason = format!("batch_rtt: {e}");
             for idx in &queued_indices {
-                let wrapped = wrap_for_dlq(&payloads[*idx], &reason, 0);
-                if dlq_xadd(redis, wrapped).await.is_err() {
-                    metrics::counter!("gateway_usage_records_lost_total").increment(1);
-                }
+                let envelope = DlqEnvelope::new(
+                    records[*idx].clone(),
+                    reason.clone(),
+                    0,
+                    DlqLayer::Redis,
+                    now_ms(),
+                );
+                route_to_dlq(redis, &envelope, dlq_fallback).await;
                 // No DEL — DLQ path leaves inflight key for reconciler.
                 if clears[*idx].is_some() {
                     metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "skipped_dlq").increment(1);
@@ -392,11 +638,15 @@ async fn flush(redis: &RedisCtx, instance_id: &str, buf: &mut Vec<LedgerItem>) {
     }
 
     // Per-record queue failures (independent of batch RTT).
-    for (idx, payload, reason) in queue_failed {
-        let wrapped = wrap_for_dlq(&payload, &format!("xadd_queue: {reason}"), 0);
-        if dlq_xadd(redis, wrapped).await.is_err() {
-            metrics::counter!("gateway_usage_records_lost_total").increment(1);
-        }
+    for (idx, reason) in queue_failed {
+        let envelope = DlqEnvelope::new(
+            records[idx].clone(),
+            format!("xadd_queue: {reason}"),
+            0,
+            DlqLayer::Redis,
+            now_ms(),
+        );
+        route_to_dlq(redis, &envelope, dlq_fallback).await;
         if clears[idx].is_some() {
             metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "skipped_dlq")
                 .increment(1);

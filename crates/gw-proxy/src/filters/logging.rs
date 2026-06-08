@@ -309,8 +309,7 @@ pub async fn run(
                 .as_ref()
                 .map(|g| g.freeze_amount())
                 .unwrap_or(0),
-            // C-β sources real version from entity:estimate_pricing.
-            estimate_pricing_version: 0,
+            estimate_pricing_version: ctx.estimate_pricing_version,
             markup_chain_snapshot: ctx
                 .merged_perm
                 .as_ref()

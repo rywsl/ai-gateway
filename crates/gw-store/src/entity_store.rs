@@ -10,8 +10,8 @@
 //! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
 use crate::loader::{
-    load_apikey, load_auth_config, load_ipblock, load_jwks, load_mgmt_token, load_model,
-    load_model_group, load_pricing, load_proxy_node, load_proxy_nodes_list, load_user,
+    load_apikey, load_auth_config, load_estimate_pricing, load_ipblock, load_jwks, load_mgmt_token,
+    load_model, load_model_group, load_pricing, load_proxy_node, load_proxy_nodes_list, load_user,
     load_user_group, load_vendor, load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
@@ -114,6 +114,7 @@ pub struct EntityStore {
     pub vendor_key: Cache<KeyId, Arc<Versioned<VendorKey>>>,
     pub model_group: Cache<Group, Arc<Versioned<ModelGroup>>>,
     pub pricing: Cache<ModelName, Arc<Versioned<Pricing>>>,
+    pub estimate_pricing: Cache<ModelName, Arc<Versioned<EstimatePricing>>>,
     pub jwks: Cache<Kid, Arc<Versioned<JwksEntry>>>,
     /// JWT/blacklist policy (G1/G2/G3). Keyed by config id (well-known id
     /// `"global"`). 3600s TTL, same as `jwks`. Populated by T1-E via
@@ -193,6 +194,10 @@ impl EntityStore {
                 .time_to_live(Duration::from_secs(1800))
                 .build(),
             pricing: Cache::builder()
+                .max_capacity(1_000)
+                .time_to_live(Duration::from_secs(1800))
+                .build(),
+            estimate_pricing: Cache::builder()
                 .max_capacity(1_000)
                 .time_to_live(Duration::from_secs(1800))
                 .build(),
@@ -417,6 +422,29 @@ impl EntityStore {
             .try_get_with_by_ref(id, async move {
                 with_cold_load_timeout("pricing", deadline, async move {
                     load_pricing(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn estimate_pricing_or_load(
+        &self,
+        id: &ModelName,
+    ) -> Option<Arc<Versioned<EstimatePricing>>> {
+        if let Some(hit) = self.estimate_pricing.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.clone();
+        let deadline = self.cold_load_timeout;
+        self.estimate_pricing
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("estimate_pricing", deadline, async move {
+                    load_estimate_pricing(&loader, &id2).await
                 })
                 .await
                 .map(Arc::new)

@@ -294,6 +294,15 @@ pub struct Pricing {
     pub stream_total_timeout_ms: Option<u32>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EstimatePricing {
+    pub model: ModelName,
+    pub conservative_per_token_micro: u64,
+    pub safety_factor: f64,
+    pub default_max_tokens: u32,
+    pub hard_cap_tokens: u32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct JwksEntry {
     pub kid: Kid,
