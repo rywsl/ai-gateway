@@ -209,6 +209,7 @@ mod tests {
             tunnel_preference: None,
             oauth: None,
             identity_snapshot: None,
+            quota_state: Default::default(),
         })
     }
 

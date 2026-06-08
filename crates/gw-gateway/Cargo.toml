@@ -30,6 +30,7 @@ gw-ledger = { path = "../gw-ledger" }
 gw-codec = { path = "../gw-codec" }
 gw-billing = { path = "../gw-billing" }
 gw-task = { path = "../gw-task" }
+gw-adapter = { path = "../gw-adapter" }
 gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
 anyhow.workspace = true
 serde.workspace = true

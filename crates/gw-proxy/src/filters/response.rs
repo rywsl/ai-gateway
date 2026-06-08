@@ -47,6 +47,76 @@ use pingora_proxy::Session;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+#[derive(Clone, Debug)]
+pub struct QuotaSnapshot {
+    pub state: gw_core::entity::QuotaState,
+    pub retry_after_secs: Option<u32>,
+}
+
+pub trait QuotaHeaderView {
+    fn get(&self, name: &str) -> Option<&str>;
+}
+
+pub struct QuotaSnapshotExtractor;
+
+impl QuotaSnapshotExtractor {
+    pub fn extract(headers: &dyn QuotaHeaderView) -> Option<QuotaSnapshot> {
+        let remaining = first_i64(
+            headers,
+            &[
+                "anthropic-ratelimit-requests-remaining",
+                "x-ratelimit-remaining-requests",
+                "x-rate-limit-remaining",
+                "ratelimit-remaining",
+            ],
+        )?;
+        let limit = first_i64(
+            headers,
+            &[
+                "anthropic-ratelimit-requests-limit",
+                "x-ratelimit-limit-requests",
+                "x-ratelimit-limit",
+                "ratelimit-limit",
+            ],
+        );
+        let retry_after_secs = headers
+            .get("retry-after")
+            .and_then(|s| s.parse::<u32>().ok());
+        let now = unix_s();
+        let reset_at_unix_s = retry_after_secs.map(|s| now + i64::from(s));
+        let availability = if remaining == 0 {
+            gw_core::entity::QuotaAvailability::Exhausted
+        } else {
+            gw_core::entity::QuotaAvailability::Available
+        };
+
+        Some(QuotaSnapshot {
+            state: gw_core::entity::QuotaState {
+                availability,
+                remaining: Some(remaining),
+                limit,
+                reset_at_unix_s,
+                observed_at_unix_s: Some(now),
+                source: Some("response_header".to_string()),
+            },
+            retry_after_secs,
+        })
+    }
+}
+
+fn first_i64(headers: &dyn QuotaHeaderView, names: &[&str]) -> Option<i64> {
+    names
+        .iter()
+        .find_map(|name| headers.get(name).and_then(|s| s.parse::<i64>().ok()))
+}
+
+fn unix_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
+}
+
 pub fn run(
     _session: &mut Session,
     body: &mut Option<Bytes>,
@@ -187,6 +257,52 @@ pub fn run(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod quota_snapshot_tests {
+    use super::*;
+
+    struct Headers(Vec<(&'static str, &'static str)>);
+
+    impl QuotaHeaderView for Headers {
+        fn get(&self, name: &str) -> Option<&str> {
+            self.0
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| *v)
+        }
+    }
+
+    #[test]
+    fn anthropic_remaining_headers_extract_available_state() {
+        let snap = QuotaSnapshotExtractor::extract(&Headers(vec![
+            ("anthropic-ratelimit-requests-remaining", "42"),
+            ("anthropic-ratelimit-requests-limit", "100"),
+        ]))
+        .expect("snapshot");
+        assert_eq!(
+            snap.state.availability,
+            gw_core::entity::QuotaAvailability::Available
+        );
+        assert_eq!(snap.state.remaining, Some(42));
+        assert_eq!(snap.state.limit, Some(100));
+    }
+
+    #[test]
+    fn zero_remaining_extracts_exhausted_state() {
+        let snap = QuotaSnapshotExtractor::extract(&Headers(vec![
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-limit-requests", "500"),
+            ("retry-after", "30"),
+        ]))
+        .expect("snapshot");
+        assert_eq!(
+            snap.state.availability,
+            gw_core::entity::QuotaAvailability::Exhausted
+        );
+        assert_eq!(snap.retry_after_secs, Some(30));
+    }
 }
 
 pub fn run_cli_body_filter(

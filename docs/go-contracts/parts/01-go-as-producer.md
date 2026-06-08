@@ -53,7 +53,7 @@ XADD 字段（key-value 列表）：
 | `user_group` | `user_groups` | `EntityStore.user_group` | `UserGroup` | 5 min TTL |
 | `apikey` | `api_keys` | `EntityStore.apikey` | `ApiKeyEntry` | 5 min TTL |
 | `vendor` | `vendors` | `EntityStore.vendor` | `Vendor` | 30 min TTL；`egress_mode` 写入契约见 [parts/03 §3.2.4](03-shared-schema.md#324-vendorspayload--vendor) |
-| `vendor_key` | `vendor_keys` | `EntityStore.vendor_key` | `VendorKey`（含 `api_key_enc` 解密前形态、`tunnel_preference`、`identity_snapshot` 折叠字段，见 [parts/03 §3.2.5](03-shared-schema.md#325-vendor_keyspayload--vendorkey含加密-api_key) / [§3.4](03-shared-schema.md#34-加密-payload-aes-256-gcm)） | 30 min TTL |
+| `vendor_key` | `vendor_keys` | `EntityStore.vendor_key` | `VendorKey`（含 `api_key_enc` 解密前形态、`tunnel_preference`、`identity_snapshot` 与 `quota_state` 折叠字段，见 [parts/03 §3.2.5](03-shared-schema.md#325-vendor_keyspayload--vendorkey含加密-api_key) / [§3.4](03-shared-schema.md#34-加密-payload-aes-256-gcm)） | 30 min TTL |
 | `model_group` | `model_groups` | `EntityStore.model_group` | `ModelGroup` | 30 min TTL |
 | `pricing` | `pricings` | `EntityStore.pricing` | `Pricing` | 30 min TTL，但 Rust 实际只读 estimate_pricing；过渡期保留 |
 | `jwks` | `jwks` | `EntityStore.jwks` | `JwksEntry` | 1 h TTL |
@@ -63,7 +63,7 @@ XADD 字段（key-value 列表）：
 | `auth_config` | `auth_configs`（待 migration） | `EntityStore.auth_config` | `AuthConfig` | 1 h TTL；well-known ID `"global"` |
 | `management_token` | `management_tokens`（0007 migration） | `EntityStore.mgmt_token` | `ManagementTokenEntry` | 5 min TTL；ID 前缀 `mt_` |
 | `proxy_node` | `proxy_nodes`（0005 migration,已 merged）| `EntityStore.proxy_node` | `ProxyNodeEntry` | 30 min TTL;支撑 tunnel client 节点视图;详见 [parts/04](04-proxy-nodes.md) |
-| `estimate_pricing` | （Go 自定表） | （待加） | `EstimatePricing`（见 §1.5） | 30 min TTL |
+| `estimate_pricing` | `estimate_pricings`（Go 负责建表/写入） | `EntityStore.estimate_pricing` | `EstimatePricing`（见 §1.5） | 30 min TTL |
 
 未知 ns Rust 端 warn 后丢弃。新增 ns **必须**同步：本表 + `crates/gw-store/src/stream_consumer.rs::apply_entity_event` + `crates/gw-store/src/entity_store.rs::EntityStore`。
 
@@ -152,7 +152,7 @@ XADD 字段：
 | 退款 / 管理员调账 | `base_micro` | `+/-amount` |
 | Go settle 一条 UsageRecord | `deducted_micro` | `+cost_micro` |
 
-> Rust **不**写 `events:counter`。`frozen_micro` 变化由 Rust 异步 `HINCRBY counter:user:<uid>:frozen_micro`，**不**通过 events:counter 通知 Go（Go 直接 GET Redis 读 frozen）。
+> Rust **不**写 `events:counter`。`frozen_micro` 变化由 Rust 异步 `INCRBY counter:user:<uid>:frozen_micro`，**不**通过 events:counter 通知 Go（Go 直接 GET Redis 读 frozen）。
 
 ### 1.3.4 写顺序
 
@@ -175,8 +175,9 @@ Go 端必须：
 | `counter:user:<uid>:deducted_micro` | Go | Rust（启动期 HGET + events:counter 增量） | Go INCRBY，每条 UsageRecord 算完 cost 后写 |
 | `counter:user:<uid>:frozen_micro` | **Rust** | Rust + Go | Rust 异步 HINCRBY（freeze +est / release -est）；Go 仅 GET 读用于审计 / balance check |
 | `counter:user:<uid>:daily_tokens:<YYYY-MM-DD>` | **Rust**（observational） | Rust（quota 检查） + Go（报表可读） | Rust `INCRBY + EXPIRE 48h`（`counter_store.rs:50-60`） |
+| `vendor_keys.quota_*` | **Rust**（runtime writer） | Rust（routing 前置过滤） + Go（报表/管理只读） | Rust `QuotaStateUpdateQueue` 更新列、自增 version、发 `events:entity ns=vendor_key op=quota_state` |
 
-> 写权独占：`base_micro` / `deducted_micro` 仅 Go 写；`frozen_micro` 仅 Rust 写；`daily_tokens:*` 仅 Rust 写。**禁止**任一方越线写另一方的 field——会破坏 [parts/02 §2.5](02-go-as-consumer.md#25-counter-frozen-micro-rust-写) 的不变量。
+> 写权独占：`base_micro` / `deducted_micro` 仅 Go 写；`frozen_micro` 仅 Rust 写；`daily_tokens:*` 仅 Rust 写；`vendor_keys.quota_*` 运行时仅 Rust 写。**禁止**任一方越线写另一方的 field——会破坏 [parts/02 §2.5](02-go-as-consumer.md#25-counter-frozen-micro-rust-写) 的不变量。
 
 Go 写顺序：见 §1.3.4。Go 不需要写 `counter:*:frozen_micro` 或 `counter:*:daily_tokens:*`，直接 GET 即可。
 
@@ -222,7 +223,7 @@ conservative_per_token_micro = ceil(
 
 ### 1.5.3 上线 ordering
 
-- v1：Rust 同时支持读旧 `entity:pricing` 与新 `entity:estimate_pricing`，前者优先用后者兜底（C-β §ADR-Cβ-4 step 1）。
+- v1：Rust 同时支持旧 `entity:pricing` 与新 `entity:estimate_pricing`；请求冻结估算优先用 `entity:estimate_pricing`，缺失 / cold-load miss 时回退 legacy flat estimate（C-β §ADR-Cβ-4 step 1）。
 - v2：Go 切到完全用 BillingPricing 算 cost，删除 `entity:pricing` namespace。Rust 仅读 `entity:estimate_pricing`。
 
 > 用户决议（[breaking changes OK](../../../../../.claude/projects/-Users-whereslow-Desktop-work-ailinkmax-gateway/memory/feedback_breaking_changes_ok.md)）：v2 切换可以直接做，不需要 step 1 兼容期。
@@ -231,8 +232,8 @@ conservative_per_token_micro = ceil(
 
 | 故障 | Rust 行为 |
 |---|---|
-| Go 改 BillingPricing 但忘记 push EstimatePricing | Rust 用旧 conservative_per_token_micro → freeze 可能偏低 → 透支风险。Go 必须 CI 防呆 |
-| EstimatePricing entity load 失败（Redis miss + PgSQL 慢） | 短路 503 + metric `gw_freeze_estimate_pricing_unavailable_total`（C-β §ADR-Cβ-7） |
+| Go 改 BillingPricing 但忘记 push EstimatePricing | Rust 可能继续使用旧 conservative_per_token_micro，或在 entity 缺失时使用 legacy flat estimate → freeze 可能偏低 → 透支风险。Go 必须 CI 防呆 |
+| EstimatePricing entity 缺失 / cold-load miss | Rust 回退 legacy flat estimate，`UsageRecord.estimate_pricing_version = 0`，用于区分非 C-β 估算路径 |
 
 ## 1.6 `jwt:blacklist:<jti>` Redis Key
 

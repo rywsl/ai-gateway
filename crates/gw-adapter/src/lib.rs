@@ -17,7 +17,8 @@ pub mod registry;
 pub mod trait_def;
 
 pub use analyzer::{
-    DefaultErrorAnalyzer, ErrorKind, ErrorOutcome, HeaderView, UpstreamErrorAnalyzer,
+    BuiltinAnalyzerKind, DefaultErrorAnalyzer, ErrorKind, ErrorOutcome, HeaderView,
+    KeywordErrorAnalyzer, UpstreamErrorAnalyzer,
 };
 pub use ctx::{AdapterCtx, HeadersAccessor, HeadersMut, UrlAccessor, UrlMut};
 pub use error::AdapterError;

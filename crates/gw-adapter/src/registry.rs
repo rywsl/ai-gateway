@@ -2,7 +2,7 @@
 //!
 //! Built at gateway / worker bootstrap; one shared instance per process.
 
-use crate::analyzer::{DefaultErrorAnalyzer, UpstreamErrorAnalyzer};
+use crate::analyzer::{DefaultErrorAnalyzer, KeywordErrorAnalyzer, UpstreamErrorAnalyzer};
 use crate::noop::NoopAdapter;
 use crate::trait_def::UpstreamAdapter;
 use dashmap::DashMap;
@@ -55,8 +55,23 @@ impl AdapterRegistry {
         self.error_analyzers
             .get(v)
             .map(|e| e.value().clone())
+            .or_else(|| builtin_error_analyzer_for(v))
             .unwrap_or_else(|| {
                 (self.default_error_analyzer.clone()) as Arc<dyn UpstreamErrorAnalyzer>
             })
     }
+}
+
+fn builtin_error_analyzer_for(vendor: &VendorId) -> Option<Arc<dyn UpstreamErrorAnalyzer>> {
+    let id = vendor.as_ref().to_ascii_lowercase();
+    if id.contains("codex") || id.contains("openai") {
+        return Some(Arc::new(KeywordErrorAnalyzer::codex()));
+    }
+    if id.contains("anthropic") || id.contains("claude") {
+        return Some(Arc::new(KeywordErrorAnalyzer::anthropic()));
+    }
+    if id.contains("gemini") || id.contains("google") {
+        return Some(Arc::new(KeywordErrorAnalyzer::gemini()));
+    }
+    None
 }

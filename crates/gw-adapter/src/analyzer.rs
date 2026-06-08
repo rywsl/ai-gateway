@@ -138,3 +138,164 @@ impl UpstreamErrorAnalyzer for DefaultErrorAnalyzer {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinAnalyzerKind {
+    Codex,
+    Anthropic,
+    Gemini,
+}
+
+pub struct KeywordErrorAnalyzer {
+    kind: BuiltinAnalyzerKind,
+}
+
+impl KeywordErrorAnalyzer {
+    pub fn codex() -> Self {
+        Self {
+            kind: BuiltinAnalyzerKind::Codex,
+        }
+    }
+
+    pub fn anthropic() -> Self {
+        Self {
+            kind: BuiltinAnalyzerKind::Anthropic,
+        }
+    }
+
+    pub fn gemini() -> Self {
+        Self {
+            kind: BuiltinAnalyzerKind::Gemini,
+        }
+    }
+}
+
+fn body_contains_any(body_head: &[u8], needles: &[&str]) -> bool {
+    let body = String::from_utf8_lossy(body_head).to_ascii_lowercase();
+    needles
+        .iter()
+        .any(|needle| body.contains(&needle.to_ascii_lowercase()))
+}
+
+fn cooldown(reason_code: u16, ttl_secs: u32, reset_consecutive: bool) -> CooldownDirective {
+    CooldownDirective {
+        reason_code,
+        ttl_secs,
+        reset_consecutive,
+    }
+}
+
+impl UpstreamErrorAnalyzer for KeywordErrorAnalyzer {
+    fn analyze(&self, status: u16, body_head: &[u8], headers: &dyn HeaderView) -> ErrorOutcome {
+        let retry_after_secs = retry_after_header(headers);
+        match self.kind {
+            BuiltinAnalyzerKind::Codex => {
+                if status == 429 {
+                    let ttl = retry_after_secs.unwrap_or(60);
+                    return ErrorOutcome {
+                        kind: Some(ErrorKind::RateLimit),
+                        retry_after_secs,
+                        cooldown: Some(cooldown(7, ttl, false)),
+                        ..Default::default()
+                    };
+                }
+            }
+            BuiltinAnalyzerKind::Anthropic => {
+                if (status == 401 || status == 403)
+                    && body_contains_any(body_head, &["disabled", "deactivated", "suspended"])
+                {
+                    return ErrorOutcome {
+                        kind: Some(ErrorKind::Quota),
+                        cooldown: Some(cooldown(13, 3600, false)),
+                        ..Default::default()
+                    };
+                }
+                if status == 429 {
+                    let ttl = retry_after_secs.unwrap_or(60);
+                    return ErrorOutcome {
+                        kind: Some(ErrorKind::RateLimit),
+                        retry_after_secs,
+                        cooldown: Some(cooldown(7, ttl, false)),
+                        ..Default::default()
+                    };
+                }
+            }
+            BuiltinAnalyzerKind::Gemini => {
+                if status == 429
+                    && body_contains_any(
+                        body_head,
+                        &["resource_exhausted", "quota exceeded", "quota"],
+                    )
+                {
+                    let ttl = retry_after_secs.unwrap_or(60);
+                    return ErrorOutcome {
+                        kind: Some(ErrorKind::Quota),
+                        retry_after_secs,
+                        cooldown: Some(cooldown(7, ttl, false)),
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+        DefaultErrorAnalyzer.analyze(status, body_head, headers)
+    }
+}
+
+#[cfg(test)]
+mod vendor_analyzer_tests {
+    use super::*;
+
+    struct Headers(Vec<(&'static str, &'static str)>);
+
+    impl HeaderView for Headers {
+        fn get(&self, name: &str) -> Option<&str> {
+            self.0
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| *v)
+        }
+    }
+
+    #[test]
+    fn codex_429_reads_retry_after_and_marks_rate_limit() {
+        let analyzer = KeywordErrorAnalyzer::codex();
+        let out = analyzer.analyze(
+            429,
+            br#"{"error":{"message":"rate limit reached"}}"#,
+            &Headers(vec![("Retry-After", "17")]),
+        );
+        assert_eq!(out.kind, Some(ErrorKind::RateLimit));
+        assert_eq!(out.retry_after_secs, Some(17));
+        let cooldown = out.cooldown.expect("429 produces cooldown");
+        assert_eq!(cooldown.reason_code, 7);
+        assert_eq!(cooldown.ttl_secs, 17);
+    }
+
+    #[test]
+    fn anthropic_disabled_body_marks_account_blocked() {
+        let analyzer = KeywordErrorAnalyzer::anthropic();
+        let out = analyzer.analyze(
+            403,
+            br#"{"type":"error","error":{"message":"workspace account disabled"}}"#,
+            &Headers(vec![]),
+        );
+        assert_eq!(out.kind, Some(ErrorKind::Quota));
+        let cooldown = out.cooldown.expect("disabled account produces cooldown");
+        assert_eq!(cooldown.reason_code, 13);
+        assert_eq!(cooldown.ttl_secs, 3600);
+    }
+
+    #[test]
+    fn gemini_resource_exhausted_body_marks_quota() {
+        let analyzer = KeywordErrorAnalyzer::gemini();
+        let out = analyzer.analyze(
+            429,
+            br#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}"#,
+            &Headers(vec![]),
+        );
+        assert_eq!(out.kind, Some(ErrorKind::Quota));
+        let cooldown = out.cooldown.expect("quota exhausted produces cooldown");
+        assert_eq!(cooldown.reason_code, 7);
+        assert_eq!(cooldown.ttl_secs, 60);
+    }
+}

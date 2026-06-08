@@ -70,6 +70,7 @@ fn vendor_key_capability_fields_default_construction() {
         tunnel_preference: None,
         oauth: None,
         identity_snapshot: None,
+        quota_state: Default::default(),
     };
 
     assert!(vk.forced_capabilities.is_empty());

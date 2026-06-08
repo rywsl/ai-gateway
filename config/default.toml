@@ -64,6 +64,7 @@ billing_estimated_duration_secs = 60
 channel_capacity = 65536
 batch_size = 200
 flush_interval_ms = 200
+emergency_dlq_dir = "data/ledger"
 
 [kms]
 # Dev mode: provide a 32-byte KEK as 64 hex chars via env var
@@ -159,6 +160,12 @@ heartbeat_ttl_secs = 600          # heartbeat key TTL (供 Go-side reaper 探活
 enabled = false
 interval_secs = 30
 probe_endpoint = "/v1/models"
+
+[quota_state_probe]
+enabled = false
+interval_secs = 300
+probe_endpoint = "/v1/models"
+max_pending = 1000
 
 [egress]
 # Workspace kill-switch for the egress-impersonate path. When true, vendors

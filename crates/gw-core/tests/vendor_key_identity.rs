@@ -27,5 +27,6 @@ fn vendor_key_identity_snapshot_defaults_to_none() {
         tunnel_preference: None,
         oauth: None,
         identity_snapshot: None,
+        quota_state: Default::default(),
     };
 }

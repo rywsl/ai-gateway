@@ -43,12 +43,16 @@ pub async fn get_candidate_keys(
     required_caps: Option<&RequiredCapabilities>,
 ) -> Vec<Arc<VendorKey>> {
     let mut out = Vec::with_capacity(group.vendor_key_ids.len());
+    let now_unix_s = now_unix_s();
     for kid in &group.vendor_key_ids {
         let Some(v) = store.vendor_key_or_load(kid).await else {
             continue;
         };
         let key = &*v.value;
         if !matches!(key.status, KeyStatus::Active) {
+            continue;
+        }
+        if !key.quota_state.is_routable_at_unix_s(now_unix_s) {
             continue;
         }
         if !key.accessible_models.contains(model) {
@@ -98,7 +102,15 @@ pub async fn get_candidate_keys(
             tunnel_preference: key.tunnel_preference.clone(),
             oauth: key.oauth.clone(),
             identity_snapshot: key.identity_snapshot.clone(),
+            quota_state: key.quota_state.clone(),
         }));
     }
     out
+}
+
+fn now_unix_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
 }

@@ -37,6 +37,7 @@ fn fake_key(id: &str, priority: i32) -> Arc<VendorKey> {
         tunnel_preference: None,
         oauth: None,
         identity_snapshot: None,
+        quota_state: Default::default(),
     })
 }
 

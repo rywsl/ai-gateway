@@ -13,7 +13,8 @@ use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
     ApiKeyEntry, AuthConfig, EstimatePricing, IpBlockEntry, JwksEntry, ManagementTokenEntry, Model,
-    ModelGroup, OAuthCredentials, Pricing, ProxyNode, UserEntry, UserGroup, Vendor, VendorKey,
+    ModelGroup, OAuthCredentials, Pricing, ProxyNode, QuotaState, UserEntry, UserGroup, Vendor,
+    VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -199,6 +200,9 @@ struct VendorKeyRow {
     /// `None` for keys that have not yet used impersonate egress.
     #[serde(default)]
     identity_snapshot: Option<gw_core::impersonate::IdentitySnapshot>,
+    /// Persisted vendor quota snapshot folded from dedicated hot columns.
+    #[serde(default)]
+    quota_state: QuotaState,
 }
 
 const USER_SQL: &str = "SELECT payload, version FROM users WHERE id = $1 AND deleted_at IS NULL";
@@ -222,7 +226,7 @@ const VENDOR_SQL: &str =
 // closure only sees `payload`, so fold the column into `payload.identity_snapshot`
 // with `jsonb_set` — same trick as `API_KEY_SQL` does for `signature_secret`.
 // Without this, lazy-persisted identities would never be read back.
-const VENDOR_KEY_SQL: &str = "SELECT jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true) AS payload, version FROM vendor_keys WHERE id = $1 AND deleted_at IS NULL";
+const VENDOR_KEY_SQL: &str = "SELECT jsonb_set(jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true), '{quota_state}', jsonb_build_object('availability', quota_availability, 'remaining', quota_remaining, 'limit', quota_limit, 'reset_at_unix_s', CASE WHEN quota_reset_at IS NULL THEN NULL ELSE EXTRACT(EPOCH FROM quota_reset_at)::BIGINT END, 'observed_at_unix_s', CASE WHEN quota_observed_at IS NULL THEN NULL ELSE EXTRACT(EPOCH FROM quota_observed_at)::BIGINT END, 'source', quota_source), true) AS payload, version FROM vendor_keys WHERE id = $1 AND deleted_at IS NULL";
 const MODEL_GROUP_SQL: &str =
     "SELECT payload, version FROM model_groups WHERE id = $1 AND deleted_at IS NULL";
 const PRICING_SQL: &str =
@@ -326,6 +330,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
             tunnel_preference: row.tunnel_preference,
             oauth,
             identity_snapshot: row.identity_snapshot,
+            quota_state: row.quota_state,
         })
     })
     .await
@@ -382,6 +387,46 @@ pub async fn load_auth_config(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versi
         serde_json::from_value::<AuthConfig>(v.clone()).map_err(Into::into)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encrypt::encrypt_for_test_only;
+    use gw_core::entity::{QuotaAvailability, QuotaState};
+
+    #[test]
+    fn vendor_key_row_decodes_quota_state_from_payload() {
+        let api_key_enc = encrypt_for_test_only("sk-test", [7u8; 32]);
+        let payload = serde_json::json!({
+            "key_id": "vk-quota-row",
+            "vendor_id": "v1",
+            "api_key_enc": api_key_enc,
+            "status": "active",
+            "quota_state": {
+                "availability": "exhausted",
+                "remaining": 0,
+                "limit": 1000,
+                "reset_at_unix_s": 99,
+                "observed_at_unix_s": 10,
+                "source": "vendor"
+            }
+        });
+
+        let row: VendorKeyRow = serde_json::from_value(payload).expect("decode vendor key row");
+
+        assert_eq!(
+            row.quota_state,
+            QuotaState {
+                availability: QuotaAvailability::Exhausted,
+                remaining: Some(0),
+                limit: Some(1000),
+                reset_at_unix_s: Some(99),
+                observed_at_unix_s: Some(10),
+                source: Some("vendor".to_string()),
+            }
+        );
+    }
 }
 
 /// Cold-load a [`Model`] (G13 — capability metadata) by name. Mirrors

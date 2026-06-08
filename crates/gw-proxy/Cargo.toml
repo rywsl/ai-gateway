@@ -20,6 +20,7 @@ gw-ledger = { path = "../gw-ledger" }
 gw-capability = { path = "../gw-capability" }
 gw-billing = { path = "../gw-billing" }
 gw-task = { path = "../gw-task" }
+gw-adapter = { path = "../gw-adapter" }
 gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
 gw-egress-impersonate = { path = "../gw-egress-impersonate" }
 async-trait.workspace = true

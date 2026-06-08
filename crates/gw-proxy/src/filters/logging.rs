@@ -63,6 +63,7 @@ pub async fn run(
     store: &Arc<gw_store::EntityStore>,
     resilience: &crate::resilience::ResilienceState,
     ratelimit: &Arc<RateLimitGuard>,
+    quota_state_updates: Option<&Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
 ) {
     // W2-T4: force Terminated on any request that reached Sent or Streaming
     // but didn't arrive at a terminal state (cancel, error, deadline, etc.).
@@ -191,15 +192,23 @@ pub async fn run(
                 gw_core::protocol::resolve_upstream_format(&pk.accessible_endpoints, client_kind)
             }
         };
+        let retry_after_secs = ctx
+            .error_outcome
+            .as_ref()
+            .and_then(|outcome| outcome.rate_limit_hint.as_ref())
+            .and_then(|hint| hint.retry_after_secs);
         let outcome = if ok {
             OutcomeKind::Success
         } else {
             OutcomeKind::Failure {
                 http_status: ctx.upstream_status.unwrap_or(0),
-                retry_after_secs: None,
+                retry_after_secs,
             }
         };
         health.record(&pk.key_id, api_fmt, outcome);
+        if let (Some(queue), Some(snapshot)) = (quota_state_updates, ctx.quota_snapshot.as_ref()) {
+            queue.schedule(pk.key_id.0.clone(), snapshot.state.clone());
+        }
     }
 
     // ---------------------------------------------------------------------

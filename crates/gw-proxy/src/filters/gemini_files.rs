@@ -573,6 +573,7 @@ pub fn skeleton_vendor_key() -> Arc<VendorKey> {
         tunnel_preference: None,
         oauth: None,
         identity_snapshot: None,
+        quota_state: Default::default(),
     })
 }
 
@@ -693,6 +694,7 @@ fn clone_vendor_key(key: &VendorKey) -> Arc<VendorKey> {
         tunnel_preference: key.tunnel_preference.clone(),
         oauth: key.oauth.clone(),
         identity_snapshot: key.identity_snapshot.clone(),
+        quota_state: key.quota_state.clone(),
     })
 }
 
@@ -850,6 +852,7 @@ mod tests {
             tunnel_preference: None,
             oauth: None,
             identity_snapshot: None,
+            quota_state: Default::default(),
         };
         store
             .vendor_key

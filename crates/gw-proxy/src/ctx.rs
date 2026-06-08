@@ -313,6 +313,8 @@ pub struct ReqCtx {
     pub archive_downstream_response_body: bytes::BytesMut,
     /// Upstream response headers + status snapshot, taken in `response_filter`.
     pub archive_upstream_response_meta: Option<ResponseMeta>,
+    /// Vendor quota snapshot extracted from upstream response headers.
+    pub quota_snapshot: Option<crate::filters::response::QuotaSnapshot>,
     /// Downstream response headers + status snapshot, taken at EOS in
     /// `response_body_filter` (after any codec header rewrite via response_filter).
     pub archive_downstream_response_meta: Option<ResponseMeta>,
@@ -426,6 +428,7 @@ impl ReqCtx {
             archive_upstream_response_body: bytes::BytesMut::new(),
             archive_downstream_response_body: bytes::BytesMut::new(),
             archive_upstream_response_meta: None,
+            quota_snapshot: None,
             archive_downstream_response_meta: None,
             trace: TraceBuffer::new(),
             debug: DebugMode::DISABLED,

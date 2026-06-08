@@ -120,6 +120,8 @@ struct Wired {
     /// via the lease branch or fall through to the legacy soft-defense path.
     protection_cfg: gw_ledger::ProtectionConfig,
     classifier: Arc<dyn gw_core::error::ErrorClassifier>,
+    adapter_registry: Arc<gw_adapter::AdapterRegistry>,
+    quota_state_updates: Option<Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
     retryable_codes: Arc<std::collections::HashSet<u16>>,
     error_passthrough_enabled: bool,
     error_passthrough_rules: std::sync::Arc<Vec<gw_core::error::rules::PassthroughRule>>,
@@ -312,6 +314,8 @@ pub fn run() -> anyhow::Result<()> {
         wired.hard_cap_cfg,
         wired.protection_cfg.clone(),
         wired.classifier,
+        wired.adapter_registry,
+        wired.quota_state_updates,
         wired.retryable_codes,
         wired.error_passthrough_enabled,
         wired.error_passthrough_rules,
@@ -380,6 +384,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
         &cfg.adaptive_rpm,
     )));
+    let adapter_registry = Arc::new(gw_adapter::AdapterRegistry::new());
     spawn_decay_loop(
         adaptive_rpm.clone(),
         cfg.adaptive_rpm.probe_after_min.saturating_mul(60),
@@ -414,6 +419,30 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         ));
     }
     let store = Arc::new(store_inner);
+    let quota_state_updates = {
+        let writer = Arc::new(gw_store::quota_state::QuotaStateWriter::new(
+            pg.clone(),
+            redis.clone(),
+        ));
+        Arc::new(gw_store::quota_state::QuotaStateUpdateQueue::new(
+            writer,
+            cfg.quota_state_probe.max_pending,
+        ))
+    };
+    if cfg.quota_state_probe.enabled {
+        gw_store::quota_state::QuotaStateProbeRunner {
+            store: store.clone(),
+            queue: quota_state_updates.clone(),
+            client: reqwest::Client::new(),
+            cfg: gw_store::quota_state::QuotaStateProbeCfg {
+                enabled: cfg.quota_state_probe.enabled,
+                interval_secs: cfg.quota_state_probe.interval_secs,
+                probe_endpoint: cfg.quota_state_probe.probe_endpoint.clone(),
+                max_pending: cfg.quota_state_probe.max_pending,
+            },
+        }
+        .start();
+    }
     let health = Arc::new(KeyHealthStore::default());
     let in_flight = Arc::new(InFlightStore::default());
     let ratelimit = Arc::new(RateLimitGuard::new());
@@ -518,12 +547,13 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     );
 
     // 4a. Ledger flusher.
-    let ledger = Arc::new(Ledger::start(
+    let ledger = Arc::new(Ledger::start_with_emergency_dir(
         redis.clone(),
         instance_id.clone(),
         cfg.ledger.channel_capacity,
         cfg.ledger.batch_size,
         Duration::from_millis(cfg.ledger.flush_interval_ms),
+        cfg.ledger.emergency_dlq_dir.clone(),
     ));
 
     // 4b. Detailed-log archive (T10). Workers is auto when configured to 0:
@@ -903,6 +933,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         },
         protection_cfg: cfg.protection.clone(),
         classifier: Arc::new(gw_core::error::DefaultClassifier),
+        adapter_registry,
+        quota_state_updates: Some(quota_state_updates),
         retryable_codes: {
             let mut codes = std::collections::HashSet::new();
             codes.insert(429);

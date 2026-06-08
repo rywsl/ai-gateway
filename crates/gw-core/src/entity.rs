@@ -19,6 +19,43 @@ pub enum KeyStatus {
     Deleted,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaAvailability {
+    #[default]
+    Unknown,
+    Available,
+    Exhausted,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuotaState {
+    #[serde(default)]
+    pub availability: QuotaAvailability,
+    #[serde(default)]
+    pub remaining: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub reset_at_unix_s: Option<i64>,
+    #[serde(default)]
+    pub observed_at_unix_s: Option<i64>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+impl QuotaState {
+    pub fn is_routable_at_unix_s(&self, now_unix_s: i64) -> bool {
+        match self.availability {
+            QuotaAvailability::Unknown => true,
+            QuotaAvailability::Available => true,
+            QuotaAvailability::Exhausted => self
+                .reset_at_unix_s
+                .is_some_and(|reset_at| reset_at <= now_unix_s),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserStatus {
@@ -224,6 +261,10 @@ pub struct VendorKey {
     /// Populated by `ensure_identity` on first impersonated dispatch and
     /// re-derived if `profile_kind` does not match the current vendor profile.
     pub identity_snapshot: Option<crate::impersonate::IdentitySnapshot>,
+    /// Persisted vendor quota snapshot. When the vendor reports the key is
+    /// temporarily exhausted and the reset time is still in the future, routing
+    /// removes the key before strategy selection.
+    pub quota_state: QuotaState,
 }
 
 impl std::fmt::Debug for VendorKey {

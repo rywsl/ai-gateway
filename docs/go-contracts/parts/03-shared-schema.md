@@ -19,6 +19,7 @@ Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开�
 | `0007_management_tokens.sql` | `management_tokens`（B2，T1-D 落地） |
 | `0008_signature_secret.sql` | `api_keys.signature_secret BYTEA`（HMAC 独立密钥列，KEK 加密 at rest；S-proxy-core H-1） |
 | `0009_egress_impersonation.sql` | `vendors.egress_mode` JSONB + `vendor_keys.identity_snapshot` JSONB（egress-impersonate 身份持久化） |
+| `0010_vendor_key_quota_state.sql` | `vendor_keys.quota_*` 结构化列（Rust 运行时写入 quota snapshot，Go 只读/管理展示） |
 
 ### 3.1.1 公共控制列（所有 entity 表）
 
@@ -173,6 +174,8 @@ deleted_at  TIMESTAMPTZ NULL
 > **0004 列冗余说明**：migration 0004 在 `vendor_keys` 表上**同时**加了 top-level 列 `forced_capabilities JSONB` 与 `exclusive_capability_match BOOLEAN`，但 Rust 实际通过 `payload.forced_capabilities` / `payload.exclusive_capability_match` 反序列化（见 `loader.rs:101-141`）。top-level 列**仅供 Go 端建索引或查询**，不是 Rust 数据来源。Go 写入时**必须**同时写两处，否则 Rust 看不到。
 
 > **0009 `identity_snapshot` 列说明**：`vendor_keys.identity_snapshot` 是 top-level JSONB 列，不是 Go 写入 `payload` 的字段。Rust `load_vendor_key` 用 `jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true)` 将该列折叠进反序列化 payload。Rust 首次 impersonated dispatch 通过 `PgSnapshotWriter::write_if_null` 懒写该列；Go 的 regenerate-identity 管理动作必须 `SET identity_snapshot = NULL, version = version + 1` 并发出 `events:entity ns=vendor_key`，详见 [`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md)。
+
+> **0010 `quota_state` 列说明**：`vendor_keys.quota_availability`、`quota_remaining`、`quota_limit`、`quota_reset_at`、`quota_observed_at`、`quota_source` 是 Rust 运行时 quota snapshot writer 的结构化列。Rust `load_vendor_key` 将这些列折叠为 `payload.quota_state`，路由在候选过滤阶段跳过 `availability = exhausted` 且未到 reset 的 key。Go 可读取这些列做报表/管理展示，但不得作为运行时 writer；Rust 写入后会自增 `version` 并发出 `events:entity ns=vendor_key op=quota_state`。
 
 #### `tunnel_preference` 子结构(可选)
 

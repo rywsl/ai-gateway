@@ -64,6 +64,8 @@ pub struct Config {
     pub body_rules: BodyRulesCfg,
     #[serde(default)]
     pub health: HealthCfg,
+    #[serde(default)]
+    pub quota_state_probe: QuotaStateProbeCfg,
     /// Credit-lease protection mode (Spec 2026-05-29-credit-lease-design).
     /// `enabled = false` (the default) keeps the legacy `frozen_micro` soft
     /// defense path; flipping it on activates the per-Pod hard upper bound.
@@ -123,6 +125,12 @@ pub struct LedgerCfg {
     pub channel_capacity: usize,
     pub batch_size: usize,
     pub flush_interval_ms: u64,
+    #[serde(default = "default_emergency_dlq_dir")]
+    pub emergency_dlq_dir: String,
+}
+
+fn default_emergency_dlq_dir() -> String {
+    "data/ledger".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -917,6 +925,41 @@ impl Default for QuotaProbeCfg {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuotaStateProbeCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_quota_state_probe_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_quota_state_probe_endpoint")]
+    pub probe_endpoint: String,
+    #[serde(default = "default_quota_state_probe_max_pending")]
+    pub max_pending: usize,
+}
+
+fn default_quota_state_probe_interval_secs() -> u64 {
+    300
+}
+
+fn default_quota_state_probe_endpoint() -> String {
+    "/v1/models".to_string()
+}
+
+fn default_quota_state_probe_max_pending() -> usize {
+    1000
+}
+
+impl Default for QuotaStateProbeCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_quota_state_probe_interval_secs(),
+            probe_endpoint: default_quota_state_probe_endpoint(),
+            max_pending: default_quota_state_probe_max_pending(),
+        }
+    }
+}
+
 /// Billing-robustness knobs. Spec:
 /// [`docs/spec/06-billing-ledger.md`].
 #[derive(Debug, Clone, Deserialize)]
@@ -1181,6 +1224,17 @@ impl Config {
                 anyhow::bail!(
                     "invalid config: health.quota_probe.probe_endpoint must be non-empty"
                 );
+            }
+        }
+        if self.quota_state_probe.enabled {
+            if self.quota_state_probe.interval_secs == 0 {
+                anyhow::bail!("invalid config: quota_state_probe.interval_secs must be > 0");
+            }
+            if self.quota_state_probe.probe_endpoint.is_empty() {
+                anyhow::bail!("invalid config: quota_state_probe.probe_endpoint must be non-empty");
+            }
+            if self.quota_state_probe.max_pending == 0 {
+                anyhow::bail!("invalid config: quota_state_probe.max_pending must be > 0");
             }
         }
 

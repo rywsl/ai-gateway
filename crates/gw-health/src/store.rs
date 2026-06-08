@@ -125,9 +125,18 @@ impl KeyHealthStore {
     }
 
     pub fn record(&self, key: &KeyId, fmt: ApiFormat, outcome: OutcomeKind) {
+        let health = self.get_or_create(key, fmt);
         let ok = matches!(outcome, OutcomeKind::Success);
-        self.get_or_create(key, fmt).record(ok);
-        let _ = outcome;
+        health.record(ok);
+        if let OutcomeKind::Failure {
+            http_status,
+            retry_after_secs,
+        } = outcome
+        {
+            if let Some(directive) = failure_payload_directive(http_status, retry_after_secs) {
+                health.apply_cooldown(directive);
+            }
+        }
     }
 
     pub fn apply_cooldown(&self, key: &KeyId, fmt: ApiFormat, d: CooldownDirective) {
@@ -215,6 +224,29 @@ impl KeyHealthStore {
     }
 }
 
+fn failure_payload_directive(
+    http_status: u16,
+    retry_after_secs: Option<u32>,
+) -> Option<CooldownDirective> {
+    match http_status {
+        429 => Some(CooldownDirective {
+            reason: CooldownReason::Status429RateLimit,
+            ttl_secs: retry_after_secs.unwrap_or(60),
+            reset_consecutive: false,
+        }),
+        500..=599 => Some(CooldownDirective {
+            reason: if http_status == 529 {
+                CooldownReason::Status529Overloaded
+            } else {
+                CooldownReason::StatusTransient5xx
+            },
+            ttl_secs: retry_after_secs.unwrap_or(30),
+            reset_consecutive: false,
+        }),
+        _ => None,
+    }
+}
+
 fn snapshot_to_string(v: serde_json::Value) -> String {
     // serde_json::to_string on a Value cannot fail (no custom serializers in
     // play). Falling back to a minimal empty-object literal preserves the
@@ -276,5 +308,39 @@ mod snapshot_tests {
         assert_eq!(entries.len(), 1, "exactly one row for k-keep");
         assert_eq!(entries[0]["key_id"], "k-keep");
         assert_eq!(entries[0]["in_cooldown"], true);
+    }
+
+    #[test]
+    fn record_429_failure_payload_applies_retry_after_cooldown() {
+        let store = KeyHealthStore::default();
+        let key = KeyId::from("vk-429");
+        store.record(
+            &key,
+            ProtocolKind::OpenAi,
+            OutcomeKind::Failure {
+                http_status: 429,
+                retry_after_secs: Some(23),
+            },
+        );
+        let snap = store.peek(&key, ProtocolKind::OpenAi);
+        assert!(snap.in_cooldown);
+        assert_eq!(snap.cooldown_reason, CooldownReason::Status429RateLimit);
+    }
+
+    #[test]
+    fn record_5xx_payload_uses_transient_cooldown() {
+        let store = KeyHealthStore::default();
+        let key = KeyId::from("vk-500");
+        store.record(
+            &key,
+            ProtocolKind::OpenAi,
+            OutcomeKind::Failure {
+                http_status: 500,
+                retry_after_secs: None,
+            },
+        );
+        let snap = store.peek(&key, ProtocolKind::OpenAi);
+        assert!(snap.in_cooldown);
+        assert_eq!(snap.cooldown_reason, CooldownReason::StatusTransient5xx);
     }
 }

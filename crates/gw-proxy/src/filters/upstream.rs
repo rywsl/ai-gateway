@@ -1259,6 +1259,7 @@ mod body_hash_tests {
             tunnel_preference: None,
             oauth: None,
             identity_snapshot: None,
+            quota_state: Default::default(),
         }
     }
 
@@ -1578,6 +1579,7 @@ mod regression_baseline_tests {
             tunnel_preference: None,
             oauth: None,
             identity_snapshot: None,
+            quota_state: Default::default(),
         };
 
         // --- Vendor with OpenAI base URL and Bearer auth template ---

@@ -1,6 +1,6 @@
 # 07 — Vendor Integration (as-built)
 
-- Family: A (adapter/egress) · Backing crates: `gw-adapter`, `gw-egress-impersonate`, `gw-core::impersonate` · Source-of-truth: `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-core/src/impersonate/`, `crates/gw-egress-impersonate/src/`, `crates/gw-store/src/loader.rs`, `crates/gw-proxy/src/error/listeners/oauth.rs` · Status: vendor integration runs **inline in the upstream filter** — header injection, OAuth-token injection, and egress impersonation are all live; the standalone `gw-adapter` registry/adapter layer is compiled but linked into no binary.
+- Family: A (adapter/egress) · Backing crates: `gw-adapter`, `gw-egress-impersonate`, `gw-core::impersonate` · Source-of-truth: `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/gateway.rs`, `crates/gw-adapter/src/{analyzer.rs,registry.rs}`, `crates/gw-core/src/impersonate/`, `crates/gw-egress-impersonate/src/`, `crates/gw-store/src/loader.rs`, `crates/gw-proxy/src/error/listeners/oauth.rs` · Status: outbound vendor integration runs **inline in the upstream filter** — header injection, OAuth-token injection, and egress impersonation are all live; `gw-adapter` is wired only for response-side error analyzers.
 
 ## Purpose
 
@@ -42,9 +42,9 @@ The loopback itself is `gw-egress-impersonate`: `EgressHandle::start` (`handle.r
 
 Workspace kill-switch: `[egress].disabled` (`EgressCfg.disabled`, `crates/gw-gateway/src/config.rs:548`) drops every `Impersonate`-mode candidate in `pick_peer` (`upstream.rs:201`–`221`), ticking `gw_egress_disabled_total{profile}` per skipped candidate; Rustls vendors are unaffected. `[egress]` is boot-time-only — changing it requires a restart (`config.rs:540`).
 
-### `gw-adapter` (compiled, unlinked)
+### `gw-adapter` error analyzers (wired)
 
-`crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs:13`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`patch_response`/`transport_profile`), an `AdapterRegistry` (`registry.rs:12`), an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait (`analyzer.rs`). The only concrete implementations that exist are `NoopAdapter` (`crates/gw-adapter/src/noop.rs:13`, an x-api-key injector) and `DefaultErrorAnalyzer` (`crates/gw-adapter/src/analyzer.rs`). No vendor-specific adapter exists. The crate is a workspace member (`Cargo.toml:9`) but **no binary or other crate depends on it** — `grep -rl gw-adapter crates/*/Cargo.toml` returns only `crates/gw-adapter/Cargo.toml`, and no `.rs` outside the crate references any of its symbols. The live request path uses the inline `inject_vendor_headers` path above, not this registry.
+`crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`patch_response`/`transport_profile`), an `AdapterRegistry`, an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait. The outbound `UpstreamAdapter` path is still not used by production request rewriting; the live request path uses inline `inject_vendor_headers` as described above. The response-side error analyzer path is wired: `gw-proxy::LlmGateway` holds an `AdapterRegistry`, calls `error_analyzer_for(vendor_id)` at response EOS with headers and an 8 KiB body head, and merges the resulting `ErrorOutcome` into the classifier outcome. Built-in analyzer fallback exists for codex/openai, anthropic/claude, and gemini/google vendor ids.
 
 ## Deliberate behaviours
 
@@ -53,7 +53,7 @@ Workspace kill-switch: `[egress].disabled` (`EgressCfg.disabled`, `crates/gw-gat
 - **Tunnel and Impersonate are mutually exclusive.** When the tunnel feature would route an impersonate vendor through a tunnel node, `pick_peer` returns `GW_TUNNEL_IMPERSONATE_CONFLICT` instead of silently picking one. (`upstream.rs:436`–`448`)
 - **Auth header-name fallback is lenient, not fatal.** A malformed `auth_template` (colon present but the name isn't a header token) falls back to `authorization` plus a metric rather than failing the request — pre-production operator-misconfig tolerance. (`upstream.rs:1070`–`1073`)
 - **Identity persistence is lazy and fingerprint-stable.** A per-key `IdentitySnapshot` is derived once on first impersonated dispatch and persisted out-of-band; profile drift forces a re-derive. (`ensure.rs:19`–`36`)
-- **`gw-adapter` is a dead crate by design-in-progress.** It is fully compiled and unit-tested but wired into nothing; the production auth/transport path deliberately remains the inline filter code. This is current-state, not a temporary build artifact.
+- **`gw-adapter::UpstreamAdapter` remains unwired by design-in-progress.** The production auth/transport path deliberately remains the inline filter code. Only `UpstreamErrorAnalyzer` is wired into `gw-proxy`.
 
 ## Cross-process touchpoints
 
@@ -77,8 +77,8 @@ These are governed by `docs/go-contracts/` (KEK rotation, encrypted column shape
 
 The following are designed/scaffolded but not on any live path. Tag: **capability-gap**.
 
-- **The A-T0..A-T6 vendor adapter layer.** `gw-adapter`'s `AdapterRegistry::for_vendor` (`registry.rs:47`) is never called by a binary; 0 of 6 named vendor adapters (claude_code / gemini_cli / vertex_ai / antigravity / codex / kiro) referenced in `trait_def.rs:4` exist — only `NoopAdapter`. A decision is owed: **wire the registry into `gw-proxy` or delete `gw-adapter`.** (capability-gap)
+- **The A-T0..A-T6 outbound vendor adapter layer.** `gw-adapter`'s `AdapterRegistry::for_vendor` is still not called by a binary; 0 of 6 named outbound vendor adapters (claude_code / gemini_cli / vertex_ai / antigravity / codex / kiro) referenced in `trait_def.rs` exist — only `NoopAdapter`. Error analyzers are live, but outbound auth/transport/body rewrite remains inline in `gw-proxy`. (capability-gap)
 - **K-C: in-Rust OAuth refresh.** Rust injects pre-decrypted tokens and delegates refresh to Go via `events:entity`; no in-process refresh stack against `token_endpoint`/`refresh_token` exists. (capability-gap)
 - **Kiro adapter (A-T6).** No kiro profile or adapter. (capability-gap)
 - **Vertex AI service-account JWT signing.** No SA-JWT auth rewrite; `vertex_ai` is named in the adapter trait doc but unimplemented. (capability-gap)
-- **Codex request-body transform.** Codex impersonation injects headers only; no request-body rewrite hook is active (`patch_request` defaults to no-op and the registry is unlinked). (capability-gap)
+- **Codex request-body transform.** Codex impersonation injects headers only; no outbound request-body rewrite hook is active (`patch_request` defaults to no-op and outbound adapter dispatch is not wired). (capability-gap)

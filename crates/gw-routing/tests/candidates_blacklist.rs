@@ -39,6 +39,7 @@ fn seed_key(id: &str) -> VendorKey {
         tunnel_preference: None,
         oauth: None,
         identity_snapshot: None,
+        quota_state: Default::default(),
     }
 }
 
@@ -147,4 +148,46 @@ async fn all_blacklisted_returns_empty() {
     )
     .await;
     assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn quota_unavailable_key_filtered_until_reset() {
+    let store = Arc::new(EntityStore::new());
+    let mut exhausted = seed_key("k1");
+    exhausted.quota_state = QuotaState {
+        availability: QuotaAvailability::Exhausted,
+        reset_at_unix_s: Some(i64::MAX),
+        observed_at_unix_s: Some(1),
+        ..Default::default()
+    };
+    store
+        .vendor_key
+        .insert(KeyId::from("k1"), Arc::new(Versioned::new(1, exhausted)))
+        .await;
+    store
+        .vendor_key
+        .insert(
+            KeyId::from("k2"),
+            Arc::new(Versioned::new(1, seed_key("k2"))),
+        )
+        .await;
+
+    let group = group_with(&["k1", "k2"]);
+    let perm = perm();
+    let in_flight = InFlightStore::default();
+    let out = get_candidate_keys(
+        &group,
+        &ModelName::from("m1"),
+        ProtocolKind::OpenAi,
+        &perm,
+        &in_flight,
+        &store,
+        1024,
+        &[],
+        None,
+    )
+    .await;
+
+    let ids: Vec<&str> = out.iter().map(|k| k.key_id.as_ref()).collect();
+    assert_eq!(ids, vec!["k2"]);
 }

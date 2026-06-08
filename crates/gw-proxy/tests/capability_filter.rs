@@ -112,6 +112,7 @@ fn seed_key(id: &str, forced: &[&str], exclusive: bool) -> VendorKey {
         tunnel_preference: None,
         oauth: None,
         identity_snapshot: None,
+        quota_state: Default::default(),
     }
 }
 

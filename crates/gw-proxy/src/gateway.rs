@@ -103,6 +103,49 @@ fn remaining_failover_candidates(
         .collect()
 }
 
+fn adapter_body_head(body: &bytes::BytesMut) -> &[u8] {
+    let cap = body.len().min(8192);
+    &body[..cap]
+}
+
+fn merge_adapter_error_outcome(
+    mut base: gw_core::error::ClassifierOutcome,
+    adapter: gw_adapter::ErrorOutcome,
+) -> gw_core::error::ClassifierOutcome {
+    if let Some(cooldown) = adapter.cooldown {
+        base.cooldown = Some(cooldown);
+    }
+    if let Some(oauth_signal) = adapter.oauth_signal {
+        base.oauth_signal = Some(oauth_signal);
+    }
+    if adapter.retry_after_secs.is_some() {
+        base.rate_limit_hint = Some(gw_core::error::RateLimitHint {
+            kind: gw_core::ratelimit::RateLimitKind::Unknown,
+            retry_after_secs: adapter.retry_after_secs,
+        });
+    }
+    match adapter.kind {
+        Some(gw_adapter::ErrorKind::RateLimit) => {
+            base.class = gw_core::error::ErrorClass::RateLimitedUpstream(
+                gw_core::ratelimit::RateLimitKind::Unknown,
+            );
+            base.retryable = gw_core::error::Retryability::CrossKey;
+        }
+        Some(gw_adapter::ErrorKind::Quota) => {
+            base.class = gw_core::error::ErrorClass::QuotaDenied;
+            base.retryable = gw_core::error::Retryability::CrossKey;
+        }
+        Some(gw_adapter::ErrorKind::Authentication) => {
+            base.class = gw_core::error::ErrorClass::AuthDenied;
+        }
+        Some(gw_adapter::ErrorKind::UpstreamServer | gw_adapter::ErrorKind::Transient) => {
+            base.class = gw_core::error::ErrorClass::UpstreamTransient;
+        }
+        Some(gw_adapter::ErrorKind::Unknown) | None => {}
+    }
+    base
+}
+
 /// Task 4.4 — map an `X-Egress-Error-Class` header value to
 /// `(stable_code, retryable, is_tls)`. `is_tls` short-circuits (no retry);
 /// `retryable` routes through the FailoverExecutor; otherwise the error is
@@ -284,6 +327,8 @@ pub struct LlmGateway {
     /// through the lease branch or the legacy soft-defense path.
     pub(crate) protection_cfg: gw_ledger::ProtectionConfig,
     pub(crate) classifier: Arc<dyn gw_core::error::ErrorClassifier>,
+    pub(crate) adapter_registry: Arc<gw_adapter::AdapterRegistry>,
+    pub(crate) quota_state_updates: Option<Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
     pub(crate) retryable_codes: Arc<std::collections::HashSet<u16>>,
     pub(crate) error_passthrough_enabled: bool,
     /// Ordered allow/deny rules over the upstream error message (audit §3.8).
@@ -339,6 +384,8 @@ impl LlmGateway {
         hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
         protection_cfg: gw_ledger::ProtectionConfig,
         classifier: Arc<dyn gw_core::error::ErrorClassifier>,
+        adapter_registry: Arc<gw_adapter::AdapterRegistry>,
+        quota_state_updates: Option<Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
         retryable_codes: Arc<std::collections::HashSet<u16>>,
         error_passthrough_enabled: bool,
         error_passthrough_rules: Arc<Vec<gw_core::error::rules::PassthroughRule>>,
@@ -392,6 +439,8 @@ impl LlmGateway {
             hard_cap_cfg,
             protection_cfg,
             classifier,
+            adapter_registry,
+            quota_state_updates,
             retryable_codes,
             error_passthrough_enabled,
             error_passthrough_rules,
@@ -408,6 +457,63 @@ impl LlmGateway {
     /// but this returns the borrow without cloning the `Arc`.
     pub fn resilience(&self) -> &Arc<ResilienceState> {
         &self.resilience
+    }
+
+    fn classify_final_upstream_error(&self, ctx: &mut ReqCtx) {
+        let Some(status) = ctx.upstream_status else {
+            return;
+        };
+        if status < 400 {
+            return;
+        }
+        let Some(meta) = ctx.archive_upstream_response_meta.as_ref() else {
+            return;
+        };
+        let picked = ctx.picked_vendor_key.as_ref();
+        let classify_ctx = gw_core::error::ClassifyCtx {
+            key_id: picked.map_or("", |k| k.key_id.0.as_str()),
+            vendor_id: picked.map_or("", |k| k.vendor_id.0.as_str()),
+            api_format: ctx
+                .client_codec
+                .as_ref()
+                .map_or(gw_core::protocol::ProtocolKind::OpenAi, |c| c.kind()),
+            protocol: ctx
+                .upstream_codec
+                .as_ref()
+                .map_or(gw_core::protocol::ProtocolKind::OpenAi, |c| c.kind()),
+            has_oauth: picked.is_some_and(|k| k.oauth.is_some()),
+        };
+        struct MetaHeaders<'a>(&'a [(String, String)]);
+        impl gw_core::error::HeadersAccessor for MetaHeaders<'_> {
+            fn get(&self, name: &str) -> Option<&str> {
+                self.0
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v.as_str())
+            }
+        }
+        impl gw_adapter::HeaderView for MetaHeaders<'_> {
+            fn get(&self, name: &str) -> Option<&str> {
+                <Self as gw_core::error::HeadersAccessor>::get(self, name)
+            }
+        }
+
+        let headers = MetaHeaders(&meta.headers);
+        let base = self
+            .classifier
+            .classify_upstream(&classify_ctx, status, &headers, None);
+        let adapter_outcome = picked
+            .map(|key| {
+                self.adapter_registry
+                    .error_analyzer_for(&key.vendor_id)
+                    .analyze(
+                        status,
+                        adapter_body_head(&ctx.archive_upstream_response_body),
+                        &headers,
+                    )
+            })
+            .unwrap_or_default();
+        ctx.error_outcome = Some(merge_adapter_error_outcome(base, adapter_outcome));
     }
 
     /// Emit upstream + downstream response surfaces at end-of-stream.
@@ -740,6 +846,20 @@ impl ProxyHttp for LlmGateway {
                 .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
                 .collect(),
         });
+        if let Some(meta) = ctx.archive_upstream_response_meta.as_ref() {
+            struct QuotaHeaders<'a>(&'a [(String, String)]);
+            impl crate::filters::response::QuotaHeaderView for QuotaHeaders<'_> {
+                fn get(&self, name: &str) -> Option<&str> {
+                    self.0
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .map(|(_, v)| v.as_str())
+                }
+            }
+            ctx.quota_snapshot = crate::filters::response::QuotaSnapshotExtractor::extract(
+                &QuotaHeaders(&meta.headers),
+            );
+        }
 
         // S-codec T6: cross-protocol non-stream re-renders the body in
         // `response_body_filter` at EOS, so the upstream's `Content-Length`
@@ -1029,6 +1149,10 @@ impl ProxyHttp for LlmGateway {
         }
 
         let res = filters::response::run(session, body, end_of_stream, ctx);
+
+        if end_of_stream {
+            self.classify_final_upstream_error(ctx);
+        }
 
         if end_of_stream && ctx.error_passthrough_active {
             if let Some(status) = ctx.upstream_status {
@@ -1340,6 +1464,7 @@ impl ProxyHttp for LlmGateway {
             &self.store,
             &self.resilience,
             &self.ratelimit,
+            self.quota_state_updates.as_ref(),
         )
         .await;
 
@@ -1485,7 +1610,14 @@ fn trace_id_hex() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_connect_error, is_gw_short_circuit, ConnectErrorKind};
+    use super::{
+        adapter_body_head, classify_connect_error, is_gw_short_circuit,
+        merge_adapter_error_outcome, ConnectErrorKind,
+    };
+    use bytes::BytesMut;
+    use gw_adapter::{ErrorKind, ErrorOutcome};
+    use gw_core::error::{ClassifierOutcome, CooldownDirective, ErrorClass, Retryability};
+    use gw_core::ratelimit::RateLimitKind;
     use pingora::{Error, ErrorType};
 
     #[test]
@@ -1611,5 +1743,38 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].0, "authorization");
         assert_eq!(out[1].0, "Content-Type");
+    }
+
+    #[test]
+    fn analyzer_cooldown_overrides_default_classifier_cooldown() {
+        let default = ClassifierOutcome {
+            class: ErrorClass::RateLimitedUpstream(RateLimitKind::Unknown),
+            retryable: Retryability::CrossKey,
+            cooldown: Some(CooldownDirective {
+                reason_code: 7,
+                ttl_secs: 60,
+                reset_consecutive: false,
+            }),
+            ..Default::default()
+        };
+        let analyzer = ErrorOutcome {
+            kind: Some(ErrorKind::Quota),
+            retry_after_secs: Some(17),
+            cooldown: Some(CooldownDirective {
+                reason_code: 7,
+                ttl_secs: 17,
+                reset_consecutive: false,
+            }),
+            ..Default::default()
+        };
+        let merged = merge_adapter_error_outcome(default, analyzer);
+        assert_eq!(merged.cooldown.as_ref().unwrap().ttl_secs, 17);
+    }
+
+    #[test]
+    fn body_head_is_capped_to_8k() {
+        let body = BytesMut::from(&vec![b'a'; 9000][..]);
+        let head = adapter_body_head(&body);
+        assert_eq!(head.len(), 8192);
     }
 }
