@@ -1,4 +1,5 @@
 stages:
+  - test
   - build
   - push
 
@@ -15,12 +16,28 @@ variables:
   BUILDAH_FORMAT: "docker"
   BUILDAH_ISOLATION: "chroot"
 
-rust-build:
-  stage: build
+lint-test:
+  stage: test
   image: rust:1.88-bookworm
   before_script:
     - apt-get update
-    - apt-get install -y --no-install-recommends cmake build-essential pkg-config perl libssl-dev libclang-dev
+    - apt-get install -y --no-install-recommends cmake build-essential pkg-config perl libssl-dev libclang-dev jq
+    - rustup component add rustfmt clippy
+  script:
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+    - cargo test --workspace --locked
+    - bash scripts/check-invariants.sh
+    - for f in docs/spec/0*.md; do bash scripts/check-spec.sh "$f" || exit 1; done
+
+rust-build:
+  stage: build
+  image: rust:1.88-bookworm
+  needs:
+    - lint-test
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends cmake build-essential pkg-config perl libssl-dev libclang-dev jq
   script:
     - cargo build --release --locked -p gw-gateway
 

@@ -84,4 +84,4 @@ This quota is resolved **Rust-side** end-to-end. The pre-check (`request.rs:1144
 
 ## Not built → ROADMAP
 
-This domain is largely complete. One doc-divergence remains to reconcile: the `no_global_hmac_force` invariant lint (`scripts/check-invariants.sh:241`-`251`) greps only for the literal identifiers `signature_required_workspace_wide` / `(global|workspace)_signature_required` / `force_signature_(global|workspace)`. The shipped global signature toggle is named `[signature].required` / `SignatureCfg.required` / the `signature_required` filter parameter, so the lint never matches it and reports `ok` while a real workspace-wide HMAC force path exists and is honored (`request.rs:347`). The lint is therefore inert against the feature it nominally guards; reconcile the invariant doc with the shipped global toggle.
+No open ROADMAP items. The prior `no_global_hmac_force` invariant was retired on 2026-06-08 because `[signature].required` is an intentional built feature, not a forbidden global force path.
