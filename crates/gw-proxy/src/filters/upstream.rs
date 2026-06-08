@@ -72,6 +72,11 @@ pub fn envelope_for(code: &'static str, message: &'static str, status: u16) -> E
     }
 }
 
+#[cfg(not(feature = "tunnel"))]
+fn default_build_requires_tunnel(pref: Option<&gw_core::entity::TunnelPreference>) -> bool {
+    pref.is_some_and(|p| p.require_tunnel)
+}
+
 /// Render an envelope to the client via the client codec, then return a
 /// short-circuit `Err` for pingora.
 async fn emit_envelope_and_bail<T>(
@@ -528,6 +533,15 @@ pub async fn pick_peer(
         }
         #[cfg(not(feature = "tunnel"))]
         {
+            if default_build_requires_tunnel(picked_arc.tunnel_preference.as_ref()) {
+                metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node").increment(1);
+                return emit_envelope_and_bail(
+                    session,
+                    ctx,
+                    envelope_for(codes::GW_TUNNEL_NO_NODE, "no tunnel node available", 502),
+                )
+                .await;
+            }
             ctx.tunnel_resolution = Some("direct".into());
             peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
         }
@@ -1696,5 +1710,20 @@ mod egress_kill_switch_tests {
             }),
             "Impersonate must be filtered by the kill-switch"
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "tunnel")))]
+mod tunnel_required_default_build_tests {
+    use gw_core::entity::TunnelPreference;
+
+    #[test]
+    fn default_build_honors_require_tunnel() {
+        let pref = TunnelPreference {
+            require_tunnel: true,
+            ..Default::default()
+        };
+        assert!(super::default_build_requires_tunnel(Some(&pref)));
+        assert!(!super::default_build_requires_tunnel(None));
     }
 }
