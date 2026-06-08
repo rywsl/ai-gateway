@@ -10,10 +10,10 @@
 
 A 7-domain spec-vs-code audit (2026-06-08) found the design corpus describes a substantially more complete system than exists. Two failure modes dominate:
 
-1. **Spec finalized but not implemented** — whole subsystems are scaffold or absent (the entire `gw-adapter` vendor layer, K-B/K-C/K-D, kiro codec, task billing, R-D/R-F, RL-Core, several C-* billing pieces), yet their specs are marked "integrated"/"landed".
+1. **Spec finalized but not implemented** — whole subsystems are scaffold or absent (the outbound `gw-adapter` vendor layer, K-C, kiro codec, R-D/R-F), yet their older specs may be marked "integrated"/"landed".
 2. **Spec ⇄ spec / spec ⇄ code conflicts** — e.g. `v2-integration` forbids the `gw-billing` crate while it exists and is depended on by four crates; `daily_quota_tokens` ownership disagreement; retired `usage_source` still referenced in a contract; two `issues/2026-05-29-*` docs that self-contradict; CLAUDE.md count drift (15→21 crates, 3→10 migrations).
 
-Root cause: the project went through an architecture turn (adapter-driven → `impersonate` + Go-delegated) and a v2 cleanup; **code followed, the early dated specs did not**, and nothing marks them superseded. CI compounds it — `.gitlab-ci.yml` only builds, so `check-invariants.sh` never runs and the doc⇄code drift is unchecked.
+Root cause: the project went through an architecture turn (adapter-driven → `impersonate` + Go-delegated) and a v2 cleanup; **code followed, the early dated specs did not**, and older docs did not always mark superseded material clearly. CI now runs fmt, clippy, tests, invariant lints, and spec checks.
 
 ## 2. Decisions (locked during brainstorming)
 
@@ -61,12 +61,12 @@ Each domain spec is written **from the code**; the third column records which de
 |------|------------------|-------------------------|
 | 01-protocol-codec | gw-codec, gw-codec-macros | codec-s1..s4, v2-codec-cleanup, cli-variants (kiro/S5 → ROADMAP) |
 | 02-routing | gw-routing, gw-capability | routing-r-ab/c/e/g (R-AB rewrite, R-D, R-F → ROADMAP), capability resolver |
-| 03-key-health | gw-health | key-health-k-a (K-B/K-C/K-D → ROADMAP / 07) |
-| 04-rate-limiting | gw-auth (ratelimit, ip) | ratelimit-rl-adaptive, rl-ip (RL-Core per-key gate → ROADMAP) |
+| 03-key-health | gw-health, gw-adapter, gw-store | key-health-k-a; K-B/K-D implemented; K-C → ROADMAP / 07 |
+| 04-rate-limiting | gw-auth (ratelimit, ip) | ratelimit-rl-adaptive, rl-ip |
 | 05-auth-permissions | gw-auth (jwt/apikey/merge/mgmt), gw-proxy auth filter | llm-gateway-design (auth+perm), systemic-fixes (signature, mgmt token) |
-| 06-billing-ledger | gw-ledger, gw-billing | billing-c-alpha, billing-robustness, billing-record-durability, credit-lease, detailed-log (C-beta/gamma/delta gaps → ROADMAP) |
+| 06-billing-ledger | gw-ledger, gw-billing | billing-c-alpha, billing-robustness, billing-record-durability, credit-lease, detailed-log |
 | 07-vendor-integration | gw-adapter, gw-egress-impersonate, gw-core::impersonate | egress-impersonation; **as-built = NoopAdapter + auth_template injection + egress profiles + Go-delegated OAuth** (A-T0..T6, in-Rust OAuth refresh → ROADMAP) |
-| 08-async-tasks | gw-task, gw-task-runtime, gw-task-worker | task-worker-design (settle/billing + submit→poll → ROADMAP) |
+| 08-async-tasks | gw-task, gw-task-runtime, gw-task-worker | task-worker-design (Redis freeze/settle + submit→poll built; codec render → ROADMAP) |
 | 09-tunnel | gw-tunnel-client | tunnel-t (default-build wiring + require_tunnel hard-fail → ROADMAP) |
 
 ## 5. Per-spec template (the anti-ambiguity contract)
@@ -108,9 +108,9 @@ One section per family. Each unbuilt or divergent item carries:
 
 Seed contents (from the audit):
 
-**Unbuilt capabilities** — full `gw-adapter` vendor layer (A-T0..T6) · K-B vendor error analyzers · K-C in-Rust OAuth refresh (vs current Go-delegated) · K-D quota probe · kiro codec + adapter (S5/A-T7) · R-AB multi-score rewrite · R-D affinity manager · R-F stream probe · RL-Core per-key RPM gate + `RateLimitKind` · C-beta `EstimatePricing` entity · C-gamma frozen→Redis sync · C-delta DLQ three-tier "never drop".
+**Unbuilt capabilities** — outbound `gw-adapter` vendor layer (A-T0..T6) · K-C in-Rust OAuth refresh (vs current Go-delegated) · kiro codec + adapter (S5/A-T7) · R-AB multi-score rewrite · R-D affinity manager · R-F stream probe · task codec render of `ir_wire_body`.
 
-**Runtime-risk divergences (bugs to fix)** — task settle leaks freeze + bills nothing · gateway task-freeze is in-process (breaks multi-gateway) · credit-lease `GW_QUOTA_LEASE_EXPIRED` ships 402 not 503 · `lease_grace_ms` configured but never applied · RL-Adaptive learns from non-RPM 429s · `require_tunnel=true` silently falls back to Direct in the default build · **`check-invariants.sh` never runs in CI**.
+**Runtime-risk divergences (bugs to fix)** — `require_tunnel=true` silently falls back to Direct in the default build.
 
 ## 7. Conflict resolution (cleanup payoff)
 
@@ -151,6 +151,5 @@ Items that are genuine **bugs** (not just stale docs) are NOT silently blessed �
 
 - **No code changes.** This refactor touches docs only. The runtime-risk bugs land in ROADMAP, not fixed here.
 - **`go-contracts/` content** stays as-is (live Rust↔Go contract), only cross-referenced.
-- **Wiring `check-invariants.sh` into CI** is recorded in ROADMAP (it is the highest-leverage fix) but is a separate change.
+- **Wiring `check-invariants.sh` into CI** is complete; future consolidation tasks should keep it green.
 - **`docs/issues/` deep cleanup** beyond pruning the self-contradicting 2026-05-29 pair.
-

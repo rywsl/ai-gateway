@@ -33,11 +33,11 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 | `gw-codec-macros` | Supporting | Proc-macros driving codec boilerplate (Phase 2 `wire_convert_matrix!` scaffolding). |
 | `gw-codec` | Supporting | `ProtocolCodec` trait + OpenAI / Anthropic / Gemini codecs, same-protocol passthrough fast path, cross-protocol IR re-render, SSE accumulator, gzip/brotli compression, stream-policy truth table. CLI variant codecs (`gw-codec::cli`) implement the narrower `CliCodec` trait for transparent body passthrough with usage extraction — see §3.1. |
 | `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (Moka caches with cold-load chain), vendor-key invalidation hooks, `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
-| `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor RPM plus `ratelimit::adaptive::AdaptiveRpmManager`, ADR-024 hard caps, HMAC signature verify, `ip_filter` / allowlist / blocklist / per-IP RPM, model-permission regex w/ ReDoS budget, management-path detect. |
+| `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor per-user RPM/TPM/concurrency plus per-vendor-key RPM and `ratelimit::adaptive::AdaptiveRpmManager`, ADR-024 hard caps, HMAC signature verify, `ip_filter` / allowlist / blocklist / per-IP RPM, model-permission regex w/ ReDoS budget, management-path detect. |
 | `gw-task` | Supporting | Task contract crate: shared task DTOs, lifecycle/status enums, transition validation, and Redis/Lua protocol shapes for background work without pulling in store/runtime I/O. |
 | `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process request `frozen_micro`; task freezes delegate to its `TaskFreezeRelease` trait), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction; `lease`/`coef`/`credit_estimator`/`counter_handler` modules (2026-05-29 credit lease). |
 | `gw-task-runtime` | Business | Task runtime coordination used by the worker path: `RedisTaskFreezeRelease`, execution/cancel/watchdog/heartbeat loops, and task-level settlement helpers. Must not depend on `gw-proxy`. |
-| `gw-adapter` | Business | `UpstreamAdapter` trait (vendor-specific outbound rewrite hooks), `UpstreamErrorAnalyzer` trait, `ErrorOutcome`. |
+| `gw-adapter` | Business | `UpstreamAdapter` trait (vendor-specific outbound rewrite hooks, not wired for outbound yet), live `UpstreamErrorAnalyzer` trait, `ErrorOutcome`. |
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
 | `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
 | `gw-capability` | Business | Model-capability resolution: `Capability` enum, `RequiredCapabilities`, `ModelMapper`, `CapabilityResolver`, `AdapterCapabilityHook`, `CapabilityFilter`, `PricingReader`. |
@@ -64,7 +64,7 @@ Supporting:
 
 Business:
   gw-health        ◄── gw-adapter, gw-routing, gw-proxy, gw-gateway
-  gw-adapter       ◄── (wired into gw-proxy in Phase 3)
+  gw-adapter       ◄── gw-proxy, gw-gateway (error analyzers only)
   gw-routing       ◄── gw-proxy, gw-gateway
   gw-capability    ◄── gw-proxy, gw-gateway
   gw-tunnel-client ◄── gw-gateway (feature="tunnel")
@@ -82,7 +82,7 @@ Execution:
 |-------|-------|---------|-------|
 | `ProtocolCodec` | gw-codec | Wire ⇄ IR per protocol | `OpenAiCodec`, `AnthropicCodec`, `GeminiCodec`, `PassthroughCodec`, `ErrorPassthroughCodec`, `AnyCodec` (dispatcher) |
 | `ErrorClassifier` | gw-core | HTTP status + body → `ClassifierOutcome` | `DefaultClassifier` |
-| `UpstreamErrorAnalyzer` | gw-adapter | Vendor-specific error shape → `ErrorOutcome` | `DefaultErrorAnalyzer` (Phase 3 adds vendor analyzers) |
+| `UpstreamErrorAnalyzer` | gw-adapter | Vendor-specific error shape → `ErrorOutcome` | Built-in codex/openai, anthropic/claude, gemini/google fallback analyzers |
 | `UpstreamAdapter` | gw-adapter | 4 outbound rewrite hooks + transport profile | `NoopAdapter` |
 | `Strategy` | gw-routing | Pick one `VendorKey` from candidates | `FixedOrder`, `RoundRobin`, `LoadBalance`, `WeightedRr`, `CostFirst`, `LatencyFirst`, `CacheAffinity`, `Sticky` (8 total, `StrategyAny` enum) |
 | `FreezeGuard` | gw-ledger | RAII freeze on `frozen_micro` | `RequestFreeze`, `TaskFreeze` |
@@ -143,6 +143,7 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 | `[error.passthrough]` | `enabled` (default `false`) | When `true`, upstream error bodies (≥ 400) are re-rendered through `render_error_to_client` into client-protocol envelopes. HTML bodies are always wrapped as JSON. Boot-time only. |
 | `[body_rules]` | Per-endpoint flat key-value defaults. Sub-table key = endpoint path, value = `{ key = value, … }`. Set-if-absent: existing client fields are never overridden. | Boot-time only. Values injected into `ir.passthrough_overrides` in `upstream_request_filter`. |
 | `[health.quota_probe]` | `enabled` (false), `interval_secs` (30), `probe_endpoint` (`/v1/models`) | Optional background probe for keys in cooldown without Retry-After. Sends low-cost GET to upstream; 2xx clears cooldown, non-2xx keeps it. No `usage:records` emitted. Boot-time only. |
+| `[quota_state_probe]` | `enabled` (false), `interval_secs` (300), `probe_endpoint` (`/v1/models`), `max_pending` (1000) | Optional quota-remaining probe for cached vendor keys whose persisted quota state is exhausted and reset-eligible. Writes `vendor_keys.quota_*` through Rust's `QuotaStateUpdateQueue`. Boot-time only. |
 
 Secrets must come from env, never the TOML.
 
@@ -181,6 +182,7 @@ Migrations live at `crates/gw-store/migrations/`. **Not auto-applied** — run `
 | `0003_model_mapping.sql` | `model_mapping(user_alias, protocol) PK → default_upstream_model, vendor_key_overrides JSONB, availability, pricing_strategy_ref`. Dispatch rewrites request-body `model` via `passthrough_overrides` when the resolved upstream model is non-empty and differs; response bodies are left untouched. |
 | `0004_capabilities.sql` | New `models` table (canonical entity shape) for `Model.capabilities`; `vendor_keys` gains `forced_capabilities JSONB` + `exclusive_capability_match BOOLEAN`. Capability strings parsed by `gw-capability` at resolve time (see [`docs/ROADMAP.md`](ROADMAP.md)). |
 | `0004_task_worker.sql` | `task_records(task_id TEXT PK, user_id, api_key_id, status, kind, model, vendor_key_id, input_payload JSONB, output_payload JSONB, frozen_micro BIGINT, actual_micro BIGINT, provider_task_id, created_at, updated_at, settled_at TIMESTAMPTZ NULL)`. `worker_registrations(worker_id TEXT PK, hostname, status, start_time TIMESTAMPTZ, last_heartbeat TIMESTAMPTZ, metadata JSONB)`. Both additive, `IF NOT EXISTS`. |
+| `0010_vendor_key_quota_state.sql` | `vendor_keys.quota_availability`, `quota_remaining`, `quota_limit`, `quota_reset_at`, `quota_observed_at`, `quota_source`. Rust is the runtime writer for quota snapshots; Go may read for admin/reporting. |
 
 ### 5.2 Redis namespaces
 
@@ -188,7 +190,7 @@ Migrations live at `crates/gw-store/migrations/`. **Not auto-applied** — run `
 |-----------|---------|--------|--------|
 | `entity:{ns}:{id}` | Entity cache L1 | `gw-store::loader` (write-back), control plane | `EntityStore::*_or_load` |
 | `entity:ipblock:{id}` | IP-block entry cache. Redis hash, 300 s TTL, Moka L1. Preloaded at boot (100-row pages, fail-closed). | `gw-store::loader::load_ipblock` | `EntityStore::ipblock_or_load`, `ipblock_snapshot` (walked by `gw-auth::ip_filter`) |
-| `counter:{scope}:{id}:{field}` | Runtime counters (`balance_micro`, RPM, TPM) | Go billing service, `CounterStore::incrby` | `request_filter` balance check, RPM guard |
+| `counter:{scope}:{id}:{field}` | Runtime counters (`base_micro`, `deducted_micro`, `frozen_micro`, RPM, TPM) | Go billing service for base/deducted, Rust frozen-delta worker for frozen, `CounterStore::incrby` | `request_filter` available-balance check, RPM guard |
 | `events:entity` | Cache-invalidation stream | Control plane | `StreamConsumer` → `EntityStore::invalidate` |
 | `events:counter` | Counter event echo (Phase 5) | (deferred) | `StreamConsumer` (observability only in v1) |
 | `usage:records` | Billing records | `Ledger` flusher (XADD batched) | Go billing service |

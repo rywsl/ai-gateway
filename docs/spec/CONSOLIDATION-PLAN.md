@@ -169,7 +169,7 @@ Each task: read the listed source files, write the spec to the template in `CONS
   - `format_health.rs::FormatHealth` (sliding window + 3-state circuit + `cooldown_until_ms`/`reason`/`consecutive_failures`); `store.rs::KeyHealthStore` `DashMap<(KeyId,ApiFormat),Arc<FormatHealth>>`; `is_available` consumed by routing; `record` from `gw-proxy/filters/logging.rs`; `apply_cooldown` from `error/listeners/key_health.rs`.
   - Cooldown-recovery probe `quota_probe.rs` (probes keys in cooldown, 2xx → `clear_cooldown`; default-disabled). **Name it precisely as cooldown-recovery, not quota-remaining.**
   - Deliberate behaviour: `record` accumulates a bool; `OutcomeKind::Failure{http_status,retry_after}` payload is currently inert (cooldown decided by the classifier upstream).
-  - Not built → ROADMAP: K-B vendor error analyzers; K-C in-Rust OAuth (see 07); K-D quota-remaining probe + `QuotaState`.
+  - Not built → ROADMAP: K-C in-Rust OAuth (see 07). K-B vendor error analyzers and K-D quota-remaining probe + `QuotaState` are now as-built.
 
 - [ ] **Step 2: Verify.** `bash scripts/check-spec.sh docs/spec/03-key-health.md` → `ok`.
 - [ ] **Step 3: Commit.** `git add docs/spec/03-key-health.md && git commit -m "docs(spec): 03 key-health (as-built)"`
@@ -182,7 +182,7 @@ Each task: read the listed source files, write the spec to the template in `CONS
   - `RateLimitGuard` (`ratelimit/mod.rs`): `per_user`, `per_user_tpm`, `per_user_streams`, `total_streams`; global stream cap `GW_QUOTA_CONCURRENT_EXCEEDED`.
   - Adaptive RPM `adaptive.rs::AdaptiveRpmManager` (`observe_429`, `try_admit` GCRA, AIMD confidence/decay/probe), wired `upstream.rs:332`.
   - IP: `ip_ratelimit.rs` per-IP governor + LRU sweep; `ip_filter.rs::check_ip` (blocklist + allowlist + ratelimit); `ip_allowlist.rs`; codes `GW_QUOTA_IP_RPM_EXCEEDED`, `GW_AUTH_IP_NOT_IN_ALLOWLIST`; config `ip_filter.allowlist_mode`.
-  - Not built → ROADMAP: RL-Core per-key RPM gate (`check_key`/`override_key_rpm`/`GW_QUOTA_RPM_KEY_EXCEEDED`) + `RateLimitKind` classifier; RL-Adaptive should gate learning on `Rpm|Unknown` (currently learns from every 429).
+  - Not built → ROADMAP: no open 04 rate-limiting items after W3; per-key RPM, `RateLimitKind`, and RL-Adaptive learn-only-on-Rpm|Unknown are now as-built.
 
 - [ ] **Step 2: Verify.** `bash scripts/check-spec.sh docs/spec/04-rate-limiting.md` → `ok`.
 - [ ] **Step 3: Commit.** `git add docs/spec/04-rate-limiting.md && git commit -m "docs(spec): 04 rate-limiting (as-built)"`
@@ -212,13 +212,13 @@ Each task: read the listed source files, write the spec to the template in `CONS
 - [ ] **Step 1: Write the spec.** As-built surface:
   - `UsageRecord` (`usage.rs`): `vendor_exposure_state` + `usage_provenance` (**no `cost_micro`**, no legacy `usage_source`); stream `usage:records`; per-attempt records.
   - Flusher `flusher.rs`: `usage:records` XADD + `usage:records:dlq` (single tier; on DLQ-fail → `gateway_usage_records_lost_total`).
-  - Freeze `freeze.rs::RequestFreeze` (in-process `AtomicI64`) + `release`; `deduct_gc.rs` DEDUCT GC.
+  - Freeze `freeze.rs::RequestFreeze` (in-process `AtomicI64` plus Redis frozen-delta enqueue) + `release`; `deduct_gc.rs` DEDUCT GC.
   - Billing robustness: `billing_lifecycle.rs` state machine; `inflight.rs::InflightLedger` + `inflight_reaper.rs` (T0 emit-lag watchdog) + `inflight_reconciler.rs` (crash recovery); boot wiring `gw-gateway/src/lib.rs`.
   - Credit-lease: `lease.rs`/`coef.rs`/`credit_estimator.rs`; codes `GW_QUOTA_LEASE_INSUFFICIENT`/`GW_QUOTA_LEASE_EXPIRED`; `counter_handler.rs` `events:counter` (ns `protected_lease`/`coef_table`/`coef_table_commit`); fail-closed on no-coefs.
   - Detailed-log: 5 per-surface XADD, raw/lz4/zstd tiering, drop-on-outage.
   - `gw-billing`: task freeze/settle multipliers (`formulas.rs`, image/video/audio/batch) — **not per-token cost** (guarded by `no_billing_cost_per_token`). Document why the crate legitimately exists (resolves the v2-integration "forbidden" conflict).
   - Cost boundary: Rust does no per-token cost; freeze uses flat `freeze_estimate` (1-micro/token, `request.rs:1514`).
-  - Not built / divergent → ROADMAP: C-beta `EstimatePricing` entity/formula; C-gamma frozen→Redis sync + `events:counter ns=user_balance`; C-delta DLQ three-tier never-drop + frozen DLQ + retry loop; **bug:** lease `EXPIRED` returns 402 not 503; **bug:** `lease_grace_ms` configured but never applied.
+  - Not built / divergent → ROADMAP: no open 06 billing-ledger items after W2.
 
 - [ ] **Step 2: Verify.** `bash scripts/check-spec.sh docs/spec/06-billing-ledger.md` → `ok`.
 - [ ] **Step 3: Commit.** `git add docs/spec/06-billing-ledger.md && git commit -m "docs(spec): 06 billing-ledger (as-built)"`
@@ -242,11 +242,11 @@ Each task: read the listed source files, write the spec to the template in `CONS
 **Files:** Create `docs/spec/08-async-tasks.md` · Read: `crates/gw-task/src/{scripts.rs,redis_contract.rs}`, `crates/gw-task-runtime/src/{exec_loop.rs,heartbeat_loop.rs,watchdog_loop.rs,release.rs}`, `crates/gw-task-worker/src/lib.rs`, `crates/gw-proxy/src/filters/task.rs`, `config/default.toml`
 
 - [ ] **Step 1: Write the spec.** As-built surface:
-  - Submit endpoint + freeze (`filters/task.rs`, freeze into in-process `gw_store::deduction::DEDUCT`); Redis contract `gw-task/scripts.rs` (`SUBMIT_LUA`/`SETTLE_LUA`/`RECOVER_LEASE_LUA`) + `redis_contract.rs`; worker claim via XREADGROUP.
+  - Submit endpoint + Redis-backed task freeze (`filters/task.rs` → `TaskContract::freeze_task`); Redis contract `gw-task/scripts.rs` (`TASK_FREEZE_LUA`/`SUBMIT_LUA`/`SETTLE_LUA`/`RECOVER_LEASE_LUA`) + `redis_contract.rs`; worker claim via XREADGROUP.
   - Runtime: `exec_loop.rs` (single synchronous upstream POST), `heartbeat_loop.rs`, `watchdog_loop.rs` (lease recovery, **no leader election**); worker identity `gw-task-worker` `entity:worker` heartbeat.
   - Default-off: `task.enabled = false` (`config/default.toml`).
   - Deliberate/known: `SETTLE_LUA` only `HSET`+`ZREM`; `release.rs` exists but is unused and on a mismatched key namespace — document as current reality, flag in ROADMAP.
-  - Not built / bug → ROADMAP: settle must release freeze + deduct balance + XADD usage (**currently leaks freeze, bills nothing**); gateway task-freeze should be Redis-based (in-process breaks multi-gateway); async submit→poll loop + backoff + codec render (`ir_wire_body`); watchdog leader election.
+  - Not built / bug → ROADMAP: codec render of `ir_wire_body` remains. Redis task freeze, settle release/deduct/usage, submit→poll backoff, and watchdog leader election are now as-built.
 
 - [ ] **Step 2: Verify.** `bash scripts/check-spec.sh docs/spec/08-async-tasks.md` → `ok`.
 - [ ] **Step 3: Commit.** `git add docs/spec/08-async-tasks.md && git commit -m "docs(spec): 08 async-tasks (as-built)"`
@@ -281,14 +281,14 @@ Each task: read the listed source files, write the spec to the template in `CONS
 Required entries (priority in parens):
   - **01:** kiro/S5 EventStream codec (`capability-gap`); `gw_cli_usage_extract_total` metric (`doc-divergence`); `UsageSource::CliExtracted` (`doc-divergence`).
   - **02:** R-AB multi-score rewrite (`capability-gap`); R-D AffinityManager (`capability-gap`); R-F stream probe (`capability-gap`); R-E 401/403 switch + `total_budget_ms` + 3 missing codes (`capability-gap`).
-  - **03:** K-B vendor error analyzers (`capability-gap`); K-D quota-remaining probe + `QuotaState` (`capability-gap`); inert `record` failure payload (`doc-divergence`).
-  - **04:** RL-Core per-key RPM gate + `RateLimitKind` (`capability-gap`); RL-Adaptive learn-only-on-Rpm|Unknown (`runtime-risk` — mis-learns non-RPM 429s).
-  - **05:** `no_global_hmac_force` lint inert vs shipped toggle (`doc-divergence`).
-  - **06:** C-beta `EstimatePricing` (`capability-gap`); C-gamma frozen→Redis sync + `events:counter ns=user_balance` (`capability-gap`); C-delta DLQ three-tier never-drop (`runtime-risk`); lease `EXPIRED` 402→503 (`runtime-risk`); `lease_grace_ms` unused (`runtime-risk`).
+  - **03:** no open ROADMAP items after W5 except K-C OAuth in 07.
+  - **04:** no open ROADMAP items after W3.
+  - **05:** no open ROADMAP items after W0/W1.
+  - **06:** no open ROADMAP items after W2.
   - **07:** full A-T0..T6 adapter layer + decide wire-or-delete `gw-adapter` (`capability-gap`); K-C in-Rust OAuth refresh (`capability-gap`); kiro adapter / vertex SA-JWT / codex body transform (`capability-gap`).
-  - **08:** settle release+deduct+usage (`runtime-risk` — freeze leak + zero billing); Redis-based task freeze (`runtime-risk`); async submit→poll + backoff + codec (`capability-gap`); watchdog leader election (`capability-gap`).
+  - **08:** codec render of `ir_wire_body` remains after W4.
   - **09:** tunnel off in shipped binary — decide default (`capability-gap`); `require_tunnel=true` silent Direct fallback in default build (`runtime-risk`); enable ignored e2e tunnel test (`doc-divergence`).
-  - **Cross-cutting:** **wire `check-invariants.sh` into CI** — `.gitlab-ci.yml` only builds (`runtime-risk`, highest leverage).
+  - **Cross-cutting:** no open CI gate item after W0.
 
 - [ ] **Step 2: Verify.** `grep -c '^### ' docs/ROADMAP.md` ≥ 25; `grep -nE 'runtime-risk|capability-gap|doc-divergence' docs/ROADMAP.md | wc -l` ≥ 25.
 - [ ] **Step 3: Commit.** `git add docs/ROADMAP.md && git commit -m "docs(roadmap): seed unbuilt + divergent items from 2026-06-08 audit"`
@@ -382,4 +382,3 @@ Expected: CLAUDE.md reflects 21 crates and the 10-migration list.
 - **Type/name consistency:** `scripts/check-spec.sh` name, `docs/spec/0N-*.md` paths, and `docs/ROADMAP.md` are used identically across all tasks.
 
 > **Task 14 addendum (from self-review):** in Step 2, also handle `docs/issues/2026-05-29-functional-audit-findings.md` and `docs/issues/2026-05-29-aether-coverage-gaps.md` — flip the stale per-section "open" labels to match their "Fixed" tables, or `git rm` if fully superseded by ROADMAP. Include in the Task 14 commit.
-
