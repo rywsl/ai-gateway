@@ -381,6 +381,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         pg: pg.clone(),
         kek: kek_cache,
     };
+    #[cfg(feature = "tunnel")]
     let tunnel_kek = loader.kek.clone();
     let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
         &cfg.adaptive_rpm,
