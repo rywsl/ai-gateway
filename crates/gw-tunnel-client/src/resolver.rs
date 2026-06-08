@@ -9,6 +9,7 @@ pub struct ProxyNodeView {
     /// `ws[s]://host:port/path` — the endpoint `TunnelStack::peer_for_node`
     /// dials when building the `HttpPeer`. Mirrors `gw_core::entity::ProxyNode::ws_url`.
     pub ws_url: url::Url,
+    pub auth_token: Option<secrecy::SecretString>,
     pub enabled: bool,
     pub latency_ms: u32,
     pub allowed_provider_ids: Vec<String>,

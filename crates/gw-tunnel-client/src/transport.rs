@@ -4,6 +4,7 @@
 use crate::frame::{decode_frame, encode_frame, Frame, MsgType};
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use url::Url;
 #[derive(Clone, Debug)]
 pub struct TransportConfig {
     pub url: Url,
+    pub auth_token: Option<SecretString>,
     pub heartbeat_interval: Duration,
     pub missed_pong_threshold: u32,
     pub max_streams_per_conn: u32,
@@ -23,6 +25,7 @@ impl Default for TransportConfig {
     fn default() -> Self {
         Self {
             url: "ws://127.0.0.1:0/".parse().unwrap(),
+            auth_token: None,
             heartbeat_interval: Duration::from_secs(30),
             missed_pong_threshold: 3,
             max_streams_per_conn: 256,
@@ -58,6 +61,18 @@ impl WsTransport {
                     }
                 }
             });
+        }
+
+        if let Some(token) = cfg.auth_token.as_ref() {
+            out_tx
+                .send(Frame {
+                    msg_type: MsgType::ControlAuth,
+                    flags: 0,
+                    stream_id: 0,
+                    payload: Bytes::copy_from_slice(token.expose_secret().as_bytes()),
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         }
 
         {

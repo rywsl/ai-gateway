@@ -11,6 +11,7 @@ fn nodes() -> Vec<ProxyNodeView> {
         ProxyNodeView {
             id: "n1".into(),
             ws_url: dummy_url(),
+            auth_token: None,
             enabled: true,
             latency_ms: 30,
             allowed_provider_ids: vec!["openai".into()],
@@ -19,6 +20,7 @@ fn nodes() -> Vec<ProxyNodeView> {
         ProxyNodeView {
             id: "n2".into(),
             ws_url: dummy_url(),
+            auth_token: None,
             enabled: true,
             latency_ms: 10,
             allowed_provider_ids: vec!["anthropic".into()],
@@ -27,6 +29,7 @@ fn nodes() -> Vec<ProxyNodeView> {
         ProxyNodeView {
             id: "n3".into(),
             ws_url: dummy_url(),
+            auth_token: None,
             enabled: false,
             latency_ms: 5,
             allowed_provider_ids: vec!["openai".into()],
@@ -68,6 +71,7 @@ fn disabled_nodes_skipped() {
     let only_disabled = vec![ProxyNodeView {
         id: "x".into(),
         ws_url: dummy_url(),
+        auth_token: None,
         enabled: false,
         latency_ms: 1,
         allowed_provider_ids: vec!["openai".into()],
@@ -90,6 +94,7 @@ fn vendor_key_whitelist_filters() {
     let nodes = vec![ProxyNodeView {
         id: "n1".into(),
         ws_url: dummy_url(),
+        auth_token: None,
         enabled: true,
         latency_ms: 10,
         allowed_provider_ids: vec!["openai".into()],
@@ -114,6 +119,7 @@ fn prefer_low_latency_sorts_nodes() {
         ProxyNodeView {
             id: "n1".into(),
             ws_url: dummy_url(),
+            auth_token: None,
             enabled: true,
             latency_ms: 30,
             allowed_provider_ids: vec!["openai".into()],
@@ -122,6 +128,7 @@ fn prefer_low_latency_sorts_nodes() {
         ProxyNodeView {
             id: "n4".into(),
             ws_url: dummy_url(),
+            auth_token: None,
             enabled: true,
             latency_ms: 5,
             allowed_provider_ids: vec!["openai".into()],

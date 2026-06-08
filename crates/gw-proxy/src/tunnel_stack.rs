@@ -178,12 +178,8 @@ impl TunnelStack {
         } else {
             // The node ws_url comes from the matching ProxyNodeView. If the
             // node disappeared between resolve() and here, fall through to NoLive.
-            let url = match snapshot
-                .iter()
-                .find(|n| n.id == node_id)
-                .map(|n| n.ws_url.clone())
-            {
-                Some(u) => u,
+            let node = match snapshot.iter().find(|n| n.id == node_id) {
+                Some(n) => n,
                 None => {
                     return Err(TunnelPeerError::NoLive {
                         node_id: node_id.to_owned(),
@@ -191,7 +187,8 @@ impl TunnelStack {
                 }
             };
             let mut cfg = self.transport_cfg_template.clone();
-            cfg.url = url;
+            cfg.url = node.ws_url.clone();
+            cfg.auth_token = node.auth_token.clone();
             let t = ReconnectingTransport::start(cfg, self.pool_cfg.clone()).await;
             self.transports.insert(node_id.to_owned(), t.clone());
             t
@@ -279,6 +276,7 @@ mod tests {
         ProxyNodeView {
             id: id.into(),
             ws_url: dummy_url(),
+            auth_token: None,
             enabled: true,
             latency_ms: latency,
             allowed_provider_ids: providers.iter().map(|s| (*s).to_string()).collect(),

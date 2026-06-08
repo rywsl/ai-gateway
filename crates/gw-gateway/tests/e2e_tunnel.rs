@@ -225,6 +225,7 @@ async fn e2e_tunnel_resolves_use_when_node_matches_provider() {
         .map(|n| ProxyNodeView {
             id: n.id,
             ws_url: n.ws_url,
+            auth_token: None,
             enabled: n.enabled,
             latency_ms: n.latency_ms,
             allowed_provider_ids: n.allowed_provider_ids,

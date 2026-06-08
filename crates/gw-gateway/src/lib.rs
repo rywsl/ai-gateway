@@ -381,6 +381,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         pg: pg.clone(),
         kek: kek_cache,
     };
+    let tunnel_kek = loader.kek.clone();
     let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
         &cfg.adaptive_rpm,
     )));
@@ -751,23 +752,42 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         };
         let transport_template = TransportConfig {
             url: "ws://placeholder:0/".parse().unwrap(), // overwritten per node in peer_for_node
+            auth_token: None,
             heartbeat_interval: pool_cfg.heartbeat_interval,
             missed_pong_threshold: cfg.tunnel.missed_pong_threshold,
             max_streams_per_conn: cfg.tunnel.max_streams_per_conn,
         };
         let dns = Arc::new(SafeDnsResolver::cloudflare_default());
 
+        fn node_auth_token(
+            enc: Option<gw_core::entity::entity_helpers::EncryptedBlob>,
+            kek: &gw_store::encrypt::KekCache,
+        ) -> anyhow::Result<Option<secrecy::SecretString>> {
+            let Some(enc) = enc else {
+                return Ok(None);
+            };
+            let key = gw_store::encrypt::EncryptedKey {
+                ciphertext: enc.ciphertext,
+                nonce: enc.nonce,
+                auth_tag: enc.auth_tag,
+                kek_kid: enc.kek_kid,
+            };
+            gw_store::encrypt::decrypt(&key, kek).map(Some)
+        }
+
         fn node_to_view(
             n: gw_core::entity::ProxyNode,
-        ) -> gw_tunnel_client::resolver::ProxyNodeView {
-            gw_tunnel_client::resolver::ProxyNodeView {
+            kek: &gw_store::encrypt::KekCache,
+        ) -> anyhow::Result<gw_tunnel_client::resolver::ProxyNodeView> {
+            Ok(gw_tunnel_client::resolver::ProxyNodeView {
                 id: n.id,
                 ws_url: n.ws_url,
+                auth_token: node_auth_token(n.auth_token_enc, kek)?,
                 enabled: n.enabled,
                 latency_ms: n.latency_ms,
                 allowed_provider_ids: n.allowed_provider_ids,
                 allowed_vendor_key_ids: n.allowed_vendor_key_ids,
-            }
+            })
         }
 
         // Initial node snapshot. Plan defines ProxyNode -> ProxyNodeView mapping;
@@ -777,8 +797,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(node_to_view)
-            .collect();
+            .map(|n| node_to_view(n, &tunnel_kek))
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         let stack = Arc::new(gw_proxy::tunnel_stack::TunnelStack::new(
             initial_nodes,
@@ -794,6 +814,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         // `stream_consumer` does not yet expose a per-namespace callback.
         let stack_clone = stack.clone();
         let store_clone = store.clone();
+        let tunnel_kek = tunnel_kek.clone();
         tokio::spawn(async move {
             let mut last_signature: u64 = 0;
             loop {
@@ -813,8 +834,20 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
                     });
                     if sig != last_signature {
                         last_signature = sig;
-                        let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> =
-                            nodes.into_iter().map(node_to_view).collect();
+                        let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> = nodes
+                            .into_iter()
+                            .filter_map(|n| match node_to_view(n, &tunnel_kek) {
+                                Ok(view) => Some(view),
+                                Err(err) => {
+                                    tracing::error!(
+                                        target: "gw_gateway::tunnel",
+                                        error = %err,
+                                        "dropping proxy_node with undecryptable auth_token_enc"
+                                    );
+                                    None
+                                }
+                            })
+                            .collect();
                         stack_clone.reload_nodes(view);
                     }
                 }
