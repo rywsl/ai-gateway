@@ -67,6 +67,7 @@ fn dummy_vendor_key() -> Arc<VendorKey> {
         tunnel_preference: None,
         oauth: None,
         identity_snapshot: None,
+        quota_state: Default::default(),
     })
 }
 
