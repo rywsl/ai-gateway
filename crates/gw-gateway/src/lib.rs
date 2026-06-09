@@ -124,6 +124,7 @@ struct Wired {
     protection_cfg: gw_ledger::ProtectionConfig,
     classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     adapter_registry: Arc<gw_adapter::AdapterRegistry>,
+    oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime>,
     quota_state_updates: Option<Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
     retryable_codes: Arc<std::collections::HashSet<u16>>,
     error_failover_total_budget_ms: u64,
@@ -320,6 +321,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.protection_cfg.clone(),
         wired.classifier,
         wired.adapter_registry,
+        wired.oauth_runtime,
         wired.quota_state_updates,
         wired.retryable_codes,
         wired.error_passthrough_enabled,
@@ -386,6 +388,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         pg: pg.clone(),
         kek: kek_cache,
     };
+    let oauth_kek = loader.kek.clone();
     #[cfg(feature = "tunnel")]
     let tunnel_kek = loader.kek.clone();
     let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
@@ -433,6 +436,24 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         ));
     }
     let store = Arc::new(store_inner);
+    let oauth_writer = Arc::new(gw_store::oauth_refresh::PgOAuthRefreshWriter::new(
+        pg.clone(),
+        redis.clone(),
+        oauth_kek,
+    ));
+    let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> =
+        Arc::new(gw_adapter::oauth_runtime::RustOAuthRuntime::new(
+            store.clone(),
+            oauth_writer,
+            redis.clone(),
+            reqwest::Client::new(),
+            gw_adapter::oauth_runtime::OAuthRuntimeCfg {
+                lock_ttl_ms: cfg.oauth_refresh.lock_ttl_ms,
+                refresh_skew_secs: cfg.oauth_refresh.refresh_skew_secs,
+                request_timeout_ms: cfg.oauth_refresh.request_timeout_ms,
+                wait_after_lock_lost_ms: cfg.oauth_refresh.wait_after_lock_lost_ms,
+            },
+        ));
     let quota_state_updates = {
         let writer = Arc::new(gw_store::quota_state::QuotaStateWriter::new(
             pg.clone(),
@@ -981,6 +1002,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         protection_cfg: cfg.protection.clone(),
         classifier: Arc::new(gw_core::error::DefaultClassifier),
         adapter_registry,
+        oauth_runtime,
         quota_state_updates: Some(quota_state_updates),
         retryable_codes: {
             Arc::new(

@@ -373,6 +373,7 @@ pub struct LlmGateway {
     pub(crate) protection_cfg: gw_ledger::ProtectionConfig,
     pub(crate) classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     pub(crate) adapter_registry: Arc<gw_adapter::AdapterRegistry>,
+    pub(crate) oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime>,
     pub(crate) quota_state_updates: Option<Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
     pub(crate) retryable_codes: Arc<std::collections::HashSet<u16>>,
     pub(crate) error_passthrough_enabled: bool,
@@ -431,6 +432,7 @@ impl LlmGateway {
         protection_cfg: gw_ledger::ProtectionConfig,
         classifier: Arc<dyn gw_core::error::ErrorClassifier>,
         adapter_registry: Arc<gw_adapter::AdapterRegistry>,
+        oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime>,
         quota_state_updates: Option<Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
         retryable_codes: Arc<std::collections::HashSet<u16>>,
         error_passthrough_enabled: bool,
@@ -487,6 +489,7 @@ impl LlmGateway {
             protection_cfg,
             classifier,
             adapter_registry,
+            oauth_runtime,
             quota_state_updates,
             retryable_codes,
             error_passthrough_enabled,
@@ -854,6 +857,7 @@ impl ProxyHttp for LlmGateway {
             ctx,
             &self.body_rules,
             &self.adapter_registry,
+            &self.oauth_runtime,
             &self.health,
         )
         .await?;

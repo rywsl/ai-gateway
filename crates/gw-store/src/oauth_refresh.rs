@@ -11,7 +11,7 @@ pub struct OAuthWriteBack {
     pub expected_version: u64,
     pub access_token: SecretString,
     pub rotated_refresh_token: Option<SecretString>,
-    pub previous_refresh_token_enc: EncryptedKey,
+    pub previous_refresh_token_enc: Option<EncryptedKey>,
     pub access_expires_at: OffsetDateTime,
     pub token_endpoint: String,
     pub scope: Vec<String>,
@@ -92,7 +92,13 @@ impl PgOAuthRefreshWriter {
         let access_token_enc = encrypt_with_active_kek(&input.access_token, &self.kek)?;
         let refresh_token_enc = match input.rotated_refresh_token.as_ref() {
             Some(token) => encrypt_with_active_kek(token, &self.kek)?,
-            None => input.previous_refresh_token_enc,
+            None => match input.previous_refresh_token_enc {
+                Some(enc) => enc,
+                None => {
+                    self.load_existing_refresh_token_enc(&input.key_id, input.expected_version)
+                        .await?
+                }
+            },
         };
         let payload = build_oauth_payload(
             access_token_enc,
@@ -112,6 +118,8 @@ impl PgOAuthRefreshWriter {
             .map_err(anyhow::Error::from)?;
 
         let Some((new_version_i64,)) = row else {
+            metrics::counter!("gw_oauth_runtime_writeback_total", "result" => "cas_lost")
+                .increment(1);
             return Err(OAuthWriteBackError::CasLost {
                 key_id: input.key_id,
                 expected_version: input.expected_version,
@@ -137,6 +145,32 @@ impl PgOAuthRefreshWriter {
             key_id: input.key_id,
             new_version,
         })
+    }
+
+    async fn load_existing_refresh_token_enc(
+        &self,
+        key_id: &str,
+        expected_version: u64,
+    ) -> Result<EncryptedKey, OAuthWriteBackError> {
+        let value: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT payload #> '{oauth,refresh_token_enc}' \
+             FROM vendor_keys \
+             WHERE id = $1 AND version = $2 AND deleted_at IS NULL",
+        )
+        .bind(key_id)
+        .bind(expected_version as i64)
+        .fetch_optional(&self.pg)
+        .await
+        .map_err(anyhow::Error::from)?;
+        let Some(value) = value else {
+            return Err(OAuthWriteBackError::CasLost {
+                key_id: key_id.to_string(),
+                expected_version,
+            });
+        };
+        serde_json::from_value(value)
+            .map_err(anyhow::Error::from)
+            .map_err(Into::into)
     }
 }
 

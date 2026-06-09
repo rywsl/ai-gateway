@@ -13,6 +13,7 @@ pub mod analyzer;
 pub mod ctx;
 pub mod error;
 pub mod noop;
+pub mod oauth_runtime;
 pub mod registry;
 pub mod trait_def;
 
@@ -20,7 +21,9 @@ pub use analyzer::{
     BuiltinAnalyzerKind, DefaultErrorAnalyzer, ErrorKind, ErrorOutcome, HeaderView,
     KeywordErrorAnalyzer, UpstreamErrorAnalyzer,
 };
-pub use ctx::{AdapterCtx, HeadersAccessor, HeadersMut, OAuthRuntime, UrlAccessor, UrlMut};
+pub use ctx::{
+    AdapterCtx, HeadersAccessor, HeadersMut, OAuthRuntime, OAuthTokenResult, UrlAccessor, UrlMut,
+};
 pub use error::AdapterError;
 pub use noop::NoopAdapter;
 pub use registry::AdapterRegistry;

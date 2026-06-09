@@ -66,6 +66,8 @@ pub struct Config {
     pub health: HealthCfg,
     #[serde(default)]
     pub quota_state_probe: QuotaStateProbeCfg,
+    #[serde(default)]
+    pub oauth_refresh: OAuthRefreshCfg,
     /// Credit-lease protection mode (Spec 2026-05-29-credit-lease-design).
     /// `enabled = false` (the default) keeps the legacy `frozen_micro` soft
     /// defense path; flipping it on activates the per-Pod hard upper bound.
@@ -963,6 +965,45 @@ impl Default for QuotaStateProbeCfg {
             interval_secs: default_quota_state_probe_interval_secs(),
             probe_endpoint: default_quota_state_probe_endpoint(),
             max_pending: default_quota_state_probe_max_pending(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthRefreshCfg {
+    #[serde(default = "default_oauth_lock_ttl_ms")]
+    pub lock_ttl_ms: u64,
+    #[serde(default = "default_oauth_refresh_skew_secs")]
+    pub refresh_skew_secs: i64,
+    #[serde(default = "default_oauth_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_oauth_wait_after_lock_lost_ms")]
+    pub wait_after_lock_lost_ms: u64,
+}
+
+fn default_oauth_lock_ttl_ms() -> u64 {
+    30_000
+}
+
+fn default_oauth_refresh_skew_secs() -> i64 {
+    60
+}
+
+fn default_oauth_request_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_oauth_wait_after_lock_lost_ms() -> u64 {
+    100
+}
+
+impl Default for OAuthRefreshCfg {
+    fn default() -> Self {
+        Self {
+            lock_ttl_ms: default_oauth_lock_ttl_ms(),
+            refresh_skew_secs: default_oauth_refresh_skew_secs(),
+            request_timeout_ms: default_oauth_request_timeout_ms(),
+            wait_after_lock_lost_ms: default_oauth_wait_after_lock_lost_ms(),
         }
     }
 }

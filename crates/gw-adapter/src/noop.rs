@@ -22,22 +22,18 @@ impl UpstreamAdapter for NoopAdapter {
         ctx.headers_mut.remove("x-api-key");
         ctx.headers_mut.remove("x-api-key-id");
 
-        let auth_secret = if let Some(oauth) = ctx.vendor_key.oauth.as_ref() {
-            let now = time::OffsetDateTime::now_utc();
-            if now >= oauth.access_expires_at {
-                metrics::counter!(
-                    "gw_oauth_token_expired_total",
-                    "vendor_key_id" => ctx.vendor_key.key_id.as_ref().to_string(),
-                )
-                .increment(1);
-            } else if now >= oauth.access_expires_at - time::Duration::seconds(60) {
-                metrics::counter!(
-                    "gw_oauth_token_near_expiry_total",
-                    "vendor_key_id" => ctx.vendor_key.key_id.as_ref().to_string(),
-                )
-                .increment(1);
+        let auth_secret = if ctx.vendor_key.oauth.is_some() {
+            let runtime = ctx.oauth_runtime.ok_or_else(|| {
+                AdapterError::Oauth("oauth runtime unavailable for oauth vendor key".to_string())
+            })?;
+            let token = runtime
+                .access_token_for(&ctx.vendor_key.key_id, ctx.request_id)
+                .await
+                .map_err(AdapterError::Oauth)?;
+            if let Some(refreshed) = token.refreshed_vendor_key {
+                ctx.vendor_key = refreshed;
             }
-            oauth.access_token.expose_secret().to_owned()
+            token.access_token.expose_secret().to_owned()
         } else {
             ctx.vendor_key.api_key.expose_secret().to_owned()
         };

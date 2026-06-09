@@ -850,6 +850,7 @@ pub async fn rewrite_request(
     ctx: &mut ReqCtx,
     body_rules: &BodyRulesMap,
     adapter_registry: &Arc<gw_adapter::AdapterRegistry>,
+    oauth_runtime: &Arc<dyn gw_adapter::OAuthRuntime>,
     health_store: &Arc<gw_health::store::KeyHealthStore>,
 ) -> Result<()> {
     ctx.phase_start("upstream_request_filter");
@@ -922,6 +923,7 @@ pub async fn rewrite_request(
             &vendor,
             outbound.len(),
             adapter_registry,
+            oauth_runtime,
             health_store,
             client_kind,
             upstream_kind,
@@ -1037,6 +1039,7 @@ pub async fn rewrite_request(
         &vendor,
         outbound.len(),
         adapter_registry,
+        oauth_runtime,
         health_store,
         client_kind,
         upstream_kind,
@@ -1211,6 +1214,7 @@ async fn apply_outbound_adapter(
     vendor: &Arc<gw_core::versioned::Versioned<Vendor>>,
     content_len: usize,
     adapter_registry: &Arc<gw_adapter::AdapterRegistry>,
+    oauth_runtime: &Arc<dyn gw_adapter::OAuthRuntime>,
     health_store: &Arc<gw_health::store::KeyHealthStore>,
     client_protocol: gw_core::protocol::ProtocolKind,
     upstream_protocol: gw_core::protocol::ProtocolKind,
@@ -1253,7 +1257,7 @@ async fn apply_outbound_adapter(
         user_id,
         api_format,
         health_store,
-        oauth_runtime: None,
+        oauth_runtime: Some(oauth_runtime),
         headers_mut: gw_adapter::HeadersMut {
             inner: &mut headers,
         },
@@ -1933,6 +1937,23 @@ mod regression_baseline_tests {
     use std::collections::HashMap;
     use url::Url;
 
+    struct StaticOAuthRuntime;
+
+    #[async_trait]
+    impl gw_adapter::OAuthRuntime for StaticOAuthRuntime {
+        async fn access_token_for(
+            &self,
+            _vendor_key_id: &gw_core::ids::KeyId,
+            _request_id: &str,
+        ) -> Result<gw_adapter::OAuthTokenResult, String> {
+            Ok(gw_adapter::OAuthTokenResult {
+                access_token: secrecy::SecretString::from("runtime-access".to_string()),
+                refreshed_vendor_key: None,
+                version: 1,
+            })
+        }
+    }
+
     /// Build the fixed, deterministic test inputs that mirror a canonical
     /// OpenAI chat-completion upstream request.
     fn make_canonical_inputs() -> (
@@ -2050,6 +2071,7 @@ mod regression_baseline_tests {
     async fn direct_mode_outbound_adapter_headers() {
         let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
         let registry = Arc::new(gw_adapter::AdapterRegistry::default());
+        let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> = Arc::new(StaticOAuthRuntime);
         let health = Arc::new(gw_health::store::KeyHealthStore::default());
         apply_outbound_adapter(
             &mut ctx,
@@ -2058,6 +2080,7 @@ mod regression_baseline_tests {
             &vendor,
             content_len,
             &registry,
+            &oauth_runtime,
             &health,
             gw_core::protocol::ProtocolKind::OpenAi,
             gw_core::protocol::ProtocolKind::OpenAi,
@@ -2097,6 +2120,7 @@ mod regression_baseline_tests {
         let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
         let registry = Arc::new(gw_adapter::AdapterRegistry::default());
         registry.register_adapter(VendorId::from("openai"), Arc::new(TargetRewriteAdapter));
+        let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> = Arc::new(StaticOAuthRuntime);
         let health = Arc::new(gw_health::store::KeyHealthStore::default());
 
         let err = apply_outbound_adapter(
@@ -2106,6 +2130,7 @@ mod regression_baseline_tests {
             &vendor,
             content_len,
             &registry,
+            &oauth_runtime,
             &health,
             gw_core::protocol::ProtocolKind::OpenAi,
             gw_core::protocol::ProtocolKind::OpenAi,

@@ -12,14 +12,19 @@ use gw_core::protocol::{ApiFormat, ProtocolKind};
 use gw_health::store::KeyHealthStore;
 use std::sync::Arc;
 
+pub struct OAuthTokenResult {
+    pub access_token: secrecy::SecretString,
+    pub refreshed_vendor_key: Option<Arc<VendorKey>>,
+    pub version: u64,
+}
+
 #[async_trait]
 pub trait OAuthRuntime: Send + Sync {
-    async fn get_access_token(
+    async fn access_token_for(
         &self,
-        _vendor_key: &VendorKey,
-    ) -> Result<Option<secrecy::SecretString>, String> {
-        Ok(None)
-    }
+        vendor_key_id: &KeyId,
+        request_id: &str,
+    ) -> Result<OAuthTokenResult, String>;
 }
 
 pub struct AdapterCtx<'a> {

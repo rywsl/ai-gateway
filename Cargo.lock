@@ -1802,17 +1802,23 @@ dependencies = [
 name = "gw-adapter"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "dashmap",
+ "fred",
  "gw-auth",
  "gw-codec",
  "gw-core",
  "gw-health",
+ "gw-store",
  "hex",
  "metrics",
  "rand 0.8.6",
+ "reqwest",
  "secrecy",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "time",
  "tokio",

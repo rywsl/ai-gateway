@@ -10,7 +10,9 @@ gw-core = { path = "../gw-core" }
 gw-codec = { path = "../gw-codec" }
 gw-health = { path = "../gw-health" }
 gw-auth = { path = "../gw-auth" }
+gw-store = { path = "../gw-store" }
 async-trait.workspace = true
+anyhow.workspace = true
 thiserror.workspace = true
 secrecy.workspace = true
 dashmap.workspace = true
@@ -19,6 +21,11 @@ metrics.workspace = true
 rand.workspace = true
 hex.workspace = true
 time.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+fred.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

@@ -1,11 +1,16 @@
+use async_trait::async_trait;
 use gw_adapter::ctx::UrlAccessor;
-use gw_adapter::{AdapterCtx, HeadersAccessor, HeadersMut, NoopAdapter, UpstreamAdapter, UrlMut};
+use gw_adapter::{
+    AdapterCtx, HeadersAccessor, HeadersMut, NoopAdapter, OAuthRuntime, OAuthTokenResult,
+    UpstreamAdapter, UrlMut,
+};
 use gw_core::entity::{KeyStatus, OAuthCredentials, VendorKey};
 use gw_core::ids::{KeyId, ModelName, RequestId, TraceId, UserId, VendorId};
 use gw_core::protocol::ProtocolKind;
 use gw_health::store::KeyHealthStore;
 use secrecy::SecretString;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 struct InMemoryHeaders(HashMap<String, String>);
@@ -128,7 +133,8 @@ async fn run_noop(
     headers: &mut InMemoryHeaders,
     key: Arc<VendorKey>,
     auth_template: &str,
-) -> String {
+    oauth_runtime: Option<&Arc<dyn OAuthRuntime>>,
+) -> Result<String, gw_adapter::AdapterError> {
     let health = Arc::new(KeyHealthStore::default());
     let trace_id = TraceId::from("0000000000000000aaaaaaaaaaaaaaaa");
     let request_id = RequestId::from("req-baseline-0001");
@@ -143,7 +149,7 @@ async fn run_noop(
         user_id: UserId::from("u-1"),
         api_format: ProtocolKind::OpenAi,
         health_store: &health,
-        oauth_runtime: None,
+        oauth_runtime,
         headers_mut: HeadersMut { inner: headers },
         url_mut: UrlMut { inner: &mut url },
         auth_template,
@@ -154,8 +160,8 @@ async fn run_noop(
     };
 
     let adapter = NoopAdapter;
-    adapter.rewrite_auth(&mut ctx).await.expect("rewrite_auth");
-    render(headers)
+    adapter.rewrite_auth(&mut ctx).await?;
+    Ok(render(headers))
 }
 
 #[tokio::test]
@@ -166,8 +172,10 @@ async fn direct_noop_rewrite_matches_legacy_proxy_snapshot() {
         &mut headers,
         vendor_key("sk-vendor-secret", None),
         "Bearer {api_key}",
+        None,
     )
-    .await;
+    .await
+    .expect("rewrite_auth");
 
     assert_eq!(
         rendered,
@@ -184,21 +192,68 @@ traceparent: 00-0000000000000000aaaaaaaaaaaaaaaa-SPANID-01
 }
 
 #[tokio::test]
-async fn oauth_noop_rewrite_uses_access_token() {
+async fn oauth_noop_rewrite_requires_runtime() {
     let mut headers = make_headers();
 
-    let rendered = run_noop(
+    let err = run_noop(
         &mut headers,
         vendor_key(
             "static-api-key",
             Some(oauth_credentials("oauth-access-token")),
         ),
         "Authorization: Bearer {api_key}",
+        None,
     )
-    .await;
+    .await
+    .expect_err("oauth key without runtime must fail");
 
-    assert!(rendered.contains("authorization: Bearer oauth-access-token\n"));
+    assert!(err.to_string().contains("oauth runtime unavailable"));
+}
+
+struct TestOAuthRuntime {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl OAuthRuntime for TestOAuthRuntime {
+    async fn access_token_for(
+        &self,
+        _vendor_key_id: &KeyId,
+        _request_id: &str,
+    ) -> Result<OAuthTokenResult, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(OAuthTokenResult {
+            access_token: SecretString::from("runtime-access".to_string()),
+            refreshed_vendor_key: None,
+            version: 7,
+        })
+    }
+}
+
+#[tokio::test]
+async fn noop_uses_runtime_oauth_token_before_injecting_bearer() {
+    let mut headers = make_headers();
+    let runtime = Arc::new(TestOAuthRuntime {
+        calls: AtomicUsize::new(0),
+    });
+    let runtime_dyn: Arc<dyn OAuthRuntime> = runtime.clone();
+
+    let rendered = run_noop(
+        &mut headers,
+        vendor_key(
+            "static-api-key",
+            Some(oauth_credentials("stale-oauth-access-token")),
+        ),
+        "Authorization: Bearer {api_key}",
+        Some(&runtime_dyn),
+    )
+    .await
+    .expect("rewrite_auth");
+
+    assert!(rendered.contains("authorization: Bearer runtime-access\n"));
     assert!(!rendered.contains("x-api-key:"));
     assert!(!rendered.contains("x-api-key-id:"));
     assert!(!rendered.contains("static-api-key"));
+    assert!(!rendered.contains("stale-oauth-access-token"));
+    assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
 }
