@@ -25,6 +25,8 @@ pub struct UsageSnapshot {
 pub enum ProvenanceTag {
     /// Vendor sent terminal usage event/payload.
     UpstreamFinal,
+    /// Parsed from an upstream CLI response body or stream event.
+    CliExtracted,
     /// Parsed mid-stream; never saw final.
     UpstreamPartial,
     /// Fell back to tokenizer/estimate.
@@ -61,5 +63,13 @@ mod tests {
         let s = serde_json::to_string(&u).unwrap();
         let back: UsageSnapshot = serde_json::from_str(&s).unwrap();
         assert_eq!(u, back);
+    }
+
+    #[test]
+    fn provenance_tag_cli_extracted_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ProvenanceTag::CliExtracted).unwrap(),
+            "\"cli_extracted\""
+        );
     }
 }

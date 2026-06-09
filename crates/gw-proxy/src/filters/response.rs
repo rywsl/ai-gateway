@@ -404,6 +404,7 @@ fn apply_cli_full_usage(shape: ApiShape, body: &[u8], ctx: &mut ReqCtx) {
         ctx.usage.output_tokens = full.output_tokens as u32;
         ctx.usage.cached_tokens = Some(full.cache_read_input_tokens as u32);
         ctx.usage.cache_creation_tokens = Some(full.cache_creation_input_tokens as u32);
+        mark_cli_extracted_usage(ctx, true, true, true, true);
     }
 }
 
@@ -417,18 +418,29 @@ fn record_cli_usage_extract(shape: ApiShape, source: &'static str) {
 }
 
 fn apply_cli_delta(delta: gw_codec::cli::CliUsageDelta, ctx: &mut ReqCtx) {
+    let mut has_input = false;
+    let mut has_output = false;
+    let mut has_cache_read = false;
+    let mut has_cache_creation = false;
+
     if let Some(v) = delta.input_tokens {
         ctx.usage.input_tokens = v as u32;
+        has_input = true;
     }
     if let Some(v) = delta.output_tokens {
         ctx.usage.output_tokens = v as u32;
+        has_output = true;
     }
     if let Some(v) = delta.cache_read_input_tokens {
         ctx.usage.cached_tokens = Some(v as u32);
+        has_cache_read = true;
     }
     if let Some(v) = delta.cache_creation_input_tokens {
         ctx.usage.cache_creation_tokens = Some(v as u32);
+        has_cache_creation = true;
     }
+
+    mark_cli_extracted_usage(ctx, has_input, has_output, has_cache_read, has_cache_creation);
 }
 
 fn cli_usage_extractor(shape: ApiShape) -> &'static dyn gw_codec::cli::CliUsageExtractor {
@@ -700,22 +712,54 @@ fn apply_extracted_to_ctx(e: &gw_codec::usage_extractor::ExtractedUsage, ctx: &m
     copy_provenance(e, ctx);
 }
 
-/// Promote per-dimension provenance: only advance if the incoming tag has
-/// higher confidence. Order: UpstreamFinal > UpstreamPartial > Estimated >
-/// CrashFallback > Unknown.
-fn copy_provenance(e: &gw_codec::usage_extractor::ExtractedUsage, ctx: &mut ReqCtx) {
+fn provenance_rank(t: gw_core::usage::ProvenanceTag) -> u8 {
     use gw_core::usage::ProvenanceTag;
-    fn rank(t: ProvenanceTag) -> u8 {
-        match t {
-            ProvenanceTag::UpstreamFinal => 4,
-            ProvenanceTag::UpstreamPartial => 3,
-            ProvenanceTag::Estimated => 2,
-            ProvenanceTag::CrashFallback => 1,
-            ProvenanceTag::Unknown => 0,
+    match t {
+        ProvenanceTag::UpstreamFinal => 5,
+        ProvenanceTag::CliExtracted => 4,
+        ProvenanceTag::UpstreamPartial => 3,
+        ProvenanceTag::Estimated => 2,
+        ProvenanceTag::CrashFallback => 1,
+        ProvenanceTag::Unknown => 0,
+    }
+}
+
+fn mark_cli_extracted_usage(
+    ctx: &mut ReqCtx,
+    input: bool,
+    output: bool,
+    cache_read: bool,
+    cache_creation: bool,
+) {
+    use gw_core::usage::ProvenanceTag;
+
+    fn promote(dst: &mut ProvenanceTag) {
+        if provenance_rank(ProvenanceTag::CliExtracted) > provenance_rank(*dst) {
+            *dst = ProvenanceTag::CliExtracted;
         }
     }
+
+    if input {
+        promote(&mut ctx.usage_provenance.input);
+    }
+    if output {
+        promote(&mut ctx.usage_provenance.output);
+    }
+    if cache_read {
+        promote(&mut ctx.usage_provenance.cache_read);
+    }
+    if cache_creation {
+        promote(&mut ctx.usage_provenance.cache_creation);
+    }
+}
+
+/// Promote per-dimension provenance: only advance if the incoming tag has
+/// higher confidence. Order: UpstreamFinal > CliExtracted > UpstreamPartial >
+/// Estimated > CrashFallback > Unknown.
+fn copy_provenance(e: &gw_codec::usage_extractor::ExtractedUsage, ctx: &mut ReqCtx) {
+    use gw_core::usage::ProvenanceTag;
     fn promote(dst: &mut ProvenanceTag, src: ProvenanceTag) {
-        if rank(src) > rank(*dst) {
+        if provenance_rank(src) > provenance_rank(*dst) {
             *dst = src;
         }
     }
@@ -969,6 +1013,7 @@ mod non_stream_branch_tests {
     use crate::ctx::ReqCtx;
     use bytes::Bytes;
     use gw_codec::openai::OpenAi;
+    use gw_core::usage::ProvenanceTag;
     use gw_codec::AnyCodec;
 
     fn make_ctx_non_stream() -> ReqCtx {
@@ -1116,6 +1161,76 @@ mod non_stream_branch_tests {
             .expect("compressed body preserved");
         assert_eq!(accum.as_ref(), &gz[..]);
         assert_eq!(ctx.usage.input_tokens, 0);
+    }
+
+    #[test]
+    fn cli_extracted_ranks_between_final_and_partial() {
+        assert!(
+            provenance_rank(ProvenanceTag::UpstreamFinal)
+                > provenance_rank(ProvenanceTag::CliExtracted)
+        );
+        assert!(
+            provenance_rank(ProvenanceTag::CliExtracted)
+                > provenance_rank(ProvenanceTag::UpstreamPartial)
+        );
+        assert!(
+            provenance_rank(ProvenanceTag::UpstreamPartial)
+                > provenance_rank(ProvenanceTag::Estimated)
+        );
+        assert!(
+            provenance_rank(ProvenanceTag::Estimated)
+                > provenance_rank(ProvenanceTag::CrashFallback)
+        );
+        assert!(
+            provenance_rank(ProvenanceTag::CrashFallback)
+                > provenance_rank(ProvenanceTag::Unknown)
+        );
+    }
+
+    #[test]
+    fn cli_full_usage_marks_extracted_provenance() {
+        let mut ctx = ReqCtx::default();
+        let body = br#"{"usage":{"input_tokens":12,"output_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}"#;
+
+        apply_cli_full_usage(ApiShape::OpenAiCli, body, &mut ctx);
+
+        assert_eq!(ctx.usage_provenance.input, ProvenanceTag::CliExtracted);
+        assert_eq!(ctx.usage_provenance.output, ProvenanceTag::CliExtracted);
+        assert_eq!(ctx.usage_provenance.cache_read, ProvenanceTag::CliExtracted);
+        assert_eq!(
+            ctx.usage_provenance.cache_creation,
+            ProvenanceTag::CliExtracted
+        );
+        assert_eq!(ctx.usage_provenance.thinking, ProvenanceTag::Unknown);
+        assert_eq!(
+            ctx.usage_provenance.multimodal_input,
+            ProvenanceTag::Unknown
+        );
+    }
+
+    #[test]
+    fn cli_delta_marks_only_present_dimensions() {
+        let mut ctx = ReqCtx::default();
+
+        apply_cli_delta(
+            gw_codec::cli::CliUsageDelta {
+                input_tokens: None,
+                output_tokens: Some(9),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(ctx.usage_provenance.input, ProvenanceTag::Unknown);
+        assert_eq!(ctx.usage_provenance.output, ProvenanceTag::CliExtracted);
+        assert_eq!(ctx.usage_provenance.cache_read, ProvenanceTag::Unknown);
+        assert_eq!(ctx.usage_provenance.cache_creation, ProvenanceTag::Unknown);
+        assert_eq!(ctx.usage_provenance.thinking, ProvenanceTag::Unknown);
+        assert_eq!(
+            ctx.usage_provenance.multimodal_input,
+            ProvenanceTag::Unknown
+        );
     }
 }
 

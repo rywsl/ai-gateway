@@ -23,6 +23,10 @@ fn schema_serializes_new_fields() {
         "input provenance label"
     );
     assert!(
+        json.contains("\"output\":\"cli_extracted\""),
+        "output provenance label"
+    );
+    assert!(
         !json.contains("\"usage_source\""),
         "old field must be removed"
     );
@@ -37,6 +41,10 @@ fn provenance_tag_serializes_snake_case() {
     assert_eq!(
         serde_json::to_string(&ProvenanceTag::UpstreamFinal).unwrap(),
         "\"upstream_final\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ProvenanceTag::CliExtracted).unwrap(),
+        "\"cli_extracted\""
     );
     assert_eq!(
         serde_json::to_string(&ProvenanceTag::CrashFallback).unwrap(),
@@ -84,7 +92,7 @@ fn test_record() -> UsageRecord {
         vendor_exposure_state: VendorExposureState::Settled,
         usage_provenance: UsageProvenance {
             input: ProvenanceTag::UpstreamFinal,
-            output: ProvenanceTag::UpstreamFinal,
+            output: ProvenanceTag::CliExtracted,
             cache_read: ProvenanceTag::UpstreamFinal,
             cache_creation: ProvenanceTag::Unknown,
             thinking: ProvenanceTag::Unknown,

@@ -24,8 +24,8 @@ Provenance ranking (highest = winner = the entry Go keeps; lowest = the dup
 Go discards), per spec §8.3:
 
 - `vendor_exposure_state`:  settled > terminated > crash_fallback
-- `usage_provenance.<dim>` (any dimension): upstream_final > upstream_partial >
-  estimated > crash_fallback > unknown
+- `usage_provenance.<dim>` (any dimension): upstream_final > cli_extracted >
+  upstream_partial > estimated > crash_fallback > unknown
 
 The record wire shape is `crates/gw-ledger/src/usage.rs::UsageRecord`
 serialized to JSON under the `payload` field of each `usage:records` XADD
@@ -49,10 +49,11 @@ _EXPOSURE_RANK: dict[str, int] = {
 # `ProvenanceTag` — crates/gw-core/src/usage.rs.
 _PROVENANCE_RANK: dict[str, int] = {
     "upstream_final": 5,
-    "upstream_partial": 4,
-    "estimated": 3,
-    "crash_fallback": 2,
-    "unknown": 1,
+    "cli_extracted": 4,
+    "upstream_partial": 3,
+    "estimated": 2,
+    "crash_fallback": 1,
+    "unknown": 0,
 }
 
 # Dimensions carried by `UsageProvenance` (crates/gw-ledger/src/usage.rs).

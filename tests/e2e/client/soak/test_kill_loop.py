@@ -104,3 +104,40 @@ def test_kill_fired_passes_when_at_least_one_succeeded():
 def test_kill_fired_fails_when_zero_kills():
     leaf = kill_loop_fired_at_least_once(kill_report={"kills_succeeded": 0})
     assert leaf["passed"] is False
+
+
+def test_dedupe_rank_orders_cli_extracted_between_final_and_partial():
+    from soak.dedupe import _PROVENANCE_RANK
+
+    assert _PROVENANCE_RANK["upstream_final"] == 5
+    assert _PROVENANCE_RANK["cli_extracted"] == 4
+    assert _PROVENANCE_RANK["upstream_partial"] == 3
+    assert _PROVENANCE_RANK["estimated"] == 2
+    assert _PROVENANCE_RANK["crash_fallback"] == 1
+    assert _PROVENANCE_RANK["unknown"] == 0
+
+
+def test_dedupe_breakdown_keeps_cli_extracted_over_estimated_fallback():
+    from soak.dedupe import dedupe_breakdown
+
+    def rec(provenance):
+        return {
+            "request_id": "cli-usage-1",
+            "attempt_index": 0,
+            "vendor_exposure_state": "settled",
+            "usage_provenance": {
+                "input": provenance,
+                "output": "unknown",
+                "cache_read": "unknown",
+                "cache_creation": "unknown",
+                "thinking": "unknown",
+                "multimodal_input": "unknown",
+            },
+        }
+
+    breakdown = dedupe_breakdown([rec("estimated"), rec("cli_extracted")])
+
+    assert breakdown["dedupes_inferred"] == 1
+    [collision] = breakdown["collision_groups"]
+    assert collision["winner"]["rank"] == [3, 4]
+    assert collision["discarded"][0]["rank"] == [3, 2]
