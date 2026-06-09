@@ -475,13 +475,15 @@ payload    bytes  encoding 决定如何解码；解码后是 JSON
 | Go 接收行为 | 写 `ip_blocks.payload`，包含 `cidr / scope=global / reason=abnormal_traffic / expires_at`；自增 version |
 | Rust 后续 | Rust 通过 events:entity 自然消费此条 → 失效 `ipblock` cache → 下次请求拒服 |
 
-### 2.4.3 `vendor_key.oauth_failed`(OAuth 失败通知)
+### 2.4.3 `vendor_key.oauth_failed`(OAuth 失败通知, legacy/pre-K-C)
 
 | 触发 | 上游返回 401 且 `vendor_key.oauth.is_some()`,经 `OAuthListener` 判定为 `AccountBlocked(OAuthRefreshFailed)` |
 |---|---|
-| Payload | `ns=vendor_key id=<key_id> op=status_change field=oauth_failed reason=upstream_401 ts_ms=<now>` |
-| Go 接收行为 | task-worker 检查 `refresh_token` 有效性 → 尝试 refresh:<br/>① 成功:加密新 access_token + 整体替换 `payload.oauth` 子对象 + `version + 1` + XADD `events:entity ns=vendor_key op=upsert`;<br/>② 失败:`status = disabled` + XADD `events:entity ns=vendor_key op=upsert` |
-| Rust 后续 | **不**主动 refresh;等 Go 写新 vendor_key payload 后自然冷加载到新 token |
+| Payload | legacy/pre-K-C: `ns=vendor_key id=<key_id> op=status_change field=oauth_failed reason=upstream_401 ts_ms=<now>` |
+| Go 接收行为 | legacy/pre-K-C only: task-worker 可尝试 refresh。Post-K-C: status/alert only,不得触发 Go runtime refresh。 |
+| Rust 后续 | Post-K-C 由 Rust `OAuthRuntime` 完成 runtime refresh、encrypted write-back、version bump 与 `events:entity ns=vendor_key op=upsert`。 |
+
+Post-K-C rule: Go must not refresh `vendor_keys.payload.oauth` in response to Rust OAuth runtime events. Rust-owned OAuth events are status/alert signals only; runtime refresh and encrypted write-back are owned by Rust.
 
 不变量:与 §2.4.1(`rate_limited`)、§2.4.2(`ipblock`)并列,均属"Rust 反向写,Go 接收"的白名单 op。
 
@@ -492,7 +494,7 @@ payload    bytes  encoding 决定如何解码；解码后是 JSON
   1. PgSQL `UPDATE ... SET version = version + 1 RETURNING version`；
   2. 把 `version` 写回 events:entity 的 `v` 字段（再 XADD 一次"权威 upsert"）；
   3. 这避免了 Rust 反向写 `v=0` 让其他 Rust 副本的 versioned upsert 误判。
-- §2.4.3 oauth_failed:Rust 反向写,Go task-worker 端必须实现 refresh 处理;未实现的代价 = 该 vendor_key 失效后无法自愈,等同 §2.4.4 表中"Go 未实现接收 → vendor_key 状态不会同步到 PgSQL"。
+- §2.4.3 oauth_failed:legacy/pre-K-C 可作为 Go refresh command。Post-K-C 后 Rust 是 sole runtime writer,Go 端不得把 Rust OAuth runtime event 当作 refresh command。
 
 > v1 实现：Rust 端可以省略 `v`，Go 端按收到的 `op=status_change` / `reason=abnormal_traffic` 字段识别"Rust 反向写"。Go 端实施完成后，可将此约定显式化为 stream 字段 `source=rust`。
 

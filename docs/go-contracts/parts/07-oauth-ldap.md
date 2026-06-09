@@ -64,6 +64,8 @@ Go 是 `oauth_providers` 表的唯一 writer；Rust 不写该表，仅通过 Go 
 
 OAuth code exchange、access token cache、refresh token 续签都由 Go 执行；Rust gateway **不**直连 OAuth provider，只读 Go 写入的 Redis 结果。目标是把外部 IdP 抖动、client secret、refresh_token 生命周期都收口在 Go。
 
+This section governs user authentication provider configuration and `auth:oauth:token:*` caches. It does not govern vendor-key runtime OAuth credentials in `vendor_keys.payload.oauth`. After K-C, vendor-key runtime refresh is Rust-owned per `contract-change/2026-06-09-rust-oauth-refresh.md`.
+
 #### 7.3.1 Token exchange flow
 
 1. Go 用 `authorization_code` 或 `refresh_token` 模式向外部 provider 换 token。

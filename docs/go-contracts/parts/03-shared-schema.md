@@ -203,17 +203,20 @@ deleted_at  TIMESTAMPTZ NULL
 }
 ```
 
-**Writer 责任(Go)**:
+**Writer responsibility after K-C**:
 
-- 加密字段由 Go OAuth task-worker 完成;明文绝不入库 / 日志 / 缓存;
-- refresh 完成后**整体替换** `payload.oauth` 子对象 + `version + 1` + XADD `events:entity` op=upsert;
-- `token_endpoint` 仅供 Go refresh 使用,Rust 端不读。
+- Go writes OAuth configuration and initial authorization seed data.
+- Rust writes runtime refresh results for `vendor_keys.payload.oauth`.
+- Rust reads `token_endpoint` for vendor-key runtime refresh.
+- Rust encrypts refreshed tokens with the active KEK and persists with version CAS.
+- Rust emits `events:entity ns=vendor_key op=upsert` after a successful write.
+- Go must not perform runtime refresh write-back for this sub-object after K-C.
 
 **Rust 行为**:
 
-- `upstream_request_filter` 注入 auth header 时若 `oauth.is_some()`,用 `access_token`(解密后)代替 `api_key`(参 gaps spec ADR-G3-2);
-- 临过期判定:`now >= access_expires_at - 60s` 仍使用现有 token,不主动 refresh,仅 emit metric `gw_oauth_token_near_expiry_total{vendor_key_id}`;
-- 上游 401 → `OAuthListener` 触发反向 `events:entity`(参 [parts/02 §2.4.3](../parts/02-go-as-consumer.md#243-vendor_keyoauth_failedoauth-失败通知))。
+- `upstream_request_filter` 注入 auth header 时若 `oauth.is_some()`,通过 Rust `OAuthRuntime` 在 refresh skew 内先刷新,再用 runtime access token 代替 `api_key`;
+- 临过期判定:`now >= access_expires_at - 60s` 后不得继续无条件发送旧 token;Rust runtime 负责 refresh 或 fail-closed;
+- 上游 401 → `OAuthListener` 可触发 status-only `events:entity`,Go 不得将该事件作为 runtime refresh command。
 
 ### 3.2.5.2 Capability 字段契约（`forced_capabilities` / `exclusive_capability_match`）
 

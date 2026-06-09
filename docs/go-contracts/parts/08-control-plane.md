@@ -127,7 +127,7 @@ XADD commands:gateway * command_id <id> action <action> target <t> args <json> i
 |---|---|---|---|
 | `cooldown-key` | `key_id, format, ttl_secs` | all | `KeyHealthStore::apply_cooldown` |
 | `clear-cooldown` | `key_id, format` | all | `KeyHealthStore::clear_cooldown` |
-| `refresh-oauth` | `key_id` | all(leader 单飞) | F2 K-C `OAuthRefresher` |
+| `refresh-oauth` | `key_id` | all(leader 单飞) | F2 K-C Rust `OAuthRuntime` single-flight refresher; Go issues the command, Rust performs refresh and write-back |
 | `reload-config` | `table`(或 `"*"`) | all | SP-A `ConfigReloadRegistry` |
 | `restart-component` | `component` | all/instance | SP-A `Reconfigurable`(强制重建) |
 | `drain` / `undrain` | — | instance | graceful-upgrade `GracefulDrain` |
@@ -166,5 +166,4 @@ result = { "status": "ok|failed|skipped|not_applicable", "detail": "…", "appli
 - **上线 ordering**:Rust 先上(读 `default.toml` 兜底可单跑)→ Go 写 `config_*` + 发 `events:entity ns=config` 接管控制。破坏性变更直接做(main §3.6,项目未上线)。
 
 > Sync rule:本 part 任何接触点改动须同步 [main.md](../main.md) §2/§3.3/§7;Rust 侧实现细节见三个 [SP design doc](../../design/)。
-
 
