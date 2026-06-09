@@ -357,6 +357,8 @@ fi
 #    contract; no use-site code nearby)
 #  - persistence-layer JSON decode tests (loader.rs)
 #  - resolver.rs doc comment that names both tokens on the same line
+#  - the default-build predicate helper; the caller owns hard-fail rendering
+#  - in-file unit-test struct literals
 #  - pure comment lines (the documentation match noted in the plan)
 # ---------------------------------------------------------------------------
 echo "[tunnel_require_means_hard_fail] require_tunnel implies GW_TUNNEL_NO_NODE"
@@ -369,6 +371,8 @@ while IFS=: read -r vfile vline _; do
   vcontent=$(sed -n "${vline}p" "$vfile" 2>/dev/null)
   case "$vcontent" in
     *'//'*) continue;;
+    *'is_some_and(|p| p.require_tunnel)'*) continue;;
+    *'require_tunnel: true'*) continue;;
   esac
   if ! sed -n "${vline},$((vline+7))p" "$vfile" 2>/dev/null | grep -q 'GW_TUNNEL_NO_NODE'; then
     violations="${violations}${vfile}:${vline}: require_tunnel without GW_TUNNEL_NO_NODE within 8 lines\n"
