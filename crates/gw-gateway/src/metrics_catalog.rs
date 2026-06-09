@@ -448,6 +448,11 @@ pub static METRICS: &[MetricSpec] = &[
         help: "UsageRecord emit attempts by path (channel / closed / sync_bypass_closed)",
     },
     MetricSpec {
+        name: "gw_cli_usage_extract_total",
+        kind: MetricKind::Counter,
+        help: "CLI usage extraction successes; labels=shape,source(stream_event|response_body)",
+    },
+    MetricSpec {
         name: "gw_billing_inflight_clear_total",
         kind: MetricKind::Counter,
         help: "Outcome of the DEL inflight key step in ledger flusher / sync bypass; labels=outcome(ok|del_failed|skipped_dlq|skipped_lost)",

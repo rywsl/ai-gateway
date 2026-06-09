@@ -12,11 +12,6 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 - **Design points:** new `crates/gw-codec/src/kiro/` module: EventStream framer (length-prefixed + `crc32fast` CRCs — add the dep), wire request/response types, thinking-tag parser, request/response roundtrip. Register a Kiro variant in `gw-codec/src/any.rs::AnyCodec`. No code exists today (only stray comments in `gw-adapter`).
 - **Source:** deleted `codec-s5-kiro-eventstream` + `adapter-a-t6-kiro-vendor` (git history).
 
-### `gw_cli_usage_extract_total` metric — `doc-divergence`
-- **Intent:** observability for CLI usage extraction (source = stream_event | response_body | estimated).
-- **Design points:** emit `metrics::counter!("gw_cli_usage_extract_total", "shape" => …, "source" => …)` at the CLI usage-extraction sites in `crates/gw-proxy/src/filters/response.rs`; register in `crates/gw-gateway/src/metrics_catalog.rs`. `docs/workflow.md` currently advertises it but it is never emitted.
-- **Source:** deleted `cli-variants-design` ADR-CLI-10.
-
 ### `UsageSource::CliExtracted` provenance — `doc-divergence`
 - **Intent:** let billing distinguish CLI-extracted usage from parsed/estimated.
 - **Design points:** the ledger replaced the old `usage_source` field with `usage_provenance` (`crates/gw-ledger/src/usage.rs`); decide whether a CLI-extracted provenance value is needed and add it there rather than reviving `UsageSource`.

@@ -373,6 +373,7 @@ fn handle_cli_event(shape: ApiShape, event_bytes: &[u8], ctx: &mut ReqCtx) {
         ctx.timing.ttft = Some(std::time::Instant::now());
     }
     if let Some(delta) = cli_usage_extractor(shape).extract_stream_usage(event_type, data) {
+        record_cli_usage_extract(shape, "stream_event");
         apply_cli_delta(delta, ctx);
     }
 }
@@ -398,11 +399,21 @@ fn split_sse_event(event_bytes: &[u8]) -> (&str, &[u8]) {
 
 fn apply_cli_full_usage(shape: ApiShape, body: &[u8], ctx: &mut ReqCtx) {
     if let Some(full) = cli_usage_extractor(shape).extract_response_usage(body) {
+        record_cli_usage_extract(shape, "response_body");
         ctx.usage.input_tokens = full.input_tokens as u32;
         ctx.usage.output_tokens = full.output_tokens as u32;
         ctx.usage.cached_tokens = Some(full.cache_read_input_tokens as u32);
         ctx.usage.cache_creation_tokens = Some(full.cache_creation_input_tokens as u32);
     }
+}
+
+fn record_cli_usage_extract(shape: ApiShape, source: &'static str) {
+    metrics::counter!(
+        "gw_cli_usage_extract_total",
+        "shape" => shape.format_id(),
+        "source" => source,
+    )
+    .increment(1);
 }
 
 fn apply_cli_delta(delta: gw_codec::cli::CliUsageDelta, ctx: &mut ReqCtx) {
