@@ -4,6 +4,21 @@
 >
 > **状态:目标契约(design 阶段,尚未实现)** —— 对应设计 doc [SP-A 配置下行](../../design/2026-06-08-control-plane-sp-a-config-downlink.md) / [SP-B 能力上行](../../design/2026-06-08-control-plane-sp-b-capability-uplink.md) / [SP-C 命令通道](../../design/2026-06-08-control-plane-sp-c-command-channel.md)。Go 团队可据此**并行实现**;Rust 侧随各 SP 的实现 plan 落地。本 part 遵循 [main.md §3](../main.md) 通用约定(`ts_ms` 毫秒 / `snake_case` / entity 信封 §3.2 / 写顺序 §3.4)。
 
+## Purpose
+
+定义 Go 管理面和 Rust 网关之间的配置下行、能力上行、运行状态和命令 ACK 契约，使控制面字段与 Rust runtime 能力保持一致。
+
+## As-built surface
+
+- Runtime instance identity and heartbeat anchors live in `crates/gw-ledger/src/instance_id.rs`.
+- Protocol and API-shape capability strings mirror `crates/gw-core/src/protocol.rs`, including `kiro`, `kiro:eventstream`, and `kiro:cli`.
+- OAuth refresh commands are consumed by Rust runtime code; W7 Vertex adapter consumes runtime tokens through `crates/gw-adapter/src/vertex.rs` and does not call PgSQL, Redis, or Google token endpoints directly.
+
+## Not built
+
+- SP-A/SP-B/SP-C control-plane Redis surfaces remain a design contract until their implementation plans land.
+- Kiro CLI remains capability-advertised only; detector and usage extraction require a real CLI traffic sample.
+
 ## 8.1 概览(三线接触点)
 
 | 线 | 接触点 | Writer | Reader | 说明 |

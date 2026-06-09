@@ -4,6 +4,21 @@
 
 ---
 
+## Purpose
+
+锁定 Go 管理面和 Rust 网关共享的持久化 schema、JSONB payload、加密封包和版本协议，避免两端各自解释同一字段。
+
+## As-built surface
+
+- Rust entity payload 类型由 `crates/gw-core/src/entity.rs` 反序列化，PgSQL loader 在 `crates/gw-store/src/loader.rs` 折叠 top-level 列后加载。
+- Vendor OAuth runtime token 由 `crates/gw-adapter/src/vertex.rs` 消费，Kiro SigV4 credential plaintext 由 `crates/gw-adapter/src/kiro.rs` 消费。
+- Protocol and shape wire strings come from `crates/gw-core/src/protocol.rs`; Kiro EventStream/CLI share `ProtocolKind::Kiro` and diverge by `ApiShape`.
+
+## Not built
+
+- Kiro CLI detector and usage extraction are shape-registered only; production detection requires a real CLI traffic sample.
+- Go-side generated types are contract consumers and are not emitted from this markdown automatically.
+
 ## 3.1 PgSQL 表清单
 
 Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开发期由 `psql -f` 跑，生产由 Go 端 / 运维负责执行。Rust 启动期假定所有表已就位。
