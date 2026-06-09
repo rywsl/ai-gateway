@@ -624,3 +624,21 @@ git commit -m "docs(plan): update owned tunnel execution status"
 ## Handoff Summary
 
 W8 is no longer blocked on confirming the real aether-hub protocol. The implementation target is an owned `ailinkmax-tunnel` protocol with first-party `gw-tunnel-server` and `gw-tunnel-client` behavior. Aether and current mocks are reference-only. The bridge must route Pingora-selected tunnel traffic through a loopback HTTP bridge into owned WebSocket streams. E2E must prove a real request reaches a fake upstream through the owned tunnel server. Default `latest` remains non-tunnel until the user explicitly chooses a release promotion after green e2e.
+
+## Execution Status — 2026-06-10
+
+Status: source implementation complete; final serial validation in progress.
+
+Commits:
+
+- `5f025e8 feat(tunnel): add owned server client protocol`
+- `db02897 feat(tunnel): bridge proxy traffic through owned server`
+- `3bd970c fix(tunnel): preserve adapter patch regression under tunnel feature`
+- `c545fbc test(tunnel): prove owned server roundtrip e2e`
+
+Notes:
+
+- The owned protocol target is `ailinkmax-tunnel`; aether and the prior mock remain reference material only.
+- `TunnelStack::peer_for_node` now returns the loopback bridge peer after DNS, target, and live transport checks; Pingora is not pointed at the node WebSocket endpoint.
+- Gateway ignored e2e now covers owned server/client positive round trip, no-live node, target denial, and auth failure using local listeners rather than Docker/testcontainers.
+- Default `latest` remains non-tunnel. `latest-tunnel` remains operator-selected; promotion is still a release decision outside W8.
