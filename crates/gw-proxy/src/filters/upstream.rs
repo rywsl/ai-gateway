@@ -109,20 +109,40 @@ fn affinity_preferred_candidate<'a>(
     let dimension = gw_routing::affinity::AffinityDimension::ApiKey(api_key_id.clone());
     let record = affinity.get(&dimension, std::time::Instant::now())?;
     ranked_candidates.iter().find(|candidate| {
+        let upstream_format =
+            gw_core::protocol::resolve_upstream_format(&candidate.accessible_endpoints, api_format);
         candidate.key_id == record.vendor_key_id
             && !ctx
                 .retry_blacklist
                 .iter()
                 .any(|blacklisted| blacklisted == &candidate.key_id)
-            && health.is_available(&candidate.key_id, api_format)
+            && health.is_available(&candidate.key_id, upstream_format)
     })
+}
+
+fn admit_preferred_candidate<'a>(
+    ranked_candidates: &'a [Arc<VendorKey>],
+    preferred: Option<&'a Arc<VendorKey>>,
+    adaptive_rpm: &gw_auth::ratelimit::adaptive::AdaptiveRpmManager,
+) -> Option<&'a Arc<VendorKey>> {
+    let preferred = preferred?;
+    if adaptive_rpm.try_admit(&preferred.key_id) {
+        return Some(preferred);
+    }
+    ranked_candidates
+        .iter()
+        .find(|candidate| {
+            candidate.key_id != preferred.key_id && adaptive_rpm.try_admit(&candidate.key_id)
+        })
+        .or(Some(preferred))
 }
 
 pub fn record_api_key_affinity(
     ctx: &ReqCtx,
     affinity: &gw_routing::affinity::AffinityManager,
 ) -> bool {
-    let (Some(api_key_id), Some(picked)) = (ctx.api_key_id.as_ref(), ctx.picked_vendor_key.as_ref())
+    let (Some(api_key_id), Some(picked)) =
+        (ctx.api_key_id.as_ref(), ctx.picked_vendor_key.as_ref())
     else {
         return false;
     };
@@ -377,31 +397,12 @@ pub async fn pick_peer(
     } else {
         None
     };
-    let picked = match failover_pick.or(affinity_pick) {
+    let picked = match failover_pick {
         Some(candidate) => candidate,
         None => {
-            let first = ranked_candidates
-                .first()
-                .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?;
-            // Adaptive-RPM enforcement (audit 2026-05-30 §1.8): if the strategy's
-            // pick is over its learned per-key ceiling, divert to another
-            // candidate that is within its ceiling. This makes the learned limit
-            // actually enforced (the former request_filter clamp was dead code).
-            // Fail-operational: if every candidate is over its ceiling, send to
-            // `first` anyway — the per-user RPM bucket and response-side cooldown
-            // remain in force, so a denial is proactive back-pressure, not a hard
-            // reject. Only applied on the first-attempt pick; the failover path
-            // honors the FailoverExecutor's deliberate choice as-is.
-            if adaptive_rpm.try_admit(&first.key_id) {
-                first
-            } else if let Some(alt) = ranked_candidates
-                .iter()
-                .find(|c| c.key_id != first.key_id && adaptive_rpm.try_admit(&c.key_id))
-            {
-                alt
-            } else {
-                first
-            }
+            let preferred = affinity_pick.or_else(|| ranked_candidates.first());
+            admit_preferred_candidate(&ranked_candidates, preferred, adaptive_rpm.as_ref())
+                .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?
         }
     };
     let picked_arc = Arc::clone(picked);
@@ -1319,14 +1320,22 @@ mod affinity_tests {
     use secrecy::SecretString;
 
     fn key(id: &str) -> Arc<VendorKey> {
+        key_with_protocols(id, vec![ProtocolKind::OpenAi], false)
+    }
+
+    fn key_with_protocols(
+        id: &str,
+        accessible_endpoints: Vec<ProtocolKind>,
+        protocol_conversion: bool,
+    ) -> Arc<VendorKey> {
         Arc::new(VendorKey {
             key_id: KeyId::from(id),
             vendor_id: VendorId::from("v-affinity"),
             api_key: SecretString::new("sk-test".into()),
             accessible_models: vec![ModelName::from("m1")],
             model_mapping: Default::default(),
-            accessible_endpoints: vec![ProtocolKind::OpenAi],
-            protocol_conversion: false,
+            accessible_endpoints,
+            protocol_conversion,
             priority: 0,
             weight: 1,
             rpm_limit: 0,
@@ -1392,6 +1401,60 @@ mod affinity_tests {
             ProtocolKind::OpenAi,
         )
         .is_none());
+    }
+
+    #[test]
+    fn api_key_affinity_checks_resolved_upstream_health_bucket() {
+        let affinity = AffinityManager::default();
+        let mut ctx = ReqCtx::default();
+        ctx.api_key_id = Some(ApiKeyId::from("ak-affinity"));
+        let preferred = key_with_protocols("vk-convert", vec![ProtocolKind::Anthropic], true);
+        let ranked = vec![preferred.clone()];
+        affinity.record_hit(
+            AffinityDimension::ApiKey(ApiKeyId::from("ak-affinity")),
+            preferred.key_id.clone(),
+            std::time::Instant::now(),
+        );
+        let health = KeyHealthStore::default();
+        health.apply_cooldown(
+            &preferred.key_id,
+            ProtocolKind::Anthropic,
+            gw_health::cooldown::CooldownDirective {
+                reason: gw_health::cooldown::CooldownReason::Status429RateLimit,
+                ttl_secs: 30,
+                reset_consecutive: false,
+            },
+        );
+
+        assert!(
+            health.is_available(&preferred.key_id, ProtocolKind::OpenAi),
+            "client bucket remains healthy"
+        );
+        assert!(affinity_preferred_candidate(
+            &ctx,
+            &ranked,
+            &affinity,
+            &health,
+            ProtocolKind::OpenAi,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn affinity_preferred_candidate_over_ceiling_diverts_to_admitted_alternative() {
+        let adaptive = gw_auth::ratelimit::adaptive::AdaptiveRpmManager::new(Default::default());
+        let preferred = key("vk-preferred");
+        let alternative = key("vk-alternative");
+        let ranked = vec![preferred.clone(), alternative.clone()];
+        adaptive.observe_429(&preferred.key_id, 120, Some(1), 120, None);
+        adaptive.observe_429(&preferred.key_id, 120, Some(1), 120, None);
+        assert_eq!(adaptive.should_enforce(&preferred.key_id), Some(1));
+        assert!(adaptive.try_admit(&preferred.key_id));
+
+        let picked = admit_preferred_candidate(&ranked, Some(&preferred), &adaptive)
+            .expect("preferred should fall back to admitted alternative");
+
+        assert_eq!(picked.key_id, alternative.key_id);
     }
 
     #[test]

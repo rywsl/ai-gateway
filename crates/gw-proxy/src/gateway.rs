@@ -85,6 +85,15 @@ fn classify_connect_error(e: &Error) -> ConnectErrorKind {
     }
 }
 
+fn invalidate_connect_failure_affinity(
+    ctx: &ReqCtx,
+    affinity: &gw_routing::affinity::AffinityManager,
+) {
+    if let Some(key) = ctx.picked_vendor_key.as_ref() {
+        affinity.invalidate_vendor_key(&key.key_id);
+    }
+}
+
 fn remaining_failover_candidates(
     candidates: &[Arc<gw_core::entity::VendorKey>],
     ctx: &ReqCtx,
@@ -1294,6 +1303,7 @@ impl ProxyHttp for LlmGateway {
                 e
             }
             ConnectErrorKind::Connect => {
+                invalidate_connect_failure_affinity(ctx, self.affinity.as_ref());
                 if ctx.retry_count < MAX_CONNECT_RETRIES {
                     if let Some(k) = ctx.picked_vendor_key.as_ref().map(|p| p.key_id.clone()) {
                         ctx.retry_blacklist.push(k);
@@ -1664,15 +1674,16 @@ fn trace_id_hex() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_body_head, classify_connect_error, is_gw_short_circuit,
-        merge_adapter_error_outcome, next_failover_decision, ConnectErrorKind,
+        adapter_body_head, classify_connect_error, invalidate_connect_failure_affinity,
+        is_gw_short_circuit, merge_adapter_error_outcome, next_failover_decision, ConnectErrorKind,
     };
     use bytes::BytesMut;
     use gw_adapter::{ErrorKind, ErrorOutcome};
     use gw_core::entity::{KeyStatus, VendorKey};
     use gw_core::error::{ClassifierOutcome, CooldownDirective, ErrorClass, Retryability};
-    use gw_core::ids::{KeyId, VendorId};
+    use gw_core::ids::{ApiKeyId, KeyId, VendorId};
     use gw_core::ratelimit::RateLimitKind;
+    use gw_routing::affinity::{AffinityDimension, AffinityManager};
     use gw_routing::{FailoverDecision, FailoverExecutor};
     use pingora::{Error, ErrorType};
     use secrecy::SecretString;
@@ -1745,6 +1756,29 @@ mod tests {
             next_failover_decision(&executor, &remaining, 1, &ctx),
             FailoverDecision::Timeout
         ));
+    }
+
+    #[test]
+    fn connect_failure_invalidates_affinity_for_picked_vendor_key() {
+        let affinity = AffinityManager::default();
+        let picked = make_test_key("vk-connect-failed");
+        let mut ctx = crate::ctx::ReqCtx::default();
+        ctx.api_key_id = Some(ApiKeyId::from("ak-connect"));
+        ctx.picked_vendor_key = Some(picked.clone());
+        affinity.record_hit(
+            AffinityDimension::ApiKey(ApiKeyId::from("ak-connect")),
+            picked.key_id.clone(),
+            Instant::now(),
+        );
+
+        invalidate_connect_failure_affinity(&ctx, &affinity);
+
+        assert!(affinity
+            .get(
+                &AffinityDimension::ApiKey(ApiKeyId::from("ak-connect")),
+                Instant::now(),
+            )
+            .is_none());
     }
 
     #[test]
