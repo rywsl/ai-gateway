@@ -50,10 +50,10 @@ No open ROADMAP items.
 
 ## 07 vendor-integration
 
-### Full A-T0..A-T6 outbound adapter registry — `capability-gap` / decision confirmed
-- **Intent:** move per-vendor outbound rewrite (OAuth bearer, fingerprint headers, URL rewrite, body transforms) behind the standalone `gw-adapter` seam while preserving byte-identical direct-vendor behavior during incremental rollout.
-- **Design points:** F1 is confirmed by `docs/plans/2026-06-08-roadmap-implementation-program.md` and `docs/design/2026-06-09-roadmap-authority-and-scope.md`: keep `crates/gw-adapter`, make `AdapterRegistry::for_vendor` the proxy outbound seam, keep the task worker out of adapter dispatch, leave direct vendors as Noop/short-circuit, keep impersonate vendors backed by `gw-core::impersonate`, and put new heavy vendor transforms behind adapter hooks. `AdapterCtx` must gain the OAuth cache field required by the K-C work.
-- **Source:** deleted `adapter-a-t0..t6`, `adapter-layer-design`.
+### Full A-T0 outbound adapter seam — closed in spec
+- **Landed:** `gw-proxy` outbound request rewrite dispatches through `gw-adapter::AdapterRegistry::for_vendor`, with `NoopAdapter` preserving the legacy direct-vendor auth/header rewrite and the Direct-mode snapshot renamed to `direct_mode_outbound_adapter_headers`.
+- **Boundary:** task worker/task submit do not call adapters; egress impersonation still runs through `gw-core::impersonate` / `gw-egress-impersonate` after adapter rewrite; `AdapterCtx` carries an inert optional OAuth runtime slot for K-C.
+- **Spec:** `docs/spec/07-vendor-integration.md`.
 
 ### K-C in-Rust OAuth refresh/write-back — `capability-gap` / decision confirmed
 - **Intent:** move runtime OAuth token refresh/write-back to Rust while leaving OAuth configuration and first-time authorization in Go.

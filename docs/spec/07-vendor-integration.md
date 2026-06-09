@@ -1,6 +1,6 @@
 # 07 — Vendor Integration (as-built)
 
-- Family: A (adapter/egress) · Backing crates: `gw-adapter`, `gw-egress-impersonate`, `gw-core::impersonate` · Source-of-truth: `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/gateway.rs`, `crates/gw-adapter/src/{analyzer.rs,registry.rs}`, `crates/gw-core/src/impersonate/`, `crates/gw-egress-impersonate/src/`, `crates/gw-store/src/loader.rs`, `crates/gw-proxy/src/error/listeners/oauth.rs` · Status: outbound vendor integration runs **inline in the upstream filter** — header injection, OAuth-token injection, and egress impersonation are all live; `gw-adapter` is wired only for response-side error analyzers.
+- Family: A (adapter/egress) · Backing crates: `gw-adapter`, `gw-egress-impersonate`, `gw-core::impersonate` · Source-of-truth: `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/gateway.rs`, `crates/gw-adapter/src/{ctx.rs,noop.rs,registry.rs,analyzer.rs}`, `crates/gw-core/src/impersonate/`, `crates/gw-egress-impersonate/src/`, `crates/gw-store/src/loader.rs`, `crates/gw-proxy/src/error/listeners/oauth.rs` · Status: outbound vendor header injection and OAuth-token injection run through `gw-adapter::AdapterRegistry::for_vendor`; egress impersonation remains in the existing proxy + `gw-core::impersonate` / `gw-egress-impersonate` path.
 
 ## Purpose
 
@@ -8,21 +8,21 @@ Take a routed-and-picked `(VendorKey, Vendor)` pair and turn the in-memory reque
 
 ## As-built surface
 
-### Upstream header injection (inline, not via an adapter)
+### Upstream header injection (adapter seam)
 
-All vendor header work happens inside `rewrite_request` → `inject_vendor_headers` in `crates/gw-proxy/src/filters/upstream.rs`. There is no dispatch to a vendor adapter object.
+Vendor auth/header work happens inside `rewrite_request` -> `apply_outbound_adapter` in `crates/gw-proxy/src/filters/upstream.rs`, using `AdapterRegistry::for_vendor(&picked.vendor_id)` from the `LlmGateway` registry passed by `crates/gw-proxy/src/gateway.rs`. Unregistered vendors use `NoopAdapter`, which preserves the legacy direct-vendor rewrite byte shape.
 
-- `inject_vendor_headers` (`crates/gw-proxy/src/filters/upstream.rs:1024`) first removes the inbound client credentials `authorization`, `x-api-key`, `x-api-key-id`, then injects the vendor secret.
-- The auth secret is chosen at `upstream.rs:1040`: if `picked.oauth.is_some()` the (already-decrypted) `oauth.access_token` is used; otherwise `picked.api_key` is exposed via `secrecy::ExposeSecret`.
-- The injection honors the **header name encoded in `Vendor.auth_template`** (`upstream.rs:1067`–`1077`). The template is split on its first `:`; if the left side is a valid header-name token (`is_header_token`, `upstream.rs:1018`) the value is injected under that name (e.g. `x-goog-api-key: {api_key}` for native Gemini, `x-api-key: {api_key}` for Anthropic). A template with no colon (e.g. `Bearer {api_key}`) injects under `authorization`. A colon with an invalid token falls back leniently to `authorization` and ticks `gw_upstream_auth_header_invalid_total`. `{api_key}` is substituted in the value template after the split, so a secret containing a colon is safe.
-- `host` is set from `vendor.value.base_urls.first()` (`upstream.rs:1078`).
-- A W3C `traceparent` (`00-<trace_id>-<fresh-8-byte-span>-01`) is set per upstream hop (`upstream.rs:1084`); `content-length` is rewritten from the rendered body length (`upstream.rs:1089`).
+- `NoopAdapter::rewrite_auth` (`crates/gw-adapter/src/noop.rs`) first removes the inbound client credentials `authorization`, `x-api-key`, `x-api-key-id`, then injects the vendor secret.
+- The auth secret is chosen in `noop.rs`: if `ctx.vendor_key.oauth.is_some()` the already-decrypted `oauth.access_token` is used; otherwise `ctx.vendor_key.api_key` is exposed via `secrecy::ExposeSecret`.
+- The injection honors the **header name encoded in `Vendor.auth_template`**. The template is split on its first `:`; if the left side is a valid header-name token (`is_header_token`, `noop.rs`) the value is injected under that name (e.g. `x-goog-api-key: {api_key}` for native Gemini, `x-api-key: {api_key}` for Anthropic). A template with no colon (e.g. `Bearer {api_key}`) injects under `authorization`. A colon with an invalid token falls back leniently to `authorization` and ticks `gw_upstream_auth_header_invalid_total`. `{api_key}` is substituted in the value template after the split, so a secret containing a colon is safe.
+- `host` is set from the adapter context's `upstream_host`, derived from `vendor.value.base_urls.first()` in `apply_outbound_adapter` (`crates/gw-proxy/src/filters/upstream.rs`).
+- A W3C `traceparent` (`00-<trace_id>-<fresh-8-byte-span>-01`) is set per upstream hop by `NoopAdapter`; `content-length` is rewritten from the rendered body length carried in `AdapterCtx`.
 - The upstream peer host/port also come from `Vendor.base_urls.first()` in `pick_peer` (`upstream.rs:362`–`371`); a vendor with no base URL is a hard `gw_vendor_no_base_url` 500.
 
 ### OAuth: inject pre-decrypted token, refresh delegated to Go
 
 - OAuth credentials are decrypted **at load time** in `crates/gw-store/src/loader.rs`: `load_vendor_key` (`loader.rs:283`–`329`) AES-256-GCM-decrypts `access_token_enc` and `refresh_token_enc` via `crate::encrypt::decrypt` into an in-memory `OAuthCredentials` (`loader.rs:290`–`299`). The wire row shape is `OAuthCredentialsRow` (`loader.rs:131`), carrying `access_expires_at`, `token_endpoint`, `scope`, and `quota_project_id`.
-- On dispatch, `inject_vendor_headers` (`upstream.rs:1040`–`1058`) compares `oauth.access_expires_at` against `now`: at/after expiry it increments `gw_oauth_token_expired_total`; within 60 s of expiry it increments `gw_oauth_token_near_expiry_total`. **The token is sent regardless of expiry** — `oauth.access_token.expose_secret()` is injected even when the metric fired. This is deliberate: Rust does not refresh.
+- On dispatch, `NoopAdapter::rewrite_auth` (`crates/gw-adapter/src/noop.rs`) compares `oauth.access_expires_at` against `now`: at/after expiry it increments `gw_oauth_token_expired_total`; within 60 s of expiry it increments `gw_oauth_token_near_expiry_total`. **The token is sent regardless of expiry** — `oauth.access_token.expose_secret()` is injected even when the metric fired. This is deliberate: Rust does not refresh.
 - Refresh is **delegated to Go**. The error path's `OAuthListener` (`crates/gw-proxy/src/error/listeners/oauth.rs`) reacts to a classifier `OAuthSignalKind::RefreshFailed` by reverse-`XADD`ing to `events:entity` (`oauth.rs:58`–`83`) with fields `ns=vendor_key id=<key_id> op=status_change field=oauth_failed reason=upstream_401 ts_ms=<now>`, then ticks `gw_oauth_refresh_failed_xadd_total`. The XADD is fire-and-forget via `tokio::spawn` because the listener trait is synchronous. `gw_oauth_refresh_total{vendor,outcome}` is emitted for every signal (`oauth.rs:32`).
 
 ### Egress impersonation
@@ -42,21 +42,20 @@ The loopback itself is `gw-egress-impersonate`: `EgressHandle::start` (`handle.r
 
 Workspace kill-switch: `[egress].disabled` (`EgressCfg.disabled`, `crates/gw-gateway/src/config.rs:548`) drops every `Impersonate`-mode candidate in `pick_peer` (`upstream.rs:201`–`221`), ticking `gw_egress_disabled_total{profile}` per skipped candidate; Rustls vendors are unaffected. `[egress]` is boot-time-only — changing it requires a restart (`config.rs:540`).
 
-### `gw-adapter` error analyzers (wired)
+### `gw-adapter` outbound adapters and error analyzers (wired)
 
-`crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`patch_response`/`transport_profile`), an `AdapterRegistry`, an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait. The outbound `UpstreamAdapter` path is not used by production request rewriting; outbound v1 is the inline `gw-proxy` filter plus `gw-core::impersonate` profile code described above. The response-side error analyzer path is wired: `gw-proxy::LlmGateway` holds an `AdapterRegistry`, calls `error_analyzer_for(vendor_id)` at response EOS with headers and an 8 KiB body head, and merges the resulting `ErrorOutcome` into the classifier outcome. Built-in analyzer fallback exists for codex/openai, anthropic/claude, and gemini/google vendor ids.
+`crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`patch_response`/`transport_profile`), an `AdapterRegistry`, an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait. The outbound `UpstreamAdapter` path is wired in production request rewriting through `apply_outbound_adapter` (`crates/gw-proxy/src/filters/upstream.rs`). `AdapterCtx` carries request metadata (`auth_template`, `upstream_host`, `content_len`) plus an optional inert `OAuthRuntime` slot for runtime OAuth cache/refresher ownership; this slot is not used for refresh/write-back in this spec state.
 
-Outbound adapter dispatch is not part of the current as-built runtime. The architecture decision to keep and incrementally wire the outbound adapter seam was confirmed after this as-built spec was written; see `docs/design/2026-06-09-roadmap-authority-and-scope.md`. Until that work lands, the production behavior remains inline header injection plus the existing impersonate path described here.
+The response-side error analyzer path is also wired: `gw-proxy::LlmGateway` holds the same `AdapterRegistry`, calls `error_analyzer_for(vendor_id)` at response EOS with headers and an 8 KiB body head, and merges the resulting `ErrorOutcome` into the classifier outcome. Built-in analyzer fallback exists for codex/openai, anthropic/claude, and gemini/google vendor ids.
 
 ## Deliberate behaviours
 
-- **Expired OAuth tokens are still sent.** `inject_vendor_headers` injects `oauth.access_token` even when `now >= access_expires_at`; it only records `gw_oauth_token_expired_total`. Refresh is Go's job; sending the stale token (which usually 401s) is what triggers the `OAuthListener` reverse-XADD that drives Go's async refresh. (`upstream.rs:1040`, `oauth.rs:39`)
+- **Expired OAuth tokens are still sent.** `NoopAdapter::rewrite_auth` injects `oauth.access_token` even when `now >= access_expires_at`; it only records `gw_oauth_token_expired_total`. Refresh is Go's job; sending the stale token (which usually 401s) is what triggers the `OAuthListener` reverse-XADD that drives Go's async refresh. (`noop.rs`, `oauth.rs:39`)
 - **Direct (Rustls) keys with a configured proxy fail closed.** Pingora 0.8's next-hop is UDS-only and cannot route through an arbitrary HTTP proxy, so a Direct vendor key with `proxy`/`default_proxy` set is rejected with `GW_UPSTREAM_PROXY_UNSUPPORTED` rather than silently leaking the gateway egress IP. Proxied egress must use `egress_mode = Impersonate`, whose loopback honors `X-Egress-Proxy`. (`upstream.rs:394`–`407`)
 - **Tunnel and Impersonate are mutually exclusive.** When the tunnel feature would route an impersonate vendor through a tunnel node, `pick_peer` returns `GW_TUNNEL_IMPERSONATE_CONFLICT` instead of silently picking one. (`upstream.rs:436`–`448`)
 - **Auth header-name fallback is lenient, not fatal.** A malformed `auth_template` (colon present but the name isn't a header token) falls back to `authorization` plus a metric rather than failing the request — pre-production operator-misconfig tolerance. (`upstream.rs:1070`–`1073`)
 - **Identity persistence is lazy and fingerprint-stable.** A per-key `IdentitySnapshot` is derived once on first impersonated dispatch and persisted out-of-band; profile drift forces a re-derive. (`ensure.rs:19`–`36`)
-- **Outbound v1 is inline+impersonate.** The production auth/transport path deliberately remains the inline filter code plus `gw-core::impersonate` / `gw-egress-impersonate`; this is the documented as-built boundary, not a missing production hook.
-- **`gw-adapter::UpstreamAdapter` is not yet wired into outbound production traffic.** Only `UpstreamErrorAnalyzer` is wired into `gw-proxy` today. F1 confirms the target boundary is to keep `gw-adapter` and wire it incrementally; this spec continues to describe the current as-built runtime until that implementation lands.
+- **Outbound auth is adapter-based; impersonate remains external to the adapter.** The production auth/header path dispatches `gw-adapter::UpstreamAdapter`; TLS fingerprinting and identity headers remain in `gw-core::impersonate` / `gw-egress-impersonate`, called after adapter rewrite by `inject_egress_headers`.
 - **Rust OAuth is not yet the runtime writer.** Rust decrypts and injects the access token, emits expiry/401 signals, and currently delegates refresh/write-back to Go. F2 confirms the target ownership change: Go remains the config writer and Rust becomes the sole runtime refresh writer. That implementation is tracked in ROADMAP.
 
 ## Cross-process touchpoints
@@ -72,15 +71,14 @@ These are governed by `docs/go-contracts/` (KEK rotation, encrypted column shape
 
 - `no_cost_micro` / `no_billing_crate` (`scripts/check-invariants.sh`) — no cost arithmetic in this path; vendor integration emits usage, never price.
 - `no_v1_markers_in_prod` (`scripts/check-invariants.sh`, error mode) — no placeholder markers in `crates/`.
-- Source tripwire `oauth_injection_present_in_source` (`upstream.rs:1502`) asserts the OAuth branch, `access_token` usage, and both expiry metrics stay present.
+- Source tripwire `oauth_injection_present_in_source` (`upstream.rs`) asserts the default outbound adapter keeps the OAuth branch, `access_token` usage, and both expiry metrics present.
 - Source tripwire `oauth_listener_emits_reverse_xadd_on_refresh_failed` (`oauth.rs:133`) pins the `events:entity` stream name, field keys, success metric, and the spawn.
-- `direct_mode_inject_vendor_headers` snapshot (`upstream.rs:1656`) holds the Direct-mode header output byte-stable so impersonation additions never regress the rustls path.
+- `direct_mode_outbound_adapter_headers` snapshot (`upstream.rs`) holds the Direct-mode header output byte-stable so adapter dispatch and impersonation additions never regress the rustls path.
 - `impersonate_predicate_matches_both_variants` (`upstream.rs:1682`) pins the kill-switch predicate against both `VendorEgressMode` variants.
 
 ## Not built → ROADMAP
 
-The following are outside outbound v1. F1/F2 have been confirmed by `docs/design/2026-06-09-roadmap-authority-and-scope.md`, so these are implementation gaps rather than unresolved decisions.
+The following are outside outbound v1. F2 and the heavy-transform boundary have been confirmed by `docs/design/2026-06-09-roadmap-authority-and-scope.md`, so these are implementation gaps rather than unresolved decisions.
 
-- **Full outbound adapter registry (A-T0..A-T6).** `gw-adapter`'s `AdapterRegistry::for_vendor` is not called by a binary and only `NoopAdapter` exists, while response analyzers are wired. F1 confirms this crate stays and becomes the incremental proxy outbound seam. (capability-gap)
 - **In-Rust OAuth refresh/write-back (K-C).** Rust injects pre-decrypted tokens and delegates refresh to Go via `events:entity` today. F2 confirms the target state: Go config writer, Rust runtime refresh writer, no double-writer. (capability-gap)
 - **Heavy vendor-specific outbound transforms.** Kiro adapter/AWS SigV4, Vertex AI SA-JWT token exchange, and Codex request-body transforms land behind the confirmed outbound adapter boundary. (capability-gap)
