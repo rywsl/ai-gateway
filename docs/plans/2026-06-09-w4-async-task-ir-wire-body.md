@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make async task submission enqueue codec-rendered request bytes in `input_payload.ir_wire_body`, make the worker send those bytes verbatim when present, and record best-effort normalized response bytes without letting task workers call `gw-adapter`.
+**Goal:** Make async task submission enqueue a complete protocol IR envelope plus codec-rendered request bytes in `input_payload`, make the worker send `input_payload.ir_wire_body` verbatim when present, and record a complete response IR envelope plus rendered response bytes without letting task workers call `gw-adapter`.
 
-**Architecture:** The gateway submit path owns request parse/render because `crates/gw-proxy` already has the detected client codec and already depends on `gw-codec`. `gw-task-runtime` may use `gw-codec` for best-effort response parse/render, but it must not depend on or call `gw-adapter`; worker request sending is byte transport only. Existing task payloads remain valid: if `input_payload.ir_wire_body` is absent, the worker keeps the current `input_payload.body` / whole-payload JSON logic.
+**Architecture:** The gateway submit path owns request parse/render because `crates/gw-proxy` already has the detected client codec and already depends on `gw-codec`. W4 starts with a feasibility spike that proves the existing protocol IR can be serialized into task payload JSON and restored for request/response round trips without broad contract or API changes. If the spike is feasible, W4 implements the complete IR envelope; if it exposes a need for large `TaskContract`, `gw-codec`, load/watch, or API response contract changes, W4 stops and returns a decision packet to the user instead of silently falling back to a reduced raw-plus-wire envelope. `gw-task-runtime` may use `gw-codec` for response parse/render, but it must not depend on or call `gw-adapter`; worker request sending is byte transport only. Existing task payloads remain valid: if `input_payload.ir_wire_body` is absent, the worker keeps the current `input_payload.body` / whole-payload JSON logic.
 
 **Tech Stack:** Rust 1.88 workspace, `gw-proxy`, `gw-task`, `gw-task-runtime`, `gw-codec::AnyCodec`, `ProtocolCodec`, Redis `TaskRecord` hash serialization, `reqwest`.
 
@@ -31,7 +31,7 @@
 ## File Structure
 
 - Modify: `crates/gw-task/src/types.rs`
-  - Add string constants and small helper functions for `ir_wire_body`, `ir_wire_format`, `ir_wire_content_type`, and response envelope keys. Keep them JSON-key helpers, not new `TaskRecord` fields.
+  - Add string constants and small helper functions for `ir_request`, `ir_response`, `ir_wire_body`, `ir_wire_format`, `ir_wire_content_type`, and response envelope keys. Keep them JSON-key helpers, not new `TaskRecord` fields.
 - Modify: `crates/gw-task/src/contract.rs`
   - Add contract comments that `input_payload.ir_wire_body` is optional and that absence means legacy body behavior.
 - Modify: `crates/gw-task/src/redis_contract.rs`
@@ -44,7 +44,7 @@
   - Add `gw-codec = { path = "../gw-codec" }`; do not add `gw-adapter`.
 - Modify: `crates/gw-task-runtime/src/exec_loop.rs`
   - Send `input_payload.ir_wire_body` with `.body(bytes)` when present; otherwise keep current JSON fallback.
-  - Parse/render response bytes best-effort with the recorded format and store a minimal envelope in `output_payload`.
+  - Parse/render response bytes with the recorded format and store a complete IR response envelope in `output_payload` when feasible.
 - Modify: `crates/gw-proxy/tests/task_endpoints.rs`
   - Add submit-time render tests.
 - Modify: `crates/gw-task/tests/types.rs`
@@ -52,7 +52,9 @@
 - Modify: `crates/gw-task/tests/redis_contract.rs`
   - Extend ignored Redis round-trip coverage for nested payload keys.
 - Modify: `crates/gw-task-runtime/tests/exec_loop.rs`
-  - Add worker verbatim-body and response-normalization tests.
+  - Add worker verbatim-body, complete IR response envelope, response parse/render, and legacy fallback tests.
+- Modify or verify: task load/watch projection tests and docs
+  - Confirm existing load/watch projections still return the expected raw payload shape, or update them explicitly if complete IR envelope projection is intentionally surfaced.
 - Modify: `docs/spec/08-async-tasks.md`
   - Move W4 behavior from "Not built" to as-built once code is green.
 - Modify: `docs/ROADMAP.md`
@@ -65,6 +67,7 @@ Request payload keys:
 ```json
 {
   "body": {"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "hi"}]},
+  "ir_request": {"protocol": "openai:chat", "kind": "request", "value": {"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "hi"}]}},
   "ir_wire_format": "openai:chat",
   "ir_wire_content_type": "application/json",
   "ir_wire_body": "{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
@@ -76,25 +79,28 @@ Worker request rule:
 - If `input_payload.ir_wire_body` is a string, send its UTF-8 bytes exactly with `Content-Type: input_payload.ir_wire_content_type || application/json`.
 - If `input_payload.ir_wire_body` is absent, use current behavior: send `input_payload.body` as JSON, or the whole `input_payload` as JSON.
 - If `input_payload.ir_wire_body` is present but not a string, fail the task with `invalid task payload: ir_wire_body must be a string`; do not silently reinterpret malformed new records.
+- If `input_payload.ir_request` is absent on an old record, do not fail the task; the worker's wire-send path only requires `ir_wire_body`.
 
-Minimal response normalization:
+Complete response IR envelope:
 
 ```json
 {
   "body": {"id": "chatcmpl-task", "choices": [{"message": {"role": "assistant", "content": "done"}}]},
+  "ir_response": {"protocol": "openai:chat", "kind": "response", "value": {"id": "chatcmpl-task", "choices": [{"message": {"role": "assistant", "content": "done"}}]}},
   "ir_wire_format": "openai:chat",
   "ir_wire_content_type": "application/json",
   "ir_wire_body": "{\"id\":\"chatcmpl-task\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"}}]}"
 }
 ```
 
-- `body` keeps the current raw JSON payload semantics.
-- `ir_wire_body` is present only when `gw-codec` can parse and render the terminal response with the recorded format.
+- `body` keeps the current raw JSON payload semantics for backward-compatible operator visibility and provider id/status extraction.
+- `ir_response` stores the complete protocol response IR envelope when `gw-codec` can parse the terminal response with the recorded format.
+- `ir_wire_body` stores the response rendered from that IR with the recorded format.
 - Response parse/render failure must not fail an otherwise successful upstream task; store raw `body` only and emit a debug or warn log with no key-level labels.
 
-User Decision Needed: response envelope shape
+用户决策已记录：完整 IR 优先
 
-Current `TaskRecord.output_payload: Option<serde_json::Value>` can store arbitrary JSON, but there is no typed client-facing task response envelope that says whether load/watch should prefer `output_payload.body`, `output_payload.ir_wire_body`, or a future complete IR object. W4 should implement the minimal envelope above and document it, but it must not add full IR response storage or change load/watch response projection without an explicit user decision.
+The user direction is to prefer a complete IR envelope because missing complete IR makes future protocol conversion harder. W4 therefore starts with a feasibility spike and, if implementation is not large, implements complete request/response IR envelopes. If the spike shows complete IR requires broad contract/API changes, W4 must stop and return that finding to the user for a decision; it must not quietly implement only a reduced raw-plus-wire envelope.
 
 ## Boundary Rules
 
@@ -103,6 +109,39 @@ Current `TaskRecord.output_payload: Option<serde_json::Value>` can store arbitra
 - Do not route or select vendor keys in W4. Current task submit has no live routing result; W4 renders through the submit path's detected client codec and stores a format string. W5/W7 adapter work can later decide how adapter-rendered bytes are produced for vendor-specific transforms.
 - Do not remove `input_payload.body`; it is the backward-compatible fallback and an operator-visible raw payload.
 - Do not change the `TaskContract` trait method set.
+- Do not proceed with a reduced envelope if complete IR requires large-scale contract or API changes; stop after the feasibility spike and return a user decision packet.
+
+### Task 0: Complete IR Envelope Feasibility Spike
+
+**Files:**
+- Inspect: `crates/gw-codec/src`
+- Inspect: `crates/gw-task/src/types.rs`
+- Inspect: task load/watch endpoint code and tests
+- Produce, if blocked: a decision packet in this plan's handoff notes instead of implementation code
+
+- [ ] **Step 1: Prove request IR can be stored**
+
+Confirm that the request IR returned by `AnyCodec::parse_request` can be converted into stable JSON with the existing Rust types or a small local envelope adapter. The spike must prove an `openai:chat` request can round-trip as:
+
+```text
+wire request bytes -> codec request IR -> input_payload.ir_request JSON -> restored IR -> codec render_request -> wire request bytes
+```
+
+- [ ] **Step 2: Prove response IR can be stored**
+
+Confirm that the response IR returned by `AnyCodec::parse_response` can be converted into stable JSON with the existing Rust types or a small local envelope adapter. The spike must prove an `openai:chat` response can round-trip as:
+
+```text
+wire response bytes -> codec response IR -> output_payload.ir_response JSON -> restored IR -> codec render_response -> wire response bytes
+```
+
+- [ ] **Step 3: Check load/watch projection impact**
+
+Inspect task load/watch response projection and tests. If current projection returns `output_payload` unchanged, add or update tests to prove the complete IR envelope does not break existing consumers that read `output_payload.body`. If current projection unwraps or reshapes payloads, make that planned projection change explicit before implementation.
+
+- [ ] **Step 4: Decide execution path**
+
+If Steps 1-3 require only local helper functions, serde derives already available on IR types, or small envelope adapters, continue with Tasks 1-7 and implement complete IR envelopes. If they require broad changes to `TaskContract`, public task APIs, codec trait signatures, or client-facing load/watch contracts, stop and return the exact blocker set to the user for decision.
 
 ### Task 1: Lock Payload Key Helpers
 
@@ -160,6 +199,8 @@ Expected: FAIL with unresolved functions `task_ir_wire_body`, `task_ir_wire_form
 Add to `crates/gw-task/src/types.rs` after `TaskRecord`:
 
 ```rust
+pub const TASK_IR_REQUEST: &str = "ir_request";
+pub const TASK_IR_RESPONSE: &str = "ir_response";
 pub const TASK_IR_WIRE_BODY: &str = "ir_wire_body";
 pub const TASK_IR_WIRE_FORMAT: &str = "ir_wire_format";
 pub const TASK_IR_WIRE_CONTENT_TYPE: &str = "ir_wire_content_type";
@@ -183,15 +224,25 @@ pub fn task_ir_wire_content_type(payload: &serde_json::Value) -> Option<&str> {
         .get(TASK_IR_WIRE_CONTENT_TYPE)
         .and_then(serde_json::Value::as_str)
 }
+
+#[must_use]
+pub fn task_ir_request(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+    payload.get(TASK_IR_REQUEST)
+}
+
+#[must_use]
+pub fn task_ir_response(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+    payload.get(TASK_IR_RESPONSE)
+}
 ```
 
 Update `crates/gw-task/src/lib.rs` exports:
 
 ```rust
 pub use types::{
-    task_ir_wire_body, task_ir_wire_content_type, task_ir_wire_format, TaskId, TaskKind,
-    TaskRecord, TaskStatus, TASK_BODY, TASK_IR_WIRE_BODY, TASK_IR_WIRE_CONTENT_TYPE,
-    TASK_IR_WIRE_FORMAT,
+    task_ir_request, task_ir_response, task_ir_wire_body, task_ir_wire_content_type,
+    task_ir_wire_format, TaskId, TaskKind, TaskRecord, TaskStatus, TASK_BODY, TASK_IR_REQUEST,
+    TASK_IR_RESPONSE, TASK_IR_WIRE_BODY, TASK_IR_WIRE_CONTENT_TYPE, TASK_IR_WIRE_FORMAT,
 };
 ```
 
@@ -330,6 +381,9 @@ async fn test_submit_endpoint_stores_codec_rendered_ir_wire_body() {
     let submitted = contract.submitted.lock().unwrap();
     let payload = &submitted[0].input_payload;
     assert_eq!(payload["ir_wire_format"], "openai:chat");
+    assert_eq!(payload["ir_request"]["protocol"], "openai:chat");
+    assert_eq!(payload["ir_request"]["kind"], "request");
+    assert_eq!(payload["ir_request"]["value"]["messages"][0]["content"], "hi");
     assert_eq!(payload["ir_wire_content_type"], "application/json");
     let rendered = payload["ir_wire_body"].as_str().expect("rendered body");
     let rendered_json: serde_json::Value =
@@ -609,7 +663,7 @@ git add crates/gw-task-runtime/src/exec_loop.rs crates/gw-task-runtime/tests/exe
 git commit -m "feat(task): send rendered async body verbatim"
 ```
 
-### Task 5: Add Best-Effort Response Normalization
+### Task 5: Add Complete IR Response Envelope
 
 **Files:**
 - Modify: `crates/gw-task-runtime/Cargo.toml:8-23`
@@ -617,13 +671,13 @@ git commit -m "feat(task): send rendered async body verbatim"
 - Test: `crates/gw-task-runtime/tests/exec_loop.rs`
 - Reference: `crates/gw-codec/src/any.rs:159-180`
 
-- [ ] **Step 1: Add a failing normalized-response test**
+- [ ] **Step 1: Add a failing complete-IR response test**
 
 Append this test to `crates/gw-task-runtime/tests/exec_loop.rs`:
 
 ```rust
 #[tokio::test]
-async fn test_exec_loop_stores_normalized_response_wire_body_when_codec_parses() {
+async fn test_exec_loop_stores_complete_ir_response_envelope_when_codec_parses() {
     let addr = http_server(
         200,
         r#"{"id":"chatcmpl-task","choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
@@ -644,6 +698,12 @@ async fn test_exec_loop_stores_normalized_response_wire_body_when_codec_parses()
     let settlements = contract.settlements().await;
     let output = settlements[0].1.as_ref().expect("output payload");
     assert_eq!(output["ir_wire_format"], "openai:chat");
+    assert_eq!(output["ir_response"]["protocol"], "openai:chat");
+    assert_eq!(output["ir_response"]["kind"], "response");
+    assert_eq!(
+        output["ir_response"]["value"]["choices"][0]["message"]["content"],
+        "done"
+    );
     let rendered = output["ir_wire_body"].as_str().expect("normalized body");
     let rendered_json: serde_json::Value =
         serde_json::from_str(rendered).expect("rendered response is json");
@@ -657,7 +717,7 @@ async fn test_exec_loop_stores_normalized_response_wire_body_when_codec_parses()
 Run:
 
 ```bash
-cargo test -p gw-task-runtime test_exec_loop_stores_normalized_response_wire_body_when_codec_parses --locked
+cargo test -p gw-task-runtime test_exec_loop_stores_complete_ir_response_envelope_when_codec_parses --locked
 ```
 
 Expected: FAIL because `gw-task-runtime` does not depend on `gw-codec` and stores raw response JSON directly.
@@ -672,7 +732,7 @@ gw-codec = { path = "../gw-codec" }
 
 Do not add `gw-adapter`.
 
-- [ ] **Step 4: Add format-to-codec and response envelope helpers**
+- [ ] **Step 4: Add format-to-codec and complete response envelope helpers**
 
 Add these helpers near `parse_response_payload` in `crates/gw-task-runtime/src/exec_loop.rs`:
 
@@ -691,7 +751,7 @@ fn codec_for_task_format(format: &str) -> Option<gw_codec::AnyCodec> {
     }
 }
 
-fn normalized_output_payload(record: &TaskRecord, text: &str) -> anyhow::Result<serde_json::Value> {
+fn complete_ir_output_payload(record: &TaskRecord, text: &str) -> anyhow::Result<serde_json::Value> {
     let raw = parse_response_payload(text)?;
     let Some(format) = gw_task::task_ir_wire_format(&record.input_payload) else {
         return Ok(raw);
@@ -706,9 +766,15 @@ fn normalized_output_payload(record: &TaskRecord, text: &str) -> anyhow::Result<
     if codec.render_response(&ir, &mut out).is_err() {
         return Ok(raw);
     }
+    let ir_value = serde_json::to_value(&ir).context("serialize response ir")?;
     let rendered = String::from_utf8(out.to_vec()).context("normalized response utf8")?;
     Ok(serde_json::json!({
         "body": raw,
+        "ir_response": {
+            "protocol": format,
+            "kind": "response",
+            "value": ir_value
+        },
         gw_task::TASK_IR_WIRE_FORMAT: format,
         gw_task::TASK_IR_WIRE_CONTENT_TYPE: "application/json",
         gw_task::TASK_IR_WIRE_BODY: rendered,
@@ -718,7 +784,7 @@ fn normalized_output_payload(record: &TaskRecord, text: &str) -> anyhow::Result<
 
 If `bytes` is not already available to this crate through an existing dependency, add `bytes.workspace = true` to `crates/gw-task-runtime/Cargo.toml`.
 
-- [ ] **Step 5: Use the normalized output helper**
+- [ ] **Step 5: Use the complete IR output helper**
 
 In `call_upstream`, replace:
 
@@ -729,7 +795,7 @@ In `call_upstream`, replace:
 with:
 
 ```rust
-        let mut payload = normalized_output_payload(record, &text)?;
+        let mut payload = complete_ir_output_payload(record, &text)?;
 ```
 
 In the poll loop, replace:
@@ -741,7 +807,7 @@ In the poll loop, replace:
 with:
 
 ```rust
-            payload = normalized_output_payload(record, &text)?;
+            payload = complete_ir_output_payload(record, &text)?;
 ```
 
 Adjust `provider_task_id`, `provider_task_state`, and `poll_url` helpers so they look at `payload["body"]` first when the normalized envelope is present:
@@ -754,12 +820,12 @@ fn task_provider_payload(payload: &serde_json::Value) -> &serde_json::Value {
 
 Then call `task_provider_payload(payload)` inside `provider_task_id`, `provider_task_state`, and `poll_url`.
 
-- [ ] **Step 6: Verify response normalization and raw fallback**
+- [ ] **Step 6: Verify response IR envelope and raw fallback**
 
 Run:
 
 ```bash
-cargo test -p gw-task-runtime test_exec_loop_stores_normalized_response_wire_body_when_codec_parses --locked
+cargo test -p gw-task-runtime test_exec_loop_stores_complete_ir_response_envelope_when_codec_parses --locked
 cargo test -p gw-task-runtime exec_loop --locked
 ```
 
@@ -771,7 +837,7 @@ Run:
 
 ```bash
 git add crates/gw-task-runtime/Cargo.toml crates/gw-task-runtime/src/exec_loop.rs crates/gw-task-runtime/tests/exec_loop.rs
-git commit -m "feat(task): normalize async response wire body"
+git commit -m "feat(task): store async response ir envelope"
 ```
 
 ### Task 6: Update Specs And Roadmap
@@ -784,13 +850,13 @@ git commit -m "feat(task): normalize async response wire body"
 
 Edit `docs/spec/08-async-tasks.md`:
 
-- In the submit section, state that the gateway attempts codec parse/render at submit and stores `input_payload.ir_wire_body`, `ir_wire_format`, and `ir_wire_content_type` when the detected client codec supports the body.
+- In the submit section, state that the gateway attempts codec parse/render at submit and stores `input_payload.ir_request`, `ir_wire_body`, `ir_wire_format`, and `ir_wire_content_type` when the detected client codec supports the body.
 - In the runtime loop section, state that `ExecLoop` sends `ir_wire_body` verbatim when present and falls back to `input_payload.body` / whole payload for older records.
 - In deliberate behaviours, add: `Task workers do not call gw-adapter; adapter-specific request transforms remain proxy-owned per F1.`
 - Replace the "Not built" bullet with an as-built compatibility note:
 
 ```markdown
-- **Async wire-body compatibility.** New IR-capable submissions carry `input_payload.ir_wire_body`; old records without that key remain executable through the legacy `input_payload.body` fallback. Terminal responses keep raw `output_payload.body` and add `output_payload.ir_wire_body` only when response codec parse/render succeeds. Full client-facing response envelope projection remains a separate user decision.
+- **Async IR compatibility.** New IR-capable submissions carry `input_payload.ir_request` and `input_payload.ir_wire_body`; old records without those keys remain executable through the legacy `input_payload.body` fallback. Terminal responses keep raw `output_payload.body` and add `output_payload.ir_response` plus `output_payload.ir_wire_body` when response codec parse/render succeeds. Task load/watch projection must either preserve this envelope without breaking existing `output_payload.body` consumers or be explicitly updated with matching tests.
 ```
 
 - [ ] **Step 2: Close the ROADMAP entry**
@@ -830,9 +896,11 @@ Run:
 cargo test -p gw-task --locked
 cargo test -p gw-proxy task_endpoints --locked
 cargo test -p gw-task-runtime exec_loop --locked
+cargo test -p gw-proxy task_load --locked
+cargo test -p gw-proxy task_watch --locked
 ```
 
-Expected: PASS.
+Expected: PASS, or replace the load/watch test names with the exact local test filters after inspecting the endpoint tests. The load/watch verification must prove `output_payload.body` consumers are not broken by the added complete IR envelope, or that any planned projection update has matching assertions.
 
 - [ ] **Step 2: Run workspace gates**
 
@@ -871,7 +939,7 @@ Expected: recent commits include:
 
 ```text
 docs(task): close async wire-body roadmap entry
-feat(task): normalize async response wire body
+feat(task): store async response ir envelope
 feat(task): send rendered async body verbatim
 feat(task): enqueue codec-rendered wire body
 ```
@@ -882,7 +950,7 @@ The exact helper/test commits may appear between those depending on review adjus
 
 - `feat(task): enqueue codec-rendered wire body`
 - `feat(task): send rendered async body verbatim`
-- `feat(task): normalize async response wire body`
+- `feat(task): store async response ir envelope`
 - `docs(task): close async wire-body roadmap entry`
 
 The user-requested headline commits are:
@@ -894,4 +962,4 @@ The user-requested headline commits are:
 
 - Backward compatibility is mandatory: records without `input_payload.ir_wire_body` must continue using legacy `input_payload.body` / whole-payload JSON behavior.
 - W4 should not make task submission perform vendor routing or call adapters. If implementation discovers a need for vendor-specific transform output before enqueue, stop and return a decision packet because that crosses into W5/W7 adapter ownership.
-- User Decision Needed: response envelope shape. Implement only the minimal raw-plus-normalized response payload described here; do not invent complete IR storage or change client-facing task load/watch projection.
+- 用户决策已记录：完整 IR 优先。Implement complete request/response IR envelopes if the feasibility spike shows this is local and tractable. If complete IR requires broad task contract, public API, codec trait, or load/watch projection redesign, stop and return a user decision packet; do not silently downgrade to a reduced envelope.
