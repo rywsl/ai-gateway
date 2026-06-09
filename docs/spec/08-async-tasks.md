@@ -3,7 +3,7 @@
 - Family: T (task)
 - Backing crates: `gw-task`, `gw-task-runtime`, `gw-task-worker`
 - Source-of-truth: `crates/gw-task/src/{contract.rs,scripts.rs,redis_contract.rs}`, `crates/gw-task-runtime/src/{exec_loop.rs,heartbeat_loop.rs,watchdog_loop.rs,release.rs}`, `crates/gw-task-worker/src/lib.rs`, `crates/gw-proxy/src/filters/task.rs`
-- Status: default-off (`[task].enabled = false`); submit, Redis queue, Redis task freeze, worker execution/polling, atomic settle accounting, and watchdog leader election are built.
+- Status: default-off (`[task].enabled = false`); submit, Redis queue, Redis task freeze, worker execution/polling, full IR request/response envelopes, atomic settle accounting, and watchdog leader election are built.
 
 ## Purpose
 
@@ -15,7 +15,7 @@ Task settlement is the accounting point: it atomically releases the task freeze,
 
 `detect_task_shape` (`crates/gw-proxy/src/filters/task.rs`) routes to `TaskAction::Submit` for `POST /v1/tasks`, `POST /v1/images/generations`, and `POST /v1/responses` when the JSON body has `background: true`; `GET /v1/tasks/{id}`, `GET /v1/tasks/{id}/watch`, and `POST /v1/tasks/{id}/cancel` map to `Load` / `Watch` / `Cancel`. The matcher returns `None` when `[task].enabled = false`.
 
-`submit_endpoint_impl` parses the body, infers the kind from `task_type` or `kind`, computes `frozen_micro` with `gw_billing::formulas::calculate_freeze_amount`, generates the `TaskId`, and calls `TaskContract::freeze_task(user_id, task_id, frozen_micro, available_balance_micro)` before enqueue. Insufficiency maps to `GW_TASK_FREEZE_FAILED` (HTTP 402) and increments `gw_task_gw_freeze_total{result="insufficient"}`. Successful freeze increments `gw_task_gw_freeze_total{result="ok"}`. If enqueue fails after a freeze, `release_task_freeze` rolls the Redis task freeze back.
+`submit_endpoint_impl` parses the body, infers the kind from `task_type` or `kind`, computes `frozen_micro` with `gw_billing::formulas::calculate_freeze_amount`, generates the `TaskId`, and calls `TaskContract::freeze_task(user_id, task_id, frozen_micro, available_balance_micro)` before enqueue. When the request has a non-CLI detected client codec, submit also parses the task request body through `gw-codec`, stores `input_payload.ir_request = {protocol, kind:"request", value}`, renders the normalized request back to wire bytes, and stores `input_payload.ir_wire_format`, `input_payload.ir_wire_content_type`, and `input_payload.ir_wire_body`. Insufficiency maps to `GW_TASK_FREEZE_FAILED` (HTTP 402) and increments `gw_task_gw_freeze_total{result="insufficient"}`. Successful freeze increments `gw_task_gw_freeze_total{result="ok"}`. If enqueue fails after a freeze, `release_task_freeze` rolls the Redis task freeze back.
 
 A successful submit writes a `TaskRecord` with `status = Queued`, `schema_version = 1`, `expires_at_ms = now + 86_400_000`, and the parsed `input_payload`, then returns HTTP 201 `{task_id, status:"queued", expires_at}`. Load/watch/cancel serialize the Redis task record back to the client.
 
@@ -35,9 +35,11 @@ A successful submit writes a `TaskRecord` with `status = Queued`, `schema_versio
 
 ## Runtime Loops
 
-`ExecLoop` claims one task, acquires global/vendor/model/key concurrency permits, updates it to running, and runs `call_upstream` under the task total timeout. `call_upstream` sends a `reqwest` `POST` to `input_payload.upstream_url` or `vendor_key_hint` with `input_payload.body` or the whole payload.
+`ExecLoop` claims one task, acquires global/vendor/model/key concurrency permits, updates it to running, and runs `call_upstream` under the task total timeout. `call_upstream` sends a `reqwest` `POST` to `input_payload.upstream_url` or `vendor_key_hint`. If `input_payload.ir_wire_body` is present, the worker sends those UTF-8 bytes verbatim with `Content-Type = input_payload.ir_wire_content_type || application/json`; old records without `ir_wire_body` keep the legacy fallback of JSON-serializing `input_payload.body` or the whole payload.
 
-Immediate terminal responses settle once. LRO-style responses with `status`/`state` in `queued|pending|running|in_progress|processing` plus `status_url`/`poll_url` enter a generic JSON poll loop. The worker `GET`s the poll URL with exponential backoff (`poll_initial_backoff` default 1 s, capped by `poll_max_backoff` default 30 s) until terminal success (`succeeded|completed|complete|done|success`) or failure (`failed|cancelled|canceled|error`). `provider_task_id` is extracted from `provider_task_id` or `id` and written back before terminal settle.
+Immediate terminal responses settle once. When `input_payload.ir_wire_format` maps to a supported codec and the upstream response parses successfully, terminal `output_payload` stores a normalized full IR response envelope: `body` preserves the raw upstream JSON, `ir_response = {protocol, kind:"response", value}` stores the parsed response IR, and `ir_wire_body` stores the response rendered back from that IR with `ir_wire_content_type = application/json`. Response codec parse failures do not fail an otherwise successful task; the worker stores the raw JSON payload only.
+
+LRO-style responses with `status`/`state` in `queued|pending|running|in_progress|processing` plus `status_url`/`poll_url` enter a generic JSON poll loop. The worker `GET`s the poll URL with exponential backoff (`poll_initial_backoff` default 1 s, capped by `poll_max_backoff` default 30 s) until terminal success (`succeeded|completed|complete|done|success`) or failure (`failed|cancelled|canceled|error`). `provider_task_id` is extracted from `provider_task_id` or `id`; for normalized response envelopes the worker reads those fields through `output_payload.body` / `output_payload.ir_response.value` as needed, and writes the provider id back before terminal settle.
 
 `HeartbeatLoop` refreshes `lease_until_ms` for running tasks and evicts registry entries when the task is already terminal or missing.
 
@@ -63,8 +65,9 @@ Immediate terminal responses settle once. LRO-style responses with `status`/`sta
 - `[task].enabled = false` is the default and the only gateway route gate.
 - Task freeze is Redis-backed, not process-local `DEDUCT`.
 - Task actual billing amounts are task-domain formula outputs from `gw-billing`; synchronous request token cost computation remains outside Rust.
-- Worker polling is generic JSON-status polling and does not depend on `gw-codec`.
+- Task workers do not call `gw-adapter`; request wire bytes are pre-rendered by submit, and response normalization uses `gw-codec` only.
+- Worker polling is generic JSON-status polling. Codec response normalization is best-effort for terminal payload persistence and does not replace the JSON status/poll contract.
 
 ## Not built -> ROADMAP
 
-- **Codec render of `ir_wire_body`.** The worker forwards `input_payload.body` raw and stores raw upstream JSON; there is no gateway-side codec normalization/re-render of the task request or response through IR.
+No open ROADMAP items after W4 full IR request/response persistence.

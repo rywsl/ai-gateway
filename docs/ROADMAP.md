@@ -67,10 +67,7 @@ No open ROADMAP items.
 
 ## 08 async-tasks
 
-### Codec render of `ir_wire_body` for task worker — `capability-gap`
-- **Intent:** make async task worker requests/responses use the same codec-normalized wire bodies as sync proxy traffic.
-- **Design points:** W4 implemented Redis task freeze, settle accounting, submit→poll, and watchdog leader election. The worker still forwards `input_payload.body` raw and stores raw upstream JSON; it does not normalize/re-render request or response through `gw-codec` IR.
-- **Source:** residual from deleted `task-worker-design` ADR-T6/T3.
+No open roadmap items after W4 full IR task request/response persistence.
 
 ## 09 tunnel
 

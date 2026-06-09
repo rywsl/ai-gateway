@@ -246,7 +246,7 @@ Each task: read the listed source files, write the spec to the template in `CONS
   - Runtime: `exec_loop.rs` (single synchronous upstream POST), `heartbeat_loop.rs`, `watchdog_loop.rs` (lease recovery, **no leader election**); worker identity `gw-task-worker` `entity:worker` heartbeat.
   - Default-off: `task.enabled = false` (`config/default.toml`).
   - Deliberate/known: `SETTLE_LUA` only `HSET`+`ZREM`; `release.rs` exists but is unused and on a mismatched key namespace — document as current reality, flag in ROADMAP.
-  - Not built / bug → ROADMAP: codec render of `ir_wire_body` remains. Redis task freeze, settle release/deduct/usage, submit→poll backoff, and watchdog leader election are now as-built.
+  - Not built / bug → ROADMAP: no open async-task ROADMAP item remains after W4 full IR request/response persistence. Redis task freeze, settle release/deduct/usage, submit→poll backoff, and watchdog leader election are now as-built.
 
 - [ ] **Step 2: Verify.** `bash scripts/check-spec.sh docs/spec/08-async-tasks.md` → `ok`.
 - [ ] **Step 3: Commit.** `git add docs/spec/08-async-tasks.md && git commit -m "docs(spec): 08 async-tasks (as-built)"`
@@ -286,7 +286,7 @@ Required entries (priority in parens):
   - **05:** no open ROADMAP items after W0/W1.
   - **06:** no open ROADMAP items after W2.
   - **07:** full A-T0..T6 adapter layer + decide wire-or-delete `gw-adapter` (`capability-gap`); K-C in-Rust OAuth refresh (`capability-gap`); kiro adapter / vertex SA-JWT / codex body transform (`capability-gap`).
-  - **08:** codec render of `ir_wire_body` remains after W4.
+  - **08:** no open ROADMAP items after W4 full IR request/response persistence.
   - **09:** tunnel off in shipped binary — decide default (`capability-gap`); `require_tunnel=true` silent Direct fallback in default build (`runtime-risk`); enable ignored e2e tunnel test (`doc-divergence`).
   - **Cross-cutting:** no open CI gate item after W0.
 

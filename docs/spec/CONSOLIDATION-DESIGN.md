@@ -108,7 +108,7 @@ One section per family. Each unbuilt or divergent item carries:
 
 Seed contents (from the audit):
 
-**Unbuilt capabilities** — outbound `gw-adapter` vendor layer (A-T0..T6) · K-C in-Rust OAuth refresh (vs current Go-delegated) · kiro codec + adapter (S5/A-T7) · R-AB multi-score rewrite · R-D affinity manager · R-F stream probe · task codec render of `ir_wire_body`.
+**Unbuilt capabilities** — outbound `gw-adapter` vendor layer (A-T0..T6) · K-C in-Rust OAuth refresh (vs current Go-delegated) · kiro codec + adapter (S5/A-T7) · R-AB multi-score rewrite · R-D affinity manager · R-F stream probe. The async task codec render of `ir_wire_body` item was closed by W4 full IR task request/response persistence.
 
 **Runtime-risk divergences (bugs to fix)** — `require_tunnel=true` silently falls back to Direct in the default build.
 
