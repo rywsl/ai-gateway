@@ -134,13 +134,23 @@ fn build_authorization(
     host: &str,
 ) -> Result<String, AdapterError> {
     let credential_scope = format!("{scope_date}/{}/{}/aws4_request", cfg.region, cfg.service);
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    let signed_headers = if cfg.session_token.is_some() {
+        "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+    } else {
+        "host;x-amz-content-sha256;x-amz-date"
+    };
+    let mut canonical_headers = format!(
+        "host:{host}\nx-amz-content-sha256:{}\nx-amz-date:{amz_date}",
+        ctx.body_sha256_hex
+    );
+    if let Some(token) = cfg.session_token.as_ref() {
+        canonical_headers.push_str("\nx-amz-security-token:");
+        canonical_headers.push_str(token.expose_secret());
+    }
     let canonical_request = format!(
-        "POST\n{}\n\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n\n{}\n{}",
+        "POST\n{}\n\n{}\n\n{}\n{}",
         ctx.url_mut.path(),
-        host,
-        ctx.body_sha256_hex,
-        amz_date,
+        canonical_headers,
         signed_headers,
         ctx.body_sha256_hex
     );
@@ -221,12 +231,16 @@ mod tests {
     }
 
     fn vendor_key() -> Arc<VendorKey> {
+        vendor_key_with_secret(
+            r#"{"access_key_id":"AKIA_TEST","secret_access_key":"wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY","region":"us-east-1","service":"bedrock"}"#,
+        )
+    }
+
+    fn vendor_key_with_secret(secret: &str) -> Arc<VendorKey> {
         Arc::new(VendorKey {
             key_id: KeyId::from("vk-kiro"),
             vendor_id: VendorId::from("kiro"),
-            api_key: SecretString::from(
-                r#"{"access_key_id":"AKIA_TEST","secret_access_key":"wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY","region":"us-east-1","service":"bedrock"}"#.to_owned(),
-            ),
+            api_key: SecretString::from(secret.to_owned()),
             accessible_models: Vec::new(),
             model_mapping: HashMap::new(),
             accessible_endpoints: vec![ProtocolKind::Kiro],
@@ -299,5 +313,49 @@ mod tests {
             !format!("{:?}", parse_sigv4_config(&ctx.vendor_key.api_key).unwrap())
                 .contains("EXAMPLEKEY")
         );
+    }
+
+    #[tokio::test]
+    async fn kiro_rewrite_auth_signs_session_token_header() {
+        let health = Arc::new(KeyHealthStore::default());
+        let key = vendor_key_with_secret(
+            r#"{"access_key_id":"AKIA_TEST","secret_access_key":"wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY","session_token":"session-token-123","region":"us-east-1","service":"bedrock"}"#,
+        );
+        let mut headers = Headers(HashMap::new());
+        let mut url = Url;
+        let mut ctx = AdapterCtx {
+            vendor_id: VendorId::from("kiro"),
+            vendor_key_id: KeyId::from("vk-kiro"),
+            vendor_key: key,
+            client_protocol: ProtocolKind::Kiro,
+            upstream_protocol: ProtocolKind::Kiro,
+            model: ModelName::from("kiro-model"),
+            user_id: UserId::from("u-1"),
+            api_format: ProtocolKind::Kiro,
+            health_store: &health,
+            oauth_runtime: None,
+            headers_mut: HeadersMut {
+                inner: &mut headers,
+            },
+            url_mut: UrlMut { inner: &mut url },
+            auth_template: "",
+            upstream_host: Some("kiro.example.com"),
+            content_len: 17,
+            body_sha256_hex: "8f434346648f6b96df89dda901c5176d09833210c989a459b957023e1ffde663"
+                .to_owned(),
+            trace_id: "0000000000000000aaaaaaaaaaaaaaaa",
+            request_id: "req-1",
+        };
+
+        KiroAdapter.rewrite_auth(&mut ctx).await.unwrap();
+
+        assert_eq!(
+            ctx.headers_mut.get("x-amz-security-token"),
+            Some("session-token-123")
+        );
+        let auth = ctx.headers_mut.get("authorization").unwrap();
+        assert!(auth.contains(
+            "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+        ));
     }
 }
