@@ -10,6 +10,7 @@
 //! Spec: `docs/spec/07-vendor-integration.md`.
 
 pub mod analyzer;
+pub mod codex;
 pub mod ctx;
 pub mod error;
 pub mod kiro;
@@ -23,6 +24,7 @@ pub use analyzer::{
     BuiltinAnalyzerKind, DefaultErrorAnalyzer, ErrorKind, ErrorOutcome, HeaderView,
     KeywordErrorAnalyzer, UpstreamErrorAnalyzer,
 };
+pub use codex::CodexAdapter;
 pub use ctx::{
     AdapterCtx, HeadersAccessor, HeadersMut, OAuthRuntime, OAuthTokenResult, UrlAccessor, UrlMut,
 };

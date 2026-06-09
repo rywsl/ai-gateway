@@ -3,6 +3,7 @@
 //! Built at gateway / worker bootstrap; one shared instance per process.
 
 use crate::analyzer::{DefaultErrorAnalyzer, KeywordErrorAnalyzer, UpstreamErrorAnalyzer};
+use crate::codex::CodexAdapter;
 use crate::kiro::KiroAdapter;
 use crate::noop::NoopAdapter;
 use crate::trait_def::UpstreamAdapter;
@@ -72,6 +73,9 @@ fn builtin_adapter_for(vendor: &VendorId) -> Option<Arc<dyn UpstreamAdapter>> {
     }
     if id.contains("vertex") || id.contains("google_vertex") {
         return Some(Arc::new(VertexAdapter));
+    }
+    if id.contains("codex") {
+        return Some(Arc::new(CodexAdapter));
     }
     None
 }

@@ -54,6 +54,7 @@ fn builtin_vendor_adapters_match_known_vendor_ids() {
         r.for_vendor(&VendorId::from("google_vertex_us")).name(),
         "vertex"
     );
+    assert_eq!(r.for_vendor(&VendorId::from("codex-main")).name(), "codex");
 }
 
 #[test]
