@@ -351,6 +351,40 @@ async fn test_exec_loop_sends_ir_wire_body_verbatim() {
 }
 
 #[tokio::test]
+async fn test_exec_loop_stores_normalized_ir_response_envelope() {
+    let upstream_response = r#"{"id":"chatcmpl-task","object":"chat.completion","created":1700000000,"model":"gpt-4.1-mini","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#;
+    let addr = http_server(200, upstream_response, Duration::ZERO).await;
+    let mut record = sample_record(format!("http://{addr}/submit"));
+    record.input_payload["ir_wire_format"] = serde_json::json!("openai:chat");
+    record.input_payload["ir_wire_content_type"] = serde_json::json!("application/json");
+    record.input_payload["ir_wire_body"] = serde_json::json!(
+        "{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+    );
+    let contract = MemoryContract::enqueue(record).await;
+    let loop_ = ExecLoop::new(contract.clone(), reqwest::Client::new(), config());
+
+    loop_.run_once().await.expect("run once");
+
+    let settlements = contract.settlements().await;
+    let output = settlements[0].1.as_ref().expect("output payload");
+    assert_eq!(output["body"]["id"], "chatcmpl-task");
+    assert_eq!(output["ir_response"]["protocol"], "openai:chat");
+    assert_eq!(output["ir_response"]["kind"], "response");
+    assert_eq!(output["ir_response"]["value"]["id"], "chatcmpl-task");
+    assert_eq!(
+        output["ir_response"]["value"]["messages"][0]["content"]["value"],
+        "done"
+    );
+    assert_eq!(output["ir_wire_format"], "openai:chat");
+    assert_eq!(output["ir_wire_content_type"], "application/json");
+    let rendered = output["ir_wire_body"].as_str().expect("rendered body");
+    let rendered_json: serde_json::Value =
+        serde_json::from_str(rendered).expect("rendered body is json");
+    assert_eq!(rendered_json["id"], "chatcmpl-task");
+    assert_eq!(rendered_json["choices"][0]["message"]["content"], "done");
+}
+
+#[tokio::test]
 async fn test_exec_loop_claims_and_executes() {
     let addr = http_server(
         200,

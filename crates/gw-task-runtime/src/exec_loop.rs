@@ -1,5 +1,6 @@
 use crate::task_metrics;
 
+use bytes::BytesMut;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -7,6 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context};
 use gw_billing::formulas::{calculate_settle_amount, TaskBillingResult};
+use gw_codec::{
+    anthropic::Anthropic, gemini::Gemini, openai::responses::OpenAiResponsesCodec, openai::OpenAi,
+    AnyCodec,
+};
 use gw_task::contract::ClaimedTask;
 use gw_task::{TaskContract, TaskKind, TaskRecord, TaskStatus};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -306,7 +311,7 @@ where
         if !status.is_success() {
             return Err(anyhow!("upstream status {}: {}", status.as_u16(), text));
         }
-        let mut payload = parse_response_payload(&text)?;
+        let mut payload = normalize_response_payload(record, &text)?;
         let mut current_provider_task_id = provider_task_id(&payload);
         let Some(mut current_poll_url) = poll_url(&url, record, &payload)? else {
             return Ok(UpstreamSuccess {
@@ -352,7 +357,7 @@ where
                     text
                 ));
             }
-            payload = parse_response_payload(&text)?;
+            payload = normalize_response_payload(record, &text)?;
             current_provider_task_id = provider_task_id(&payload).or(current_provider_task_id);
             if let Some(next_poll_url) = poll_url(&url, record, &payload)? {
                 current_poll_url = next_poll_url;
@@ -406,15 +411,69 @@ fn parse_response_payload(text: &str) -> anyhow::Result<serde_json::Value> {
     }
 }
 
+fn normalize_response_payload(
+    record: &TaskRecord,
+    text: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let raw_payload = parse_response_payload(text)?;
+    let Some(codec) =
+        codec_for_ir_wire_format(record.input_payload.get(gw_task::TASK_IR_WIRE_FORMAT))
+    else {
+        return Ok(raw_payload);
+    };
+
+    let Ok(ir) = codec.parse_response(text.as_bytes()) else {
+        return Ok(raw_payload);
+    };
+    let ir_value = serde_json::to_value(&ir).context("serialize task response ir")?;
+    let mut rendered = BytesMut::with_capacity(text.len());
+    codec.render_response(&ir, &mut rendered).map_err(|err| {
+        anyhow!(
+            "codec render task response for {}: {}",
+            ir_wire_format(record).unwrap_or_default(),
+            err.message
+        )
+    })?;
+    let rendered = String::from_utf8(rendered.to_vec()).context("rendered task response utf8")?;
+
+    Ok(serde_json::json!({
+        "body": raw_payload,
+        gw_task::TASK_IR_RESPONSE: {
+            "protocol": ir_wire_format(record).unwrap_or_default(),
+            "kind": "response",
+            "value": ir_value,
+        },
+        gw_task::TASK_IR_WIRE_FORMAT: ir_wire_format(record).unwrap_or_default(),
+        gw_task::TASK_IR_WIRE_CONTENT_TYPE: "application/json",
+        gw_task::TASK_IR_WIRE_BODY: rendered,
+    }))
+}
+
 fn provider_task_id(payload: &serde_json::Value) -> Option<String> {
     payload
+        .get("body")
+        .and_then(provider_task_id)
+        .or_else(|| {
+            payload
+                .get(gw_task::TASK_IR_RESPONSE)
+                .and_then(|envelope| envelope.get("value"))
+                .and_then(|value| value.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            payload
         .get("provider_task_id")
         .or_else(|| payload.get("id"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
+        })
 }
 
 fn provider_task_state(payload: &serde_json::Value) -> Option<ProviderTaskState> {
+    if let Some(state) = payload.get("body").and_then(provider_task_state) {
+        return Some(state);
+    }
     let status = payload
         .get("status")
         .or_else(|| payload.get("state"))
@@ -445,10 +504,21 @@ fn poll_url(
     payload: &serde_json::Value,
 ) -> anyhow::Result<Option<String>> {
     let raw = payload
+        .get("body")
+        .and_then(|body| poll_url_value(record, body))
+        .or_else(|| poll_url_value(record, payload));
+    resolve_poll_url(submit_url, raw)
+}
+
+fn poll_url_value<'a>(record: &'a TaskRecord, payload: &'a serde_json::Value) -> Option<&'a str> {
+    payload
         .get("status_url")
         .or_else(|| payload.get("poll_url"))
         .or_else(|| record.input_payload.get("poll_url"))
-        .and_then(serde_json::Value::as_str);
+        .and_then(serde_json::Value::as_str)
+}
+
+fn resolve_poll_url(submit_url: &str, raw: Option<&str>) -> anyhow::Result<Option<String>> {
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -496,6 +566,20 @@ fn upstream_body(record: &TaskRecord) -> anyhow::Result<UpstreamBody> {
         bytes: serde_json::to_vec(body).context("serialize upstream task body")?,
         content_type: "application/json".to_string(),
     })
+}
+
+fn ir_wire_format(record: &TaskRecord) -> Option<&str> {
+    gw_task::task_ir_wire_format(&record.input_payload)
+}
+
+fn codec_for_ir_wire_format(format: Option<&serde_json::Value>) -> Option<AnyCodec> {
+    match format.and_then(serde_json::Value::as_str) {
+        Some("openai:chat") => Some(AnyCodec::OpenAi(OpenAi)),
+        Some("openai:responses") => Some(AnyCodec::OpenAiResponses(OpenAiResponsesCodec)),
+        Some("anthropic:messages") => Some(AnyCodec::Anthropic(Anthropic)),
+        Some("gemini:generate") => Some(AnyCodec::Gemini(Gemini)),
+        _ => None,
+    }
 }
 
 #[allow(dead_code)]

@@ -11,8 +11,10 @@ gw-billing = { path = "../gw-billing" }
 gw-ledger = { path = "../gw-ledger" }
 gw-store = { path = "../gw-store" }
 gw-task = { path = "../gw-task" }
+gw-codec = { path = "../gw-codec" }
 async-trait.workspace = true
 anyhow.workspace = true
+bytes.workspace = true
 fred.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true

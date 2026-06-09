@@ -2178,8 +2178,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "fred",
  "gw-billing",
+ "gw-codec",
  "gw-core",
  "gw-ledger",
  "gw-store",
