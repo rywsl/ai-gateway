@@ -251,6 +251,7 @@ fn cli_extracted_usage_success_keeps_cli_extracted_provenance() {
 fn cli_usage_absent_uses_nonzero_estimate_instead_of_free_usage() {
     let mut ctx = seeded_cli_ctx();
     ctx.prompt_estimate_tokens = Some(37);
+    ctx.usage_provenance.input = ProvenanceTag::CliExtracted;
 
     let record = build_attempt_record(&ctx).expect("cli record");
 
@@ -276,11 +277,18 @@ fn cli_zero_cache_dimensions_use_nonzero_estimate_in_attempt_record() {
     ctx.prompt_estimate_tokens = Some(17);
     ctx.usage.cached_tokens = Some(0);
     ctx.usage.cache_creation_tokens = Some(0);
+    ctx.usage_provenance.cache_read = ProvenanceTag::CliExtracted;
+    ctx.usage_provenance.cache_creation = ProvenanceTag::CliExtracted;
 
     let record = build_attempt_record(&ctx).expect("cli record");
 
     assert_eq!(record.usage.input_tokens, 17);
     assert_eq!(record.usage_provenance.input, ProvenanceTag::Estimated);
+    assert_eq!(record.usage_provenance.cache_read, ProvenanceTag::Estimated);
+    assert_eq!(
+        record.usage_provenance.cache_creation,
+        ProvenanceTag::Estimated
+    );
     assert!(record.usage.input_tokens > 0 || record.usage.output_tokens > 0);
 }
 

@@ -7,7 +7,7 @@ use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::ProvenanceTag;
 use gw_core::usage::UsageSnapshot;
 use gw_health::{KeyHealthStore, OutcomeKind};
-use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
+use gw_ledger::usage::{UsageProvenance, UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::{ClearKey, FreezeGuard, Ledger, LedgerItem};
 use gw_store::counter_store::daily_tokens_key;
 use gw_store::CounterStore;
@@ -124,6 +124,8 @@ pub async fn run(
     // The settle MUST happen before the UsageRecord literal below reads
     // `ctx.credits_consumed` / `ctx.coef_table_version_at_settle`.
     // ---------------------------------------------------------------------
+    let ok = err.is_none() && matches!(ctx.upstream_status, Some(s) if (200..400).contains(&s));
+
     if let Some(guard) = ctx.lease_guard.as_ref() {
         let coef_version = guard.coef_version();
         let model_name = ctx
@@ -131,13 +133,19 @@ pub async fn run(
             .as_ref()
             .map(|m| m.as_ref().to_string())
             .unwrap_or_default();
-        let usage_snap = UsageSnapshot {
-            input_tokens: ctx.usage.input_tokens,
-            output_tokens: ctx.usage.output_tokens,
-            cache_read_input_tokens: ctx.usage.cached_tokens,
-            cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
-            thinking_tokens: ctx.usage.thinking_tokens,
-            multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
+        let Some((usage_snap, _)) = usage_snapshot_and_provenance_for_record(ctx, ok) else {
+            tracing::error!(
+                target: "gw_proxy::filters::logging",
+                request_id = %ctx.request_id,
+                trace_id = %ctx.trace_id,
+                client_shape = ?ctx.client_shape,
+                vendor_exposure = ?ctx.vendor_exposure,
+                "skipping credit-lease settle due to CLI billing protection"
+            );
+            if let Some(g) = ctx.lease_guard.as_ref() {
+                g.release();
+            }
+            return;
         };
         match gw_ledger::actual_usage_credits(coef_version, model_name.as_str(), &usage_snap) {
             Ok(actual) => {
@@ -173,7 +181,6 @@ pub async fn run(
     // success, otherwise failure. The picked key's FormatHealth is fetched
     // on demand (multi-dim: key + api_format).
     // ---------------------------------------------------------------------
-    let ok = err.is_none() && matches!(ctx.upstream_status, Some(s) if (200..400).contains(&s));
     if let Some(pk) = ctx.picked_vendor_key.as_ref() {
         // Audit 2026-05-30 §1.5: record into the SAME (key, ApiFormat) bucket the
         // routing health gate read. `record()` keys by api_format, so the bucket
@@ -414,6 +421,28 @@ fn provenance_label(tag: ProvenanceTag) -> &'static str {
     }
 }
 
+fn raw_usage_snapshot(ctx: &ReqCtx) -> UsageSnapshot {
+    UsageSnapshot {
+        input_tokens: ctx.usage.input_tokens,
+        output_tokens: ctx.usage.output_tokens,
+        cache_read_input_tokens: ctx.usage.cached_tokens,
+        cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
+        thinking_tokens: ctx.usage.thinking_tokens,
+        multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
+    }
+}
+
+fn usage_snapshot_and_provenance_for_record(
+    ctx: &ReqCtx,
+    ok: bool,
+) -> Option<(UsageSnapshot, UsageProvenance)> {
+    if ok {
+        crate::billing_lifecycle::billing_protected_usage(ctx)
+    } else {
+        Some((raw_usage_snapshot(ctx), ctx.usage_provenance))
+    }
+}
+
 fn build_final_usage_record(
     ctx: &ReqCtx,
     ok: bool,
@@ -436,21 +465,7 @@ fn build_final_usage_record(
         _ => None,
     };
     let is_subaccount = effective != auth_user_id;
-    let (usage, usage_provenance) = if ok {
-        crate::billing_lifecycle::billing_protected_usage(ctx)?
-    } else {
-        (
-            UsageSnapshot {
-                input_tokens: ctx.usage.input_tokens,
-                output_tokens: ctx.usage.output_tokens,
-                cache_read_input_tokens: ctx.usage.cached_tokens,
-                cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
-                thinking_tokens: ctx.usage.thinking_tokens,
-                multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
-            },
-            ctx.usage_provenance,
-        )
-    };
+    let (usage, usage_provenance) = usage_snapshot_and_provenance_for_record(ctx, ok)?;
 
     Some(UsageRecord {
         ts_ms: now_ms,
@@ -531,7 +546,9 @@ mod tests {
     use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
     use gw_core::permissions::{MarkupChainSnapshot, MergedPermissions};
     use gw_core::protocol::ApiShape;
+    use gw_ledger::{apply_coef_commit, apply_coef_entry, Dim};
     use secrecy::SecretString;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn seeded_vendor_key() -> VendorKey {
         VendorKey {
@@ -592,10 +609,25 @@ mod tests {
         )
     }
 
+    fn next_test_coef_version() -> u64 {
+        static NEXT_VERSION: AtomicU64 = AtomicU64::new(1_000_000);
+        NEXT_VERSION.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn install_test_input_coef(version: u64, model_id: &str, input: u64) {
+        apply_coef_entry(version, model_id, Dim::Input, input);
+        let outcome = apply_coef_commit(version, 1);
+        assert!(
+            matches!(outcome, gw_ledger::CommitOutcome::Activated),
+            "unexpected coef commit outcome: {outcome:?}"
+        );
+    }
+
     #[test]
     fn cli_final_logging_uses_nonzero_estimate_instead_of_free_usage() {
         let (mut ctx, auth_user_id, effective, model, picked) = seeded_cli_ctx();
         ctx.prompt_estimate_tokens = Some(41);
+        ctx.usage_provenance.input = ProvenanceTag::CliExtracted;
 
         let rec =
             build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked)
@@ -623,6 +655,8 @@ mod tests {
         ctx.prompt_estimate_tokens = Some(19);
         ctx.usage.cached_tokens = Some(0);
         ctx.usage.cache_creation_tokens = Some(0);
+        ctx.usage_provenance.cache_read = ProvenanceTag::CliExtracted;
+        ctx.usage_provenance.cache_creation = ProvenanceTag::CliExtracted;
 
         let rec =
             build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked)
@@ -630,6 +664,11 @@ mod tests {
 
         assert_eq!(rec.usage.input_tokens, 19);
         assert_eq!(rec.usage_provenance.input, ProvenanceTag::Estimated);
+        assert_eq!(rec.usage_provenance.cache_read, ProvenanceTag::Estimated);
+        assert_eq!(
+            rec.usage_provenance.cache_creation,
+            ProvenanceTag::Estimated
+        );
         assert!(rec.usage.input_tokens > 0 || rec.usage.output_tokens > 0);
     }
 
@@ -639,10 +678,37 @@ mod tests {
         ctx.prompt_estimate_tokens = None;
         ctx.usage.cached_tokens = Some(0);
         ctx.usage.cache_creation_tokens = Some(0);
+        ctx.usage_provenance.cache_read = ProvenanceTag::CliExtracted;
+        ctx.usage_provenance.cache_creation = ProvenanceTag::CliExtracted;
 
         let rec =
             build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked);
 
         assert!(rec.is_none(), "zero cache dims must not count as billable usage");
+    }
+
+    #[test]
+    fn protected_lease_settlement_uses_nonzero_billing_protected_usage_credits() {
+        let (mut ctx, _, _, model, _) = seeded_cli_ctx();
+        ctx.prompt_estimate_tokens = Some(23);
+        ctx.usage.cached_tokens = Some(0);
+        ctx.usage.cache_creation_tokens = Some(0);
+        ctx.usage_provenance.cache_read = ProvenanceTag::CliExtracted;
+        ctx.usage_provenance.cache_creation = ProvenanceTag::CliExtracted;
+
+        let model_id = model.as_ref().to_string();
+        let version = next_test_coef_version();
+        install_test_input_coef(version, model_id.as_str(), 7);
+
+        let (usage, provenance) =
+            usage_snapshot_and_provenance_for_record(&ctx, true).expect("protected usage");
+        assert_eq!(usage.input_tokens, 23);
+        assert_eq!(provenance.input, ProvenanceTag::Estimated);
+        assert_eq!(provenance.cache_read, ProvenanceTag::Estimated);
+        assert_eq!(provenance.cache_creation, ProvenanceTag::Estimated);
+
+        let actual = gw_ledger::actual_usage_credits(version, model_id.as_str(), &usage)
+            .expect("actual usage credits");
+        assert!(actual > 0, "protected settlement credits must stay billable");
     }
 }

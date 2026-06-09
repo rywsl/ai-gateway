@@ -223,11 +223,21 @@ pub(crate) fn billing_protected_usage(
 
     let estimate = ctx.prompt_estimate_tokens?;
     usage.input_tokens = estimate.max(1);
-    if provenance.input != ProvenanceTag::UpstreamFinal
-        && provenance.input != ProvenanceTag::CliExtracted
-        && provenance.input != ProvenanceTag::UpstreamPartial
-    {
-        provenance.input = ProvenanceTag::Estimated;
+    provenance.input = ProvenanceTag::Estimated;
+    if provenance.output == ProvenanceTag::CliExtracted {
+        provenance.output = ProvenanceTag::Estimated;
+    }
+    if provenance.cache_read == ProvenanceTag::CliExtracted {
+        provenance.cache_read = ProvenanceTag::Estimated;
+    }
+    if provenance.cache_creation == ProvenanceTag::CliExtracted {
+        provenance.cache_creation = ProvenanceTag::Estimated;
+    }
+    if provenance.thinking == ProvenanceTag::CliExtracted {
+        provenance.thinking = ProvenanceTag::Estimated;
+    }
+    if provenance.multimodal_input == ProvenanceTag::CliExtracted {
+        provenance.multimodal_input = ProvenanceTag::Estimated;
     }
     Some((usage, provenance))
 }
