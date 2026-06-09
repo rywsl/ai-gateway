@@ -1231,6 +1231,15 @@ pub async fn run(
 
         if in_protected {
             let model_id_str = model_name.as_ref().to_string();
+            let freeze_estimate = freeze_estimate_with_pricing(
+                est_input_tokens,
+                req_max_tokens.map(u64::from),
+                merged.markup_chain.product,
+                estimate_pricing
+                    .as_ref()
+                    .map(|p| (p.value.as_ref(), p.version)),
+            );
+            stash_prompt_estimate_ctx(ctx, est_input_tokens, freeze_estimate);
 
             // Resolve max_output_tokens with 3-tier fallback:
             //   1. request explicit max_tokens
@@ -1362,8 +1371,7 @@ pub async fn run(
             .map(|p| (p.value.as_ref(), p.version)),
     );
     let freeze_estimate_micro = freeze_estimate.amount_micro;
-    ctx.estimate_pricing_version = freeze_estimate.estimate_pricing_version;
-    ctx.prompt_estimate_tokens = Some(est_input_tokens);
+    stash_prompt_estimate_ctx(ctx, est_input_tokens, freeze_estimate);
     if let Err(err) = check_cost(freeze_estimate_micro, hard_cap_cfg) {
         bail!(session, ctx, &err, &request_id)
     }
@@ -1536,6 +1544,15 @@ pub fn freeze_estimate_with_pricing(
         amount_micro: freeze_estimate(est_input_tokens, markup),
         estimate_pricing_version: 0,
     }
+}
+
+fn stash_prompt_estimate_ctx(
+    ctx: &mut ReqCtx,
+    est_input_tokens: u32,
+    freeze_estimate: FreezeEstimate,
+) {
+    ctx.prompt_estimate_tokens = Some(est_input_tokens);
+    ctx.estimate_pricing_version = freeze_estimate.estimate_pricing_version;
 }
 
 fn normalize_markup(markup: f32) -> f64 {
@@ -1754,6 +1771,43 @@ mod lease_expired_tests {
 
         assert_eq!(daily_quota_estimated_tokens(20, None, Some(&pricing)), 120);
         assert_eq!(daily_quota_estimated_tokens(20, None, None), 20);
+    }
+
+    #[test]
+    fn protected_cli_request_stashes_prompt_estimate_before_lease_return() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filters/request.rs"
+        ))
+        .expect("read source");
+        let protected_guard = src
+            .find("ctx.lease_guard = Some(guard);")
+            .expect("protected lease success path");
+        let estimate_store = src
+            .find("stash_prompt_estimate_ctx(ctx, est_input_tokens, freeze_estimate);")
+            .expect("prompt estimate must be stashed");
+
+        assert!(
+            estimate_store < protected_guard,
+            "protected CLI path must preserve prompt estimate before early lease return"
+        );
+    }
+
+    #[test]
+    fn stash_prompt_estimate_ctx_preserves_estimate_for_protected_settlement() {
+        let mut ctx = ReqCtx::default();
+
+        stash_prompt_estimate_ctx(
+            &mut ctx,
+            41,
+            FreezeEstimate {
+                amount_micro: 123,
+                estimate_pricing_version: 9,
+            },
+        );
+
+        assert_eq!(ctx.prompt_estimate_tokens, Some(41));
+        assert_eq!(ctx.estimate_pricing_version, 9);
     }
 }
 
