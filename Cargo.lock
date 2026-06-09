@@ -1809,8 +1809,12 @@ dependencies = [
  "gw-codec",
  "gw-core",
  "gw-health",
+ "hex",
+ "metrics",
+ "rand 0.8.6",
  "secrecy",
  "thiserror 1.0.69",
+ "time",
  "tokio",
 ]
 

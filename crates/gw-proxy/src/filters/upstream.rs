@@ -36,7 +36,6 @@ use pingora::http::RequestHeader;
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, Result};
 use pingora_proxy::Session;
-use secrecy::ExposeSecret;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -850,6 +849,8 @@ pub async fn rewrite_request(
     upstream_request: &mut RequestHeader,
     ctx: &mut ReqCtx,
     body_rules: &BodyRulesMap,
+    adapter_registry: &Arc<gw_adapter::AdapterRegistry>,
+    health_store: &Arc<gw_health::store::KeyHealthStore>,
 ) -> Result<()> {
     ctx.phase_start("upstream_request_filter");
 
@@ -876,6 +877,7 @@ pub async fn rewrite_request(
         .client_codec
         .as_ref()
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_client_codec")))?;
+    let client_kind = client_codec.kind();
     let outbound_body = ctx
         .body
         .as_ref()
@@ -899,10 +901,8 @@ pub async fn rewrite_request(
     if picked.accessible_endpoints.is_empty() {
         return Err(Error::new(ErrorType::Custom("gw_no_upstream_codec")));
     }
-    let upstream_kind = gw_core::protocol::resolve_upstream_format(
-        &picked.accessible_endpoints,
-        client_codec.kind(),
-    );
+    let upstream_kind =
+        gw_core::protocol::resolve_upstream_format(&picked.accessible_endpoints, client_kind);
     let upstream_codec = codec_for(upstream_kind);
 
     if let Some(client_shape) = ctx.client_shape.filter(gw_core::protocol::ApiShape::is_cli) {
@@ -915,7 +915,18 @@ pub async fn rewrite_request(
             }
         }
         archive_upstream_request(ctx, upstream_request, outbound.clone());
-        inject_vendor_headers(ctx, upstream_request, &picked, &vendor, outbound.len());
+        apply_outbound_adapter(
+            ctx,
+            upstream_request,
+            &picked,
+            &vendor,
+            outbound.len(),
+            adapter_registry,
+            health_store,
+            client_kind,
+            upstream_kind,
+        )
+        .await?;
         inject_egress_headers(ctx, upstream_request, &picked).await;
         crate::billing_lifecycle::transition_to(
             ctx,
@@ -945,7 +956,7 @@ pub async fn rewrite_request(
     if has_body_rules {
         mutations.set_passthrough_overrides();
     }
-    let outbound: bytes::Bytes = if mutations.is_empty() && upstream_kind == client_codec.kind() {
+    let outbound: bytes::Bytes = if mutations.is_empty() && upstream_kind == client_kind {
         match client_codec {
             AnyCodec::OpenAi(c) => match same_protocol_passthrough(c, &outbound_body, &mutations) {
                 Ok(cow) => bytes_from_passthrough(cow, &outbound_body),
@@ -1015,7 +1026,18 @@ pub async fn rewrite_request(
     }
 
     archive_upstream_request(ctx, upstream_request, outbound.clone());
-    inject_vendor_headers(ctx, upstream_request, &picked, &vendor, outbound.len());
+    apply_outbound_adapter(
+        ctx,
+        upstream_request,
+        &picked,
+        &vendor,
+        outbound.len(),
+        adapter_registry,
+        health_store,
+        client_kind,
+        upstream_kind,
+    )
+    .await?;
     inject_egress_headers(ctx, upstream_request, &picked).await;
 
     // W2-T4: mark the request as dispatched to the upstream vendor.
@@ -1046,6 +1068,28 @@ fn render_same_protocol_openai_with_passthrough_overrides_for_test(
         .render_request(&ir, &mut buf)
         .unwrap();
     buf.freeze()
+}
+
+#[cfg(test)]
+mod adapter_dispatch_source_tests {
+    #[test]
+    fn rewrite_request_dispatches_outbound_adapter_registry() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/filters/upstream.rs"
+        ))
+        .expect("read source");
+        assert!(
+            src.contains(".for_vendor(&picked.vendor_id)")
+                || src.contains(".for_vendor(&vendor.value.id)"),
+            "rewrite_request must dispatch AdapterRegistry::for_vendor on the outbound path"
+        );
+        let legacy_call = ["inject_vendor", "_headers("].concat();
+        assert!(
+            !src.contains(&legacy_call),
+            "legacy inline header injection must not remain the outbound auth seam"
+        );
+    }
 }
 
 pub fn cli_passthrough_body(
@@ -1105,89 +1149,141 @@ fn archive_upstream_request(
     });
 }
 
-/// True if `s` is a valid HTTP header-name token for auth_template parsing
-/// (audit 2026-05-30 §3.3). Conservative subset of RFC 7230 token chars covering
-/// real header names (alphanumerics, '-', '_'); rejects spaces / colons / etc.
-fn is_header_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+struct ProxyHeadersAccessor<'a>(&'a mut RequestHeader);
+
+impl gw_adapter::HeadersAccessor for ProxyHeadersAccessor<'_> {
+    fn get(&self, name: &str) -> Option<&str> {
+        self.0
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    fn set(&mut self, name: &str, value: &str) {
+        let _ = self.0.insert_header(name.to_owned(), value.to_owned());
+    }
+
+    fn remove(&mut self, name: &str) {
+        let _ = self.0.remove_header(name);
+    }
 }
 
-fn inject_vendor_headers(
+struct ProxyUrlAccessor {
+    scheme: String,
+    host: String,
+    path: String,
+}
+
+impl gw_adapter::UrlAccessor for ProxyUrlAccessor {
+    fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    fn host(&self) -> &str {
+        &self.host
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn set_scheme(&mut self, scheme: &str) {
+        self.scheme = scheme.to_owned();
+    }
+
+    fn set_host(&mut self, host: &str) {
+        self.host = host.to_owned();
+    }
+
+    fn set_path(&mut self, path: &str) {
+        self.path = path.to_owned();
+    }
+}
+
+async fn apply_outbound_adapter(
     ctx: &mut ReqCtx,
     upstream_request: &mut RequestHeader,
-    picked: &gw_core::entity::VendorKey,
-    vendor: &gw_core::versioned::Versioned<Vendor>,
+    picked: &Arc<gw_core::entity::VendorKey>,
+    vendor: &Arc<gw_core::versioned::Versioned<Vendor>>,
     content_len: usize,
-) {
-    let _ = upstream_request.remove_header("authorization");
-    let _ = upstream_request.remove_header("x-api-key");
-    let _ = upstream_request.remove_header("x-api-key-id");
+    adapter_registry: &Arc<gw_adapter::AdapterRegistry>,
+    health_store: &Arc<gw_health::store::KeyHealthStore>,
+    client_protocol: gw_core::protocol::ProtocolKind,
+    upstream_protocol: gw_core::protocol::ProtocolKind,
+) -> Result<()> {
+    let model = ctx
+        .model
+        .clone()
+        .unwrap_or_else(|| gw_core::ids::ModelName::from(""));
+    let user_id = ctx
+        .effective_user_id()
+        .cloned()
+        .unwrap_or_else(|| gw_core::ids::UserId::from(""));
+    let api_format = ctx
+        .client_codec
+        .as_ref()
+        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_client_codec")))?
+        .kind();
+    let upstream_host = vendor.value.base_urls.first().and_then(|u| u.host_str());
+    let initial_path = upstream_request.uri.path().to_owned();
+    let mut headers = ProxyHeadersAccessor(upstream_request);
+    let mut url = ProxyUrlAccessor {
+        scheme: vendor
+            .value
+            .base_urls
+            .first()
+            .map(|u| u.scheme().to_owned())
+            .unwrap_or_else(|| "https".to_owned()),
+        host: upstream_host.unwrap_or_default().to_owned(),
+        path: initial_path.clone(),
+    };
+    let mut adapter_ctx = gw_adapter::AdapterCtx {
+        vendor_id: vendor.value.id.clone(),
+        vendor_key_id: picked.key_id.clone(),
+        vendor_key: picked.clone(),
+        client_protocol,
+        upstream_protocol,
+        model,
+        user_id,
+        api_format,
+        health_store,
+        oauth_runtime: None,
+        headers_mut: gw_adapter::HeadersMut {
+            inner: &mut headers,
+        },
+        url_mut: gw_adapter::UrlMut { inner: &mut url },
+        auth_template: vendor.value.auth_template.as_str(),
+        upstream_host,
+        content_len,
+        trace_id: ctx.trace_id.as_ref(),
+        request_id: ctx.request_id.as_ref(),
+    };
+    let adapter = adapter_registry.for_vendor(&picked.vendor_id);
+    adapter
+        .rewrite_auth(&mut adapter_ctx)
+        .await
+        .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_rewrite_auth_failed")))?;
+    adapter
+        .rewrite_transport(&mut adapter_ctx)
+        .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_rewrite_transport_failed")))?;
+    drop(adapter_ctx);
+    drop(headers);
 
-    // G3 / ADR-G3-2: when the vendor key carries OAuth credentials, inject the
-    // (already-decrypted) access_token instead of the static api_key. Token
-    // refresh is handled out-of-band by the Go task-worker: on upstream 401,
-    // the OAuthListener reverse-XADDs an events:entity to trigger refresh
-    // (T2-B). The expired token still flows here — Go refreshes asynchronously.
-    let auth_secret = if let Some(oauth) = picked.oauth.as_ref() {
-        let now = time::OffsetDateTime::now_utc();
-        if now >= oauth.access_expires_at {
-            metrics::counter!(
-                "gw_oauth_token_expired_total",
-                "vendor_key_id" => picked.key_id.as_ref().to_string(),
-            )
-            .increment(1);
-        } else if now >= oauth.access_expires_at - time::Duration::seconds(60) {
-            metrics::counter!(
-                "gw_oauth_token_near_expiry_total",
-                "vendor_key_id" => picked.key_id.as_ref().to_string(),
-            )
-            .increment(1);
-        }
-        oauth.access_token.expose_secret().to_owned()
-    } else {
-        picked.api_key.expose_secret().to_owned()
-    };
-    // Audit 2026-05-30 §3.3: honor the header NAME encoded in auth_template so
-    // native Gemini vendors (x-goog-api-key) work, not only Bearer/authorization.
-    // Form: "<header-name>: <value-with-{api_key}>" injects under <header-name>;
-    // a template with no colon (e.g. "Bearer {api_key}") keeps the legacy
-    // authorization behavior. Split on the TEMPLATE's first colon (before
-    // substituting the secret, which may itself contain a colon). A colon with an
-    // invalid header-name token falls back leniently to authorization + a metric
-    // (operator misconfig; pre-production so we don't hard-fail the request).
-    let template = vendor.value.auth_template.as_str();
-    let (header_name, value_template) = match template.split_once(':') {
-        Some((name, rest)) if is_header_token(name.trim()) => (name.trim(), rest.trim_start()),
-        Some(_) => {
-            metrics::counter!("gw_upstream_auth_header_invalid_total").increment(1);
-            ("authorization", template)
-        }
-        None => ("authorization", template),
-    };
-    let auth_value = value_template.replace("{api_key}", &auth_secret);
-    let _ = upstream_request.insert_header(header_name.to_string(), auth_value);
-    if let Some(host) = vendor.value.base_urls.first().and_then(|u| u.host_str()) {
-        let _ = upstream_request.insert_header("host", host.to_string());
+    if url.path != initial_path {
+        let parsed = url
+            .path
+            .parse()
+            .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_rewrite_url_failed")))?;
+        upstream_request.set_uri(parsed);
     }
-    // W3C traceparent: version-traceid-spanid-flags. The span-id is a fresh
-    // 8-byte random value per upstream hop (re-using the trace-id prefix as we
-    // used to do made the span-id deterministic and meaningless to consumers).
-    let span_id = hex::encode(rand::random::<[u8; 8]>());
-    let traceparent = format!("00-{}-{}-01", ctx.trace_id.0, span_id);
-    let _ = upstream_request.insert_header("traceparent", traceparent);
 
-    // Rewrite Content-Length: the body may have changed.
-    let _ = upstream_request.insert_header("content-length", content_len.to_string());
+    Ok(())
 }
 
 /// Inject X-Egress-* routing headers and per-profile forged identity headers.
 ///
-/// This is a separate async function so that `inject_vendor_headers` (and its
-/// unit test `direct_mode_inject_vendor_headers`) remains synchronous.  When
-/// `ctx.egress_profile` is `None` (i.e. the standard rustls path) the function
-/// is a no-op and adds zero overhead to the hot path.
+/// When `ctx.egress_profile` is `None` (i.e. the standard rustls path) the
+/// function is a no-op and adds zero overhead to the hot path.
 async fn inject_egress_headers(
     ctx: &ReqCtx,
     upstream_request: &mut RequestHeader,
@@ -1787,12 +1883,12 @@ mod oauth_injection_tests {
     fn oauth_injection_present_in_source() {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/filters/upstream.rs"
+            "/../gw-adapter/src/noop.rs"
         ))
         .expect("read source");
         assert!(
-            src.contains("picked.oauth.as_ref()"),
-            "G3 oauth branch missing in upstream_request_filter"
+            src.contains("ctx.vendor_key.oauth.as_ref()"),
+            "G3 oauth branch missing in default outbound adapter"
         );
         assert!(
             src.contains("oauth.access_token"),
@@ -1806,14 +1902,13 @@ mod oauth_injection_tests {
     }
 }
 
-/// Regression baseline: snapshots the bytes-affecting output of
-/// `inject_vendor_headers` for a Direct-mode vendor (no OAuth, static api_key).
-/// The egress impersonation work in Phase 4 modifies this function to add
-/// `X-Egress-*` headers when `egress_mode == Impersonate`. The Direct-mode
-/// output MUST remain byte-identical. Re-run after every phase:
+/// Regression baseline: snapshots the bytes-affecting output of adapter-based
+/// Direct-mode auth rewrite (no OAuth, static api_key). Egress impersonation is
+/// still injected by `inject_egress_headers`, after this adapter seam.
+/// The Direct-mode output MUST remain byte-identical. Re-run after every phase:
 ///
 /// ```bash
-/// cargo test -p gw-proxy regression_baseline -- --nocapture
+/// cargo test -p gw-proxy direct_mode_outbound_adapter_headers -- --nocapture
 /// ```
 #[cfg(test)]
 mod regression_baseline_tests {
@@ -1829,8 +1924,8 @@ mod regression_baseline_tests {
     fn make_canonical_inputs() -> (
         ReqCtx,
         RequestHeader,
-        gw_core::entity::VendorKey,
-        gw_core::versioned::Versioned<Vendor>,
+        Arc<gw_core::entity::VendorKey>,
+        Arc<gw_core::versioned::Versioned<Vendor>>,
         usize,
     ) {
         // --- VendorKey (Direct mode: no OAuth, static api_key) ---
@@ -1871,12 +1966,13 @@ mod regression_baseline_tests {
             contact: None,
             egress_mode: Default::default(),
         };
-        let versioned_vendor = gw_core::versioned::Versioned::new(1, vendor);
+        let versioned_vendor = Arc::new(gw_core::versioned::Versioned::new(1, vendor));
 
         // --- ReqCtx with a FIXED trace_id (32 hex chars = 16 bytes = W3C trace-id) ---
         let trace_id = TraceId::from("0000000000000000aaaaaaaaaaaaaaaa");
         let request_id = RequestId::from("req-baseline-0001");
-        let ctx = ReqCtx::new(trace_id, request_id);
+        let mut ctx = ReqCtx::new(trace_id, request_id);
+        ctx.client_codec = Some(gw_codec::AnyCodec::OpenAi(gw_codec::openai::OpenAi));
 
         // --- RequestHeader: POST /v1/chat/completions with realistic inbound headers ---
         let mut req = RequestHeader::build("POST", b"/v1/chat/completions", Some(4)).unwrap();
@@ -1884,7 +1980,7 @@ mod regression_baseline_tests {
         req.insert_header("content-type", "application/json")
             .unwrap();
         req.insert_header("accept", "application/json").unwrap();
-        // These three MUST be stripped by inject_vendor_headers:
+        // These three MUST be stripped by the outbound adapter:
         req.insert_header("authorization", "Bearer client-test-key")
             .unwrap();
         req.insert_header("x-api-key", "should-be-stripped")
@@ -1895,7 +1991,7 @@ mod regression_baseline_tests {
         // content_len: 42 (fixed; mirrors a small chat body)
         let content_len: usize = 42;
 
-        (ctx, req, key, versioned_vendor, content_len)
+        (ctx, req, Arc::new(key), versioned_vendor, content_len)
     }
 
     /// Render a `RequestHeader` to a deterministic, sorted text form:
@@ -1936,10 +2032,24 @@ mod regression_baseline_tests {
         out
     }
 
-    #[test]
-    fn direct_mode_inject_vendor_headers() {
+    #[tokio::test]
+    async fn direct_mode_outbound_adapter_headers() {
         let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
-        inject_vendor_headers(&mut ctx, &mut req, &key, &vendor, content_len);
+        let registry = Arc::new(gw_adapter::AdapterRegistry::default());
+        let health = Arc::new(gw_health::store::KeyHealthStore::default());
+        apply_outbound_adapter(
+            &mut ctx,
+            &mut req,
+            &key,
+            &vendor,
+            content_len,
+            &registry,
+            &health,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            gw_core::protocol::ProtocolKind::OpenAi,
+        )
+        .await
+        .expect("adapter rewrite");
         insta::assert_snapshot!(render(&req));
     }
 }

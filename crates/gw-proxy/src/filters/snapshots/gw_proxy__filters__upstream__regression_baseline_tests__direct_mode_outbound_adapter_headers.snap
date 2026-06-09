@@ -1,6 +1,6 @@
 ---
 source: crates/gw-proxy/src/filters/upstream.rs
-assertion_line: 1367
+assertion_line: 2058
 expression: render(&req)
 ---
 POST /v1/chat/completions

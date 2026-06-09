@@ -753,8 +753,15 @@ impl ProxyHttp for LlmGateway {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        filters::upstream::rewrite_request(session, upstream_request, ctx, &self.body_rules)
-            .await?;
+        filters::upstream::rewrite_request(
+            session,
+            upstream_request,
+            ctx,
+            &self.body_rules,
+            &self.adapter_registry,
+            &self.health,
+        )
+        .await?;
         filters::upstream::record_api_key_affinity(ctx, self.affinity.as_ref());
 
         // W2-T6: Register the in-flight billing entry now that the request is

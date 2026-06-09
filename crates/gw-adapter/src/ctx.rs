@@ -46,6 +46,10 @@ pub struct AdapterCtx<'a> {
     pub headers_mut: HeadersMut<'a>,
     pub url_mut: UrlMut<'a>,
 
+    pub auth_template: &'a str,
+    pub upstream_host: Option<&'a str>,
+    pub content_len: usize,
+
     pub trace_id: &'a str,
     pub request_id: &'a str,
 }
