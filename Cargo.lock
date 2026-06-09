@@ -2116,6 +2116,7 @@ dependencies = [
  "secrecy",
  "serde",
  "sha2",
+ "smallvec",
  "tokio",
  "tracing",
 ]

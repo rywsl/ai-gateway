@@ -130,6 +130,73 @@ fn latency_first_pipeline_matches_strategy() {
 }
 
 #[test]
+fn ranked_pipeline_returns_stable_fallback_order() {
+    let keys = vec![
+        fake_key("low", 1, 1),
+        fake_key("high", 10, 1),
+        fake_key("mid", 5, 1),
+    ];
+    let h = KeyHealthStore::default();
+    let f = InFlightStore::default();
+    let lt = LatencyTracker::new();
+    let uid = UserId::from("u");
+    let model = ModelName::from("m");
+    let ctx = ctx(&uid, &model, &lt);
+    let s = fixed_order::FixedOrder;
+
+    let ranked = pipeline::ranked(&s, &keys, &h, &f, &ctx);
+    let ids: Vec<_> = ranked
+        .iter()
+        .map(|key| key.key_id.as_ref().to_string())
+        .collect();
+
+    assert_eq!(ids, vec!["high", "mid", "low"]);
+}
+
+#[test]
+fn strategy_ranked_candidates_first_matches_pick() {
+    let keys = vec![
+        fake_key("slow", 1, 1),
+        fake_key("fast", 10, 1),
+        fake_key("middle", 5, 1),
+    ];
+    let h = KeyHealthStore::default();
+    let f = InFlightStore::default();
+    let lt = LatencyTracker::new();
+    for _ in 0..10 {
+        lt.record_ttft(
+            &keys[0].key_id,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            Duration::from_millis(500),
+        );
+        lt.record_ttft(
+            &keys[1].key_id,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            Duration::from_millis(50),
+        );
+        lt.record_ttft(
+            &keys[2].key_id,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            Duration::from_millis(150),
+        );
+    }
+    let uid = UserId::from("u");
+    let model = ModelName::from("m");
+    let ctx = ctx(&uid, &model, &lt);
+    let strategy = StrategyAny::LatencyFirst(latency_first::LatencyFirst);
+
+    let picked = strategy.pick(&keys, &h, &f, &ctx).expect("picked");
+    let ranked = strategy.ranked_candidates(&keys, &h, &f, &ctx);
+
+    assert_eq!(ranked.first().expect("ranked").key_id, picked.key_id);
+    let ids: Vec<_> = ranked
+        .iter()
+        .map(|key| key.key_id.as_ref().to_string())
+        .collect();
+    assert_eq!(ids, vec!["fast", "middle", "slow"]);
+}
+
+#[test]
 fn strategy_dims_are_minimal() {
     let lt = LatencyTracker::new();
     let uid = UserId::from("u");

@@ -3,6 +3,7 @@ use crate::latency::{LatencySnapshot, LatencyTracker};
 use crate::strategy::PickCtx;
 use gw_core::entity::VendorKey;
 use gw_health::KeyHealthStore;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 pub mod multi_dim;
@@ -124,6 +125,23 @@ pub fn execute<'a, P: ScoringPolicy>(
     Some(&candidates[picked.index])
 }
 
+pub fn ranked<P: ScoringPolicy>(
+    policy: &P,
+    candidates: &[Arc<VendorKey>],
+    health: &KeyHealthStore,
+    in_flight: &InFlightStore,
+    ctx: &PickCtx<'_>,
+) -> SmallVec<[Arc<VendorKey>; 8]> {
+    if candidates.is_empty() {
+        return SmallVec::new();
+    }
+
+    policy.before_extract(candidates, ctx);
+    let dims = policy.needed_dims(ctx).union(DimMask::HEALTH);
+    let features = extract_features(candidates, health, in_flight, ctx, dims);
+    rank_features(policy, &features, ctx)
+}
+
 pub fn extract(
     candidates: &[Arc<VendorKey>],
     health: &KeyHealthStore,
@@ -172,6 +190,42 @@ pub fn pick_best_index<P: ScoringPolicy>(
         }
     }
     best.map(|(feature_idx, _)| features[feature_idx].index)
+}
+
+pub fn rank_features<P: ScoringPolicy>(
+    policy: &P,
+    features: &[CandidateFeatures],
+    ctx: &PickCtx<'_>,
+) -> SmallVec<[Arc<VendorKey>; 8]> {
+    let mut scored = Vec::with_capacity(features.len());
+    for feature in features {
+        if let Some(view) = ctx.reservation_view {
+            if !view.gate_allows(ctx.model) {
+                continue;
+            }
+        }
+        if !policy.gate(feature, ctx) {
+            continue;
+        }
+        scored.push((feature, policy.score(feature, ctx)));
+    }
+
+    let tiebreak = policy.tiebreak();
+    scored.sort_by(|(left, left_score), (right, right_score)| {
+        if is_better(tiebreak, left, *left_score, right, *right_score) {
+            std::cmp::Ordering::Less
+        } else if is_better(tiebreak, right, *right_score, left, *left_score) {
+            std::cmp::Ordering::Greater
+        } else {
+            left.index.cmp(&right.index)
+        }
+    });
+
+    let mut out = SmallVec::<[Arc<VendorKey>; 8]>::new();
+    for (feature, _) in scored {
+        out.push(Arc::clone(&feature.key));
+    }
+    out
 }
 
 fn extract_features(

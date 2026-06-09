@@ -30,7 +30,7 @@ use gw_routing::candidates::get_candidate_keys;
 use gw_routing::in_flight::{InFlightGuard, InFlightStore};
 use gw_routing::latency::LatencyTracker;
 use gw_routing::strategy::set::StrategySet;
-use gw_routing::{PickCtx, Strategy};
+use gw_routing::{PickCtx, RankedStrategy, Strategy};
 use gw_store::EntityStore;
 use pingora::http::RequestHeader;
 use pingora::upstreams::peer::HttpPeer;
@@ -281,10 +281,6 @@ pub async fn pick_peer(
         };
         return emit_envelope_and_bail(session, ctx, envelope_for(code, message, 503)).await;
     }
-    if ctx.picked_candidates.is_none() {
-        ctx.picked_candidates = Some(candidates.clone());
-    }
-
     // -------------------------------------------------------------
     // Strategy dispatch.
     // -------------------------------------------------------------
@@ -311,9 +307,22 @@ pub async fn pick_peer(
         reservation_view: ctx.reservation_view.as_deref(),
         frequency_tracker: ctx.frequency_tracker.as_deref(),
     };
+    let ranked_candidates = if ctx.failover_attempt == 0 {
+        let ranked = strategy.ranked_candidates(&candidates, health, in_flight, &pick_ctx);
+        if ranked.is_empty() {
+            return Err(Error::new(ErrorType::Custom("gw_routing_strategy_empty")));
+        }
+        let ranked_vec: Vec<_> = ranked.into_iter().collect();
+        ctx.picked_candidates = Some(ranked_vec.clone());
+        ranked_vec
+    } else {
+        ctx.picked_candidates
+            .clone()
+            .unwrap_or_else(|| candidates.clone())
+    };
     let failover_pick = if ctx.failover_attempt > 0 && ctx.upstream_status.is_none() {
         ctx.picked_vendor_key.as_ref().and_then(|next| {
-            candidates
+            ranked_candidates
                 .iter()
                 .find(|candidate| candidate.key_id == next.key_id)
         })
@@ -323,8 +332,8 @@ pub async fn pick_peer(
     let picked = match failover_pick {
         Some(candidate) => candidate,
         None => {
-            let first = strategy
-                .pick(&candidates, health, in_flight, &pick_ctx)
+            let first = ranked_candidates
+                .first()
                 .ok_or_else(|| Error::new(ErrorType::Custom("gw_routing_strategy_empty")))?;
             // Adaptive-RPM enforcement (audit 2026-05-30 §1.8): if the strategy's
             // pick is over its learned per-key ceiling, divert to another
@@ -337,7 +346,7 @@ pub async fn pick_peer(
             // honors the FailoverExecutor's deliberate choice as-is.
             if adaptive_rpm.try_admit(&first.key_id) {
                 first
-            } else if let Some(alt) = candidates
+            } else if let Some(alt) = ranked_candidates
                 .iter()
                 .find(|c| c.key_id != first.key_id && adaptive_rpm.try_admit(&c.key_id))
             {

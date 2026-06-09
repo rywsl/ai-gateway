@@ -24,11 +24,6 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 
 ## 02 routing
 
-### R-AB multi-score routing core — `capability-gap`
-- **Intent:** weighted multi-dimension candidate ranking returning a stable ranked fallback list.
-- **Design points:** `CandidateFilter` chain + `ScoringDimension` set + `MultiScoreStrategy`, with `Strategy::pick` returning a ranked `SmallVec` instead of today's single `Option<&Arc<VendorKey>>` (`crates/gw-routing/src/strategy/mod.rs`, `candidates.rs`). Failover would then walk a stable ranked list instead of re-running `pick` with a blacklist.
-- **Source:** deleted `routing-r-ab-multi-score` (re-affirmed by `v2-integration` §335).
-
 ### R-D AffinityManager (api-key → vendor-key affinity) — `capability-gap`
 - **Intent:** keep a user pinned to the same upstream key across requests to preserve prompt-cache continuity and reduce re-billing.
 - **Design points:** new `crates/gw-routing/src/affinity.rs`: `AffinityManager` (`record_hit`/`get`/`invalidate_vendor_key`/`sweep_expired`), `AffinityRecord`, an `AffinityDimension`, and a sweep loop. Distinct from the existing request-level `strategy/cache_affinity.rs` (message-hash).

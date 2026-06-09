@@ -25,4 +25,4 @@ pub use failover::{classify_for_failover, FailoverClass, FailoverDecision, Failo
 pub use in_flight::{InFlightCounter, InFlightGuard, InFlightStore};
 pub use latency::LatencyTracker;
 pub use reservation::{GlobalModelView, ModelFrequencyTracker, ReservationGlobalView};
-pub use strategy::{PickCtx, Strategy, StrategyAny};
+pub use strategy::{PickCtx, RankedStrategy, Strategy, StrategyAny};
