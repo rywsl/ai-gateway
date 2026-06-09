@@ -1,263 +1,156 @@
-//! Tunnel e2e storage + `TunnelStack::resolve` smoke tests (T7-B).
-//!
-//! Status: **v1 scaffold** — wires up testcontainers (Redis + Postgres),
-//! applies the full migration chain through `0005_proxy_nodes.sql`, then
-//! exercises the `EntityStore → TunnelStack::resolve` path. The full
-//! Pingora → tunnel-node → fake-upstream round-trip is deferred to v2 because:
-//!
-//! - `TunnelStack::peer_for_node` requires a live WebSocket connection to the
-//!   proxy node; testcontainer-spun fake upstream is the next layer and
-//!   `e2e_full_flow.rs` defers an analogous ping to v2 for the same reason.
-//! - No HTTP request traverses the gateway here. Only `TunnelStack::resolve`
-//!   semantics (Direct vs Use) are exercised.
-//!
-//! What these tests do today:
-//!   - Boot Postgres + Redis via testcontainers (gated `#[ignore]`).
-//!   - Apply migrations 0001 → 0004 → 0005 in order.
-//!   - Build a `LoaderCtx` + `EntityStore` and call `proxy_nodes_list_or_load`.
-//!   - Construct a `TunnelStack` from the loaded node list.
-//!   - Assert `TunnelStack::resolve` returns `Direct` (no nodes) or `Use(id)`
-//!     (matching provider) as the seeded data dictates.
+//! Ignored owned tunnel e2e tests.
 //!
 //! Run with:
-//!   `cargo test -p gw-gateway --features tunnel --test e2e_tunnel -- --ignored --nocapture`.
+//! `cargo test -p gw-gateway --features tunnel --test e2e_tunnel -- --ignored --nocapture`
 
 #![cfg(feature = "tunnel")]
 
-use std::sync::Arc;
-use testcontainers_modules::testcontainers::runners::AsyncRunner;
-use testcontainers_modules::{postgres::Postgres, redis::Redis};
-
-use gw_proxy::tunnel_stack::TunnelStack;
-use gw_store::{encrypt::KekCache, loader::LoaderCtx, EntityStore};
+use bytes::Bytes;
+use gw_proxy::tunnel_stack::{TunnelPeerError, TunnelStack};
 use gw_tunnel_client::pool::PoolConfig;
-use gw_tunnel_client::resolver::{ProxyNodeView, TunnelPreference, TunnelResolution};
-use gw_tunnel_client::safe_dns::SafeDnsResolver;
-use gw_tunnel_client::transport::TransportConfig;
+use gw_tunnel_client::resolver::ProxyNodeView;
+use gw_tunnel_client::safe_dns::{set_override, OverrideGuard, SafeDnsResolver};
+use gw_tunnel_client::target_filter::{set_whitelist, ResetGuard};
+use gw_tunnel_client::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
+use gw_tunnel_server::{spawn, TunnelServerConfig};
+use secrecy::SecretString;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
-const MIGRATION_0001: &str = include_str!("../../gw-store/migrations/0001_initial.sql");
-const MIGRATION_0004: &str = include_str!("../../gw-store/migrations/0004_capabilities.sql");
-const MIGRATION_0005: &str = include_str!("../../gw-store/migrations/0005_proxy_nodes.sql");
-
-// ---------------------------------------------------------------------------
-// Test A — empty proxy_nodes → TunnelStack::resolve returns Direct
-// ---------------------------------------------------------------------------
-
-/// Boot PG + Redis, apply migrations, confirm `proxy_nodes_list_or_load`
-/// returns an empty `Vec`, then verify that `TunnelStack::resolve` returns
-/// `Direct` for any (provider, key, preference). Guards spec §9 "non-breaking
-/// on rollout": a gateway with tunnel enabled but no nodes seeded must not
-/// alter the routing path.
-#[tokio::test]
-#[ignore = "requires Docker (testcontainers Redis + Postgres); full pingora round-trip is v2 scope"]
-async fn e2e_tunnel_constructs_when_enabled_with_no_nodes() {
-    // -----------------------------------------------------------------
-    // 1. Boot infrastructure.
-    // -----------------------------------------------------------------
-    let pg_node = Postgres::default().start().await.expect("start postgres");
-    let redis_node = Redis::default().start().await.expect("start redis");
-
-    let pg_port = pg_node.get_host_port_ipv4(5432).await.expect("pg port");
-    let redis_port = redis_node
-        .get_host_port_ipv4(6379)
-        .await
-        .expect("redis port");
-
-    let pg_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-    let redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-    // -----------------------------------------------------------------
-    // 2. Apply migrations.
-    // -----------------------------------------------------------------
-    let pg = gw_store::pg_client::connect(&pg_url, 4)
-        .await
-        .expect("pg connect");
-
-    sqlx::raw_sql(MIGRATION_0001)
-        .execute(&pg)
-        .await
-        .expect("apply 0001_initial");
-    sqlx::raw_sql(MIGRATION_0004)
-        .execute(&pg)
-        .await
-        .expect("apply 0004_capabilities");
-    sqlx::raw_sql(MIGRATION_0005)
-        .execute(&pg)
-        .await
-        .expect("apply 0005_proxy_nodes");
-
-    // -----------------------------------------------------------------
-    // 3. Build LoaderCtx + EntityStore.
-    // -----------------------------------------------------------------
-    let redis = gw_store::redis_client::RedisCtx::connect(&redis_url, 4)
-        .await
-        .expect("redis connect");
-
-    let loader = LoaderCtx {
-        redis: redis.clone(),
-        pg: pg.clone(),
-        kek: KekCache::default(),
-    };
-    let store = EntityStore::with_loader(loader);
-
-    // -----------------------------------------------------------------
-    // 4. Load proxy nodes — expect empty list (no rows seeded).
-    // -----------------------------------------------------------------
-    let nodes = store
-        .proxy_nodes_list_or_load()
-        .await
-        .expect("proxy_nodes_list_or_load returned None (loader error)");
-    assert!(
-        nodes.is_empty(),
-        "expected empty proxy_nodes, got {} rows",
-        nodes.len()
-    );
-
-    // -----------------------------------------------------------------
-    // 5. Build TunnelStack with empty node list, assert resolve → Direct.
-    // -----------------------------------------------------------------
-    let stack = TunnelStack::new(
-        vec![],
-        Arc::new(SafeDnsResolver::cloudflare_default()),
-        PoolConfig::default(),
-        TransportConfig::default(),
-    );
-
-    let pref = TunnelPreference::default();
-    let result = stack.resolve("openai", "key-1", &pref);
-    assert_eq!(
-        result,
-        TunnelResolution::Direct,
-        "expected Direct with no nodes"
-    );
+async fn http_echo_upstream(path: &'static str) -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = stream.read(&mut buf).await.unwrap();
+        let request = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            request.starts_with(&format!("GET {path} HTTP/1.1")),
+            "unexpected request: {request}"
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nworld")
+            .await
+            .unwrap();
+    });
+    (port, task)
 }
 
-// ---------------------------------------------------------------------------
-// Test B — seeded proxy_nodes row → resolve returns Use(node_id)
-// ---------------------------------------------------------------------------
+async fn client(addr: std::net::SocketAddr, token: Option<&str>) -> WsTransport {
+    WsTransport::connect(TransportConfig {
+        url: format!("ws://{addr}/").parse().unwrap(),
+        auth_token: token.map(|s| SecretString::from(s.to_owned())),
+        heartbeat_interval: Duration::from_secs(60),
+        missed_pong_threshold: 5,
+        max_streams_per_conn: 8,
+    })
+    .await
+    .unwrap()
+}
 
-/// Boot PG + Redis, apply migrations, INSERT one `proxy_nodes` row for
-/// provider `openai`, then verify:
-///   - `resolve("openai", …)` → `Use("node-test")`.
-///   - `resolve("anthropic", …)` → `Direct` (provider mismatch).
 #[tokio::test]
-#[ignore = "requires Docker (testcontainers Redis + Postgres); full pingora round-trip is v2 scope"]
-async fn e2e_tunnel_resolves_use_when_node_matches_provider() {
-    // -----------------------------------------------------------------
-    // 1. Boot infrastructure.
-    // -----------------------------------------------------------------
-    let pg_node = Postgres::default().start().await.expect("start postgres");
-    let redis_node = Redis::default().start().await.expect("start redis");
+#[ignore = "W8 owned tunnel e2e; opens local TCP listeners"]
+async fn e2e_owned_server_roundtrips_http_bytes() {
+    let _guard = ResetGuard::new();
+    let (upstream_port, upstream_task) = http_echo_upstream("/hello").await;
+    set_whitelist(vec![("127.0.0.1".to_owned(), upstream_port)]);
+    let server = spawn(TunnelServerConfig {
+        allowed_targets: vec![("127.0.0.1".to_owned(), upstream_port)],
+        allow_private_targets: true,
+        ..TunnelServerConfig::default()
+    })
+    .await
+    .unwrap();
 
-    let pg_port = pg_node.get_host_port_ipv4(5432).await.expect("pg port");
-    let redis_port = redis_node
-        .get_host_port_ipv4(6379)
+    let t = client(server.local_addr, None).await;
+    let mut stream = t
+        .open_stream(&format!("127.0.0.1:{upstream_port}"))
         .await
-        .expect("redis port");
-
-    let pg_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
-    let redis_url = format!("redis://127.0.0.1:{redis_port}");
-
-    // -----------------------------------------------------------------
-    // 2. Apply migrations.
-    // -----------------------------------------------------------------
-    let pg = gw_store::pg_client::connect(&pg_url, 4)
+        .unwrap();
+    stream
+        .send_data(Bytes::from_static(
+            b"GET /hello HTTP/1.1\r\nhost: example.test\r\n\r\n",
+        ))
         .await
-        .expect("pg connect");
+        .unwrap();
 
-    sqlx::raw_sql(MIGRATION_0001)
-        .execute(&pg)
-        .await
-        .expect("apply 0001_initial");
-    sqlx::raw_sql(MIGRATION_0004)
-        .execute(&pg)
-        .await
-        .expect("apply 0004_capabilities");
-    sqlx::raw_sql(MIGRATION_0005)
-        .execute(&pg)
-        .await
-        .expect("apply 0005_proxy_nodes");
+    let mut response = Vec::new();
+    loop {
+        match stream.recv().await.unwrap() {
+            TunnelEvent::Data(bytes) => response.extend_from_slice(&bytes),
+            TunnelEvent::Close => break,
+            TunnelEvent::Error(msg) => panic!("unexpected tunnel error: {msg}"),
+        }
+    }
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.contains("200 OK"));
+    assert!(response.ends_with("world"));
+    upstream_task.await.unwrap();
+    server.shutdown().await;
+}
 
-    // -----------------------------------------------------------------
-    // 3. Seed one proxy_node row for provider "openai".
-    // -----------------------------------------------------------------
-    let payload = serde_json::json!({
-        "id": "node-test",
-        "ws_url": "ws://127.0.0.1:9001/",
-        "enabled": true,
-        "latency_ms": 0,
-        "allowed_provider_ids": ["openai"],
-        "allowed_vendor_key_ids": [],
-        "auth_token_enc": null,
-    });
-    sqlx::query("INSERT INTO proxy_nodes (id, payload, version) VALUES ($1, $2, 1)")
-        .bind("node-test")
-        .bind(payload)
-        .execute(&pg)
-        .await
-        .expect("seed proxy_node");
-
-    // -----------------------------------------------------------------
-    // 4. Build LoaderCtx + EntityStore + load nodes.
-    // -----------------------------------------------------------------
-    let redis = gw_store::redis_client::RedisCtx::connect(&redis_url, 4)
-        .await
-        .expect("redis connect");
-
-    let loader = LoaderCtx {
-        redis: redis.clone(),
-        pg: pg.clone(),
-        kek: KekCache::default(),
-    };
-    let store = EntityStore::with_loader(loader);
-
-    let nodes = store
-        .proxy_nodes_list_or_load()
-        .await
-        .expect("proxy_nodes_list_or_load returned None (loader error)");
-    assert_eq!(nodes.len(), 1, "expected exactly 1 proxy_node row");
-
-    // -----------------------------------------------------------------
-    // 5. Map ProxyNode → ProxyNodeView and build TunnelStack.
-    // -----------------------------------------------------------------
-    let view: Vec<ProxyNodeView> = nodes
-        .into_iter()
-        .map(|n| ProxyNodeView {
-            id: n.id,
-            ws_url: n.ws_url,
-            auth_token: None,
-            enabled: n.enabled,
-            latency_ms: n.latency_ms,
-            allowed_provider_ids: n.allowed_provider_ids,
-            allowed_vendor_key_ids: n.allowed_vendor_key_ids,
-        })
-        .collect();
-
+#[tokio::test]
+#[ignore = "W8 owned tunnel e2e; opens local TCP listeners"]
+async fn e2e_tunnel_stack_reports_no_live_node() {
+    let _guard = ResetGuard::new();
+    let _dns_guard = OverrideGuard::new();
+    set_override("tunnel-live.example", vec!["1.1.1.1".parse().unwrap()]);
+    set_whitelist(vec![("tunnel-live.example".to_owned(), 443)]);
     let stack = TunnelStack::new(
-        view,
+        vec![ProxyNodeView {
+            id: "node-no-live".to_owned(),
+            ws_url: "ws://127.0.0.1:9/".parse().unwrap(),
+            auth_token: None,
+            enabled: true,
+            latency_ms: 0,
+            allowed_provider_ids: vec!["openai".to_owned()],
+            allowed_vendor_key_ids: vec![],
+        }],
         Arc::new(SafeDnsResolver::cloudflare_default()),
         PoolConfig::default(),
         TransportConfig::default(),
     );
 
-    // -----------------------------------------------------------------
-    // 6. Assert resolve semantics.
-    // -----------------------------------------------------------------
-    let pref = TunnelPreference::default();
+    let err = stack
+        .peer_for_node("node-no-live", "tunnel-live.example", 443)
+        .await
+        .expect_err("closed local port should not produce a live peer");
+    assert!(matches!(err, TunnelPeerError::NoLive { .. }));
+}
 
-    // Provider match → Use.
-    let result = stack.resolve("openai", "any-key", &pref);
-    assert_eq!(
-        result,
-        TunnelResolution::Use("node-test".to_string()),
-        "expected Use(node-test) for matching provider"
+#[tokio::test]
+#[ignore = "W8 owned tunnel e2e; opens local TCP listeners"]
+async fn e2e_owned_server_rejects_target_denied() {
+    let server = spawn(TunnelServerConfig {
+        allowed_targets: vec![("example.com".to_owned(), 443)],
+        allow_private_targets: true,
+        ..TunnelServerConfig::default()
+    })
+    .await
+    .unwrap();
+    let t = client(server.local_addr, None).await;
+    let mut stream = t.open_stream("127.0.0.1:9").await.unwrap();
+    let err = stream.recv().await.expect_err("denied target should error");
+    assert!(
+        matches!(err, TunnelError::Remote(msg) if msg.contains("target") || msg.contains("denied") || msg.contains("blocked"))
     );
+    server.shutdown().await;
+}
 
-    // Provider mismatch → Direct.
-    let result = stack.resolve("anthropic", "any-key", &pref);
-    assert_eq!(
-        result,
-        TunnelResolution::Direct,
-        "expected Direct for non-matching provider"
-    );
+#[tokio::test]
+#[ignore = "W8 owned tunnel e2e; opens local TCP listeners"]
+async fn e2e_owned_server_rejects_auth_failure() {
+    let server = spawn(TunnelServerConfig {
+        auth_token: Some("secret".to_owned()),
+        ..TunnelServerConfig::default()
+    })
+    .await
+    .unwrap();
+    let t = client(server.local_addr, Some("wrong")).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!t.is_alive(), "transport should close after auth failure");
+    server.shutdown().await;
 }

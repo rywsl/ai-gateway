@@ -76,6 +76,7 @@ bytes.workspace = true
 # plain-HTTP recorder instead of needing a real TLS upstream.
 gw-egress-impersonate = { path = "../gw-egress-impersonate", features = ["test-utils"] }
 e2e-fake-upstream = { path = "../e2e-fake-upstream" }
+gw-tunnel-server = { path = "../gw-tunnel-server" }
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }

@@ -1981,6 +1981,7 @@ dependencies = [
  "gw-store",
  "gw-task",
  "gw-tunnel-client",
+ "gw-tunnel-server",
  "hex",
  "hostname",
  "http-body-util",
