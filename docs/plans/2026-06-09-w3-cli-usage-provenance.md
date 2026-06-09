@@ -2,27 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a first-class `cli_extracted` per-dimension usage provenance tag so CLI-parsed usage is distinguishable from upstream final, upstream partial, estimates, crash fallback, and unknown usage.
+**Goal:** Add a first-class `cli_extracted` per-dimension usage provenance tag so CLI-parsed usage is distinguishable from upstream final, upstream partial, estimates, crash fallback, and unknown usage. W3 is billing-critical: CLI paths must never let billable upstream usage turn into a zero/free `UsageRecord` just because the CLI wire response omitted usage.
 
-**Architecture:** Keep the retired `UsageSource` deleted and extend the current `ProvenanceTag` / `UsageProvenance` model. CLI body and stream extraction should stamp dimensions with `ProvenanceTag::CliExtracted`, and the shared rank order must be reflected in Rust merge logic, Go consumer contract docs, and the Python soak dedupe oracle.
+**Architecture:** Keep the retired `UsageSource` deleted and extend the current `ProvenanceTag` / `UsageProvenance` model. CLI body and stream extraction should stamp dimensions with `ProvenanceTag::CliExtracted`, and the shared rank order must be reflected in Rust merge logic, Go consumer contract docs, and the Python soak dedupe oracle. When a CLI response body or stream completes without usage, the emission path must either apply the existing settlement-safe estimate/crash-fallback protection so at least one billable dimension is non-zero, or fail closed with an explicit billing-protection error instead of emitting all-zero free usage.
 
 **Tech Stack:** Rust 1.88 workspace, serde `snake_case` enums, Pingora response filter, `gw-core`, `gw-ledger`, `gw-proxy`, `gw-gateway` metrics catalog, Redis `usage:records` contract, Python soak tests.
 
 ---
 
-## User Decision Needed
+## Confirmed User Decision
 
-W0 recommends this final priority order:
+The user confirmed the W0 recommended final priority order:
 
 ```text
 upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback > unknown
 ```
 
-Recommended decision: approve the W0 ordering above.
-
 Reason: CLI usage is parsed from upstream CLI wire response bodies/events, so it is more authoritative than partial IR accumulation and tokenizer estimates. It must still lose to a terminal usage payload from a standard upstream codec.
-
-If the user rejects this priority, stop before implementation and update the rank tables in this plan before touching code.
 
 ## File Responsibilities
 
@@ -35,7 +31,10 @@ If the user rejects this priority, stop before implementation and update the ran
 - Modify: `crates/gw-proxy/src/filters/response.rs`
   - Update `copy_provenance` ranking to `UpstreamFinal=5`, `CliExtracted=4`, `UpstreamPartial=3`, `Estimated=2`, `CrashFallback=1`, `Unknown=0`.
   - Stamp CLI full-response and stream-delta extraction into `ctx.usage_provenance`.
-  - Add unit tests for rank promotion and CLI stamping.
+  - Add unit tests for rank promotion, CLI stamping, and CLI usage-absent behavior.
+- Modify: `crates/gw-proxy/src/billing_lifecycle.rs`
+  - Before emitting a CLI `UsageRecord`, enforce the billing guard: successful upstream exposure plus absent CLI usage must not emit all-zero usage.
+  - Use the existing request estimate (`ReqCtx::prompt_estimate_tokens`) as the settlement-safe non-zero usage fallback when available; if neither extracted usage nor an estimate is available, fail closed through an explicit billing-protection path instead of producing free usage.
 - Read only: `crates/gw-proxy/src/ctx.rs`
   - Use the existing `ReqCtx::default()` test constructor; do not modify this file for W3.
 - Read only: `crates/gw-gateway/src/metrics_catalog.rs`
@@ -49,7 +48,7 @@ If the user rejects this priority, stop before implementation and update the ran
 - Modify: `docs/spec/06-billing-ledger.md`
   - Document the expanded `ProvenanceTag` set and dedupe rank order.
 - Modify: `docs/go-contracts/parts/02-go-as-consumer.md`
-  - Update `usage_provenance` schema example and Go settler dedupe priority.
+  - Update `usage_provenance` schema example, Go settler dedupe priority, and the Go-side rule that all-zero CLI usage is not a billable success.
 - Modify: `docs/ROADMAP.md`
   - Move or remove the W3 CLI provenance open item according to the repo's existing ROADMAP closure style.
 
@@ -386,7 +385,41 @@ fn cli_delta_marks_only_present_dimensions()
 
 For the delta test, use a delta with only `output_tokens: Some(9)` and all other dimensions `None`; expected output provenance is `CliExtracted`, expected input/cache dimensions remain `Unknown`.
 
-- [ ] **Step 8: Run proxy-focused tests**
+- [ ] **Step 8: Add the billing guard for CLI usage absence**
+
+Successful CLI extraction must prove provenance, but absent CLI usage must prove billing protection. Add a small helper in the emission path, called before `UsageRecord` construction in `crates/gw-proxy/src/billing_lifecycle.rs`, with this behavior:
+
+1. Only apply to CLI-shaped billable attempts whose upstream request was exposed to a vendor (`VendorExposure::Sent`, `Streaming`, `Settled`, or `Terminated` after exposure).
+2. If any billable usage dimension is already present (`input_tokens > 0`, `output_tokens > 0`, or optional cache/thinking/multimodal dimensions are `Some`), leave it unchanged.
+3. If no usage is present and `ctx.prompt_estimate_tokens` is available, set `ctx.usage.input_tokens = max(prompt_estimate_tokens, 1)` and promote `ctx.usage_provenance.input` to `ProvenanceTag::Estimated`. This reuses the existing request estimate so the Go settler receives a settlement-safe non-zero usage record.
+4. If no usage is present and no estimate is available, fail closed through an explicit billing-protection result: do not emit an all-zero successful `UsageRecord`; return `None` or an error-path record whose `error_code` makes the protection visible. The implementation choice must match the current `build_attempt_record` call sites, but the invariant is fixed: no billable successful CLI attempt can be free because usage was absent.
+
+Add unit tests with these names:
+
+```rust
+#[test]
+fn cli_extracted_usage_success_keeps_cli_extracted_provenance()
+
+#[test]
+fn cli_usage_absent_uses_nonzero_estimate_instead_of_free_usage()
+
+#[test]
+fn cli_usage_absent_without_estimate_fails_billing_protection()
+```
+
+Required assertions:
+
+```rust
+assert_eq!(record.usage_provenance.input, ProvenanceTag::CliExtracted);
+assert!(record.usage.input_tokens > 0 || record.usage.output_tokens > 0);
+assert_ne!(record.usage_provenance.input, ProvenanceTag::Unknown);
+```
+
+For the absent-usage estimate test, start with a CLI shape, exposed vendor state, `ctx.prompt_estimate_tokens = Some(37)`, and no extracted usage. The emitted record must have `usage.input_tokens == 37`, `usage_provenance.input == ProvenanceTag::Estimated`, and must not be an all-zero usage record.
+
+For the no-estimate protection test, start with a CLI shape, exposed vendor state, no extracted usage, and `ctx.prompt_estimate_tokens = None`. The test must assert the chosen fail-closed behavior explicitly; it must not accept an emitted successful all-zero record.
+
+- [ ] **Step 9: Run proxy-focused tests**
 
 Run:
 
@@ -394,6 +427,9 @@ Run:
 cargo test -p gw-proxy cli_extracted_ranks_between_final_and_partial --locked
 cargo test -p gw-proxy cli_full_usage_marks_extracted_provenance --locked
 cargo test -p gw-proxy cli_delta_marks_only_present_dimensions --locked
+cargo test -p gw-proxy cli_extracted_usage_success_keeps_cli_extracted_provenance --locked
+cargo test -p gw-proxy cli_usage_absent_uses_nonzero_estimate_instead_of_free_usage --locked
+cargo test -p gw-proxy cli_usage_absent_without_estimate_fails_billing_protection --locked
 ```
 
 Expected after implementation:
@@ -402,6 +438,9 @@ Expected after implementation:
 test ... cli_extracted_ranks_between_final_and_partial ... ok
 test ... cli_full_usage_marks_extracted_provenance ... ok
 test ... cli_delta_marks_only_present_dimensions ... ok
+test ... cli_extracted_usage_success_keeps_cli_extracted_provenance ... ok
+test ... cli_usage_absent_uses_nonzero_estimate_instead_of_free_usage ... ok
+test ... cli_usage_absent_without_estimate_fails_billing_protection ... ok
 ```
 
 ## Task 3: Update Soak Dedupe Oracle
@@ -412,7 +451,7 @@ test ... cli_delta_marks_only_present_dimensions ... ok
 
 - [ ] **Step 1: Add a failing Python assertion for the new priority**
 
-Add this test to `tests/e2e/client/soak/test_kill_loop.py`:
+Add these tests to `tests/e2e/client/soak/test_kill_loop.py`:
 
 ```python
 def test_dedupe_rank_orders_cli_extracted_between_final_and_partial():
@@ -424,6 +463,32 @@ def test_dedupe_rank_orders_cli_extracted_between_final_and_partial():
     assert _PROVENANCE_RANK["estimated"] == 2
     assert _PROVENANCE_RANK["crash_fallback"] == 1
     assert _PROVENANCE_RANK["unknown"] == 0
+
+
+def test_dedupe_breakdown_keeps_cli_extracted_over_estimated_fallback():
+    from soak.dedupe import dedupe_breakdown
+
+    def rec(provenance):
+        return {
+            "request_id": "cli-usage-1",
+            "attempt_index": 0,
+            "vendor_exposure_state": "settled",
+            "usage_provenance": {
+                "input": provenance,
+                "output": "unknown",
+                "cache_read": "unknown",
+                "cache_creation": "unknown",
+                "thinking": "unknown",
+                "multimodal_input": "unknown",
+            },
+        }
+
+    breakdown = dedupe_breakdown([rec("estimated"), rec("cli_extracted")])
+
+    assert breakdown["dedupes_inferred"] == 1
+    [collision] = breakdown["collision_groups"]
+    assert collision["winner"]["rank"] == [3, 4]
+    assert collision["discarded"][0]["rank"] == [3, 2]
 ```
 
 - [ ] **Step 2: Run the failing Python test**
@@ -432,12 +497,14 @@ Run:
 
 ```bash
 PYTHONPATH=tests/e2e/client pytest tests/e2e/client/soak/test_kill_loop.py::test_dedupe_rank_orders_cli_extracted_between_final_and_partial -q
+PYTHONPATH=tests/e2e/client pytest tests/e2e/client/soak/test_kill_loop.py::test_dedupe_breakdown_keeps_cli_extracted_over_estimated_fallback -q
 ```
 
 Expected before implementation:
 
 ```text
 KeyError: 'cli_extracted'
+winner rank is lower than expected because cli_extracted is not in _PROVENANCE_RANK
 ```
 
 - [ ] **Step 3: Update the soak rank table and docstring**
@@ -473,10 +540,10 @@ PYTHONPATH=tests/e2e/client pytest tests/e2e/client/soak/test_kill_loop.py -q
 Expected after implementation:
 
 ```text
-7 passed
+8 passed
 ```
 
-If the file already contains more than seven tests when this plan is executed, expected result is all tests in `test_kill_loop.py` pass.
+If the file already contains more than eight tests when this plan is executed, expected result is all tests in `test_kill_loop.py` pass.
 
 ## Task 4: Update Specs And Go Consumer Contract
 
@@ -546,6 +613,17 @@ Go settler rank:
 | `unknown` | 0 |
 ```
 
+Add the billing guard immediately below the table:
+
+```markdown
+CLI billing guard:
+
+- A successful CLI-shaped billable attempt must not settle as free only because the upstream CLI wire response omitted usage.
+- If Rust emits `cli_extracted`, Go ranks it as 4 and may replace lower-rank duplicate records.
+- If Rust emits an estimated fallback for absent CLI usage, Go ranks it as 2 and settles it as a non-zero usage record.
+- If Go receives a successful CLI-shaped `UsageRecord` whose billable usage dimensions are all zero and whose provenance is still `unknown`, Go must reject or quarantine it as a billing-protection violation instead of treating it as free usage.
+```
+
 - [ ] **Step 5: Update ROADMAP closure**
 
 Find the W3 / CLI provenance open item in `docs/ROADMAP.md`:
@@ -587,6 +665,7 @@ Run:
 cargo test -p gw-core usage --locked
 cargo test -p gw-ledger --test usage_schema --locked
 cargo test -p gw-proxy cli --locked
+cargo test -p gw-proxy cli_usage_absent --locked
 cargo test -p gw-gateway metrics_catalog --locked
 ```
 
@@ -601,6 +680,9 @@ cargo test -p gw-ledger --test usage_schema --locked
 
 cargo test -p gw-proxy cli --locked
 # all CLI response-filter tests pass
+
+cargo test -p gw-proxy cli_usage_absent --locked
+# CLI usage-absent billing-protection tests pass
 
 cargo test -p gw-gateway metrics_catalog --locked
 # catalog tests pass, with no duplicate gw_cli_usage_extract_total registration
@@ -671,6 +753,7 @@ Run:
 git diff -- crates/gw-core/src/usage.rs \
   crates/gw-ledger/tests/usage_schema.rs \
   crates/gw-proxy/src/filters/response.rs \
+  crates/gw-proxy/src/billing_lifecycle.rs \
   crates/gw-gateway/src/metrics_catalog.rs \
   tests/e2e/client/soak/dedupe.py \
   tests/e2e/client/soak/test_kill_loop.py \
@@ -684,6 +767,7 @@ Expected:
 
 ```text
 Only CLI usage provenance code, tests, docs, and soak oracle changes appear.
+CLI usage-absent changes are limited to the billing guard needed to prevent free successful usage.
 No `UsageSource` enum or `usage_source` JSON field is reintroduced.
 No duplicate `gw_cli_usage_extract_total` metric is added.
 ```
@@ -696,6 +780,7 @@ Run:
 git add crates/gw-core/src/usage.rs \
   crates/gw-ledger/tests/usage_schema.rs \
   crates/gw-proxy/src/filters/response.rs \
+  crates/gw-proxy/src/billing_lifecycle.rs \
   crates/gw-gateway/src/metrics_catalog.rs \
   tests/e2e/client/soak/dedupe.py \
   tests/e2e/client/soak/test_kill_loop.py \
@@ -720,6 +805,7 @@ Run these before handing off implementation:
 cargo test -p gw-core usage --locked
 cargo test -p gw-ledger --test usage_schema --locked
 cargo test -p gw-proxy cli --locked
+cargo test -p gw-proxy cli_usage_absent --locked
 cargo test -p gw-gateway metrics_catalog --locked
 PYTHONPATH=tests/e2e/client pytest tests/e2e/client/soak/test_kill_loop.py -q
 bash scripts/check-spec.sh docs/spec/01-protocol-codec.md
@@ -734,7 +820,8 @@ Expected final state:
 - `ProvenanceTag::CliExtracted` serializes as `"cli_extracted"`.
 - CLI response-body extraction stamps extracted dimensions as `cli_extracted`.
 - CLI stream-delta extraction stamps only dimensions present in the delta as `cli_extracted`.
+- CLI usage-absent success does not emit all-zero/free usage; it either emits a non-zero estimated record with `usage_provenance.input = "estimated"` or takes the explicit billing-protection failure path.
 - `copy_provenance` keeps `upstream_final` over `cli_extracted` and promotes `cli_extracted` over `upstream_partial`.
-- Go contract and soak dedupe rank order match W0 exactly: `5,4,3,2,1,0`.
+- Go contract and soak dedupe rank order match W0 exactly: `5,4,3,2,1,0`; Go and soak dedupe both keep `cli_extracted` over estimated fallback records for the same `(request_id, attempt_index)`.
 - `gw_cli_usage_extract_total{shape,source}` remains the single CLI extraction metric.
 - No `UsageSource` type or `usage_source` field is reintroduced.
