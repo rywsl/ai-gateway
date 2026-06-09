@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land Kiro EventStream, Vertex AI service-account auth, and Codex request-body transforms behind the W5 outbound adapter seam.
+**Goal:** Land Kiro EventStream, Kiro CLI shape registration, Vertex AI service-account auth, and Codex request-body transforms behind the W5 outbound adapter seam.
 
-**Architecture:** Split work into one shared contract lane and three independent vendor lanes. The shared lane makes `ProtocolKind`, `ApiShape`, `AnyCodec`, `WireAnyRequest`, Go contract strings, and `apply_outbound_adapter` hook execution agree before vendor-specific adapters rely on them. Vendor lanes then add isolated adapters for Kiro SigV4/EventStream, Vertex service-account JWT/token exchange, and Codex semantic request mutation.
+**Architecture:** Split work into one shared contract lane, one Kiro CLI contract lane, and three independent vendor lanes. The shared lane makes `ProtocolKind`, `ApiShape`, `AnyCodec`, `WireAnyRequest`, Go contract strings, and `apply_outbound_adapter` hook execution agree before vendor-specific adapters rely on them. The Kiro CLI lane registers CLI detection and hints as a separate `ApiShape` under `ProtocolKind::Kiro`; it must not be conflated with Kiro EventStream. Vendor lanes then add isolated adapters for Kiro SigV4/EventStream, Vertex service-account JWT/token exchange, and Codex semantic request mutation.
 
 **Tech Stack:** Rust 1.88 workspace, `gw-core`, `gw-codec`, `gw-adapter`, `gw-proxy`, `gw-capability`, Pingora request rewrite filters, AWS EventStream, AWS SigV4, Google OAuth service-account JWT bearer grant, Go PgSQL/Redis contracts.
 
@@ -12,30 +12,35 @@
 
 ## User Decision Needed
 
-The Kiro cross-process contract is not explicitly confirmed by the user yet. Before starting source implementation, ask for confirmation of the W0 EventStream-only recommendation:
+User decision recorded on 2026-06-09: Kiro EventStream shape continues, and W7 must also add a Kiro CLI ApiShape/lane because Kiro CLI behavior is required. EventStream implementation is no longer blocked by the CLI protocol details.
 
 ```text
-Recommended W7 Kiro contract:
+Confirmed W7 Kiro contract:
 - ProtocolKind::Kiro
 - ApiShape::KiroEventStream
 - ApiShape::format_id() == "kiro:eventstream"
+- ApiShape::KiroCli
+- ApiShape::KiroCli::format_id() == "kiro:cli"
 - ProtocolKind JSONB / as_str() wire string == "kiro"
 - vendor_keys.payload.accessible_endpoints == ["kiro"]
-- Kiro is a standard EventStream protocol, not a CLI variant
+- EventStream uses ApiShape::KiroEventStream and is not a CLI variant
+- CLI uses ApiShape::KiroCli and is a CLI variant under the same ProtocolKind::Kiro
 ```
 
-- [ ] **Decision gate:** If the user confirms this recommendation, continue with Tasks 1-7.
-- [ ] **Decision gate:** If the user chooses a different Kiro shape, stop the Kiro lane and replace Tasks 1-3 with a plan that names the chosen `ProtocolKind`, `ApiShape`, `FORMAT_ID`, codec registration, and Go strings.
+- [ ] **Implementation-time blocker:** Do not block Kiro EventStream on CLI-specific reverse engineering. If the exact Kiro CLI request markers or hint fields need more evidence, implement the enum/contract shape first and pause only the CLI detector/hints step until sample CLI traffic is available.
+- [ ] **Implementation-time blocker:** If sample Kiro CLI traffic proves that `kiro:cli` must use a different wire string, update the CLI lane and Go contract strings together before committing that lane. Keep `kiro:eventstream` unchanged.
 
 ## File Map
 
-- Modify: `crates/gw-core/src/protocol.rs` for `ProtocolKind::Kiro`, `ApiShape::KiroEventStream`, format strings, CLI flag, and protocol mapping.
+- Modify: `crates/gw-core/src/protocol.rs` for `ProtocolKind::Kiro`, `ApiShape::KiroEventStream`, `ApiShape::KiroCli`, format strings, CLI flags, and protocol mapping.
 - Modify: `crates/gw-core/tests/wire_enum_lock.rs` for serde-wire lock coverage.
 - Modify: `crates/gw-codec/src/any.rs` for `AnyCodec::Kiro`, detection order, dispatch, `kind()`, and `api_shape()`.
+- Modify: `crates/gw-codec/src/cli/mod.rs` for Kiro CLI detection.
+- Create: `crates/gw-codec/src/cli/kiro_cli.rs` for Kiro CLI shape and hints.
 - Modify: `crates/gw-codec/src/cross_render.rs` for `WireFormat::KiroEventStream`, labels, capabilities, and `from_any_codec`.
 - Modify: `crates/gw-codec/src/wire/any.rs` for `WireAnyRequest::Kiro`.
 - Modify: `crates/gw-codec/src/kiro/mod.rs` to remove the "not added" module comment and keep EventStream behavior as the codec implementation.
-- Modify: `crates/gw-codec/tests/kiro_eventstream.rs`, `crates/gw-codec/tests/cross_protocol_matrix.rs`, `crates/gw-codec/tests/lossy_paths.rs`, and `crates/gw-codec/tests/wire_any.rs` for codec registration coverage.
+- Modify: `crates/gw-codec/tests/kiro_eventstream.rs`, `crates/gw-codec/tests/cli_variants.rs`, `crates/gw-codec/tests/cross_protocol_matrix.rs`, `crates/gw-codec/tests/lossy_paths.rs`, and `crates/gw-codec/tests/wire_any.rs` for codec and CLI registration coverage.
 - Create: `crates/gw-adapter/src/kiro.rs` for Kiro SigV4 and EventStream adapter behavior.
 - Create: `crates/gw-adapter/src/vertex.rs` for service-account JWT bearer exchange and auth injection.
 - Create: `crates/gw-adapter/src/codex.rs` for Codex request mutation through `patch_request`.
@@ -47,7 +52,7 @@ Recommended W7 Kiro contract:
 
 ## Shared Contract Lane
 
-### Task 1: Register Kiro Protocol Shape
+### Task 1: Register Kiro Protocol Shapes
 
 **Files:**
 - Modify: `crates/gw-core/src/protocol.rs`
@@ -57,7 +62,7 @@ Recommended W7 Kiro contract:
 
 - [ ] **Step 1: Add the enum-lock failing test**
 
-Add assertions that lock both serde JSONB strings and runtime strings:
+Add assertions that lock both EventStream and CLI serde JSONB strings and runtime strings:
 
 ```rust
 #[test]
@@ -72,12 +77,25 @@ fn kiro_protocol_and_shape_wire_strings_are_locked() {
         r#""kiro_event_stream""#
     );
     assert_eq!(
+        serde_json::to_string(&gw_core::protocol::ApiShape::KiroCli).unwrap(),
+        r#""kiro_cli""#
+    );
+    assert_eq!(
         gw_core::protocol::ApiShape::KiroEventStream.format_id(),
         "kiro:eventstream"
     );
+    assert_eq!(
+        gw_core::protocol::ApiShape::KiroCli.format_id(),
+        "kiro:cli"
+    );
     assert!(!gw_core::protocol::ApiShape::KiroEventStream.is_cli());
+    assert!(gw_core::protocol::ApiShape::KiroCli.is_cli());
     assert_eq!(
         gw_core::protocol::ApiShape::KiroEventStream.protocol_kind(),
+        gw_core::protocol::ProtocolKind::Kiro
+    );
+    assert_eq!(
+        gw_core::protocol::ApiShape::KiroCli.protocol_kind(),
         gw_core::protocol::ProtocolKind::Kiro
     );
 }
@@ -91,7 +109,7 @@ Run:
 cargo test -p gw-core wire_enum_lock --locked
 ```
 
-Expected: FAIL because `ProtocolKind::Kiro` and `ApiShape::KiroEventStream` do not exist.
+Expected: FAIL because `ProtocolKind::Kiro`, `ApiShape::KiroEventStream`, and `ApiShape::KiroCli` do not exist.
 
 - [ ] **Step 3: Implement the protocol enums**
 
@@ -116,16 +134,23 @@ Add to `ApiShape`:
 
 ```rust
 KiroEventStream,
+KiroCli,
 ```
 
 Update `format_id()`, `is_cli()`, and `protocol_kind()`:
 
 ```rust
 Self::KiroEventStream => "kiro:eventstream",
+Self::KiroCli => "kiro:cli",
 ```
 
 ```rust
 Self::KiroEventStream => ProtocolKind::Kiro,
+Self::KiroCli => ProtocolKind::Kiro,
+```
+
+```rust
+Self::KiroCli => true,
 ```
 
 - [ ] **Step 4: Update Go contract strings**
@@ -141,14 +166,15 @@ In `docs/go-contracts/parts/03-shared-schema.md`, update the `vendor_keys.payloa
 Add a sentence:
 
 ```text
-For Kiro, both the `ProtocolKind` JSONB string and `ProtocolKind::as_str()` string are `kiro`; `ApiShape::format_id()` is `kiro:eventstream`.
+For Kiro, both the `ProtocolKind` JSONB string and `ProtocolKind::as_str()` string are `kiro`; EventStream uses `ApiShape::KiroEventStream` with `ApiShape::format_id() == "kiro:eventstream"`, while CLI uses `ApiShape::KiroCli` with `ApiShape::format_id() == "kiro:cli"`.
 ```
 
 In `docs/go-contracts/parts/08-control-plane.md`, update the capability example:
 
 ```json
 "protocols": ["openai","anthropic","gemini","kiro"],
-"api_shapes": ["openai:chat","openai:responses","anthropic:messages","gemini:generate","kiro:eventstream"]
+"api_shapes": ["openai:chat","openai:responses","anthropic:messages","gemini:generate","kiro:eventstream","kiro:cli"],
+"cli_variants": ["claude:cli","openai:cli","openai:compact","gemini:cli","kiro:cli"]
 ```
 
 - [ ] **Step 5: Verify protocol shape**
@@ -300,6 +326,85 @@ Run:
 cargo test -p gw-codec kiro --locked
 cargo test -p gw-codec cross_protocol_matrix --locked
 cargo test -p gw-codec lossy_paths --locked
+```
+
+Expected: PASS.
+
+### Task 2A: Register Kiro CLI Shape And Hints
+
+**Files:**
+- Modify: `crates/gw-core/src/protocol.rs`
+- Modify: `crates/gw-codec/src/cli/mod.rs`
+- Create: `crates/gw-codec/src/cli/kiro_cli.rs`
+- Modify: `crates/gw-codec/tests/cli_variants.rs`
+- Modify: `docs/go-contracts/parts/03-shared-schema.md`
+- Modify: `docs/go-contracts/parts/08-control-plane.md`
+
+- [ ] **Step 1: Add failing CLI shape coverage**
+
+Extend `crates/gw-codec/tests/cli_variants.rs` with a Kiro CLI case that asserts the separate CLI shape:
+
+```rust
+#[test]
+fn kiro_cli_shape_and_hints_are_separate_from_eventstream() {
+    let codec = gw_codec::cli::kiro_cli::KiroCliCodec;
+    assert_eq!(codec.shape(), gw_core::protocol::ApiShape::KiroCli);
+    assert_ne!(codec.shape(), gw_core::protocol::ApiShape::KiroEventStream);
+
+    let hints = codec.extract_hints(
+        "/kiro/cli",
+        Some(br#"{"model":"kiro-cli-model","stream":true}"#),
+    );
+    assert_eq!(hints.model.as_deref(), Some("kiro-cli-model"));
+    assert_eq!(hints.stream, Some(true));
+}
+```
+
+Add detector coverage in the same test file using the actual Kiro CLI request marker selected during implementation. The detector assertion must return `Some(ApiShape::KiroCli)`, and an AWS EventStream request must still return no CLI shape from `detect_cli`.
+
+- [ ] **Step 2: Run the failing CLI tests**
+
+Run:
+
+```bash
+cargo test -p gw-codec cli_variants --locked
+```
+
+Expected: FAIL because `KiroCliCodec`, `ApiShape::KiroCli`, and CLI detection are not fully registered.
+
+- [ ] **Step 3: Implement `KiroCliCodec`**
+
+Create `crates/gw-codec/src/cli/kiro_cli.rs` following the existing CLI codec pattern:
+
+```rust
+pub struct KiroCliCodec;
+```
+
+The codec must return `ApiShape::KiroCli` from `shape()` and extract hints with the existing `CliHints` structure. Use structured JSON parsing for body fields and preserve unknown fields by ignoring them.
+
+- [ ] **Step 4: Register Kiro CLI detection**
+
+In `crates/gw-codec/src/cli/mod.rs`, export `kiro_cli`, include `ApiShape::KiroCli` in the format/id and `is_cli()` tests, and add a detector branch for Kiro CLI request markers. Keep detection order explicit so Kiro EventStream remains owned by `AnyCodec::Kiro` and `ApiShape::KiroEventStream`, while Kiro CLI remains owned by `detect_cli` and `ApiShape::KiroCli`.
+
+- [ ] **Step 5: Update Go contract strings**
+
+In `docs/go-contracts/parts/03-shared-schema.md`, state that Kiro has two shapes under one protocol:
+
+```text
+Kiro EventStream and Kiro CLI share `ProtocolKind::Kiro` / `kiro`; EventStream uses `kiro:eventstream` and CLI uses `kiro:cli`. Runtime code must choose by `ApiShape`, not by protocol string alone.
+```
+
+In `docs/go-contracts/parts/08-control-plane.md`, ensure `api_shapes` includes both `kiro:eventstream` and `kiro:cli`, and `cli_variants` includes `kiro:cli`.
+
+- [ ] **Step 6: Verify CLI lane**
+
+Run:
+
+```bash
+cargo test -p gw-core wire_enum_lock --locked
+cargo test -p gw-codec cli_variants --locked
+bash scripts/check-spec.sh docs/go-contracts/parts/03-shared-schema.md
+bash scripts/check-spec.sh docs/go-contracts/parts/08-control-plane.md
 ```
 
 Expected: PASS.
@@ -806,6 +911,7 @@ Expected: PASS.
 - Modify: `crates/gw-adapter/tests/registry_lookup.rs`
 - Modify: `crates/gw-capability/src/resolver.rs`
 - Modify: `crates/gw-capability/tests/responses_capability.rs`
+- Modify: `crates/gw-codec/tests/cli_variants.rs`
 - Modify: `docs/spec/01-protocol-codec.md`
 - Modify: `docs/spec/07-vendor-integration.md`
 - Modify: `docs/go-contracts/parts/03-shared-schema.md`
@@ -857,7 +963,7 @@ async fn kiro_eventstream_shape_does_not_gain_openai_responses_capability() {
 }
 ```
 
-Update `crates/gw-capability/src/resolver.rs` only if matching on `ApiShape` becomes exhaustive after Task 1. Keep CLI variants unchanged; Kiro must not appear in `cli_variants`. W7 does not add new Prometheus metrics; do not modify `crates/gw-gateway/src/metrics_catalog.rs`.
+Update `crates/gw-capability/src/resolver.rs` only if matching on `ApiShape` becomes exhaustive after Task 1. Keep `ApiShape::KiroEventStream` out of `cli_variants`; add only `ApiShape::KiroCli` / `kiro:cli` to CLI variant surfacing. W7 does not add new Prometheus metrics; do not modify `crates/gw-gateway/src/metrics_catalog.rs`.
 
 - [ ] **Step 4: Update specs**
 
@@ -865,15 +971,17 @@ In `docs/spec/01-protocol-codec.md`, move Kiro from "Not built -> ROADMAP" into 
 
 ```text
 Kiro EventStream is registered through `AnyCodec::Kiro`, `ProtocolKind::Kiro`, and `ApiShape::KiroEventStream`. The Aether `FORMAT_ID` is `kiro:eventstream`; the codec parses and renders AWS EventStream frames and embedded `<thinking>` payload sections.
+Kiro CLI is registered separately as `ApiShape::KiroCli` with Aether `FORMAT_ID` `kiro:cli`. Runtime dispatch must not infer CLI behavior from `ProtocolKind::Kiro` alone.
 ```
 
 In `docs/spec/07-vendor-integration.md`, replace the heavy-transform gap with:
 
 ```text
 Kiro SigV4/EventStream, Vertex service-account auth, and Codex request mutation are implemented as `gw-adapter` outbound adapters. The proxy invokes `patch_request` after codec render and before archive/send; no task-runtime code calls adapters.
+Kiro CLI request detection is a CLI shape concern and is intentionally separate from the Kiro EventStream adapter path.
 ```
 
-In `docs/ROADMAP.md`, mark W7 items closed with the commit ids created by Tasks 1-7.
+In `docs/ROADMAP.md`, mark W7 items closed with the commit ids created by Tasks 1, 2, 2A, and 3-7.
 
 - [ ] **Step 5: Run full W7 verification**
 
@@ -883,6 +991,7 @@ Run:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test -p gw-core wire_enum_lock --locked
+cargo test -p gw-codec cli_variants --locked
 cargo test -p gw-codec kiro --locked
 cargo test -p gw-codec wire_any --locked
 cargo test -p gw-adapter kiro --locked
@@ -903,8 +1012,9 @@ Expected: PASS.
 
 ## Commit Plan
 
-- [ ] Commit Task 1 as `feat(codec): add kiro protocol shape`.
+- [ ] Commit Task 1 as `feat(codec): add kiro protocol shapes`.
 - [ ] Commit Task 2 as `feat(codec): register kiro eventstream codec`.
+- [ ] Commit Task 2A as `feat(codec): add kiro cli shape`.
 - [ ] Commit Task 3 as `feat(adapter): execute request patch hook`.
 - [ ] Commit Task 4 as `feat(adapter): add kiro outbound transform`.
 - [ ] Commit Task 5 as `feat(adapter): add vertex service-account transform`.
