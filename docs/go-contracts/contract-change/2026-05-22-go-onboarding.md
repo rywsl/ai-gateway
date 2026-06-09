@@ -299,6 +299,8 @@ CREATE TABLE auth_configs (
 
 ## 4. VendorKey payload 加 `oauth` 子结构 + 新反向事件 op
 
+> Legacy/pre-K-C note: this section's runtime-refresh ownership was superseded by [`2026-06-09-rust-oauth-refresh.md`](2026-06-09-rust-oauth-refresh.md). Post-K-C, Rust is the sole runtime writer for refreshed `vendor_keys.payload.oauth`, and Go must not refresh runtime vendor-key OAuth tokens in response to `oauth_failed` or any Rust OAuth runtime event.
+
 ### 4.1 `parts/03-shared-schema.md` §3.2.5 schema 末尾追加字段
 
 在 §3.2.5 JSON 形态的 `"exclusive_capability_match": false` 之后追加:
@@ -346,13 +348,13 @@ CREATE TABLE auth_configs (
 把现有 §2.4.3(不变量)顺延为 §2.4.4,并在原 §2.4.2 之后插入新 §2.4.3:
 
 ````
-### 2.4.3 `vendor_key.oauth_failed`(OAuth 失败通知)
+### 2.4.3 `vendor_key.oauth_failed`(OAuth 失败通知, legacy/pre-K-C)
 
 | 触发 | 上游返回 401 且 `vendor_key.oauth.is_some()`,经 `OAuthListener` 判定为 `AccountBlocked(OAuthRefreshFailed)` |
 |---|---|
-| Payload | `ns=vendor_key id=<key_id> op=status_change field=oauth_failed reason=upstream_401 ts_ms=<now>` |
-| Go 接收行为 | task-worker 检查 `refresh_token` 有效性 → 尝试 refresh:<br/>① 成功:加密新 access_token + 整体替换 `payload.oauth` 子对象 + `version + 1` + XADD `events:entity ns=vendor_key op=upsert`;<br/>② 失败:`status = disabled` + XADD `events:entity ns=vendor_key op=upsert` |
-| Rust 后续 | **不**主动 refresh;等 Go 写新 vendor_key payload 后自然冷加载到新 token |
+| Payload | legacy/pre-K-C: `ns=vendor_key id=<key_id> op=status_change field=oauth_failed reason=upstream_401 ts_ms=<now>` |
+| Go 接收行为 | legacy/pre-K-C only: task-worker 检查 `refresh_token` 有效性 → 尝试 refresh。Post-K-C: status/alert only,不得触发 Go runtime refresh。 |
+| Rust 后续 | Post-K-C 由 Rust `OAuthRuntime` 完成 runtime refresh、encrypted write-back、version bump 与 `events:entity ns=vendor_key op=upsert`。 |
 
 不变量:与 §2.4.1(`rate_limited`)、§2.4.2(`ipblock`)并列,均属"Rust 反向写,Go 接收"的白名单 op。
 ````
@@ -362,7 +364,7 @@ CREATE TABLE auth_configs (
 原 §2.4.3 内容(不变量段)顺延为 §2.4.4;并在不变量列表中追加一行:
 
 ```
-- §2.4.3 oauth_failed:Rust 反向写,Go task-worker 端必须实现 refresh 处理;未实现的代价 = 该 vendor_key 失效后无法自愈,等同 §2.4.4 表中"Go 未实现接收 → vendor_key 状态不会同步到 PgSQL"。
+- §2.4.3 oauth_failed:legacy/pre-K-C 可作为 Go refresh command。Post-K-C 后 Rust 是 sole runtime writer,Go 端不得把 Rust OAuth runtime event 当作 refresh command。
 ```
 
 ### 4.5 Rust 落点

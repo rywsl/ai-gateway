@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Take a routed-and-picked `(VendorKey, Vendor)` pair and turn the in-memory request into bytes the upstream vendor will accept: strip client credentials, inject the vendor's auth secret under the correct header, set `host`/`traceparent`/`content-length`, and — for vendors that opt into TLS-fingerprint impersonation — route the connection through an in-process BoringSSL loopback that presents a browser-class JA3/JA4 and a per-identity static header set. OAuth-credentialed keys inject a pre-decrypted bearer token; token refresh is delegated to the Go side. Cost is never computed here (workspace lint `no_cost_micro`).
+Take a routed-and-picked `(VendorKey, Vendor)` pair and turn the in-memory request into bytes the upstream vendor will accept: strip client credentials, inject the vendor's auth secret under the correct header, set `host`/`traceparent`/`content-length`, and — for vendors that opt into TLS-fingerprint impersonation — route the connection through an in-process BoringSSL loopback that presents a browser-class JA3/JA4 and a per-identity static header set. OAuth-credentialed keys refresh through Rust's runtime refresher before bearer injection when the access token is inside the refresh window. Cost is never computed here (workspace lint `no_cost_micro`).
 
 ## As-built surface
 
@@ -13,17 +13,20 @@ Take a routed-and-picked `(VendorKey, Vendor)` pair and turn the in-memory reque
 Vendor auth/header work happens inside `rewrite_request` -> `apply_outbound_adapter` in `crates/gw-proxy/src/filters/upstream.rs`, using `AdapterRegistry::for_vendor(&picked.vendor_id)` from the `LlmGateway` registry passed by `crates/gw-proxy/src/gateway.rs`. Unregistered vendors use `NoopAdapter`, which preserves the legacy direct-vendor rewrite byte shape.
 
 - `NoopAdapter::rewrite_auth` (`crates/gw-adapter/src/noop.rs`) first removes the inbound client credentials `authorization`, `x-api-key`, `x-api-key-id`, then injects the vendor secret.
-- The auth secret is chosen in `noop.rs`: if `ctx.vendor_key.oauth.is_some()` the already-decrypted `oauth.access_token` is used; otherwise `ctx.vendor_key.api_key` is exposed via `secrecy::ExposeSecret`.
+- The auth secret is chosen in `noop.rs`: if `ctx.vendor_key.oauth.is_some()` the adapter obtains a runtime access token from `ctx.oauth_runtime.access_token_for(...)`; otherwise `ctx.vendor_key.api_key` is exposed via `secrecy::ExposeSecret`.
 - The injection honors the **header name encoded in `Vendor.auth_template`**. The template is split on its first `:`; if the left side is a valid header-name token (`is_header_token`, `noop.rs`) the value is injected under that name (e.g. `x-goog-api-key: {api_key}` for native Gemini, `x-api-key: {api_key}` for Anthropic). A template with no colon (e.g. `Bearer {api_key}`) injects under `authorization`. A colon with an invalid token falls back leniently to `authorization` and ticks `gw_upstream_auth_header_invalid_total`. `{api_key}` is substituted in the value template after the split, so a secret containing a colon is safe.
 - `host` is set from the adapter context's `upstream_host`, derived from `vendor.value.base_urls.first()` in `apply_outbound_adapter` (`crates/gw-proxy/src/filters/upstream.rs`).
 - A W3C `traceparent` (`00-<trace_id>-<fresh-8-byte-span>-01`) is set per upstream hop by `NoopAdapter`; `content-length` is rewritten from the rendered body length carried in `AdapterCtx`.
 - The upstream peer host/port also come from `Vendor.base_urls.first()` in `pick_peer` (`upstream.rs:362`–`371`); a vendor with no base URL is a hard `gw_vendor_no_base_url` 500.
 
-### OAuth: inject pre-decrypted token, refresh delegated to Go
+### OAuth: Rust refreshes before bearer injection
 
 - OAuth credentials are decrypted **at load time** in `crates/gw-store/src/loader.rs`: `load_vendor_key` (`loader.rs:283`–`329`) AES-256-GCM-decrypts `access_token_enc` and `refresh_token_enc` via `crate::encrypt::decrypt` into an in-memory `OAuthCredentials` (`loader.rs:290`–`299`). The wire row shape is `OAuthCredentialsRow` (`loader.rs:131`), carrying `access_expires_at`, `token_endpoint`, `scope`, and `quota_project_id`.
-- On dispatch, `NoopAdapter::rewrite_auth` (`crates/gw-adapter/src/noop.rs`) compares `oauth.access_expires_at` against `now`: at/after expiry it increments `gw_oauth_token_expired_total`; within 60 s of expiry it increments `gw_oauth_token_near_expiry_total`. **The token is sent regardless of expiry** — `oauth.access_token.expose_secret()` is injected even when the metric fired. This is deliberate: Rust does not refresh.
-- Refresh is **delegated to Go**. The error path's `OAuthListener` (`crates/gw-proxy/src/error/listeners/oauth.rs`) reacts to a classifier `OAuthSignalKind::RefreshFailed` by reverse-`XADD`ing to `events:entity` (`oauth.rs:58`–`83`) with fields `ns=vendor_key id=<key_id> op=status_change field=oauth_failed reason=upstream_401 ts_ms=<now>`, then ticks `gw_oauth_refresh_failed_xadd_total`. The XADD is fire-and-forget via `tokio::spawn` because the listener trait is synchronous. `gw_oauth_refresh_total{vendor,outcome}` is emitted for every signal (`oauth.rs:32`).
+- On dispatch, `NoopAdapter::rewrite_auth` (`crates/gw-adapter/src/noop.rs`) checks `ctx.vendor_key.oauth.is_some()`. OAuth keys must have an `OAuthRuntime` in `AdapterCtx`; the adapter calls `OAuthRuntime::access_token_for(key_id, request_id)` and injects the returned access token into the vendor auth template. If the runtime returns a refreshed `VendorKey`, the adapter swaps `ctx.vendor_key` to that refreshed value before the upstream request is rendered.
+- `RustOAuthRuntime` (`crates/gw-adapter/src/oauth_runtime.rs`) returns the current token when it is outside the configured refresh skew. Inside the skew window it coordinates cross-pod single-flight with `SET lock:oauth:refresh:<key_id> <request_id> NX PX <lock_ttl_ms>`, calls the provider `token_endpoint`, preserves scope when the provider omits scope, persists rotated refresh tokens when returned, and reloads the winner token on lock loss or version-CAS loss.
+- Runtime write-back is in `PgOAuthRefreshWriter` (`crates/gw-store/src/oauth_refresh.rs`): it AES-256-GCM encrypts the refreshed access token and rotated refresh token, updates `vendor_keys.payload.oauth` with `WHERE version = <expected_version>`, increments the row version, and broadcasts `events:entity ns=vendor_key id=<key_id> op=upsert v=<new_version> source=rust_oauth_refresh`. Go remains the OAuth configuration and first-time authorization writer; Go must not refresh runtime vendor-key OAuth tokens after K-C.
+- Runtime refresh metrics are registered as `gw_oauth_runtime_refresh_total{result=ok|lock_lost|cas_lost|provider_error}` and `gw_oauth_runtime_writeback_total{result=ok|cas_lost|failed}`.
+- The error path's `OAuthListener` (`crates/gw-proxy/src/error/listeners/oauth.rs`) reacts to a classifier `OAuthSignalKind::RefreshFailed` by reverse-`XADD`ing a **status-only** entry to `events:entity` with fields `ns=vendor_key id=<key_id> op=status_change field=oauth_refresh_status status=rust_refresh_failed reason=upstream_401 source=rust_oauth_refresh ts_ms=<now>`, then ticks `gw_oauth_refresh_status_xadd_total`. The XADD is fire-and-forget via `tokio::spawn` because the listener trait is synchronous. `gw_oauth_refresh_total{vendor,outcome}` is emitted for every signal.
 
 ### Egress impersonation
 
@@ -50,19 +53,19 @@ The response-side error analyzer path is also wired: `gw-proxy::LlmGateway` hold
 
 ## Deliberate behaviours
 
-- **Expired OAuth tokens are still sent.** `NoopAdapter::rewrite_auth` injects `oauth.access_token` even when `now >= access_expires_at`; it only records `gw_oauth_token_expired_total`. Refresh is Go's job; sending the stale token (which usually 401s) is what triggers the `OAuthListener` reverse-XADD that drives Go's async refresh. (`noop.rs`, `oauth.rs:39`)
+- **Rust is the sole runtime OAuth refresh writer.** OAuth provider configuration and first-time authorization seed data remain Go-owned, but runtime vendor-key refresh/write-back is Rust-owned after K-C. `OAuthListener` failure events are status/alert signals only and must not be consumed by Go as refresh commands.
 - **Direct (Rustls) keys with a configured proxy fail closed.** Pingora 0.8's next-hop is UDS-only and cannot route through an arbitrary HTTP proxy, so a Direct vendor key with `proxy`/`default_proxy` set is rejected with `GW_UPSTREAM_PROXY_UNSUPPORTED` rather than silently leaking the gateway egress IP. Proxied egress must use `egress_mode = Impersonate`, whose loopback honors `X-Egress-Proxy`. (`upstream.rs:394`–`407`)
 - **Tunnel and Impersonate are mutually exclusive.** When the tunnel feature would route an impersonate vendor through a tunnel node, `pick_peer` returns `GW_TUNNEL_IMPERSONATE_CONFLICT` instead of silently picking one. (`upstream.rs:436`–`448`)
 - **Auth header-name fallback is lenient, not fatal.** A malformed `auth_template` (colon present but the name isn't a header token) falls back to `authorization` plus a metric rather than failing the request — pre-production operator-misconfig tolerance. (`upstream.rs:1070`–`1073`)
 - **Identity persistence is lazy and fingerprint-stable.** A per-key `IdentitySnapshot` is derived once on first impersonated dispatch and persisted out-of-band; profile drift forces a re-derive. (`ensure.rs:19`–`36`)
 - **Outbound auth is adapter-based; impersonate remains external to the adapter.** The production auth/header path dispatches `gw-adapter::UpstreamAdapter`; TLS fingerprinting and identity headers remain in `gw-core::impersonate` / `gw-egress-impersonate`, called after adapter rewrite by `inject_egress_headers`.
-- **Rust OAuth is not yet the runtime writer.** Rust decrypts and injects the access token, emits expiry/401 signals, and currently delegates refresh/write-back to Go. F2 confirms the target ownership change: Go remains the config writer and Rust becomes the sole runtime refresh writer. That implementation is tracked in ROADMAP.
+- **OAuth runtime errors fail before upstream auth injection.** An OAuth vendor key without an `OAuthRuntime`, a provider refresh error, or a write-back error returns an adapter auth error instead of sending an expired or stale bearer token as a best-effort fallback.
 
 ## Cross-process touchpoints
 
-- **PgSQL `vendor_keys` payload** — `oauth` JSONB sub-object (`access_token_enc`, `refresh_token_enc`, `access_expires_at`, `token_endpoint`, `scope`, `quota_project_id`); tokens AES-256-GCM at rest, decrypted in `load_vendor_key`. (`loader.rs:131`, `loader.rs:290`)
+- **PgSQL `vendor_keys` payload** — `oauth` JSONB sub-object (`access_token_enc`, `refresh_token_enc`, `access_expires_at`, `token_endpoint`, `scope`, `quota_project_id`); tokens AES-256-GCM at rest, decrypted in `load_vendor_key`, and runtime-refreshed by Rust through `PgOAuthRefreshWriter`. (`loader.rs:131`, `loader.rs:290`, `oauth_refresh.rs`)
 - **PgSQL `vendor_keys.identity_snapshot` column** — written by the lazy-persist queue (Rust) and folded into the payload via `jsonb_set` on read (`loader.rs:224`); shape is `gw_core::impersonate::IdentitySnapshot`.
-- **Redis `events:entity` stream** — reverse-XADD from `OAuthListener` to ask the Go task-worker to refresh a key whose token 401'd: `ns=vendor_key id=<key_id> op=status_change field=oauth_failed reason=upstream_401 ts_ms=<now>`. (`oauth.rs:60`–`70`)
+- **Redis `events:entity` stream** — Rust publishes refreshed vendor-key upserts after OAuth write-back: `ns=vendor_key id=<key_id> op=upsert v=<new_version> source=rust_oauth_refresh ts_ms=<now>`. `OAuthListener` also emits status-only refresh failures: `ns=vendor_key id=<key_id> op=status_change field=oauth_refresh_status status=rust_refresh_failed reason=upstream_401 source=rust_oauth_refresh ts_ms=<now>`. Go must not consume either as a runtime refresh command. (`oauth_refresh.rs`, `oauth.rs`)
 - **KEK** — `OAuthCredentialsRow`/`VendorKeyRow` decryption uses the shared `KekCache` (`loader.rs:22`, `loader.rs:283`).
 
 These are governed by `docs/go-contracts/` (KEK rotation, encrypted column shape, `events:entity` payload).
@@ -71,8 +74,8 @@ These are governed by `docs/go-contracts/` (KEK rotation, encrypted column shape
 
 - `no_cost_micro` / `no_billing_crate` (`scripts/check-invariants.sh`) — no cost arithmetic in this path; vendor integration emits usage, never price.
 - `no_v1_markers_in_prod` (`scripts/check-invariants.sh`, error mode) — no placeholder markers in `crates/`.
-- Source tripwire `oauth_injection_present_in_source` (`upstream.rs`) asserts the default outbound adapter keeps the OAuth branch, `access_token` usage, and both expiry metrics present.
-- Source tripwire `oauth_listener_emits_reverse_xadd_on_refresh_failed` (`oauth.rs:133`) pins the `events:entity` stream name, field keys, success metric, and the spawn.
+- Source tripwire `oauth_injection_present_in_source` (`upstream.rs`) asserts the default outbound adapter keeps the OAuth runtime branch, `access_token_for` lookup, refreshed-key swap, and returned token usage present.
+- Source tripwire `oauth_listener_emits_status_only_xadd_on_refresh_failed` (`oauth.rs`) pins the `events:entity` stream name, status-only field keys, success metric, and the spawn.
 - `direct_mode_outbound_adapter_headers` snapshot (`upstream.rs`) holds the Direct-mode header output byte-stable so adapter dispatch and impersonation additions never regress the rustls path.
 - `impersonate_predicate_matches_both_variants` (`upstream.rs:1682`) pins the kill-switch predicate against both `VendorEgressMode` variants.
 
@@ -80,5 +83,4 @@ These are governed by `docs/go-contracts/` (KEK rotation, encrypted column shape
 
 The following are outside outbound v1. F2 and the heavy-transform boundary have been confirmed by `docs/design/2026-06-09-roadmap-authority-and-scope.md`, so these are implementation gaps rather than unresolved decisions.
 
-- **In-Rust OAuth refresh/write-back (K-C).** Rust injects pre-decrypted tokens and delegates refresh to Go via `events:entity` today. F2 confirms the target state: Go config writer, Rust runtime refresh writer, no double-writer. (capability-gap)
 - **Heavy vendor-specific outbound transforms.** Kiro adapter/AWS SigV4, Vertex AI SA-JWT token exchange, and Codex request-body transforms land behind the confirmed outbound adapter boundary. (capability-gap)

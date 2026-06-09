@@ -56,13 +56,13 @@ No open ROADMAP items.
 
 ### Full A-T0 outbound adapter seam — closed in spec
 - **Landed:** `gw-proxy` outbound request rewrite dispatches through `gw-adapter::AdapterRegistry::for_vendor`, with `NoopAdapter` preserving the legacy direct-vendor auth/header rewrite and the Direct-mode snapshot renamed to `direct_mode_outbound_adapter_headers`.
-- **Boundary:** task worker/task submit do not call adapters; egress impersonation still runs through `gw-core::impersonate` / `gw-egress-impersonate` after adapter rewrite; `AdapterCtx` carries an inert optional OAuth runtime slot for K-C.
+- **Boundary:** task worker/task submit do not call adapters; egress impersonation still runs through `gw-core::impersonate` / `gw-egress-impersonate` after adapter rewrite; `AdapterCtx` carries the optional OAuth runtime used by K-C for vendor-key refresh before bearer injection.
 - **Spec:** `docs/spec/07-vendor-integration.md`.
 
-### K-C in-Rust OAuth refresh/write-back — `capability-gap` / decision confirmed
-- **Intent:** move runtime OAuth token refresh/write-back to Rust while leaving OAuth configuration and first-time authorization in Go.
-- **Design points:** F2 is confirmed by `docs/plans/2026-06-08-roadmap-implementation-program.md` and `docs/design/2026-06-09-roadmap-authority-and-scope.md`: Go remains the config writer, Rust becomes the sole runtime refresh writer, and there must be no double-writer path. Build `OAuthRefresher`/`OauthCache`/`get_access_token`, encrypted token write-back including rotated refresh tokens, version bump + entity broadcast, and cross-Pod single-flight or version-CAS. Retire or repurpose the previous Go runtime refresh reverse-XADD path with a Go-contract change.
-- **Source:** deleted `key-health-k-c-oauth-token`, `adapter-a-t1-claude-code`.
+### K-C in-Rust OAuth refresh/write-back — closed in spec
+- **Landed:** Rust is the sole runtime refresh writer for `vendor_keys.payload.oauth`. `gw-adapter::oauth_runtime::RustOAuthRuntime` refreshes within the configured skew window, coordinates Redis `SET NX PX` single-flight, calls the provider `token_endpoint`, reloads winner tokens on lock/CAS loss, and `gw-store::oauth_refresh::PgOAuthRefreshWriter` encrypts refreshed tokens, persists rotated refresh tokens when present, CAS-bumps version, and publishes `events:entity ns=vendor_key op=upsert source=rust_oauth_refresh`.
+- **Contract:** Go remains the OAuth provider configuration and first-time authorization writer, but post-K-C Go must not refresh runtime vendor-key OAuth tokens. The old `oauth_failed` reverse-XADD command path is repurposed as status-only `oauth_refresh_status`.
+- **Spec:** `docs/spec/07-vendor-integration.md`, `docs/go-contracts/contract-change/2026-06-09-rust-oauth-refresh.md`.
 
 ### Heavy outbound adapter transforms — `capability-gap` / decision confirmed
 - **Intent:** add Kiro AWS SigV4 + EventStream outbound integration, Vertex AI RS256 service-account JWT signing + token exchange, and Codex request-body transforms.

@@ -1,7 +1,7 @@
 # Contract Change: Rust Runtime OAuth Refresh
 
 - Date: 2026-06-09
-- Status: Planned for W6 K-C
+- Status: Implemented in W6 K-C
 - Authority: F2 in `docs/design/2026-06-09-roadmap-authority-and-scope.md`
 
 ## Ownership

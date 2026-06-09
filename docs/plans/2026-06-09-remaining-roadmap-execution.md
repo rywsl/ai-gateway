@@ -310,9 +310,11 @@ bash scripts/check-spec.sh docs/spec/07-vendor-integration.md
 - `test(adapter): lock direct and impersonate adapter behavior`
 - `docs(adapter): close A-T0 adapter registry boundary`
 
-## W6: K-C Rust OAuth Refresh And Write-Back
+## W6: K-C Rust OAuth Refresh And Write-Back — implemented
 
 **Goal:** Move runtime OAuth refresh/write-back to Rust with no Go runtime refresh writer.
+
+**Status:** Implemented in W6. Runtime refresh lives in `crates/gw-adapter/src/oauth_runtime.rs`, encrypted write-back and vendor-key upsert broadcast live in `crates/gw-store/src/oauth_refresh.rs`, proxy auth injection passes a real `OAuthRuntime`, and the old `oauth_failed` Go-refresh command path is repurposed as status-only `oauth_refresh_status`.
 
 **Suggested worker:** OAuth/store worker plus Go-contract reviewer.
 
@@ -351,6 +353,8 @@ rg -n "oauth_failed|Go.*refresh|Rust.*refresh|token_endpoint" docs/go-contracts 
 - `feat(oauth): add rust refresh cache and singleflight`
 - `feat(oauth): persist refreshed tokens and broadcast vendor key`
 - `docs(oauth): move runtime refresh ownership to rust`
+- `feat(oauth): repurpose refresh failure event as status`
+- `docs(oauth): close rust refresh roadmap entry`
 
 ## W7: Heavy Vendor Transforms And Kiro Protocol
 

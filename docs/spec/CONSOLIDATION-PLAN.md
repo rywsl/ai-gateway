@@ -225,11 +225,13 @@ Each task: read the listed source files, write the spec to the template in `CONS
 
 ### Task 8: 07-vendor-integration
 
+> Superseded after W6 K-C: current as-built OAuth runtime refresh is Rust-owned in [`07-vendor-integration.md`](07-vendor-integration.md). The pre-K-C instructions below are retained only as historical consolidation context.
+
 **Files:** Create `docs/spec/07-vendor-integration.md` · Read: `crates/gw-adapter/src/`, `crates/gw-egress-impersonate/src/`, `crates/gw-core/src/impersonate/`, `crates/gw-store/src/loader.rs`, `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/error/listeners/oauth.rs`
 
 - [ ] **Step 1: Write the spec.** As-built surface (**describe what really runs, not the adapter spec**):
   - Upstream header injection is inline in `upstream.rs::inject_vendor_headers`: `auth_template` `{api_key}` substitution (honors header-name; Bearer/x-api-key/x-goog-api-key); host from `vendor.base_urls.first()`; W3C traceparent.
-  - OAuth: `VendorKey.oauth` `OAuthCredentials` decrypted by `loader.rs`; `upstream.rs:1040` injects pre-decrypted `access_token`, emits `gw_oauth_token_expired_total`/`gw_oauth_token_near_expiry_total`, **sends even if expired**. **Refresh is delegated to Go** via `error/listeners/oauth.rs` reverse-XADD `events:entity`. State this as the deliberate, documented mechanism.
+  - OAuth (legacy/pre-K-C consolidation note): `VendorKey.oauth` `OAuthCredentials` decrypted by `loader.rs`; `upstream.rs:1040` injected pre-decrypted `access_token`, emitted `gw_oauth_token_expired_total`/`gw_oauth_token_near_expiry_total`, and sent even if expired. Refresh delegation to Go was the pre-K-C mechanism; current as-built W6 K-C refresh is Rust-owned in `07-vendor-integration.md`.
   - Egress impersonation: `egress_mode` Rustls|Impersonate; profiles `gw-core/impersonate/{claude_code,openai_codex,gemini_cli}.rs` (deterministic per-key identity; Stainless/UA/anthropic-beta/anthropic-version headers); `gw-egress-impersonate` `wreq`+BoringSSL loopback (JA3/JA4, HTTP/2 SETTINGS, `pool.rs`); per-key `identity_snapshot` lazy-persist; kill-switch `[egress].disabled`.
   - `gw-adapter`: only `NoopAdapter` + `DefaultErrorAnalyzer` exist; **the crate is not wired into any binary** — state this plainly as the current reality.
   - Not built → ROADMAP: the entire A-T0..T6 adapter layer (registry never called, 0/6 vendor adapters; decide: wire or delete `gw-adapter`); K-C in-Rust OAuth refresh stack; kiro adapter; vertex SA-JWT; codex body transform.

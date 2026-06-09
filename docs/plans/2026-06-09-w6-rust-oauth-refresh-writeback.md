@@ -1279,7 +1279,7 @@ Expected:
 - `Rust.*refresh` matches describe Rust runtime vendor-key refresh.
 - `token_endpoint` docs say Rust reads it for vendor-key runtime refresh.
 
-- [ ] **Step 5: Commit docs close**
+- [x] **Step 5: Commit docs close**
 
 ```bash
 git add docs/spec/07-vendor-integration.md docs/ROADMAP.md docs/plans/2026-06-09-remaining-roadmap-execution.md
@@ -1288,16 +1288,16 @@ git commit -m "docs(oauth): close rust refresh writeback roadmap"
 
 ## Final Review Checklist
 
-- [ ] Contract docs say Go remains config/seed writer and Rust is the only runtime vendor-key OAuth refresh writer.
-- [ ] Store writer encrypts access token and rotated refresh token if present.
-- [ ] Store writer preserves existing encrypted refresh token when no rotated refresh token is returned.
-- [ ] Store writer uses version CAS and returns new version.
-- [ ] Store writer broadcasts `events:entity ns=vendor_key op=upsert`.
-- [ ] Runtime uses Redis `SET NX PX` single-flight across pods.
-- [ ] Lock losers and CAS losers reload the winner's token and do not report hard refresh failure.
-- [ ] Adapter calls Rust runtime before bearer injection.
-- [ ] Proxy passes real `oauth_runtime` instead of `None`.
-- [ ] Old `oauth_failed` Go-refresh command semantics are removed or status-only per user decision.
-- [ ] Metrics catalog reflects post-K-C Rust refresh outcomes.
-- [ ] `docs/spec/07-vendor-integration.md` no longer says refresh is delegated to Go.
-- [ ] `docs/ROADMAP.md` no longer lists K-C as open after implementation.
+- [x] Contract docs say Go remains config/seed writer and Rust is the only runtime vendor-key OAuth refresh writer.
+- [x] Store writer encrypts access token and rotated refresh token if present.
+- [x] Store writer preserves existing encrypted refresh token when no rotated refresh token is returned.
+- [x] Store writer uses version CAS and returns new version.
+- [x] Store writer broadcasts `events:entity ns=vendor_key op=upsert`.
+- [x] Runtime uses Redis `SET NX PX` single-flight across pods.
+- [x] Lock losers and CAS losers reload the winner's token and do not report hard refresh failure.
+- [x] Adapter calls Rust runtime before bearer injection.
+- [x] Proxy passes real `oauth_runtime` instead of `None`.
+- [x] Old `oauth_failed` Go-refresh command semantics are removed or status-only per user decision.
+- [x] Metrics catalog reflects post-K-C Rust refresh outcomes.
+- [x] `docs/spec/07-vendor-integration.md` no longer says refresh is delegated to Go.
+- [x] `docs/ROADMAP.md` no longer lists K-C as open after implementation.
