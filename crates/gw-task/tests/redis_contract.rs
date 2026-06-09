@@ -92,7 +92,9 @@ async fn test_submit_stores_and_queues() {
             .expect("input_payload decodes");
     assert_eq!(
         gw_task::task_ir_wire_body(&stored_payload),
-        Some("{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+        Ok(Some(
+            "{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+        ))
     );
     assert_eq!(
         gw_task::task_ir_wire_format(&stored_payload),

@@ -549,7 +549,7 @@ struct UpstreamBody {
 }
 
 fn upstream_body(record: &TaskRecord) -> anyhow::Result<UpstreamBody> {
-    if let Some(body) = gw_task::task_ir_wire_body(&record.input_payload) {
+    if let Some(body) = gw_task::task_ir_wire_body(&record.input_payload)? {
         return Ok(UpstreamBody {
             bytes: body.as_bytes().to_vec(),
             content_type: gw_task::task_ir_wire_content_type(&record.input_payload)

@@ -351,6 +351,37 @@ async fn test_exec_loop_sends_ir_wire_body_verbatim() {
 }
 
 #[tokio::test]
+async fn test_exec_loop_rejects_non_string_ir_wire_body_without_legacy_fallback() {
+    let (addr, captured) =
+        capture_body_http_server(r#"{"provider_task_id":"provider-wire","ok":true}"#).await;
+    let mut record = sample_record(format!("http://{addr}/submit"));
+    record.input_payload["ir_wire_format"] = serde_json::json!("openai:chat");
+    record.input_payload["ir_wire_content_type"] = serde_json::json!("application/json");
+    record.input_payload["ir_wire_body"] = serde_json::json!({"model": "gpt-4.1-mini"});
+    record.input_payload["body"] = serde_json::json!({"legacy": true});
+    let contract = MemoryContract::enqueue(record).await;
+    let loop_ = ExecLoop::new(contract.clone(), reqwest::Client::new(), config());
+
+    loop_.run_once().await.expect("run once");
+
+    let settlements = contract.settlements().await;
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].0, TaskStatus::Failed);
+    assert!(
+        settlements[0]
+            .2
+            .as_deref()
+            .is_some_and(|message| message.contains("ir_wire_body")),
+        "expected invalid ir_wire_body error, got {:?}",
+        settlements[0].2
+    );
+    assert!(
+        captured.lock().await.is_empty(),
+        "invalid ir_wire_body must fail before sending a legacy fallback body"
+    );
+}
+
+#[tokio::test]
 async fn test_exec_loop_stores_normalized_ir_response_envelope() {
     let upstream_response = r#"{"id":"chatcmpl-task","object":"chat.completion","created":1700000000,"model":"gpt-4.1-mini","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#;
     let addr = http_server(200, upstream_response, Duration::ZERO).await;

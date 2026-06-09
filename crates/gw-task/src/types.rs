@@ -136,9 +136,19 @@ pub const TASK_IR_WIRE_FORMAT: &str = "ir_wire_format";
 pub const TASK_IR_WIRE_CONTENT_TYPE: &str = "ir_wire_content_type";
 pub const TASK_BODY: &str = "body";
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TaskIrWireBodyError {
+    #[error("task input_payload.ir_wire_body must be a string when present")]
+    InvalidType,
+}
+
 #[must_use]
-pub fn task_ir_wire_body(payload: &serde_json::Value) -> Option<&str> {
-    payload.get(TASK_IR_WIRE_BODY).and_then(serde_json::Value::as_str)
+pub fn task_ir_wire_body(payload: &serde_json::Value) -> Result<Option<&str>, TaskIrWireBodyError> {
+    match payload.get(TASK_IR_WIRE_BODY) {
+        None => Ok(None),
+        Some(serde_json::Value::String(body)) => Ok(Some(body.as_str())),
+        Some(_) => Err(TaskIrWireBodyError::InvalidType),
+    }
 }
 
 #[must_use]

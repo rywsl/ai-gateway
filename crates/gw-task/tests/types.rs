@@ -83,7 +83,7 @@ fn test_ir_wire_body_helper_reads_optional_string() {
 
     assert_eq!(
         gw_task::task_ir_wire_body(&payload),
-        Some("{\"model\":\"gpt-4.1-mini\"}")
+        Ok(Some("{\"model\":\"gpt-4.1-mini\"}"))
     );
     assert_eq!(gw_task::task_ir_wire_format(&payload), Some("openai:chat"));
     assert_eq!(
@@ -96,9 +96,22 @@ fn test_ir_wire_body_helper_reads_optional_string() {
 fn test_ir_wire_body_helper_treats_absence_as_legacy_payload() {
     let payload = json!({"body": {"prompt": "legacy"}});
 
-    assert_eq!(gw_task::task_ir_wire_body(&payload), None);
+    assert_eq!(gw_task::task_ir_wire_body(&payload), Ok(None));
     assert_eq!(gw_task::task_ir_wire_format(&payload), None);
     assert_eq!(gw_task::task_ir_wire_content_type(&payload), None);
+}
+
+#[test]
+fn test_ir_wire_body_helper_rejects_non_string_value() {
+    let payload = json!({
+        "body": {"model": "gpt-4.1-mini"},
+        "ir_wire_body": {"model": "gpt-4.1-mini"}
+    });
+
+    assert_eq!(
+        gw_task::task_ir_wire_body(&payload),
+        Err(gw_task::TaskIrWireBodyError::InvalidType)
+    );
 }
 
 #[test]
