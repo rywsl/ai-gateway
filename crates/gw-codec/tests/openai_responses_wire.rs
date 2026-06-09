@@ -4,6 +4,7 @@ use gw_codec::openai::responses::{
 };
 use gw_codec::ProtocolCodec;
 use gw_core::ir::{ContentIR, MessageIR, RequestIR, ResponseIR, StreamEventIR};
+use std::borrow::Cow;
 
 #[test]
 fn deserialize_minimal_request() {
@@ -81,6 +82,29 @@ fn responses_request_parse_render_round_trips_task_body() {
     assert_eq!(rendered_json["instructions"], "be direct");
     assert_eq!(rendered_json["input"], "hi");
     assert_eq!(rendered_json["stream"], false);
+}
+
+#[test]
+fn responses_request_render_reconstructed_ir_uses_item_array_input() {
+    let ir = RequestIR {
+        model: Cow::Borrowed("gpt-5"),
+        messages: vec![MessageIR::User {
+            content: ContentIR::Text(Cow::Borrowed("hi")),
+        }],
+        ..RequestIR::default()
+    };
+
+    let mut rendered = bytes::BytesMut::new();
+    OpenAiResponsesCodec
+        .render_request(&ir, &mut rendered)
+        .expect("render reconstructed responses request");
+    let rendered_json: serde_json::Value =
+        serde_json::from_slice(&rendered).expect("rendered request json");
+
+    assert_eq!(rendered_json["model"], "gpt-5");
+    let input = rendered_json["input"].as_array().expect("input item array");
+    assert_eq!(input[0]["type"], "input_text");
+    assert_eq!(input[0]["text"], "hi");
 }
 
 #[test]

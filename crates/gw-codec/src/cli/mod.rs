@@ -37,10 +37,6 @@ pub fn detect_cli(path: &str, headers: &crate::trait_def::Headers) -> Option<Api
         return Some(ApiShape::OpenAiCompact);
     }
 
-    if path.starts_with("/v1/responses") {
-        return Some(ApiShape::OpenAiCli);
-    }
-
     if path.starts_with("/v1/messages") {
         let has_bearer = headers.iter().any(|(k, v)| {
             k.eq_ignore_ascii_case("authorization")
@@ -199,10 +195,7 @@ mod tests {
     #[test]
     fn test_detect_openai_cli() {
         let headers = h(&[("authorization", "Bearer sk-XXXX")]);
-        assert_eq!(
-            detect_cli("/v1/responses", &headers),
-            Some(ApiShape::OpenAiCli)
-        );
+        assert_eq!(detect_cli("/v1/responses", &headers), None);
     }
 
     #[test]
@@ -308,7 +301,7 @@ mod tests {
 
         assert_eq!(
             detect_cli("/v1/responses", &h(&[("authorization", "Bearer sk-test")])),
-            Some(ApiShape::OpenAiCli)
+            None
         );
         assert_eq!(hints.model.as_deref(), Some("gpt-4.1"));
         assert_eq!(hints.stream, None);

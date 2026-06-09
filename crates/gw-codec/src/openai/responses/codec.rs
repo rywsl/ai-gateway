@@ -411,7 +411,10 @@ fn input_from_ir_messages(messages: &[MessageIR<'_>]) -> Value {
         match message {
             MessageIR::System { .. } | MessageIR::Developer { .. } => {}
             MessageIR::User { content } => {
-                input.push(Value::String(content_to_text(content).into_owned()));
+                input.push(serde_json::json!({
+                    "type": "input_text",
+                    "text": content_to_text(content),
+                }));
             }
             MessageIR::Assistant { content, .. } => {
                 input.push(serde_json::json!({
@@ -429,11 +432,7 @@ fn input_from_ir_messages(messages: &[MessageIR<'_>]) -> Value {
             }
         }
     }
-    if input.len() == 1 {
-        input.remove(0)
-    } else {
-        Value::Array(input)
-    }
+    Value::Array(input)
 }
 
 fn first_system_instruction(messages: &[MessageIR<'_>]) -> Option<String> {
