@@ -54,4 +54,5 @@ fn ctx_carries_optional_real_fields() {
     assert!(ctx.key_health.is_none());
     assert!(ctx.entity_store.is_none());
     assert!(ctx.resilience.is_none());
+    assert!(ctx.affinity.is_none());
 }

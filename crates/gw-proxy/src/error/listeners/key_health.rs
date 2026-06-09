@@ -41,6 +41,9 @@ impl ErrorListener for KeyHealthListener {
         };
 
         key_health.apply_cooldown(&key_id, api_format, health_cd);
+        if let Some(affinity) = ctx.affinity {
+            affinity.invalidate_vendor_key(&key_id);
+        }
 
         // Track whether the cooldown duration was driven by an upstream
         // Retry-After header (present in rate_limit_hint) vs the classifier
@@ -89,7 +92,50 @@ mod tests {
             key_health: Some(store),
             entity_store: None,
             resilience: None,
+            affinity: None,
         }
+    }
+
+    #[test]
+    fn cooldown_invalidates_affinity_for_vendor_key() {
+        let store = KeyHealthStore::default();
+        let affinity = gw_routing::affinity::AffinityManager::default();
+        affinity.record_hit(
+            gw_routing::affinity::AffinityDimension::ApiKey(gw_core::ids::ApiKeyId::from("ak-1")),
+            KeyId::from("vk-1"),
+            std::time::Instant::now(),
+        );
+        let ctx = HandlerCtx {
+            request_id: "test",
+            api_key_id: Some("ak-1"),
+            vendor_key_id: Some("vk-1"),
+            api_format: Some(ProtocolKind::OpenAi),
+            key_health: Some(&store),
+            entity_store: None,
+            resilience: None,
+            affinity: Some(&affinity),
+        };
+        let oc = ClassifierOutcome {
+            retryable: Retryability::CrossKey,
+            cooldown: Some(CooldownDirective {
+                reason_code: 7,
+                ttl_secs: 30,
+                reset_consecutive: false,
+            }),
+            rate_limit_hint: None,
+            ..Default::default()
+        };
+
+        KeyHealthListener.on_outcome(&ctx, &oc);
+
+        assert!(affinity
+            .get(
+                &gw_routing::affinity::AffinityDimension::ApiKey(gw_core::ids::ApiKeyId::from(
+                    "ak-1"
+                )),
+                std::time::Instant::now(),
+            )
+            .is_none());
     }
 
     #[test]

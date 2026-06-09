@@ -41,6 +41,9 @@ impl ErrorListener for OAuthListener {
         if sig.kind != OAuthSignalKind::RefreshFailed {
             return;
         }
+        if let (Some(affinity), Some(key_id)) = (ctx.affinity, ctx.vendor_key_id) {
+            affinity.invalidate_vendor_key(&gw_core::ids::KeyId::from(key_id));
+        }
         let (Some(es), Some(key_id)) = (ctx.entity_store, ctx.vendor_key_id) else {
             // Defensive: unit-test contexts use `HandlerCtx::stub()` with both
             // fields `None`. Match the cache_invalidate listener pattern.
@@ -101,6 +104,37 @@ mod tests {
             rate_limit_hint: None,
             passthrough_body: None,
         }
+    }
+
+    #[test]
+    fn refresh_failed_invalidates_affinity_before_xadd() {
+        let affinity = gw_routing::affinity::AffinityManager::default();
+        affinity.record_hit(
+            gw_routing::affinity::AffinityDimension::ApiKey(gw_core::ids::ApiKeyId::from("ak-1")),
+            gw_core::ids::KeyId::from("vk-1"),
+            std::time::Instant::now(),
+        );
+        let ctx = HandlerCtx {
+            request_id: "test",
+            api_key_id: Some("ak-1"),
+            vendor_key_id: Some("vk-1"),
+            api_format: None,
+            key_health: None,
+            entity_store: None,
+            resilience: None,
+            affinity: Some(&affinity),
+        };
+
+        OAuthListener.on_outcome(&ctx, &make_outcome(OAuthSignalKind::RefreshFailed));
+
+        assert!(affinity
+            .get(
+                &gw_routing::affinity::AffinityDimension::ApiKey(gw_core::ids::ApiKeyId::from(
+                    "ak-1"
+                )),
+                std::time::Instant::now(),
+            )
+            .is_none());
     }
 
     /// Stub `HandlerCtx` has `entity_store = None` and `vendor_key_id = None`,

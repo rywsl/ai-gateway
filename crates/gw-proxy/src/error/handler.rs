@@ -8,6 +8,7 @@
 use crate::resilience::ResilienceState;
 use gw_core::error::ClassifierOutcome;
 use gw_health::KeyHealthStore;
+use gw_routing::affinity::AffinityManager;
 use gw_store::EntityStore;
 use std::sync::Arc;
 
@@ -50,6 +51,7 @@ pub struct HandlerCtx<'a> {
     pub key_health: Option<&'a KeyHealthStore>,
     pub entity_store: Option<&'a Arc<EntityStore>>,
     pub resilience: Option<&'a ResilienceState>,
+    pub affinity: Option<&'a AffinityManager>,
 }
 
 impl HandlerCtx<'_> {
@@ -62,6 +64,7 @@ impl HandlerCtx<'_> {
             key_health: None,
             entity_store: None,
             resilience: None,
+            affinity: None,
         }
     }
 }

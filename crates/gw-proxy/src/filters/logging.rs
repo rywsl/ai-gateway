@@ -62,6 +62,7 @@ pub async fn run(
     counters: &Arc<CounterStore>,
     store: &Arc<gw_store::EntityStore>,
     resilience: &crate::resilience::ResilienceState,
+    affinity: &gw_routing::affinity::AffinityManager,
     ratelimit: &Arc<RateLimitGuard>,
     quota_state_updates: Option<&Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
 ) {
@@ -458,6 +459,7 @@ pub async fn run(
             key_health: Some(&**health),
             entity_store: Some(store),
             resilience: Some(resilience),
+            affinity: Some(affinity),
         };
         handler.fanout(&hctx, oc);
     }

@@ -91,6 +91,9 @@ struct Wired {
     jwt_validator: Arc<arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator>>,
     /// Shared selection-strategy instances (T0-B).
     strategies: Arc<gw_routing::strategy::set::StrategySet>,
+    /// API-key affinity table consulted by proxy routing and cleared by
+    /// vendor-key invalidation hooks.
+    affinity: Arc<gw_routing::affinity::AffinityManager>,
     /// Capability resolver (T3-C). `None` until wired.
     capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
     /// TunnelStack (T5-B). `Some` iff `cfg.tunnel.enabled = true`.
@@ -298,6 +301,7 @@ pub fn run() -> anyhow::Result<()> {
         wired.task_billing_config,
         wired.jwt_validator,
         wired.strategies,
+        wired.affinity,
         gw_routing::FailoverExecutor::with_total_budget_ms(3, wired.error_failover_total_budget_ms),
         wired.capability_resolver,
         wired.mgmt_blacklist,
@@ -387,6 +391,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
         &cfg.adaptive_rpm,
     )));
+    let affinity = Arc::new(gw_routing::affinity::AffinityManager::default());
     let adapter_registry = Arc::new(gw_adapter::AdapterRegistry::new());
     spawn_decay_loop(
         adaptive_rpm.clone(),
@@ -401,6 +406,12 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         let adaptive_for_evict = adaptive_rpm.clone();
         store_inner.on_vendor_key_invalidate(Arc::new(move |key_id| {
             adaptive_for_evict.evict(key_id);
+        }));
+    }
+    {
+        let affinity_for_evict = affinity.clone();
+        store_inner.on_vendor_key_invalidate(Arc::new(move |key_id| {
+            affinity_for_evict.invalidate_vendor_key(key_id);
         }));
     }
     // R7b: hot-reloadable JWT validator. The handle is shared between the
@@ -953,6 +964,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             Duration::from_secs(cfg.routing.sticky_ttl_secs),
             cfg.routing.preset_weights(),
         )),
+        affinity,
         capability_resolver,
         #[cfg(feature = "tunnel")]
         tunnel,

@@ -98,10 +98,46 @@ async fn emit_envelope_and_bail<T>(
     Err(short_circuit(err.status))
 }
 
+fn affinity_preferred_candidate<'a>(
+    ctx: &ReqCtx,
+    ranked_candidates: &'a [Arc<VendorKey>],
+    affinity: &gw_routing::affinity::AffinityManager,
+    health: &KeyHealthStore,
+    api_format: gw_core::protocol::ProtocolKind,
+) -> Option<&'a Arc<VendorKey>> {
+    let api_key_id = ctx.api_key_id.as_ref()?;
+    let dimension = gw_routing::affinity::AffinityDimension::ApiKey(api_key_id.clone());
+    let record = affinity.get(&dimension, std::time::Instant::now())?;
+    ranked_candidates.iter().find(|candidate| {
+        candidate.key_id == record.vendor_key_id
+            && !ctx
+                .retry_blacklist
+                .iter()
+                .any(|blacklisted| blacklisted == &candidate.key_id)
+            && health.is_available(&candidate.key_id, api_format)
+    })
+}
+
+pub fn record_api_key_affinity(
+    ctx: &ReqCtx,
+    affinity: &gw_routing::affinity::AffinityManager,
+) -> bool {
+    let (Some(api_key_id), Some(picked)) = (ctx.api_key_id.as_ref(), ctx.picked_vendor_key.as_ref())
+    else {
+        return false;
+    };
+    affinity.record_hit(
+        gw_routing::affinity::AffinityDimension::ApiKey(api_key_id.clone()),
+        picked.key_id.clone(),
+        std::time::Instant::now(),
+    );
+    true
+}
+
 // `pick_peer` is the kill-switch + impersonate-dispatch hot path; the arg count
-// grew with Task 4.2 (impersonate) and Task 5.2 (egress_disabled). Refactoring
-// to a struct would obscure call sites; keep the allow until the next time the
-// signature changes.
+// grew with Task 4.2 (impersonate), Task 5.2 (egress_disabled), and API-key
+// affinity wiring. Refactoring to a struct would obscure call sites; keep the
+// allow until the next time the signature changes.
 #[allow(clippy::too_many_arguments)]
 pub async fn pick_peer(
     session: &mut Session,
@@ -110,6 +146,7 @@ pub async fn pick_peer(
     health: &Arc<KeyHealthStore>,
     in_flight: &Arc<InFlightStore>,
     strategies: &Arc<StrategySet>,
+    affinity: &Arc<gw_routing::affinity::AffinityManager>,
     latency_tracker: &Arc<LatencyTracker>,
     adaptive_rpm: &Arc<gw_auth::ratelimit::adaptive::AdaptiveRpmManager>,
     ratelimit: &Arc<gw_auth::ratelimit::RateLimitGuard>,
@@ -329,7 +366,18 @@ pub async fn pick_peer(
     } else {
         None
     };
-    let picked = match failover_pick {
+    let affinity_pick = if failover_pick.is_none() {
+        affinity_preferred_candidate(
+            ctx,
+            &ranked_candidates,
+            affinity.as_ref(),
+            health.as_ref(),
+            client_codec_kind,
+        )
+    } else {
+        None
+    };
+    let picked = match failover_pick.or(affinity_pick) {
         Some(candidate) => candidate,
         None => {
             let first = ranked_candidates
@@ -1259,6 +1307,114 @@ pub(crate) fn body_hash_u64(body: &[u8]) -> Option<u64> {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(body);
     Some(u64::from_le_bytes(digest[..8].try_into().unwrap()))
+}
+
+#[cfg(test)]
+mod affinity_tests {
+    use super::*;
+    use gw_core::entity::KeyStatus;
+    use gw_core::ids::{ApiKeyId, KeyId, ModelName, VendorId};
+    use gw_core::protocol::ProtocolKind;
+    use gw_routing::affinity::{AffinityDimension, AffinityManager};
+    use secrecy::SecretString;
+
+    fn key(id: &str) -> Arc<VendorKey> {
+        Arc::new(VendorKey {
+            key_id: KeyId::from(id),
+            vendor_id: VendorId::from("v-affinity"),
+            api_key: SecretString::new("sk-test".into()),
+            accessible_models: vec![ModelName::from("m1")],
+            model_mapping: Default::default(),
+            accessible_endpoints: vec![ProtocolKind::OpenAi],
+            protocol_conversion: false,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: vec![],
+            forced_capabilities: vec![],
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+            identity_snapshot: None,
+            quota_state: Default::default(),
+        })
+    }
+
+    #[test]
+    fn api_key_affinity_prefers_recorded_candidate() {
+        let affinity = AffinityManager::default();
+        let mut ctx = ReqCtx::default();
+        ctx.api_key_id = Some(ApiKeyId::from("ak-affinity"));
+        let first = key("vk-first");
+        let preferred = key("vk-preferred");
+        let ranked = vec![first, preferred.clone()];
+        affinity.record_hit(
+            AffinityDimension::ApiKey(ApiKeyId::from("ak-affinity")),
+            preferred.key_id.clone(),
+            std::time::Instant::now(),
+        );
+        let health = KeyHealthStore::default();
+
+        let picked =
+            affinity_preferred_candidate(&ctx, &ranked, &affinity, &health, ProtocolKind::OpenAi)
+                .expect("recorded affinity candidate should be selected");
+
+        assert_eq!(picked.key_id, preferred.key_id);
+    }
+
+    #[test]
+    fn api_key_affinity_ignores_missing_blacklisted_or_unhealthy_candidate() {
+        let affinity = AffinityManager::default();
+        let mut ctx = ReqCtx::default();
+        ctx.api_key_id = Some(ApiKeyId::from("ak-affinity"));
+        let first = key("vk-first");
+        let preferred = key("vk-preferred");
+        let ranked = vec![first, preferred.clone()];
+        affinity.record_hit(
+            AffinityDimension::ApiKey(ApiKeyId::from("ak-affinity")),
+            preferred.key_id.clone(),
+            std::time::Instant::now(),
+        );
+        ctx.retry_blacklist.push(preferred.key_id.clone());
+        let health = KeyHealthStore::default();
+
+        assert!(affinity_preferred_candidate(
+            &ctx,
+            &ranked,
+            &affinity,
+            &health,
+            ProtocolKind::OpenAi,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn record_api_key_affinity_records_only_when_api_key_and_vendor_are_present() {
+        let affinity = AffinityManager::default();
+        let mut ctx = ReqCtx::default();
+        assert!(!record_api_key_affinity(&ctx, &affinity));
+
+        ctx.api_key_id = Some(ApiKeyId::from("ak-record"));
+        assert!(!record_api_key_affinity(&ctx, &affinity));
+
+        let picked = key("vk-recorded");
+        ctx.picked_vendor_key = Some(picked.clone());
+        assert!(record_api_key_affinity(&ctx, &affinity));
+
+        let record = affinity
+            .get(
+                &AffinityDimension::ApiKey(ApiKeyId::from("ak-record")),
+                std::time::Instant::now(),
+            )
+            .expect("record should exist after selected send");
+        assert_eq!(record.vendor_key_id, picked.key_id);
+    }
 }
 
 #[cfg(test)]

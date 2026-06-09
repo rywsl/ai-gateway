@@ -285,6 +285,9 @@ pub struct LlmGateway {
     /// Shared selection-strategy instances (T0-B). One `StrategyAny` per kind,
     /// dispatched via `StrategySet::pick_for`.
     pub strategies: Arc<gw_routing::strategy::set::StrategySet>,
+    /// Request-external API-key affinity table shared with bootstrap
+    /// invalidation hooks.
+    pub affinity: Arc<gw_routing::affinity::AffinityManager>,
     /// Response-side failover executor (5xx / 429 before body starts).
     pub failover_executor: FailoverExecutor,
     /// Capability resolver (T3-C). `None` until wired; `filters::request`
@@ -384,6 +387,7 @@ impl LlmGateway {
         task_billing_config: Option<gw_billing::TaskBillingConfig>,
         jwt_validator: Arc<arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator>>,
         strategies: Arc<gw_routing::strategy::set::StrategySet>,
+        affinity: Arc<gw_routing::affinity::AffinityManager>,
         failover_executor: FailoverExecutor,
         capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
         mgmt_blacklist: Arc<RedisJwtBlacklist>,
@@ -438,6 +442,7 @@ impl LlmGateway {
             task_billing_config,
             jwt_validator,
             strategies,
+            affinity,
             failover_executor,
             capability_resolver,
             mgmt_blacklist,
@@ -719,6 +724,7 @@ impl ProxyHttp for LlmGateway {
             &self.health,
             &self.in_flight,
             &self.strategies,
+            &self.affinity,
             &self.latency_tracker,
             &self.adaptive_rpm,
             &self.ratelimit,
@@ -740,6 +746,7 @@ impl ProxyHttp for LlmGateway {
     ) -> Result<()> {
         filters::upstream::rewrite_request(session, upstream_request, ctx, &self.body_rules)
             .await?;
+        filters::upstream::record_api_key_affinity(ctx, self.affinity.as_ref());
 
         // W2-T6: Register the in-flight billing entry now that the request is
         // committed to being sent to the upstream. Best-effort — Redis errors
@@ -1508,6 +1515,7 @@ impl ProxyHttp for LlmGateway {
             &self.counters,
             &self.store,
             &self.resilience,
+            self.affinity.as_ref(),
             &self.ratelimit,
             self.quota_state_updates.as_ref(),
         )
