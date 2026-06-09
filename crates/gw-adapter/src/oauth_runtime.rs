@@ -22,6 +22,29 @@ pub fn should_refresh(now: OffsetDateTime, expires_at: OffsetDateTime, skew_secs
     now >= expires_at - time::Duration::seconds(skew_secs)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContendedReloadDecision {
+    ReturnLoadedToken,
+    KeepWaiting,
+    RetryRefresh,
+}
+
+fn classify_contended_reload(
+    now: OffsetDateTime,
+    access_expires_at: OffsetDateTime,
+    skew_secs: i64,
+    lock_exists: bool,
+) -> ContendedReloadDecision {
+    if !should_refresh(now, access_expires_at, skew_secs) {
+        return ContendedReloadDecision::ReturnLoadedToken;
+    }
+    if lock_exists {
+        ContendedReloadDecision::KeepWaiting
+    } else {
+        ContendedReloadDecision::RetryRefresh
+    }
+}
+
 pub fn lock_key(key_id: &str) -> String {
     format!("lock:oauth:refresh:{key_id}")
 }
@@ -113,6 +136,15 @@ impl RustOAuthRuntime {
         })
     }
 
+    async fn lock_exists(&self, vendor_key_id: &KeyId) -> Result<bool, String> {
+        let client = self.redis.pool.next();
+        let exists: i64 = client
+            .exists(lock_key(vendor_key_id.as_ref()))
+            .await
+            .map_err(|e| format!("oauth refresh lock probe failed: {e}"))?;
+        Ok(exists > 0)
+    }
+
     async fn acquire_lock(&self, vendor_key_id: &KeyId, request_id: &str) -> Result<bool, String> {
         let client = self.redis.pool.next();
         let result: Option<String> = client
@@ -160,6 +192,58 @@ impl RustOAuthRuntime {
         parse_token_response(&body, previous_scope)
             .map_err(|e| format!("oauth refresh provider response invalid: {e}"))
     }
+
+    async fn wait_for_fresh_token_or_retry(
+        &self,
+        vendor_key_id: &KeyId,
+        refreshed_vendor_key: bool,
+    ) -> Result<Option<OAuthTokenResult>, String> {
+        let wait = std::time::Duration::from_millis(self.cfg.wait_after_lock_lost_ms.max(1));
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(
+                self.cfg
+                    .lock_ttl_ms
+                    .saturating_add(self.cfg.request_timeout_ms)
+                    .saturating_add(self.cfg.wait_after_lock_lost_ms)
+                    .max(1),
+            );
+
+        loop {
+            tokio::time::sleep(wait).await;
+            let loaded = self
+                .reload_token(vendor_key_id, refreshed_vendor_key)
+                .await?;
+            let oauth = loaded
+                .refreshed_vendor_key
+                .as_ref()
+                .and_then(|key| key.oauth.as_ref())
+                .ok_or_else(|| {
+                    format!(
+                        "vendor key {} has no oauth credentials after oauth reload",
+                        vendor_key_id.0
+                    )
+                })?;
+            let lock_exists = self.lock_exists(vendor_key_id).await?;
+
+            match classify_contended_reload(
+                OffsetDateTime::now_utc(),
+                oauth.access_expires_at,
+                self.cfg.refresh_skew_secs,
+                lock_exists,
+            ) {
+                ContendedReloadDecision::ReturnLoadedToken => return Ok(Some(loaded)),
+                ContendedReloadDecision::RetryRefresh => return Ok(None),
+                ContendedReloadDecision::KeepWaiting => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "oauth refresh for vendor key {} did not publish a fresh token before lock wait deadline",
+                            vendor_key_id.0
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -169,75 +253,84 @@ impl OAuthRuntime for RustOAuthRuntime {
         vendor_key_id: &KeyId,
         request_id: &str,
     ) -> Result<OAuthTokenResult, String> {
-        let loaded = self
-            .store
-            .vendor_key_or_load(vendor_key_id)
-            .await
-            .ok_or_else(|| format!("vendor key {} not found", vendor_key_id.0))?;
-        let oauth =
-            loaded.value.oauth.as_ref().ok_or_else(|| {
+        loop {
+            let loaded = self
+                .store
+                .vendor_key_or_load(vendor_key_id)
+                .await
+                .ok_or_else(|| format!("vendor key {} not found", vendor_key_id.0))?;
+            let oauth = loaded.value.oauth.as_ref().ok_or_else(|| {
                 format!("vendor key {} has no oauth credentials", vendor_key_id.0)
             })?;
 
-        let now = OffsetDateTime::now_utc();
-        if !should_refresh(now, oauth.access_expires_at, self.cfg.refresh_skew_secs) {
-            return Ok(OAuthTokenResult {
-                access_token: oauth.access_token.clone(),
-                refreshed_vendor_key: None,
-                version: loaded.version,
-            });
-        }
+            let now = OffsetDateTime::now_utc();
+            if !should_refresh(now, oauth.access_expires_at, self.cfg.refresh_skew_secs) {
+                return Ok(OAuthTokenResult {
+                    access_token: oauth.access_token.clone(),
+                    refreshed_vendor_key: None,
+                    version: loaded.version,
+                });
+            }
 
-        if !self.acquire_lock(vendor_key_id, request_id).await? {
-            metrics::counter!("gw_oauth_runtime_refresh_total", "result" => "lock_lost")
-                .increment(1);
-            tokio::time::sleep(std::time::Duration::from_millis(
-                self.cfg.wait_after_lock_lost_ms,
-            ))
-            .await;
-            return self.reload_token(vendor_key_id, true).await;
-        }
-
-        let parsed = match self
-            .refresh_with_provider(
-                &oauth.token_endpoint,
-                &oauth.refresh_token,
-                oauth.scope.as_slice(),
-            )
-            .await
-        {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                metrics::counter!("gw_oauth_runtime_refresh_total", "result" => "provider_error")
+            if !self.acquire_lock(vendor_key_id, request_id).await? {
+                metrics::counter!("gw_oauth_runtime_refresh_total", "result" => "lock_lost")
                     .increment(1);
-                return Err(err);
+                if let Some(token) = self
+                    .wait_for_fresh_token_or_retry(vendor_key_id, true)
+                    .await?
+                {
+                    return Ok(token);
+                }
+                continue;
             }
-        };
 
-        let expires_at = now + time::Duration::seconds(parsed.expires_in_secs.max(1));
-        let write = OAuthWriteBack {
-            key_id: vendor_key_id.as_ref().to_string(),
-            expected_version: loaded.version,
-            access_token: parsed.access_token,
-            rotated_refresh_token: parsed.rotated_refresh_token,
-            previous_refresh_token_enc: None,
-            access_expires_at: expires_at,
-            token_endpoint: oauth.token_endpoint.clone(),
-            scope: parsed.scope,
-            quota_project_id: oauth.quota_project_id.clone(),
-        };
+            let parsed = match self
+                .refresh_with_provider(
+                    &oauth.token_endpoint,
+                    &oauth.refresh_token,
+                    oauth.scope.as_slice(),
+                )
+                .await
+            {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    metrics::counter!("gw_oauth_runtime_refresh_total", "result" => "provider_error")
+                        .increment(1);
+                    return Err(err);
+                }
+            };
 
-        match self.writer.write(write).await {
-            Ok(_) => {
-                metrics::counter!("gw_oauth_runtime_refresh_total", "result" => "ok").increment(1);
-                self.reload_token(vendor_key_id, true).await
+            let expires_at = now + time::Duration::seconds(parsed.expires_in_secs.max(1));
+            let write = OAuthWriteBack {
+                key_id: vendor_key_id.as_ref().to_string(),
+                expected_version: loaded.version,
+                access_token: parsed.access_token,
+                rotated_refresh_token: parsed.rotated_refresh_token,
+                previous_refresh_token_enc: None,
+                access_expires_at: expires_at,
+                token_endpoint: oauth.token_endpoint.clone(),
+                scope: parsed.scope,
+                quota_project_id: oauth.quota_project_id.clone(),
+            };
+
+            match self.writer.write(write).await {
+                Ok(_) => {
+                    metrics::counter!("gw_oauth_runtime_refresh_total", "result" => "ok")
+                        .increment(1);
+                    return self.reload_token(vendor_key_id, true).await;
+                }
+                Err(OAuthWriteBackError::CasLost { .. }) => {
+                    metrics::counter!("gw_oauth_runtime_refresh_total", "result" => "cas_lost")
+                        .increment(1);
+                    if let Some(token) = self
+                        .wait_for_fresh_token_or_retry(vendor_key_id, true)
+                        .await?
+                    {
+                        return Ok(token);
+                    }
+                }
+                Err(err) => return Err(format!("oauth write-back failed: {err}")),
             }
-            Err(OAuthWriteBackError::CasLost { .. }) => {
-                metrics::counter!("gw_oauth_runtime_refresh_total", "result" => "cas_lost")
-                    .increment(1);
-                self.reload_token(vendor_key_id, true).await
-            }
-            Err(err) => Err(format!("oauth write-back failed: {err}")),
         }
     }
 }
@@ -267,5 +360,38 @@ mod tests {
         assert_eq!(parsed.access_token.expose_secret(), "new-access");
         assert!(parsed.rotated_refresh_token.is_none());
         assert_eq!(parsed.scope, vec!["old-scope".to_string()]);
+    }
+
+    #[test]
+    fn contended_reload_inside_skew_keeps_waiting_while_lock_exists() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let expires_inside_skew = time::OffsetDateTime::from_unix_timestamp(1_030).unwrap();
+
+        assert_eq!(
+            classify_contended_reload(now, expires_inside_skew, 60, true),
+            ContendedReloadDecision::KeepWaiting
+        );
+    }
+
+    #[test]
+    fn contended_reload_inside_skew_retries_refresh_after_lock_disappears() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let expires_inside_skew = time::OffsetDateTime::from_unix_timestamp(1_030).unwrap();
+
+        assert_eq!(
+            classify_contended_reload(now, expires_inside_skew, 60, false),
+            ContendedReloadDecision::RetryRefresh
+        );
+    }
+
+    #[test]
+    fn contended_reload_outside_skew_returns_loaded_token() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let expires_outside_skew = time::OffsetDateTime::from_unix_timestamp(1_120).unwrap();
+
+        assert_eq!(
+            classify_contended_reload(now, expires_outside_skew, 60, true),
+            ContendedReloadDecision::ReturnLoadedToken
+        );
     }
 }
