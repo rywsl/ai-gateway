@@ -9,10 +9,10 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 
 ## 01 protocol-codec
 
-### Kiro / S5 EventStream codec — `capability-gap`
+### Kiro / S5 EventStream codec — closed in spec
 - **Intent:** decode Kiro upstreams (AWS EventStream binary frames + embedded `<thinking>` tags) — the heaviest of the six vendor codecs.
-- **Landed:** internal `crates/gw-codec/src/kiro/` EventStream frame codec (length-prefixed + `crc32fast` CRCs), embedded `<thinking>` parser/renderer, and focused roundtrip/error tests.
-- **Remaining design points:** Kiro is not registered in `gw-codec/src/any.rs::AnyCodec` and has no `gw-core::ProtocolKind` / `ApiShape` cross-process shape yet. Do not treat it as full Kiro vendor integration until that protocol-contract decision is made.
+- **Landed:** internal `crates/gw-codec/src/kiro/` EventStream frame codec (length-prefixed + `crc32fast` CRCs), embedded `<thinking>` parser/renderer, focused roundtrip/error tests, `gw-core::ProtocolKind::Kiro`, `ApiShape::KiroEventStream`, `ApiShape::KiroCli`, and `gw-codec::AnyCodec::Kiro` registration for standard EventStream detection via `content-type: application/vnd.amazon.eventstream` plus `/kiro` or `/s5` path.
+- **Boundary:** this closes only codec registration and cross-process shape registration. AWS SigV4, vendor auth injection, full Kiro upstream integration, Kiro CLI marker detection, Kiro CLI usage extraction, and Kiro CLI passthrough behavior remain out of scope.
 - **Source:** deleted `codec-s5-kiro-eventstream` + `adapter-a-t6-kiro-vendor` (git history).
 
 ### `UsageSource::CliExtracted` provenance — closed in spec
@@ -22,7 +22,7 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 
 ### OpenAI/Kiro CLI body-level detection and ApiShape split — `capability-gap`
 - **Intent:** distinguish standard OpenAI Responses async tasks from OpenAI CLI/Kiro semantic request bodies without relying on test-only `client_protocol` injection.
-- **Design points:** W4 stores full IR for standard `/v1/responses background:true` and preserves `/v1/responses/compact` plus CLI-marked direct-submit compatibility. Real early detection still only has path/header/body-head inputs, so body-level OpenAI/Kiro markers and any dedicated Kiro/OpenAI CLI `ApiShape` registration belong in the W7/Kiro CLI lane.
+- **Design points:** W4 stores full IR for standard `/v1/responses background:true` and preserves `/v1/responses/compact` plus CLI-marked direct-submit compatibility. Real early detection still only has path/header/body-head inputs, so body-level OpenAI/Kiro markers belong in the W7/Kiro CLI lane. `ApiShape::KiroCli` is registered as a shape, but Kiro CLI marker detection, usage extraction, and passthrough behavior are still residual.
 - **Source:** W4 final quality review (2026-06-09).
 
 ## 02 routing
@@ -66,7 +66,7 @@ No open ROADMAP items.
 
 ### Heavy outbound adapter transforms — `capability-gap` / decision confirmed
 - **Intent:** add Kiro AWS SigV4 + EventStream outbound integration, Vertex AI RS256 service-account JWT signing + token exchange, and Codex request-body transforms.
-- **Design points:** these transforms use the confirmed outbound adapter boundary from F1. Kiro also requires a protocol-contract plan because the internal `gw-codec::kiro` frame codec is not yet registered as an `AnyCodec` variant and has no `gw-core::ProtocolKind` / `ApiShape` shape.
+- **Design points:** these transforms use the confirmed outbound adapter boundary from F1. Kiro protocol/API shapes and `AnyCodec::Kiro` EventStream registration are available, but SigV4, vendor auth injection, and full Kiro upstream integration remain unbuilt.
 - **Source:** deleted `adapter-a-t3-vertex-ai`, `adapter-a-t5-codex`, `adapter-a-t6-kiro-vendor`.
 
 ## 08 async-tasks
