@@ -244,6 +244,7 @@ fn codec_for_shape(shape: gw_core::protocol::ApiShape) -> AnyCodec {
             AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)
         }
         gw_core::protocol::ProtocolKind::Gemini => AnyCodec::Gemini(gw_codec::gemini::Gemini),
+        gw_core::protocol::ProtocolKind::Kiro => AnyCodec::Kiro(gw_codec::kiro::Kiro),
     }
 }
 
@@ -256,6 +257,7 @@ pub(crate) fn pick_emit_codec(c: &Option<AnyCodec>) -> AnyCodec {
         Some(AnyCodec::OpenAiResponses(_)) => AnyCodec::OpenAi(gw_codec::openai::OpenAi),
         Some(AnyCodec::Anthropic(_)) => AnyCodec::Anthropic(gw_codec::anthropic::Anthropic),
         Some(AnyCodec::Gemini(_)) => AnyCodec::Gemini(gw_codec::gemini::Gemini),
+        Some(AnyCodec::Kiro(_)) => AnyCodec::Kiro(gw_codec::kiro::Kiro),
         None => AnyCodec::OpenAi(gw_codec::openai::OpenAi),
     }
 }

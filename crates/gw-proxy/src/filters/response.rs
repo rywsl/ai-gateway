@@ -476,7 +476,12 @@ fn cli_usage_extractor(shape: ApiShape) -> &'static dyn gw_codec::cli::CliUsageE
             gw_codec::cli::openai_compact::OpenAiCompactCodec.usage_extractor()
         }
         ApiShape::GeminiCli => gw_codec::cli::gemini_cli::GeminiCliCodec.usage_extractor(),
-        _ => gw_codec::cli::openai_cli::OpenAiCliCodec.usage_extractor(),
+        ApiShape::KiroCli
+        | ApiShape::OpenAiChat
+        | ApiShape::OpenAiResponses
+        | ApiShape::AnthropicMessages
+        | ApiShape::GeminiGenerate
+        | ApiShape::KiroEventStream => &KIRO_CLI_NOOP_EXTRACTOR,
     }
 }
 
@@ -488,7 +493,30 @@ fn cli_ttft_event_types(shape: ApiShape) -> &'static [&'static str] {
             gw_codec::cli::openai_compact::OpenAiCompactCodec.ttft_event_types()
         }
         ApiShape::GeminiCli => gw_codec::cli::gemini_cli::GeminiCliCodec.ttft_event_types(),
-        _ => &[],
+        ApiShape::KiroCli
+        | ApiShape::OpenAiChat
+        | ApiShape::OpenAiResponses
+        | ApiShape::AnthropicMessages
+        | ApiShape::GeminiGenerate
+        | ApiShape::KiroEventStream => &[],
+    }
+}
+
+static KIRO_CLI_NOOP_EXTRACTOR: KiroCliNoopExtractor = KiroCliNoopExtractor;
+
+struct KiroCliNoopExtractor;
+
+impl gw_codec::cli::CliUsageExtractor for KiroCliNoopExtractor {
+    fn extract_stream_usage(
+        &self,
+        _event_type: &str,
+        _data: &[u8],
+    ) -> Option<gw_codec::cli::CliUsageDelta> {
+        None
+    }
+
+    fn extract_response_usage(&self, _body: &[u8]) -> Option<gw_codec::cli::CliUsageFull> {
+        None
     }
 }
 
@@ -513,6 +541,7 @@ fn codec_for(k: ProtocolKind) -> AnyCodec {
         ProtocolKind::OpenAi => AnyCodec::OpenAi(gw_codec::openai::OpenAi),
         ProtocolKind::Anthropic => AnyCodec::Anthropic(gw_codec::anthropic::Anthropic),
         ProtocolKind::Gemini => AnyCodec::Gemini(gw_codec::gemini::Gemini),
+        ProtocolKind::Kiro => AnyCodec::Kiro(gw_codec::kiro::Kiro),
     }
 }
 
@@ -708,6 +737,22 @@ fn extractor_for_shape(shape: ApiShape) -> Box<dyn gw_codec::usage_extractor::Us
             Box::new(gw_codec::openai::usage_extractor::OpenAiUsageExtractor::responses())
         }
         ApiShape::GeminiCli => Box::new(gw_codec::gemini::usage_extractor::GeminiUsageExtractor),
+        ApiShape::KiroEventStream | ApiShape::KiroCli => Box::new(KiroNoopUsageExtractor),
+    }
+}
+
+struct KiroNoopUsageExtractor;
+
+impl gw_codec::usage_extractor::UsageExtractor for KiroNoopUsageExtractor {
+    fn extract_response(&self, _body: &[u8]) -> gw_codec::usage_extractor::ExtractedUsage {
+        gw_codec::usage_extractor::ExtractedUsage::default()
+    }
+
+    fn extract_chunk(
+        &self,
+        _event_bytes: &[u8],
+    ) -> Option<gw_codec::usage_extractor::ExtractedUsage> {
+        None
     }
 }
 

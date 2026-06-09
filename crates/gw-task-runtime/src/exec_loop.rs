@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context};
 use gw_billing::formulas::{calculate_settle_amount, TaskBillingResult};
 use gw_codec::{
-    anthropic::Anthropic, gemini::Gemini, openai::responses::OpenAiResponsesCodec, openai::OpenAi,
-    AnyCodec,
+    anthropic::Anthropic, gemini::Gemini, kiro::Kiro, openai::responses::OpenAiResponsesCodec,
+    openai::OpenAi, AnyCodec,
 };
 use gw_task::contract::ClaimedTask;
 use gw_task::{TaskContract, TaskKind, TaskRecord, TaskStatus};
@@ -578,6 +578,7 @@ fn codec_for_ir_wire_format(format: Option<&serde_json::Value>) -> Option<AnyCod
         Some("openai:responses") => Some(AnyCodec::OpenAiResponses(OpenAiResponsesCodec)),
         Some("anthropic:messages") => Some(AnyCodec::Anthropic(Anthropic)),
         Some("gemini:generate") => Some(AnyCodec::Gemini(Gemini)),
+        Some("kiro:eventstream") => Some(AnyCodec::Kiro(Kiro)),
         _ => None,
     }
 }

@@ -986,6 +986,10 @@ pub async fn rewrite_request(
                 Ok(cow) => bytes_from_passthrough(cow, &outbound_body),
                 Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
             },
+            AnyCodec::Kiro(c) => match same_protocol_passthrough(c, &outbound_body, &mutations) {
+                Ok(cow) => bytes_from_passthrough(cow, &outbound_body),
+                Err(_e) => return Err(Error::new(ErrorType::Custom("gw_passthrough_failed"))),
+            },
         }
     } else {
         // Parse → mutate (forced_params) → render through the upstream codec.
@@ -1396,6 +1400,7 @@ fn codec_for(k: gw_core::protocol::ProtocolKind) -> AnyCodec {
         ProtocolKind::OpenAi => AnyCodec::OpenAi(gw_codec::openai::OpenAi),
         ProtocolKind::Anthropic => AnyCodec::Anthropic(gw_codec::anthropic::Anthropic),
         ProtocolKind::Gemini => AnyCodec::Gemini(gw_codec::gemini::Gemini),
+        ProtocolKind::Kiro => AnyCodec::Kiro(gw_codec::kiro::Kiro),
     }
 }
 
