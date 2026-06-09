@@ -31,6 +31,8 @@ pub enum FailoverDecision {
     Retry(Arc<VendorKey>),
     /// All candidates exhausted or max retries reached
     Exhausted,
+    /// Total failover budget has been spent.
+    Timeout,
     /// Response is not retryable (non-5xx/429, or body already started)
     NotRetryable,
 }
@@ -59,21 +61,39 @@ pub fn classify_for_failover(
 
 pub struct FailoverExecutor {
     max_retries: u8,
+    total_budget_ms: u64,
 }
 
 impl Default for FailoverExecutor {
     fn default() -> Self {
-        Self { max_retries: 3 }
+        Self {
+            max_retries: 3,
+            total_budget_ms: 30_000,
+        }
     }
 }
 
 impl FailoverExecutor {
     pub fn new(max_retries: u8) -> Self {
-        Self { max_retries }
+        Self {
+            max_retries,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_total_budget_ms(max_retries: u8, total_budget_ms: u64) -> Self {
+        Self {
+            max_retries,
+            total_budget_ms,
+        }
     }
 
     pub fn max_retries(&self) -> u8 {
         self.max_retries
+    }
+
+    pub fn total_budget_ms(&self) -> u64 {
+        self.total_budget_ms
     }
 
     /// Given a failed key and the original candidate list, decide the next action.
@@ -84,6 +104,19 @@ impl FailoverExecutor {
         remaining_candidates: &[Arc<VendorKey>],
         attempt: u8,
     ) -> FailoverDecision {
+        self.next_candidate_with_elapsed(remaining_candidates, attempt, 0)
+    }
+
+    pub fn next_candidate_with_elapsed(
+        &self,
+        remaining_candidates: &[Arc<VendorKey>],
+        attempt: u8,
+        elapsed_ms: u64,
+    ) -> FailoverDecision {
+        if elapsed_ms >= self.total_budget_ms {
+            return FailoverDecision::Timeout;
+        }
+
         if attempt > self.max_retries {
             return FailoverDecision::Exhausted;
         }
@@ -285,6 +318,17 @@ mod tests {
         assert!(matches!(
             executor.next_candidate(&candidates, 1),
             FailoverDecision::Exhausted
+        ));
+    }
+
+    #[test]
+    fn test_next_candidate_times_out_when_budget_exceeded() {
+        let executor = FailoverExecutor::with_total_budget_ms(3, 1_000);
+        let candidates = vec![make_test_key("key-a")];
+
+        assert!(matches!(
+            executor.next_candidate_with_elapsed(&candidates, 1, 1_000),
+            FailoverDecision::Timeout
         ));
     }
 }

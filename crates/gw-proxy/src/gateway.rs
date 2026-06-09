@@ -103,6 +103,22 @@ fn remaining_failover_candidates(
         .collect()
 }
 
+fn failover_elapsed_ms(ctx: &ReqCtx) -> u64 {
+    ctx.timing
+        .start
+        .map(|start| start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn next_failover_decision(
+    executor: &FailoverExecutor,
+    remaining: &[Arc<gw_core::entity::VendorKey>],
+    attempt: u8,
+    ctx: &ReqCtx,
+) -> FailoverDecision {
+    executor.next_candidate_with_elapsed(remaining, attempt, failover_elapsed_ms(ctx))
+}
+
 fn adapter_body_head(body: &bytes::BytesMut) -> &[u8] {
     let cap = body.len().min(8192);
     &body[..cap]
@@ -936,41 +952,54 @@ impl ProxyHttp for LlmGateway {
                 if let Some(candidates) = ctx.picked_candidates.as_ref() {
                     let remaining = remaining_failover_candidates(candidates, ctx);
                     let attempt = ctx.failover_attempt.saturating_add(1);
-                    let decision = self.failover_executor.next_candidate(&remaining, attempt);
-                    if let FailoverDecision::Retry(new_key) = decision {
-                        // Audit 2026-05-30 §1.2: settle the prior attempt before
-                        // mutating ctx for the next key. Bumps attempt_index (so
-                        // the next inflight.register uses a fresh key instead of
-                        // clobbering this attempt's) and emits its UsageRecord —
-                        // build_attempt_record reads ctx.picked_vendor_key, so this
-                        // MUST run before picked_vendor_key is overwritten below.
-                        crate::billing_lifecycle::settle_prior_attempt_spawn(
-                            ctx,
-                            self.inflight.clone(),
-                            self.ledger.clone(),
-                        );
-                        if let Some(k) = ctx.picked_vendor_key.as_ref() {
-                            if !ctx.retry_blacklist.iter().any(|id| id == &k.key_id) {
-                                ctx.retry_blacklist.push(k.key_id.clone());
+                    let decision =
+                        next_failover_decision(&self.failover_executor, &remaining, attempt, ctx);
+                    match decision {
+                        FailoverDecision::Retry(new_key) => {
+                            // Audit 2026-05-30 §1.2: settle the prior attempt before
+                            // mutating ctx for the next key. Bumps attempt_index (so
+                            // the next inflight.register uses a fresh key instead of
+                            // clobbering this attempt's) and emits its UsageRecord —
+                            // build_attempt_record reads ctx.picked_vendor_key, so this
+                            // MUST run before picked_vendor_key is overwritten below.
+                            crate::billing_lifecycle::settle_prior_attempt_spawn(
+                                ctx,
+                                self.inflight.clone(),
+                                self.ledger.clone(),
+                            );
+                            if let Some(k) = ctx.picked_vendor_key.as_ref() {
+                                if !ctx.retry_blacklist.iter().any(|id| id == &k.key_id) {
+                                    ctx.retry_blacklist.push(k.key_id.clone());
+                                }
                             }
-                        }
-                        metrics::counter!(
-                            "gw_retry_attempt_total",
-                            "outcome" => "egress_retry",
-                        )
-                        .increment(1);
-                        ctx.failover_attempt = attempt;
-                        ctx.inflight_guard = None;
-                        ctx.picked_vendor_key = Some(new_key);
-                        ctx.picked_vendor = None;
-                        ctx.upstream_codec = None;
-                        ctx.upstream_status = None;
-                        ctx.body_started = false;
+                            metrics::counter!(
+                                "gw_retry_attempt_total",
+                                "outcome" => "egress_retry",
+                            )
+                            .increment(1);
+                            ctx.failover_attempt = attempt;
+                            ctx.inflight_guard = None;
+                            ctx.picked_vendor_key = Some(new_key);
+                            ctx.picked_vendor = None;
+                            ctx.upstream_codec = None;
+                            ctx.upstream_status = None;
+                            ctx.body_started = false;
 
-                        let mut e = Error::new(ErrorType::HTTPStatus(status));
-                        e.as_up();
-                        e.set_retry(true);
-                        return Err(e);
+                            let mut e = Error::new(ErrorType::HTTPStatus(status));
+                            e.as_up();
+                            e.set_retry(true);
+                            return Err(e);
+                        }
+                        FailoverDecision::Timeout => {
+                            ctx.upstream_error_code = Some(codes::GW_ROUTING_FAILOVER_TIMEOUT);
+                            metrics::counter!(
+                                "gw_routing_failover_total",
+                                "reason" => "timeout",
+                                "strategy" => ctx.strategy_name.unwrap_or("unknown").to_owned(),
+                            )
+                            .increment(1);
+                        }
+                        FailoverDecision::Exhausted | FailoverDecision::NotRetryable => {}
                     }
                     // Exhausted / NotRetryable → fall through to error classification.
                 }
@@ -1007,7 +1036,12 @@ impl ProxyHttp for LlmGateway {
                     if let Some(candidates) = ctx.picked_candidates.as_ref() {
                         let remaining = remaining_failover_candidates(candidates, ctx);
                         let attempt = ctx.failover_attempt.saturating_add(1);
-                        let decision = self.failover_executor.next_candidate(&remaining, attempt);
+                        let decision = next_failover_decision(
+                            &self.failover_executor,
+                            &remaining,
+                            attempt,
+                            ctx,
+                        );
                         let strategy_name = ctx.strategy_name.unwrap_or("unknown");
                         gw_routing::failover::record_failover_metric(class, strategy_name);
 
@@ -1043,6 +1077,15 @@ impl ProxyHttp for LlmGateway {
                                 metrics::counter!(
                                     "gw_routing_failover_total",
                                     "reason" => "exhausted",
+                                    "strategy" => strategy_name.to_owned(),
+                                )
+                                .increment(1);
+                            }
+                            FailoverDecision::Timeout => {
+                                ctx.upstream_error_code = Some(codes::GW_ROUTING_FAILOVER_TIMEOUT);
+                                metrics::counter!(
+                                    "gw_routing_failover_total",
+                                    "reason" => "timeout",
                                     "strategy" => strategy_name.to_owned(),
                                 )
                                 .increment(1);
@@ -1614,13 +1657,47 @@ fn trace_id_hex() -> String {
 mod tests {
     use super::{
         adapter_body_head, classify_connect_error, is_gw_short_circuit,
-        merge_adapter_error_outcome, ConnectErrorKind,
+        merge_adapter_error_outcome, next_failover_decision, ConnectErrorKind,
     };
     use bytes::BytesMut;
     use gw_adapter::{ErrorKind, ErrorOutcome};
+    use gw_core::entity::{KeyStatus, VendorKey};
     use gw_core::error::{ClassifierOutcome, CooldownDirective, ErrorClass, Retryability};
+    use gw_core::ids::{KeyId, VendorId};
     use gw_core::ratelimit::RateLimitKind;
+    use gw_routing::{FailoverDecision, FailoverExecutor};
     use pingora::{Error, ErrorType};
+    use secrecy::SecretString;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn make_test_key(key_id: &str) -> Arc<VendorKey> {
+        Arc::new(VendorKey {
+            key_id: KeyId::from(key_id),
+            vendor_id: VendorId::from("vendor-test"),
+            api_key: SecretString::from("sk-test".to_string()),
+            accessible_models: vec![],
+            model_mapping: Default::default(),
+            accessible_endpoints: vec![],
+            protocol_conversion: false,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: vec![],
+            forced_capabilities: vec![],
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+            identity_snapshot: None,
+            quota_state: Default::default(),
+        })
+    }
 
     #[test]
     fn classify_connect_error_tls_outer() {
@@ -1647,6 +1724,19 @@ mod tests {
         assert_eq!(classify_connect_error(&e), ConnectErrorKind::Connect);
         let e = Error::new(ErrorType::ConnectNoRoute);
         assert_eq!(classify_connect_error(&e), ConnectErrorKind::Connect);
+    }
+
+    #[test]
+    fn next_failover_decision_honors_request_elapsed_budget() {
+        let mut ctx = crate::ctx::ReqCtx::default();
+        ctx.timing.start = Some(Instant::now() - Duration::from_millis(25));
+        let executor = FailoverExecutor::with_total_budget_ms(3, 10);
+        let remaining = vec![make_test_key("key-a")];
+
+        assert!(matches!(
+            next_failover_decision(&executor, &remaining, 1, &ctx),
+            FailoverDecision::Timeout
+        ));
     }
 
     #[test]

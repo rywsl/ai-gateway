@@ -167,6 +167,13 @@ interval_secs = 300
 probe_endpoint = "/v1/models"
 max_pending = 1000
 
+[error.classification]
+# Upstream statuses eligible for response-side cross-key failover before body
+# bytes are sent to the client. Boot-time only.
+retryable_status_codes = [401, 402, 403, 429, 500, 502, 503, 504]
+# Total wall-clock budget from request admission to the next failover decision.
+failover_total_budget_ms = 30000
+
 [egress]
 # Workspace kill-switch for the egress-impersonate path. When true, vendors
 # with egress_mode = Impersonate { .. } are excluded from candidate selection

@@ -39,11 +39,6 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 - **Design points:** `StreamPhase` (Connecting/Probing/Streaming) + `probe_timeout` watchdog + `ProbeFailure` (upstream-error-body / malformed-frame / timeout) + `gw_stream_probe_*` metrics. Today `gw-proxy/src/gateway.rs` conflates first-upstream-byte with first-client-byte via `body_started`.
 - **Source:** deleted `routing-r-f-stream-probe`.
 
-### R-E failover gaps + 3 error codes — `capability-gap`
-- **Intent:** complete failover semantics.
-- **Design points:** add `401|402|403 → SwitchKey` (currently NotRetryable, never switched); add a `total_budget_ms` failover deadline (today only an attempt-count cap, `failover.rs::FailoverExecutor`); define the three missing codes in `crates/gw-core/src/error/codes.rs`: `GW_ROUTING_NO_FALLBACK_LEFT`, `GW_ROUTING_FAILOVER_TIMEOUT`, `GW_ROUTING_STREAM_NOT_RETRIABLE` (only `GW_ROUTING_NO_AVAILABLE_CHANNEL` exists).
-- **Source:** deleted `routing-r-e-failover`.
-
 ## 03 key-health
 
 No open ROADMAP items.

@@ -813,16 +813,23 @@ pub struct ErrorCfg {
 pub struct ErrorClassificationCfg {
     #[serde(default = "default_retryable_status_codes")]
     pub retryable_status_codes: Vec<u16>,
+    #[serde(default = "default_failover_total_budget_ms")]
+    pub failover_total_budget_ms: u64,
 }
 
 fn default_retryable_status_codes() -> Vec<u16> {
     vec![401, 402, 403, 429, 500, 502, 503, 504]
 }
 
+const fn default_failover_total_budget_ms() -> u64 {
+    30_000
+}
+
 impl Default for ErrorClassificationCfg {
     fn default() -> Self {
         Self {
             retryable_status_codes: default_retryable_status_codes(),
+            failover_total_budget_ms: default_failover_total_budget_ms(),
         }
     }
 }
@@ -1615,6 +1622,7 @@ mod error_cfg_tests {
             cfg.error.classification.retryable_status_codes,
             vec![401, 402, 403, 429, 500, 502, 503, 504]
         );
+        assert_eq!(cfg.error.classification.failover_total_budget_ms, 30_000);
         assert!(!cfg.error.passthrough.enabled);
     }
 
