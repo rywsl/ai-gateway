@@ -1,13 +1,12 @@
-use gw_proxy::billing_lifecycle::{
-    build_attempt_record, can_transition, is_terminal, on_retry_sync, transition_to,
-    VendorExposure,
-};
-use gw_proxy::ctx::ReqCtx;
 use gw_core::entity::VendorKey;
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::{MarkupChainSnapshot, MergedPermissions};
 use gw_core::protocol::ApiShape;
 use gw_core::usage::ProvenanceTag;
+use gw_proxy::billing_lifecycle::{
+    build_attempt_record, can_transition, is_terminal, on_retry_sync, transition_to, VendorExposure,
+};
+use gw_proxy::ctx::ReqCtx;
 use secrecy::SecretString;
 use std::sync::Arc;
 
@@ -248,31 +247,32 @@ fn cli_extracted_usage_success_keeps_cli_extracted_provenance() {
 }
 
 #[test]
-fn cli_usage_absent_uses_nonzero_estimate_instead_of_free_usage() {
+fn cli_failed_attempt_with_missing_usage_keeps_raw_zero_usage() {
     let mut ctx = seeded_cli_ctx();
     ctx.prompt_estimate_tokens = Some(37);
     ctx.usage_provenance.input = ProvenanceTag::CliExtracted;
 
     let record = build_attempt_record(&ctx).expect("cli record");
 
-    assert_eq!(record.usage.input_tokens, 37);
-    assert_eq!(record.usage_provenance.input, ProvenanceTag::Estimated);
-    assert!(record.usage.input_tokens > 0 || record.usage.output_tokens > 0);
-    assert_ne!(record.usage_provenance.input, ProvenanceTag::Unknown);
+    assert_eq!(record.usage.input_tokens, 0);
+    assert_eq!(record.usage.output_tokens, 0);
+    assert_eq!(record.usage_provenance.input, ProvenanceTag::CliExtracted);
+    assert_ne!(record.usage_provenance.input, ProvenanceTag::Estimated);
 }
 
 #[test]
-fn cli_usage_absent_without_estimate_fails_billing_protection() {
+fn cli_failed_attempt_with_missing_usage_without_estimate_keeps_raw_zero_usage() {
     let mut ctx = seeded_cli_ctx();
     ctx.prompt_estimate_tokens = None;
 
-    let record = build_attempt_record(&ctx);
+    let record = build_attempt_record(&ctx).expect("failed attempt record");
 
-    assert!(record.is_none(), "billing protection must fail closed");
+    assert_eq!(record.usage.input_tokens, 0);
+    assert_eq!(record.usage.output_tokens, 0);
 }
 
 #[test]
-fn cli_zero_cache_dimensions_use_nonzero_estimate_in_attempt_record() {
+fn cli_failed_attempt_with_zero_cache_dimensions_keeps_raw_zero_usage() {
     let mut ctx = seeded_cli_ctx();
     ctx.prompt_estimate_tokens = Some(17);
     ctx.usage.cached_tokens = Some(0);
@@ -282,24 +282,30 @@ fn cli_zero_cache_dimensions_use_nonzero_estimate_in_attempt_record() {
 
     let record = build_attempt_record(&ctx).expect("cli record");
 
-    assert_eq!(record.usage.input_tokens, 17);
-    assert_eq!(record.usage_provenance.input, ProvenanceTag::Estimated);
-    assert_eq!(record.usage_provenance.cache_read, ProvenanceTag::Estimated);
+    assert_eq!(record.usage.input_tokens, 0);
+    assert_eq!(record.usage.cache_read_input_tokens, Some(0));
+    assert_eq!(record.usage.cache_creation_input_tokens, Some(0));
+    assert_ne!(record.usage_provenance.input, ProvenanceTag::Estimated);
+    assert_eq!(
+        record.usage_provenance.cache_read,
+        ProvenanceTag::CliExtracted
+    );
     assert_eq!(
         record.usage_provenance.cache_creation,
-        ProvenanceTag::Estimated
+        ProvenanceTag::CliExtracted
     );
-    assert!(record.usage.input_tokens > 0 || record.usage.output_tokens > 0);
 }
 
 #[test]
-fn cli_zero_cache_dimensions_without_estimate_fail_closed_in_attempt_record() {
+fn cli_failed_attempt_with_zero_cache_dimensions_without_estimate_keeps_raw_zero_usage() {
     let mut ctx = seeded_cli_ctx();
     ctx.prompt_estimate_tokens = None;
     ctx.usage.cached_tokens = Some(0);
     ctx.usage.cache_creation_tokens = Some(0);
 
-    let record = build_attempt_record(&ctx);
+    let record = build_attempt_record(&ctx).expect("failed attempt record");
 
-    assert!(record.is_none(), "zero cache dims must not count as billable usage");
+    assert_eq!(record.usage.input_tokens, 0);
+    assert_eq!(record.usage.cache_read_input_tokens, Some(0));
+    assert_eq!(record.usage.cache_creation_input_tokens, Some(0));
 }

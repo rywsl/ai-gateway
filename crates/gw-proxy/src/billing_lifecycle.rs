@@ -124,7 +124,15 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
         _ => None,
     };
 
-    let (usage, usage_provenance) = billing_protected_usage(ctx)?;
+    let usage = gw_core::usage::UsageSnapshot {
+        input_tokens: ctx.usage.input_tokens,
+        output_tokens: ctx.usage.output_tokens,
+        cache_read_input_tokens: ctx.usage.cached_tokens,
+        cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
+        thinking_tokens: ctx.usage.thinking_tokens,
+        multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
+    };
+    let usage_provenance = ctx.usage_provenance;
 
     Some(UsageRecord {
         ts_ms: now_ms,
@@ -195,7 +203,10 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
 
 pub(crate) fn billing_protected_usage(
     ctx: &ReqCtx,
-) -> Option<(gw_core::usage::UsageSnapshot, gw_ledger::usage::UsageProvenance)> {
+) -> Option<(
+    gw_core::usage::UsageSnapshot,
+    gw_ledger::usage::UsageProvenance,
+)> {
     let mut usage = gw_core::usage::UsageSnapshot {
         input_tokens: ctx.usage.input_tokens,
         output_tokens: ctx.usage.output_tokens,
