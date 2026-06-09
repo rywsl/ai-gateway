@@ -555,7 +555,12 @@ pub async fn pick_peer(
                         Ok(p) => {
                             metrics::counter!("gw_tunnel_resolve_total", "result" => "tunnel")
                                 .increment(1);
-                            ctx.tunnel_resolution = Some(node_id);
+                            ctx.tunnel_resolution = Some(node_id.clone());
+                            ctx.tunnel_bridge = Some(crate::ctx::TunnelBridgeMeta {
+                                node_id,
+                                target: format!("{host}:{port}"),
+                                target_tls: scheme_tls,
+                            });
                             peer = p;
                         }
                         Err(crate::tunnel_stack::TunnelPeerError::NoLive { .. }) => {
@@ -933,6 +938,7 @@ pub async fn rewrite_request(
             view.set_outbound(outbound.clone());
         }
         archive_upstream_request(ctx, upstream_request, outbound);
+        inject_tunnel_bridge_headers(ctx, upstream_request);
         inject_egress_headers(ctx, upstream_request, &picked).await;
         crate::billing_lifecycle::transition_to(
             ctx,
@@ -1052,6 +1058,7 @@ pub async fn rewrite_request(
         view.set_outbound(outbound.clone());
     }
     archive_upstream_request(ctx, upstream_request, outbound);
+    inject_tunnel_bridge_headers(ctx, upstream_request);
     inject_egress_headers(ctx, upstream_request, &picked).await;
 
     // W2-T4: mark the request as dispatched to the upstream vendor.
@@ -1162,6 +1169,23 @@ fn archive_upstream_request(
             .collect(),
     });
 }
+
+#[cfg(feature = "tunnel")]
+fn inject_tunnel_bridge_headers(ctx: &ReqCtx, upstream_request: &mut RequestHeader) {
+    let Some(meta) = ctx.tunnel_bridge.as_ref() else {
+        return;
+    };
+    let _ =
+        upstream_request.insert_header(crate::tunnel_bridge::HDR_NODE_ID, meta.node_id.as_str());
+    let _ = upstream_request.insert_header(crate::tunnel_bridge::HDR_TARGET, meta.target.as_str());
+    let _ = upstream_request.insert_header(
+        crate::tunnel_bridge::HDR_TARGET_TLS,
+        if meta.target_tls { "true" } else { "false" },
+    );
+}
+
+#[cfg(not(feature = "tunnel"))]
+fn inject_tunnel_bridge_headers(_ctx: &ReqCtx, _upstream_request: &mut RequestHeader) {}
 
 struct ProxyHeadersAccessor<'a>(&'a mut RequestHeader);
 

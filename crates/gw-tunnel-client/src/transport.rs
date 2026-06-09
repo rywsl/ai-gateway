@@ -2,13 +2,16 @@
 //! protocol. Reconnect orchestration lives in `pool::ReconnectingTransport`.
 
 use crate::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
@@ -67,9 +70,23 @@ pub enum TunnelEvent {
 pub struct TunnelStream {
     stream_id: u32,
     out_tx: mpsc::Sender<Frame>,
+    rx: Option<mpsc::Receiver<TunnelEvent>>,
+    routes: Arc<Mutex<HashMap<u32, mpsc::Sender<TunnelEvent>>>>,
+    permit: Option<OwnedSemaphorePermit>,
+    detached: bool,
+}
+
+pub struct TunnelStreamReader {
+    stream_id: u32,
     rx: mpsc::Receiver<TunnelEvent>,
+    read_buf: Option<Bytes>,
     routes: Arc<Mutex<HashMap<u32, mpsc::Sender<TunnelEvent>>>>,
     _permit: OwnedSemaphorePermit,
+}
+
+pub struct TunnelStreamWriter {
+    stream_id: u32,
+    out_tx: mpsc::Sender<Frame>,
 }
 
 impl std::fmt::Debug for TunnelStream {
@@ -102,21 +119,150 @@ impl TunnelStream {
     }
 
     pub async fn recv(&mut self) -> Result<TunnelEvent, TunnelError> {
-        match self.rx.recv().await {
+        let Some(rx) = self.rx.as_mut() else {
+            return Err(TunnelError::Closed);
+        };
+        match rx.recv().await {
             Some(TunnelEvent::Error(err)) => Err(TunnelError::Remote(err)),
             Some(event) => Ok(event),
             None => Err(TunnelError::Closed),
         }
     }
+
+    pub fn split(mut self) -> (TunnelStreamReader, TunnelStreamWriter) {
+        let rx = self.rx.take().expect("TunnelStream split once");
+        let permit = self.permit.take().expect("TunnelStream split once");
+        self.detached = true;
+        (
+            TunnelStreamReader {
+                stream_id: self.stream_id,
+                rx,
+                read_buf: None,
+                routes: self.routes.clone(),
+                _permit: permit,
+            },
+            TunnelStreamWriter {
+                stream_id: self.stream_id,
+                out_tx: self.out_tx.clone(),
+            },
+        )
+    }
 }
 
 impl Drop for TunnelStream {
+    fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
+        let routes = self.routes.clone();
+        let stream_id = self.stream_id;
+        tokio::spawn(async move {
+            routes.lock().await.remove(&stream_id);
+        });
+    }
+}
+
+impl Drop for TunnelStreamReader {
     fn drop(&mut self) {
         let routes = self.routes.clone();
         let stream_id = self.stream_id;
         tokio::spawn(async move {
             routes.lock().await.remove(&stream_id);
         });
+    }
+}
+
+impl TunnelStreamWriter {
+    pub fn stream_id(&self) -> u32 {
+        self.stream_id
+    }
+
+    pub async fn send_data(&self, payload: Bytes) -> Result<(), TunnelError> {
+        send_data_frames(&self.out_tx, self.stream_id, payload).await
+    }
+
+    pub async fn close(&self) -> Result<(), TunnelError> {
+        self.out_tx
+            .send(Frame {
+                msg_type: MsgType::Close,
+                flags: 0,
+                stream_id: self.stream_id,
+                payload: Bytes::new(),
+            })
+            .await
+            .map_err(|e| TunnelError::Send(e.to_string()))
+    }
+}
+
+impl AsyncRead for TunnelStreamReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        loop {
+            if let Some(mut bytes) = self.read_buf.take() {
+                let n = bytes.len().min(buf.remaining());
+                buf.put_slice(&bytes[..n]);
+                if n < bytes.len() {
+                    bytes.advance(n);
+                    self.read_buf = Some(bytes);
+                }
+                return Poll::Ready(Ok(()));
+            }
+            match Pin::new(&mut self.rx).poll_recv(cx) {
+                Poll::Ready(Some(TunnelEvent::Data(bytes))) => {
+                    self.read_buf = Some(bytes);
+                }
+                Poll::Ready(Some(TunnelEvent::Close)) | Poll::Ready(None) => {
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Some(TunnelEvent::Error(err))) => {
+                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, err)));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl AsyncWrite for TunnelStreamWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let n = buf.len().min(MAX_PAYLOAD_LEN);
+        match self.out_tx.try_send(Frame {
+            msg_type: MsgType::Data,
+            flags: 0,
+            stream_id: self.stream_id,
+            payload: Bytes::copy_from_slice(&buf[..n]),
+        }) {
+            Ok(()) => Poll::Ready(Ok(n)),
+            Err(mpsc::error::TrySendError::Full(_)) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "tunnel send queue full",
+            ))),
+            Err(mpsc::error::TrySendError::Closed(_)) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "tunnel transport closed",
+            ))),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let _ = self.out_tx.try_send(Frame {
+            msg_type: MsgType::Close,
+            flags: 0,
+            stream_id: self.stream_id,
+            payload: Bytes::new(),
+        });
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -306,9 +452,10 @@ impl WsTransport {
         Ok(TunnelStream {
             stream_id: id,
             out_tx: self.out_tx.clone(),
-            rx,
+            rx: Some(rx),
             routes: self.routes.clone(),
-            _permit: permit,
+            permit: Some(permit),
+            detached: false,
         })
     }
 

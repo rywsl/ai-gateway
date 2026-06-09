@@ -18,8 +18,9 @@ use gw_tunnel_client::resolver::{
     resolve_tunnel, ProxyNodeView, TunnelResolution, TunnelResolveCtx,
 };
 use gw_tunnel_client::safe_dns::SafeDnsResolver;
-use gw_tunnel_client::transport::TransportConfig;
+use gw_tunnel_client::transport::{TransportConfig, WsTransport};
 use pingora::upstreams::peer::HttpPeer;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -58,6 +59,9 @@ pub struct TunnelStack {
     pool_cfg: PoolConfig,
     /// Transport config template (only `url` differs per node).
     transport_cfg_template: TransportConfig,
+    /// Loopback HTTP/1 bridge address. `peer_for_node` returns this peer after
+    /// validating the chosen node and target.
+    bridge_addr: arc_swap::ArcSwapOption<SocketAddr>,
 }
 
 impl TunnelStack {
@@ -73,7 +77,12 @@ impl TunnelStack {
             dns,
             pool_cfg,
             transport_cfg_template,
+            bridge_addr: arc_swap::ArcSwapOption::empty(),
         }
+    }
+
+    pub fn set_bridge_addr(&self, addr: SocketAddr) {
+        self.bridge_addr.store(Some(Arc::new(addr)));
     }
 
     /// Wholesale-swap the live node list. Called by the bootstrap-side
@@ -126,6 +135,10 @@ impl TunnelStack {
                 }
             })
             .collect()
+    }
+
+    pub fn current_transport(&self, node_id: &str) -> Option<Arc<WsTransport>> {
+        self.transports.get(node_id).and_then(|t| t.current())
     }
 
     /// Decide Direct vs Tunnel for a given (provider, key, preference).
@@ -235,18 +248,11 @@ impl TunnelStack {
             });
         }
 
-        // Build the HttpPeer whose socket terminates at the WS node.
-        // Use the same snapshot taken at the top of this method.
-        let view_url = snapshot
-            .iter()
-            .find(|n| n.id == node_id)
-            .map(|n| n.ws_url.clone())
-            .ok_or_else(|| TunnelPeerError::NoLive {
+        let Some(bridge_addr) = self.bridge_addr.load_full() else {
+            return Err(TunnelPeerError::NoLive {
                 node_id: node_id.to_owned(),
-            })?;
-        let node_host = view_url.host_str().unwrap_or("").to_string();
-        let node_port = view_url.port_or_known_default().unwrap_or(443);
-        let tls = view_url.scheme().eq_ignore_ascii_case("wss");
+            });
+        };
         metrics::counter!(
             "gw_tunnel_open_total",
             "node_id" => node_id.to_owned(),
@@ -254,9 +260,9 @@ impl TunnelStack {
         )
         .increment(1);
         Ok(HttpPeer::new(
-            format!("{node_host}:{node_port}"),
-            tls,
-            node_host,
+            bridge_addr.to_string(),
+            false,
+            "127.0.0.1".to_owned(),
         ))
     }
 }

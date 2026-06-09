@@ -99,6 +99,8 @@ struct Wired {
     /// TunnelStack (T5-B). `Some` iff `cfg.tunnel.enabled = true`.
     #[cfg(feature = "tunnel")]
     tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
+    #[cfg(feature = "tunnel")]
+    _tunnel_bridge: Option<gw_proxy::tunnel_bridge::TunnelBridgeHandle>,
     /// Management-token blacklist + JWT blacklist (T3-Pre wiring). Threaded
     /// through `LlmGateway`'s request filter and the admin `/healthz/*`
     /// surface so T3-B / T3-C can implement the verify chain.
@@ -754,6 +756,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // entire stack on `false` keeps the byte-identical Direct path: pick_peer
     // sees `tunnel = None` and never branches.
     #[cfg(feature = "tunnel")]
+    let mut tunnel_bridge: Option<gw_proxy::tunnel_bridge::TunnelBridgeHandle> = None;
+
+    #[cfg(feature = "tunnel")]
     let tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>> = if cfg.tunnel.enabled {
         use gw_tunnel_client::pool::PoolConfig;
         use gw_tunnel_client::resolver::ProxyNodeView;
@@ -840,6 +845,24 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
             pool_cfg,
             transport_template,
         ));
+
+        let weak_stack = Arc::downgrade(&stack);
+        let bridge = gw_proxy::tunnel_bridge::spawn(gw_proxy::tunnel_bridge::TunnelBridgeConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            transport_for_node: Arc::new(move |node_id: &str| {
+                weak_stack
+                    .upgrade()
+                    .and_then(|stack| stack.current_transport(node_id))
+            }),
+        })
+        .await?;
+        stack.set_bridge_addr(bridge.local_addr);
+        tracing::info!(
+            target: "gw_gateway",
+            bridge_addr = %bridge.local_addr,
+            "tunnel loopback bridge started"
+        );
+        tunnel_bridge = Some(bridge);
 
         // Refresh-on-invalidation: spawn a 5s polling watcher. The stream
         // consumer in gw-store already invalidates the Moka cache on
@@ -989,6 +1012,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         capability_resolver,
         #[cfg(feature = "tunnel")]
         tunnel,
+        #[cfg(feature = "tunnel")]
+        _tunnel_bridge: tunnel_bridge,
         mgmt_blacklist,
         resilience,
         detailed_archive,

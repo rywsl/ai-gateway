@@ -25,4 +25,6 @@ pub mod timeouts;
 pub use gateway::LlmGateway;
 
 #[cfg(feature = "tunnel")]
+pub mod tunnel_bridge;
+#[cfg(feature = "tunnel")]
 pub mod tunnel_stack;

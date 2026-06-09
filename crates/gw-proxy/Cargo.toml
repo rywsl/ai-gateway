@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = []
-tunnel = ["dep:gw-tunnel-client"]
+tunnel = ["dep:gw-tunnel-client", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
 gw-core = { path = "../gw-core" }
@@ -22,6 +22,8 @@ gw-billing = { path = "../gw-billing" }
 gw-task = { path = "../gw-task" }
 gw-adapter = { path = "../gw-adapter" }
 gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
+tokio-rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 gw-egress-impersonate = { path = "../gw-egress-impersonate" }
 async-trait.workspace = true
 anyhow.workspace = true
@@ -51,6 +53,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+gw-tunnel-server = { path = "../gw-tunnel-server" }
 parking_lot = { workspace = true }
 flate2 = { workspace = true }
 hmac = { workspace = true }

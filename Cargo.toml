@@ -89,11 +89,13 @@ zstd = { version = "0.13", default-features = false }
 base64 = "0.22"
 regex = "1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-rustls = "0.26"
+webpki-roots = "1"
 futures-util = "0.3"
 hickory-resolver = { version = "0.25", features = ["https-ring", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-wreq = { version = "6.0.0-rc.28", default-features = false, features = ["json", "stream"] }
-wreq-util = { version = "3.0.0-rc.11" }
+wreq = { version = "=6.0.0-rc.28", default-features = false, features = ["json", "stream"] }
+wreq-util = { version = "=3.0.0-rc.11" }
 hyper = { version = "1.4", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
 http-body-util = "0.1"

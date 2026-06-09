@@ -207,27 +207,29 @@ fn map_egress_class(class: &str) -> (&'static str, bool, bool) {
     }
 }
 
-/// Gateway-internal egress control + error headers (Task 4.5). These are
-/// injected by `inject_vendor_headers` (request side) or emitted by the
-/// loopback egress service (response side) and must never be persisted into
-/// the detailed archive. Match is case-insensitive.
-const EGRESS_INTERNAL_HEADERS: &[&str] = &[
+/// Gateway-internal loopback control + error headers. These are injected by
+/// egress/tunnel loopbacks and must never be persisted into detailed archive.
+/// Match is case-insensitive.
+const LOOPBACK_INTERNAL_HEADERS: &[&str] = &[
     "x-egress-target",
     "x-egress-profile",
     "x-egress-proxy",
     "x-egress-error-class",
     "x-egress-error-detail",
+    "x-gateway-tunnel-node-id",
+    "x-gateway-tunnel-target",
+    "x-gateway-tunnel-target-tls",
 ];
 
-/// Drop any gateway-internal egress headers from a captured header snapshot
+/// Drop any gateway-internal loopback headers from a captured header snapshot
 /// before it is sent to the detailed archive. Preserves order of all other
 /// headers.
-fn redact_egress_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+fn redact_loopback_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
     headers
         .into_iter()
         .filter(|(name, _)| {
             let lower = name.to_ascii_lowercase();
-            !EGRESS_INTERNAL_HEADERS.contains(&lower.as_str())
+            !LOOPBACK_INTERNAL_HEADERS.contains(&lower.as_str())
         })
         .collect()
 }
@@ -586,7 +588,7 @@ impl LlmGateway {
                 payload: SurfacePayload::Response(
                     ResponsePayload {
                         status: meta.status,
-                        headers: redact_egress_headers(meta.headers),
+                        headers: redact_loopback_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
@@ -613,7 +615,7 @@ impl LlmGateway {
             payload: SurfacePayload::Response(
                 ResponsePayload {
                     status: downstream_meta.status,
-                    headers: redact_egress_headers(downstream_meta.headers),
+                    headers: redact_loopback_headers(downstream_meta.headers),
                     body_b64: String::new(),
                 },
                 body,
@@ -787,7 +789,7 @@ impl ProxyHttp for LlmGateway {
                         method: meta.method,
                         url: meta.url,
                         http_version: meta.http_version,
-                        headers: redact_egress_headers(meta.headers),
+                        headers: redact_loopback_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
@@ -914,7 +916,7 @@ impl ProxyHttp for LlmGateway {
                         method: meta.method,
                         url: meta.url,
                         http_version: meta.http_version,
-                        headers: redact_egress_headers(meta.headers),
+                        headers: redact_loopback_headers(meta.headers),
                         body_b64: String::new(),
                     },
                     body,
@@ -2048,7 +2050,7 @@ mod tests {
     }
 
     #[test]
-    fn redact_egress_headers_strips_internal_and_keeps_rest() {
+    fn redact_loopback_headers_strips_internal_and_keeps_rest() {
         let input = vec![
             (
                 "X-Egress-Target".to_string(),
@@ -2061,17 +2063,28 @@ mod tests {
                 "X-Egress-Error-Detail".to_string(),
                 "handshake failed".to_string(),
             ),
+            ("X-Gateway-Tunnel-Node-Id".to_string(), "n1".to_string()),
+            (
+                "x-gateway-tunnel-target".to_string(),
+                "api.example.com:443".to_string(),
+            ),
+            (
+                "X-Gateway-Tunnel-Target-Tls".to_string(),
+                "true".to_string(),
+            ),
             ("authorization".to_string(), "Bearer secret".to_string()),
             ("Content-Type".to_string(), "application/json".to_string()),
         ];
-        let out = super::redact_egress_headers(input);
+        let out = super::redact_loopback_headers(input);
         let names: Vec<String> = out.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
-        // All five egress-internal headers (any case) are gone.
+        // All loopback-internal headers (any case) are gone.
         assert!(
-            !names.iter().any(|n| n.starts_with("x-egress-")),
-            "egress headers leaked: {names:?}"
+            !names
+                .iter()
+                .any(|n| n.starts_with("x-egress-") || n.starts_with("x-gateway-tunnel-")),
+            "loopback headers leaked: {names:?}"
         );
-        // Non-egress headers are preserved, in order.
+        // Non-loopback headers are preserved, in order.
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].0, "authorization");
         assert_eq!(out[1].0, "Content-Type");

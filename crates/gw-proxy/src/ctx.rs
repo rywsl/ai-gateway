@@ -51,6 +51,13 @@ pub struct ResponseMeta {
     pub headers: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TunnelBridgeMeta {
+    pub node_id: String,
+    pub target: String,
+    pub target_tls: bool,
+}
+
 /// Mutable accumulator for token-usage seen on either the unary-response path
 /// or in stream `Usage` events. The `logging` filter reads these counters
 /// into the `UsageRecord` emitted to the usage stream.
@@ -267,6 +274,9 @@ pub struct ReqCtx {
     /// T6 / ADR-T-2 — set by `pick_peer` to `"direct"` or `Some(node_id)`.
     /// Read by `logging` for the detailed-log field and by metrics labels.
     pub tunnel_resolution: Option<String>,
+    /// Internal loopback bridge route metadata. Set only for tunnel-selected
+    /// Rustls traffic; consumed by `rewrite_request` to add `X-Gateway-Tunnel-*`.
+    pub tunnel_bridge: Option<TunnelBridgeMeta>,
 
     // --- Egress impersonation ---
     /// Set in `pick_peer` when `Vendor.egress_mode == Impersonate { profile }`.
@@ -427,6 +437,7 @@ impl ReqCtx {
             required_caps: None,
             retry_upgrade_hint: None,
             tunnel_resolution: None,
+            tunnel_bridge: None,
             egress_profile: None,
             egress_upstream: None,
             identity_persist: None,
