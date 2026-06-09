@@ -86,17 +86,12 @@ No open ROADMAP items.
 
 ## 09 tunnel
 
-### Tunnel is off in the shipped binary — `capability-gap`
-- **Intent:** make the tunnel data path actually compile into the release artifact.
-- **Design points:** `default = []` in `crates/gw-proxy/Cargo.toml` and `crates/gw-gateway/Cargo.toml`; `.gitlab-ci.yml` builds without `--features tunnel`, so only the `#[cfg(not(feature = "tunnel"))]` Direct arm ships. Decide whether to enable by default or build a tunnel-enabled artifact.
+### Default artifact remains non-tunnel — `capability-gap`
+- **Intent:** decide whether tunnel should stay as a separate operator-selected artifact or compile into the default release image.
+- **Design points:** `default = []` in `crates/gw-proxy/Cargo.toml` and `crates/gw-gateway/Cargo.toml`; `.gitlab-ci.yml` now builds two artifacts: default `latest` without `--features tunnel`, and `latest-tunnel` with `--features tunnel`. The split artifact is operationally usable, but the default image still compiles the `#[cfg(not(feature = "tunnel"))]` Direct arm. Decide whether this is the final shipping model or whether default `latest` should include the tunnel feature.
 - **Source:** deleted `tunnel-t-design` §1/§9.
 
-### `require_tunnel=true` silently falls back to Direct in the default build — `runtime-risk`
-- **Intent:** honor the hard-fail contract the spec was written to guarantee.
-- **Design points:** the `GW_TUNNEL_NO_NODE` hard-fail lives only in the `#[cfg(feature = "tunnel")]` arm (`gw-proxy/src/filters/upstream.rs`); the non-tunnel arm builds a Direct peer unconditionally and never consults `VendorKey.tunnel_preference.require_tunnel` (a non-gated `gw-core` field). Make the non-tunnel build reject `require_tunnel=true`.
-- **Source:** deleted `tunnel-t-design` ADR-T-4 (invariant `tunnel_require_means_hard_fail`).
-
-### Misc tunnel gaps (found during authoring) — `doc-divergence`
-- **Intent:** finish partially-wired tunnel surfaces.
-- **Design points:** `GW_TUNNEL_DNS_BLOCKED` is defined but never emitted; `last_pong_age_secs` is always `None`; `auth_token_enc` / `ControlAuth` are never sent on the control channel; the e2e tunnel test (`crates/gw-gateway/tests/e2e_tunnel.rs`) is `#[ignore]` + feature-gated. Emit/enable each.
+### Full tunnel e2e round-trip — `capability-gap`
+- **Intent:** exercise the live WebSocket tunnel path, not only entity loading and `TunnelStack::resolve`.
+- **Design points:** `crates/gw-gateway/tests/e2e_tunnel.rs` remains `#![cfg(feature = "tunnel")]` and `#[ignore]`, and its header says the full Pingora → tunnel-node → fake-upstream round-trip is deferred. Extend the ignored test (or add a dedicated one) to cover `peer_for_node` with a live WS node, `ControlAuth`, `Open` frame forwarding, DNS/target denial, and response relay.
 - **Source:** authoring pass over `crates/gw-tunnel-client` + `gw-proxy` (2026-06-08).
