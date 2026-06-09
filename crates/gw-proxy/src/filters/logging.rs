@@ -616,4 +616,33 @@ mod tests {
 
         assert!(rec.is_none(), "final logging path must fail closed");
     }
+
+    #[test]
+    fn cli_final_logging_zero_cache_dimensions_use_nonzero_estimate() {
+        let (mut ctx, auth_user_id, effective, model, picked) = seeded_cli_ctx();
+        ctx.prompt_estimate_tokens = Some(19);
+        ctx.usage.cached_tokens = Some(0);
+        ctx.usage.cache_creation_tokens = Some(0);
+
+        let rec =
+            build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked)
+                .expect("final usage record");
+
+        assert_eq!(rec.usage.input_tokens, 19);
+        assert_eq!(rec.usage_provenance.input, ProvenanceTag::Estimated);
+        assert!(rec.usage.input_tokens > 0 || rec.usage.output_tokens > 0);
+    }
+
+    #[test]
+    fn cli_final_logging_zero_cache_dimensions_without_estimate_fails_closed() {
+        let (mut ctx, auth_user_id, effective, model, picked) = seeded_cli_ctx();
+        ctx.prompt_estimate_tokens = None;
+        ctx.usage.cached_tokens = Some(0);
+        ctx.usage.cache_creation_tokens = Some(0);
+
+        let rec =
+            build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked);
+
+        assert!(rec.is_none(), "zero cache dims must not count as billable usage");
+    }
 }

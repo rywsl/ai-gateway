@@ -269,3 +269,29 @@ fn cli_usage_absent_without_estimate_fails_billing_protection() {
 
     assert!(record.is_none(), "billing protection must fail closed");
 }
+
+#[test]
+fn cli_zero_cache_dimensions_use_nonzero_estimate_in_attempt_record() {
+    let mut ctx = seeded_cli_ctx();
+    ctx.prompt_estimate_tokens = Some(17);
+    ctx.usage.cached_tokens = Some(0);
+    ctx.usage.cache_creation_tokens = Some(0);
+
+    let record = build_attempt_record(&ctx).expect("cli record");
+
+    assert_eq!(record.usage.input_tokens, 17);
+    assert_eq!(record.usage_provenance.input, ProvenanceTag::Estimated);
+    assert!(record.usage.input_tokens > 0 || record.usage.output_tokens > 0);
+}
+
+#[test]
+fn cli_zero_cache_dimensions_without_estimate_fail_closed_in_attempt_record() {
+    let mut ctx = seeded_cli_ctx();
+    ctx.prompt_estimate_tokens = None;
+    ctx.usage.cached_tokens = Some(0);
+    ctx.usage.cache_creation_tokens = Some(0);
+
+    let record = build_attempt_record(&ctx);
+
+    assert!(record.is_none(), "zero cache dims must not count as billable usage");
+}

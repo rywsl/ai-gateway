@@ -212,10 +212,10 @@ pub(crate) fn billing_protected_usage(
 
     let has_billable_usage = usage.input_tokens > 0
         || usage.output_tokens > 0
-        || usage.cache_read_input_tokens.is_some()
-        || usage.cache_creation_input_tokens.is_some()
-        || usage.thinking_tokens.is_some()
-        || usage.multimodal_input_tokens.is_some();
+        || usage.cache_read_input_tokens.is_some_and(|v| v > 0)
+        || usage.cache_creation_input_tokens.is_some_and(|v| v > 0)
+        || usage.thinking_tokens.is_some_and(|v| v > 0)
+        || usage.multimodal_input_tokens.is_some_and(|v| v > 0);
 
     if has_billable_usage {
         return Some((usage, provenance));
