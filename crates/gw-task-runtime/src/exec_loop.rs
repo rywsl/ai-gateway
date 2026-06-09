@@ -463,10 +463,10 @@ fn provider_task_id(payload: &serde_json::Value) -> Option<String> {
         })
         .or_else(|| {
             payload
-        .get("provider_task_id")
-        .or_else(|| payload.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
+                .get("provider_task_id")
+                .or_else(|| payload.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
         })
 }
 
