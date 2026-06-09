@@ -33,6 +33,12 @@ pub trait UpstreamAdapter: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether production should pay the parse/patch/re-render cost for this
+    /// adapter. Default adapters keep byte-identical passthrough bodies.
+    fn request_patch_enabled(&self) -> bool {
+        false
+    }
+
     /// Modify the incoming response wire. Default: no-op.
     fn patch_response(&self, _ctx: &AdapterCtx<'_>) -> Result<(), AdapterError> {
         Ok(())

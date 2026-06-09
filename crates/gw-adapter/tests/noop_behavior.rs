@@ -155,6 +155,8 @@ async fn run_noop(
         auth_template,
         upstream_host: Some("api.openai.com"),
         content_len: 42,
+        body_sha256_hex: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .to_owned(),
         trace_id: trace_id.as_ref(),
         request_id: request_id.as_ref(),
     };

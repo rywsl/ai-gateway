@@ -22,6 +22,7 @@ use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
+use gw_codec::ProtocolCodec;
 use gw_core::entity::{ForcedParams, ModelGroup, Pricing, TimeoutSpec, Vendor, VendorKey};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::{ForcedMutations, Mutations};
@@ -36,6 +37,7 @@ use pingora::http::RequestHeader;
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, Result};
 use pingora_proxy::Session;
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -915,13 +917,12 @@ pub async fn rewrite_request(
                 ctx.stream_state = Some(codec.new_stream_state());
             }
         }
-        archive_upstream_request(ctx, upstream_request, outbound.clone());
-        apply_outbound_adapter(
+        let outbound = apply_outbound_adapter(
             ctx,
             upstream_request,
             &picked,
             &vendor,
-            outbound.len(),
+            outbound,
             adapter_registry,
             oauth_runtime,
             health_store,
@@ -929,6 +930,10 @@ pub async fn rewrite_request(
             upstream_kind,
         )
         .await?;
+        if let Some(view) = ctx.body.as_mut() {
+            view.set_outbound(outbound.clone());
+        }
+        archive_upstream_request(ctx, upstream_request, outbound);
         inject_egress_headers(ctx, upstream_request, &picked).await;
         crate::billing_lifecycle::transition_to(
             ctx,
@@ -1031,13 +1036,12 @@ pub async fn rewrite_request(
         }
     }
 
-    archive_upstream_request(ctx, upstream_request, outbound.clone());
-    apply_outbound_adapter(
+    let outbound = apply_outbound_adapter(
         ctx,
         upstream_request,
         &picked,
         &vendor,
-        outbound.len(),
+        outbound,
         adapter_registry,
         oauth_runtime,
         health_store,
@@ -1045,6 +1049,10 @@ pub async fn rewrite_request(
         upstream_kind,
     )
     .await?;
+    if let Some(view) = ctx.body.as_mut() {
+        view.set_outbound(outbound.clone());
+    }
+    archive_upstream_request(ctx, upstream_request, outbound);
     inject_egress_headers(ctx, upstream_request, &picked).await;
 
     // W2-T4: mark the request as dispatched to the upstream vendor.
@@ -1212,13 +1220,13 @@ async fn apply_outbound_adapter(
     upstream_request: &mut RequestHeader,
     picked: &Arc<gw_core::entity::VendorKey>,
     vendor: &Arc<gw_core::versioned::Versioned<Vendor>>,
-    content_len: usize,
+    mut outbound: Bytes,
     adapter_registry: &Arc<gw_adapter::AdapterRegistry>,
     oauth_runtime: &Arc<dyn gw_adapter::OAuthRuntime>,
     health_store: &Arc<gw_health::store::KeyHealthStore>,
     client_protocol: gw_core::protocol::ProtocolKind,
     upstream_protocol: gw_core::protocol::ProtocolKind,
-) -> Result<()> {
+) -> Result<Bytes> {
     let model = ctx
         .model
         .clone()
@@ -1247,6 +1255,7 @@ async fn apply_outbound_adapter(
         host: initial_host.clone(),
         path: initial_path.clone(),
     };
+    let adapter = adapter_registry.for_vendor(&picked.vendor_id);
     let mut adapter_ctx = gw_adapter::AdapterCtx {
         vendor_id: vendor.value.id.clone(),
         vendor_key_id: picked.key_id.clone(),
@@ -1264,11 +1273,19 @@ async fn apply_outbound_adapter(
         url_mut: gw_adapter::UrlMut { inner: &mut url },
         auth_template: vendor.value.auth_template.as_str(),
         upstream_host,
-        content_len,
+        content_len: outbound.len(),
+        body_sha256_hex: sha256_hex(&outbound),
         trace_id: ctx.trace_id.as_ref(),
         request_id: ctx.request_id.as_ref(),
     };
-    let adapter = adapter_registry.for_vendor(&picked.vendor_id);
+    if adapter.request_patch_enabled() {
+        outbound =
+            patch_outbound_body(adapter.as_ref(), &adapter_ctx, upstream_protocol, &outbound)?;
+        adapter_ctx.content_len = outbound.len();
+        adapter_ctx.body_sha256_hex = sha256_hex(&outbound);
+    } else {
+        let _ = adapter.name();
+    }
     adapter
         .rewrite_auth(&mut adapter_ctx)
         .await
@@ -1293,7 +1310,88 @@ async fn apply_outbound_adapter(
         upstream_request.set_uri(parsed);
     }
 
-    Ok(())
+    Ok(outbound)
+}
+
+fn sha256_hex(body: &[u8]) -> String {
+    hex::encode(Sha256::digest(body))
+}
+
+fn patch_outbound_body(
+    adapter: &dyn gw_adapter::UpstreamAdapter,
+    patch_ctx: &gw_adapter::AdapterCtx<'_>,
+    upstream_protocol: gw_core::protocol::ProtocolKind,
+    outbound: &[u8],
+) -> Result<Bytes> {
+    match upstream_protocol {
+        gw_core::protocol::ProtocolKind::OpenAi => {
+            let parsed: gw_codec::openai::wire::OpenAiRequest<'_> =
+                serde_json::from_slice(outbound)
+                    .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_parse_failed")))?;
+            let mut wire = gw_codec::WireAnyRequest::OpenAi(Box::new(parsed));
+            adapter
+                .patch_request(patch_ctx, &mut wire)
+                .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_request_failed")))?;
+            match wire {
+                gw_codec::WireAnyRequest::OpenAi(req) => serde_json::to_vec(&req)
+                    .map(Bytes::from)
+                    .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_render_failed"))),
+                _ => Err(Error::new(ErrorType::Custom(
+                    "gw_adapter_patch_kind_mismatch",
+                ))),
+            }
+        }
+        gw_core::protocol::ProtocolKind::Anthropic => {
+            let parsed: gw_codec::anthropic::wire::AnthropicRequest<'_> =
+                serde_json::from_slice(outbound)
+                    .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_parse_failed")))?;
+            let mut wire = gw_codec::WireAnyRequest::Anthropic(parsed);
+            adapter
+                .patch_request(patch_ctx, &mut wire)
+                .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_request_failed")))?;
+            match wire {
+                gw_codec::WireAnyRequest::Anthropic(req) => serde_json::to_vec(&req)
+                    .map(Bytes::from)
+                    .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_render_failed"))),
+                _ => Err(Error::new(ErrorType::Custom(
+                    "gw_adapter_patch_kind_mismatch",
+                ))),
+            }
+        }
+        gw_core::protocol::ProtocolKind::Gemini => {
+            let parsed: gw_codec::gemini::wire::GeminiRequest<'_> =
+                serde_json::from_slice(outbound)
+                    .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_parse_failed")))?;
+            let mut wire = gw_codec::WireAnyRequest::Gemini(parsed);
+            adapter
+                .patch_request(patch_ctx, &mut wire)
+                .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_request_failed")))?;
+            match wire {
+                gw_codec::WireAnyRequest::Gemini(req) => serde_json::to_vec(&req)
+                    .map(Bytes::from)
+                    .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_render_failed"))),
+                _ => Err(Error::new(ErrorType::Custom(
+                    "gw_adapter_patch_kind_mismatch",
+                ))),
+            }
+        }
+        gw_core::protocol::ProtocolKind::Kiro => {
+            let parsed = gw_codec::kiro::decode_frame(outbound)
+                .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_parse_failed")))?;
+            let mut wire = gw_codec::WireAnyRequest::Kiro(parsed);
+            adapter
+                .patch_request(patch_ctx, &mut wire)
+                .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_patch_request_failed")))?;
+            match wire {
+                gw_codec::WireAnyRequest::Kiro(frame) => {
+                    Ok(Bytes::from(gw_codec::kiro::encode_frame(&frame)))
+                }
+                _ => Err(Error::new(ErrorType::Custom(
+                    "gw_adapter_patch_kind_mismatch",
+                ))),
+            }
+        }
+    }
 }
 
 /// Inject X-Egress-* routing headers and per-profile forged identity headers.
@@ -1934,6 +2032,7 @@ mod regression_baseline_tests {
     use gw_core::ids::{KeyId, RequestId, TraceId, VendorId};
     use secrecy::SecretString;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use url::Url;
 
     struct StaticOAuthRuntime;
@@ -1960,7 +2059,7 @@ mod regression_baseline_tests {
         RequestHeader,
         Arc<gw_core::entity::VendorKey>,
         Arc<gw_core::versioned::Versioned<Vendor>>,
-        usize,
+        Bytes,
     ) {
         // --- VendorKey (Direct mode: no OAuth, static api_key) ---
         let key = VendorKey {
@@ -2022,10 +2121,9 @@ mod regression_baseline_tests {
         req.insert_header("x-api-key-id", "should-be-stripped")
             .unwrap();
 
-        // content_len: 42 (fixed; mirrors a small chat body)
-        let content_len: usize = 42;
+        let body = Bytes::from_static(br#"{"model":"gpt-4","messages":[]}"#);
 
-        (ctx, req, Arc::new(key), versioned_vendor, content_len)
+        (ctx, req, Arc::new(key), versioned_vendor, body)
     }
 
     /// Render a `RequestHeader` to a deterministic, sorted text form:
@@ -2068,16 +2166,16 @@ mod regression_baseline_tests {
 
     #[tokio::test]
     async fn direct_mode_outbound_adapter_headers() {
-        let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
+        let (mut ctx, mut req, key, vendor, body) = make_canonical_inputs();
         let registry = Arc::new(gw_adapter::AdapterRegistry::default());
         let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> = Arc::new(StaticOAuthRuntime);
         let health = Arc::new(gw_health::store::KeyHealthStore::default());
-        apply_outbound_adapter(
+        let outbound = apply_outbound_adapter(
             &mut ctx,
             &mut req,
             &key,
             &vendor,
-            content_len,
+            body.clone(),
             &registry,
             &oauth_runtime,
             &health,
@@ -2086,6 +2184,7 @@ mod regression_baseline_tests {
         )
         .await
         .expect("adapter rewrite");
+        assert_eq!(outbound, body);
         insta::assert_snapshot!(render(&req));
     }
 
@@ -2116,7 +2215,7 @@ mod regression_baseline_tests {
 
     #[tokio::test]
     async fn adapter_transport_target_rewrite_is_rejected() {
-        let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
+        let (mut ctx, mut req, key, vendor, body) = make_canonical_inputs();
         let registry = Arc::new(gw_adapter::AdapterRegistry::default());
         registry.register_adapter(VendorId::from("openai"), Arc::new(TargetRewriteAdapter));
         let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> = Arc::new(StaticOAuthRuntime);
@@ -2127,7 +2226,7 @@ mod regression_baseline_tests {
             &mut req,
             &key,
             &vendor,
-            content_len,
+            body,
             &registry,
             &oauth_runtime,
             &health,
@@ -2140,6 +2239,115 @@ mod regression_baseline_tests {
         assert!(
             format!("{err:?}").contains("gw_adapter_transport_target_rewrite_unsupported"),
             "unexpected error: {err:?}"
+        );
+    }
+
+    struct PatchBodyAdapter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl gw_adapter::UpstreamAdapter for PatchBodyAdapter {
+        fn name(&self) -> &'static str {
+            "patch-body"
+        }
+
+        fn request_patch_enabled(&self) -> bool {
+            true
+        }
+
+        async fn rewrite_auth(
+            &self,
+            ctx: &mut gw_adapter::AdapterCtx<'_>,
+        ) -> Result<(), gw_adapter::AdapterError> {
+            ctx.headers_mut
+                .set("authorization", "Bearer patched-upstream");
+            ctx.headers_mut
+                .set("content-length", &ctx.content_len.to_string());
+            ctx.headers_mut.set("x-body-sha256", &ctx.body_sha256_hex);
+            Ok(())
+        }
+
+        fn rewrite_transport(
+            &self,
+            _ctx: &mut gw_adapter::AdapterCtx<'_>,
+        ) -> Result<(), gw_adapter::AdapterError> {
+            Ok(())
+        }
+
+        fn patch_request(
+            &self,
+            _ctx: &gw_adapter::AdapterCtx<'_>,
+            wire: &mut gw_codec::WireAnyRequest<'_>,
+        ) -> Result<(), gw_adapter::AdapterError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let gw_codec::WireAnyRequest::OpenAi(req) = wire else {
+                return Err(gw_adapter::AdapterError::PatchRequest(
+                    "expected openai request".to_owned(),
+                ));
+            };
+            req.extra.insert(
+                std::borrow::Cow::Owned("x_codex_gateway".to_owned()),
+                serde_json::value::RawValue::from_string(
+                    r#"{"request_id":"req-baseline-0001"}"#.to_owned(),
+                )
+                .unwrap(),
+            );
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_patch_request_updates_final_body_len_hash_and_archive() {
+        let (mut ctx, mut req, key, vendor, body) = make_canonical_inputs();
+        ctx.picked_vendor_key = Some(key.clone());
+        ctx.picked_vendor = Some(vendor.clone());
+        let registry = Arc::new(gw_adapter::AdapterRegistry::default());
+        let adapter = Arc::new(PatchBodyAdapter {
+            calls: AtomicUsize::new(0),
+        });
+        registry.register_adapter(VendorId::from("openai"), adapter.clone());
+        let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> = Arc::new(StaticOAuthRuntime);
+        let health = Arc::new(gw_health::store::KeyHealthStore::default());
+
+        let outbound = apply_outbound_adapter(
+            &mut ctx,
+            &mut req,
+            &key,
+            &vendor,
+            body,
+            &registry,
+            &oauth_runtime,
+            &health,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            gw_core::protocol::ProtocolKind::OpenAi,
+        )
+        .await
+        .expect("adapter rewrite");
+        archive_upstream_request(&mut ctx, &req, outbound.clone());
+
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        let json: serde_json::Value = serde_json::from_slice(&outbound).unwrap();
+        assert_eq!(json["x_codex_gateway"]["request_id"], "req-baseline-0001");
+        assert_eq!(
+            req.headers
+                .get("content-length")
+                .and_then(|v| v.to_str().ok()),
+            Some(outbound.len().to_string()).as_deref()
+        );
+        assert_eq!(
+            req.headers
+                .get("x-body-sha256")
+                .and_then(|v| v.to_str().ok()),
+            Some(sha256_hex(&outbound)).as_deref()
+        );
+        assert_eq!(
+            ctx.upstream_request_body
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .as_ref(),
+            outbound.as_ref()
         );
     }
 }

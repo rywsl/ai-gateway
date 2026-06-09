@@ -10,4 +10,10 @@ fn request_variant_tag_matches_protocol() {
         serde_json::from_slice(openai_body).expect("parse");
     let wire = WireAnyRequest::OpenAi(Box::new(parsed));
     assert_eq!(wire.kind(), ProtocolKind::OpenAi);
+
+    let wire = WireAnyRequest::Kiro(gw_codec::kiro::EventStreamFrame {
+        headers: Vec::new(),
+        payload: br#"{"prompt":"hello"}"#.to_vec(),
+    });
+    assert_eq!(wire.kind(), ProtocolKind::Kiro);
 }

@@ -54,6 +54,9 @@ pub struct AdapterCtx<'a> {
     pub auth_template: &'a str,
     pub upstream_host: Option<&'a str>,
     pub content_len: usize,
+    /// SHA-256 hex digest of the final upstream-bound body. Populated after
+    /// adapter body patching so SigV4-style auth signs the exact bytes sent.
+    pub body_sha256_hex: String,
 
     pub trace_id: &'a str,
     pub request_id: &'a str,
