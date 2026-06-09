@@ -258,6 +258,39 @@ async fn http_server(status: u16, body: &'static str, delay: Duration) -> Socket
     addr
 }
 
+async fn capture_body_http_server(
+    response_body: &'static str,
+) -> (SocketAddr, Arc<Mutex<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind capture server");
+    let addr = listener.local_addr().expect("local addr");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_task = captured.clone();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = [0_u8; 4096];
+        let n = socket.read(&mut buf).await.expect("read request");
+        let request = &buf[..n];
+        let split = request
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|idx| idx + 4)
+            .expect("http header/body split");
+        captured_for_task
+            .lock()
+            .await
+            .extend_from_slice(&request[split..]);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    });
+    (addr, captured)
+}
+
 async fn polling_http_server(responses: Vec<(u16, &'static str)>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -292,6 +325,29 @@ fn config() -> ExecLoopConfig {
         per_key_concurrency: 4,
         ..ExecLoopConfig::default()
     }
+}
+
+#[tokio::test]
+async fn test_exec_loop_sends_ir_wire_body_verbatim() {
+    let (addr, captured) =
+        capture_body_http_server(r#"{"provider_task_id":"provider-wire","ok":true}"#).await;
+    let mut record = sample_record(format!("http://{addr}/submit"));
+    record.input_payload["ir_wire_format"] = serde_json::json!("openai:chat");
+    record.input_payload["ir_wire_content_type"] = serde_json::json!("application/json");
+    record.input_payload["ir_wire_body"] = serde_json::json!(
+        "{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+    );
+    record.input_payload["body"] = serde_json::json!({"legacy": true});
+    let contract = MemoryContract::enqueue(record).await;
+    let loop_ = ExecLoop::new(contract.clone(), reqwest::Client::new(), config());
+
+    loop_.run_once().await.expect("run once");
+
+    let body = String::from_utf8(captured.lock().await.clone()).expect("utf8 body");
+    assert_eq!(
+        body,
+        "{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+    );
 }
 
 #[tokio::test]

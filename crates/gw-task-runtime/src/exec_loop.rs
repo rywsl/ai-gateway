@@ -279,12 +279,13 @@ where
         submit_timeout: Duration,
     ) -> anyhow::Result<UpstreamSuccess> {
         let url = upstream_url(record)?;
-        let body = upstream_body(record);
+        let request_body = upstream_body(record)?;
         let response = self
             .http
             .post(&url)
             .timeout(submit_timeout)
-            .json(&body)
+            .header(reqwest::header::CONTENT_TYPE, request_body.content_type)
+            .body(request_body.bytes)
             .send()
             .await
             .map_err(|err| {
@@ -472,12 +473,29 @@ fn upstream_url(record: &TaskRecord) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("task {} missing upstream_url/vendor_key_hint", record.id))
 }
 
-fn upstream_body(record: &TaskRecord) -> serde_json::Value {
-    record
+struct UpstreamBody {
+    bytes: Vec<u8>,
+    content_type: String,
+}
+
+fn upstream_body(record: &TaskRecord) -> anyhow::Result<UpstreamBody> {
+    if let Some(body) = gw_task::task_ir_wire_body(&record.input_payload) {
+        return Ok(UpstreamBody {
+            bytes: body.as_bytes().to_vec(),
+            content_type: gw_task::task_ir_wire_content_type(&record.input_payload)
+                .unwrap_or("application/json")
+                .to_string(),
+        });
+    }
+
+    let body = record
         .input_payload
-        .get("body")
-        .cloned()
-        .unwrap_or_else(|| record.input_payload.clone())
+        .get(gw_task::TASK_BODY)
+        .unwrap_or(&record.input_payload);
+    Ok(UpstreamBody {
+        bytes: serde_json::to_vec(body).context("serialize upstream task body")?,
+        content_type: "application/json".to_string(),
+    })
 }
 
 #[allow(dead_code)]
