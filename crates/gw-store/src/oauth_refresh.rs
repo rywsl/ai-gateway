@@ -3,6 +3,7 @@ use crate::redis_client::RedisCtx;
 use fred::interfaces::{KeysInterface, StreamsInterface};
 use secrecy::SecretString;
 use sqlx::PgPool;
+use std::fmt::Display;
 use time::OffsetDateTime;
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,28 @@ pub fn build_oauth_payload(
     })
 }
 
+fn require_redis_side_effects<DelErr, XaddErr>(
+    key_id: &str,
+    del_result: Result<(), DelErr>,
+    xadd_result: Result<String, XaddErr>,
+) -> Result<(), OAuthWriteBackError>
+where
+    DelErr: Display,
+    XaddErr: Display,
+{
+    del_result.map_err(|e| {
+        OAuthWriteBackError::Other(anyhow::anyhow!(
+            "oauth write-back Redis DEL failed for vendor key {key_id}: {e}"
+        ))
+    })?;
+    xadd_result.map_err(|e| {
+        OAuthWriteBackError::Other(anyhow::anyhow!(
+            "oauth write-back events:entity XADD failed for vendor key {key_id}: {e}"
+        ))
+    })?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct PgOAuthRefreshWriter {
     pg: PgPool,
@@ -127,11 +150,10 @@ impl PgOAuthRefreshWriter {
         };
         let new_version = new_version_i64 as u64;
 
-        metrics::counter!("gw_oauth_runtime_writeback_total", "result" => "ok").increment(1);
         let client = self.redis.pool.next();
         let redis_key = format!("entity:vendor_key:{}", input.key_id);
-        let _: Result<(), _> = client.del(redis_key).await;
-        let _: Result<String, _> = client
+        let del_result: Result<(), _> = client.del(redis_key).await;
+        let xadd_result: Result<String, _> = client
             .xadd(
                 "events:entity",
                 false,
@@ -140,6 +162,9 @@ impl PgOAuthRefreshWriter {
                 entity_event_fields(&input.key_id, new_version, now_ms()),
             )
             .await;
+        require_redis_side_effects(&input.key_id, del_result, xadd_result)?;
+
+        metrics::counter!("gw_oauth_runtime_writeback_total", "result" => "ok").increment(1);
 
         Ok(OAuthWriteBackResult {
             key_id: input.key_id,
@@ -226,5 +251,23 @@ mod tests {
         assert_eq!(payload["access_token_enc"]["kek_kid"], "new");
         assert_eq!(payload["token_endpoint"], "https://oauth.example/token");
         assert_eq!(payload["quota_project_id"], "quota-project");
+    }
+
+    #[test]
+    fn redis_side_effects_fail_when_cache_delete_fails() {
+        let result = require_redis_side_effects(
+            "vk-1",
+            Err("del failed"),
+            Ok::<String, &str>("stream-id".to_string()),
+        );
+
+        assert!(matches!(result, Err(OAuthWriteBackError::Other(_))));
+    }
+
+    #[test]
+    fn redis_side_effects_fail_when_entity_event_publish_fails() {
+        let result = require_redis_side_effects("vk-1", Ok::<(), &str>(()), Err("xadd failed"));
+
+        assert!(matches!(result, Err(OAuthWriteBackError::Other(_))));
     }
 }
