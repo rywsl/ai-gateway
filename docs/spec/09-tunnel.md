@@ -29,7 +29,7 @@ Route selected upstream LLM traffic through a first-party WebSocket tunnel node 
 - Cold-start nodes fail soft into retry: `peer_for_node` returns `NoLive` when a freshly-spawned transport has not completed its handshake; the rustls branch pushes the key onto `ctx.retry_blacklist` before emitting `GW_TUNNEL_NO_LIVE`, so a request retry lands on a different key (`crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/tunnel_stack.rs`).
 - Decode is memory-bounded: frames whose declared length exceeds `MAX_PAYLOAD_LEN` are rejected at decode (`crates/gw-tunnel-client/src/frame.rs`).
 - Node list reloads are atomic: `peer_for_node` takes one `nodes.load_full()` snapshot for the whole method so a concurrent `reload_nodes` cannot make its two node-lookup sites disagree (`crates/gw-proxy/src/tunnel_stack.rs`).
-- Split artifacts are the documented operator model for now: default `latest` is non-tunnel, and `latest-tunnel` is the operator-selected tunnel build. Making the default artifact tunnel-enabled would change rollout blast radius and needs a separate release decision after W8 validation.
+- Split artifacts are the recorded release policy: default `latest` is non-tunnel, and `latest-tunnel` is the operator-selected tunnel build. The W8 follow-up decision keeps the split and does not promote tunnel into default `latest`.
 
 ## Cross-process touchpoints
 - Remote proxy node: the compatibility target is the first-party `gw-tunnel-server` speaking `ailinkmax-tunnel` as specified in `docs/spec/10-owned-tunnel-protocol.md`. Aether and prior mocks remain reference material only.
@@ -46,4 +46,5 @@ Route selected upstream LLM traffic through a first-party WebSocket tunnel node 
 - `crate_layering` (`scripts/check-invariants.sh`): `gw-tunnel-client` is business-layer and must not depend on the execution layer; `gw-capability` must not depend on `gw-tunnel-client`.
 
 ## Not built → ROADMAP
-- **Default artifact policy.** The documented split remains `latest` non-tunnel and `latest-tunnel` operator-selected. Changing default `latest` to include tunnel requires an explicit release decision. (decision-gated residual)
+
+No open tunnel ROADMAP items. Default artifact policy is closed as a W8 follow-up release decision: keep `latest` non-tunnel and `latest-tunnel` opt-in.

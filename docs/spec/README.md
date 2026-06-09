@@ -12,6 +12,6 @@ Authoritative, code-mirroring design standard. Each spec describes **only what e
 | [06-billing-ledger](06-billing-ledger.md) | gw-ledger, gw-billing | complete |
 | [07-vendor-integration](07-vendor-integration.md) | gw-adapter, gw-egress-impersonate, gw-core::impersonate | inline outbound + Go-delegated OAuth + egress built; adapter error analyzers built; outbound adapter layer in ROADMAP |
 | [08-async-tasks](08-async-tasks.md) | gw-task, gw-task-runtime, gw-task-worker | default-off; Redis freeze/settle + submit-poll built; codec render in ROADMAP |
-| [09-tunnel](09-tunnel.md) | gw-tunnel-client | feature-gated; off in shipped binary, see ROADMAP |
+| [09-tunnel](09-tunnel.md) | gw-tunnel-client, gw-tunnel-server, gw-proxy | owned tunnel bridge built; split artifacts (`latest` / `latest-tunnel`) recorded |
 
 > History: this standard replaced 51 dated specs + 24 dated plans on 2026-06-08 (see git history and `CONSOLIDATION-DESIGN.md`).
