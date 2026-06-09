@@ -4,6 +4,7 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 
 ## Legend
 - **Priority**: `runtime-risk` (bug, fix first) > `capability-gap` (unbuilt feature) > `doc-divergence`.
+- **Decision-gated residual**: deliberate as-built boundary in `docs/spec/`; implement only after an explicit architecture or release decision, not as a bug fix.
 
 ## 01 protocol-codec
 
@@ -48,19 +49,19 @@ No open ROADMAP items.
 
 ## 07 vendor-integration
 
-### Full A-T0..A-T6 vendor adapter layer + wire-or-delete `gw-adapter` — `capability-gap`
-- **Intent:** per-vendor outbound rewrite (OAuth bearer, fingerprint headers, URL rewrite, body transforms) behind one trait, reused by proxy + task runtime.
-- **Design points:** `crates/gw-adapter` response-side `UpstreamErrorAnalyzer` is wired into `gw-proxy`, but outbound `AdapterRegistry::for_vendor` is still not called by any binary and only `NoopAdapter` exists. Today outbound behavior is inline in `gw-proxy::inject_vendor_headers` + `gw-core::impersonate`. Decide whether to wire outbound adapters into `gw-proxy`/`gw-task-runtime` and build the 6 vendor adapters, or bless the inline+impersonate design for outbound traffic. `AdapterCtx` also lacks the `oauth_cache` field its hooks assume (`ctx.rs` comment).
+### Full A-T0..A-T6 outbound adapter registry — `decision-gated residual`
+- **Intent:** optionally move per-vendor outbound rewrite (OAuth bearer, fingerprint headers, URL rewrite, body transforms) behind one trait, reused by proxy + task runtime.
+- **Design points:** `docs/spec/07-vendor-integration.md` blesses inline `gw-proxy::inject_vendor_headers` + `gw-core::impersonate` as outbound v1, and `gw-adapter` response-side `UpstreamErrorAnalyzer` is already wired into `gw-proxy`. Outbound `AdapterRegistry::for_vendor` remains experimental: do not implement the six outbound adapters or wire request dispatch unless the user chooses to move that boundary out of the proxy filter/profile modules. `AdapterCtx` also lacks the `oauth_cache` field its hooks assume (`ctx.rs` comment), so adopting this path is a broader adapter design change.
 - **Source:** deleted `adapter-a-t0..t6`, `adapter-layer-design`.
 
-### K-C in-Rust OAuth refresh stack — `capability-gap`
-- **Intent:** refresh vendor OAuth tokens in Rust instead of delegating to Go.
-- **Design points:** today there is no `OAuthRefresher`/`OauthCache`/`get_access_token`; `gw-proxy/src/filters/upstream.rs` injects a pre-decrypted, possibly-expired `access_token` and Go refreshes async via the `events:entity` reverse-XADD (`error/listeners/oauth.rs`). If brought in-Rust: `OauthCache` with CAS-lock lazy refresh + per-vendor `OAuthRefresher` (e.g. `console.anthropic.com/v1/oauth/token`) + write-back of `oauth_*_enc` to `entity:vendor_key`. **Note:** the current Go-delegated design is deliberate and documented in `spec/07`; only build this if moving the boundary.
+### K-C in-Rust OAuth refresh/write-back — `decision-gated residual`
+- **Intent:** optionally refresh vendor OAuth tokens in Rust instead of delegating to Go.
+- **Design points:** `docs/spec/07-vendor-integration.md` documents Go-delegated refresh as the current ownership boundary. Rust injects a pre-decrypted, possibly-expired `access_token`, emits expiry metrics, and Go refreshes async via the `events:entity` reverse-XADD (`error/listeners/oauth.rs`). Build `OAuthRefresher`/`OauthCache`/`get_access_token` plus encrypted write-back only if the user decides Rust should become the OAuth writer.
 - **Source:** deleted `key-health-k-c-oauth-token`, `adapter-a-t1-claude-code`.
 
-### kiro adapter / vertex_ai SA-JWT / codex body transform — `capability-gap`
-- **Intent:** the heavier vendor adapters.
-- **Design points:** kiro AWS SigV4 + EventStream (pairs with the codec gap in §01); vertex_ai RS256 service-account JWT signing + token exchange (`jsonwebtoken` is currently used only for *inbound* client JWTs); codex `patch_request` body image transform. None exist.
+### Heavy outbound adapter transforms — `decision-gated residual`
+- **Intent:** optionally add Kiro AWS SigV4 + EventStream outbound integration, Vertex AI RS256 service-account JWT signing + token exchange, and Codex request-body transforms.
+- **Design points:** these transforms depend on choosing an outbound transform boundary. Under current outbound v1, header/auth dispatch remains inline+impersonate and no adapter `patch_request` path is active. Treat these as follow-on work only after the outbound adapter registry, or an equivalent transform boundary, is explicitly selected.
 - **Source:** deleted `adapter-a-t3-vertex-ai`, `adapter-a-t5-codex`, `adapter-a-t6-kiro-vendor`.
 
 ## 08 async-tasks
@@ -72,12 +73,17 @@ No open ROADMAP items.
 
 ## 09 tunnel
 
-### Default artifact remains non-tunnel — `capability-gap`
-- **Intent:** decide whether tunnel should stay as a separate operator-selected artifact or compile into the default release image.
-- **Design points:** `default = []` in `crates/gw-proxy/Cargo.toml` and `crates/gw-gateway/Cargo.toml`; `.gitlab-ci.yml` now builds two artifacts: default `latest` without `--features tunnel`, and `latest-tunnel` with `--features tunnel`. The split artifact is operationally usable, but the default image still compiles the `#[cfg(not(feature = "tunnel"))]` Direct arm. Decide whether this is the final shipping model or whether default `latest` should include the tunnel feature.
-- **Source:** deleted `tunnel-t-design` §1/§9.
-
-### Full tunnel e2e round-trip — `capability-gap`
-- **Intent:** exercise the live WebSocket tunnel path, not only entity loading and `TunnelStack::resolve`.
-- **Design points:** `crates/gw-gateway/tests/e2e_tunnel.rs` remains `#![cfg(feature = "tunnel")]` and `#[ignore]`, and its header says the full Pingora → tunnel-node → fake-upstream round-trip is deferred. Extend the ignored test (or add a dedicated one) to cover `peer_for_node` with a live WS node, `ControlAuth`, `Open` frame forwarding, DNS/target denial, and response relay.
+### HTTP<->WS frame bridge runtime — `decision-gated residual`
+- **Intent:** complete the runtime bridge that maps Pingora upstream HTTP streams into the tunnel frame protocol.
+- **Design points:** `docs/spec/09-tunnel.md` documents current coverage as storage/resolve + peer decision wiring. `WsTransport::send_open` and `send_data` exist, but no production caller turns an upstream request into `Open` / `Data` frames or relays response frames back to the client. Implementing this requires a runtime architecture decision and a remote-node contract, not just a docs cleanup.
 - **Source:** authoring pass over `crates/gw-tunnel-client` + `gw-proxy` (2026-06-08).
+
+### Full tunnel e2e round-trip — `decision-gated residual`
+- **Intent:** exercise the live WebSocket tunnel path after the bridge design is chosen.
+- **Design points:** `crates/gw-gateway/tests/e2e_tunnel.rs` remains `#![cfg(feature = "tunnel")]` and `#[ignore]`, and its header says the full Pingora → tunnel-node → fake-upstream round-trip is deferred. Current e2e coverage does not exercise `peer_for_node` with a live WS node, `ControlAuth`, `Open` frame forwarding, DNS/target denial, or response relay.
+- **Source:** authoring pass over `crates/gw-tunnel-client` + `gw-proxy` (2026-06-08).
+
+### Default artifact policy — `decision-gated residual`
+- **Intent:** decide whether tunnel should remain a separate operator-selected artifact or compile into the default release image.
+- **Design points:** `docs/spec/09-tunnel.md` documents the split model as current: default `latest` is non-tunnel, while `latest-tunnel` is built with `--features tunnel` for operators that opt in. Keep this split until the bridge and full e2e loop are closed; changing default `latest` is a release decision.
+- **Source:** deleted `tunnel-t-design` §1/§9.
