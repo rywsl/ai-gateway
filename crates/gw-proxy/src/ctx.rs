@@ -27,7 +27,7 @@ use gw_routing::in_flight::InFlightGuard;
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct DownstreamRequestMeta {
@@ -186,6 +186,15 @@ pub struct ReqCtx {
     /// Set by response_body_filter. FailoverExecutor uses this to decide
     /// if response-side retry is still possible (body_started → not retryable).
     pub body_started: bool,
+    /// Explicit stream phase. `body_started` remains a compatibility alias for
+    /// final client-visible commit only.
+    pub stream_phase: crate::stream_probe::StreamPhase,
+    pub client_body_committed: bool,
+    pub probe_started_at: Option<Instant>,
+    pub probe_timeout: Duration,
+    pub probe_buffer: bytes::BytesMut,
+    pub pending_probe_failure: Option<crate::stream_probe::ProbeFailure>,
+    pub stream_probe_retry_pending: bool,
     /// Keys already tried (and failed) for this request, excluded from
     /// candidate selection on cross-key retry (G10). Empty on the first
     /// attempt.
@@ -393,6 +402,13 @@ impl ReqCtx {
             retry_count: 0,
             failover_attempt: 0,
             body_started: false,
+            stream_phase: crate::stream_probe::StreamPhase::Connecting,
+            client_body_committed: false,
+            probe_started_at: None,
+            probe_timeout: Duration::from_millis(750),
+            probe_buffer: bytes::BytesMut::new(),
+            pending_probe_failure: None,
+            stream_probe_retry_pending: false,
             retry_blacklist: Vec::new(),
             upstream_error_code: None,
             upstream_error_detail: None,

@@ -63,6 +63,26 @@ pub static METRICS: &[MetricSpec] = &[
         help: "same-protocol stream events forwarded verbatim (zero-copy); label=kind",
     },
     MetricSpec {
+        name: "gw_stream_probe_total",
+        kind: MetricKind::Counter,
+        help: "stream probe decisions before client-visible commit; label=outcome",
+    },
+    MetricSpec {
+        name: "gw_stream_probe_failover_total",
+        kind: MetricKind::Counter,
+        help: "stream probe cross-key failover outcomes; labels=reason,strategy,outcome",
+    },
+    MetricSpec {
+        name: "gw_stream_probe_buffer_bytes",
+        kind: MetricKind::Histogram,
+        help: "bytes buffered by the pre-commit stream probe; no labels",
+    },
+    MetricSpec {
+        name: "gw_stream_probe_timeout_total",
+        kind: MetricKind::Counter,
+        help: "stream probe timeout failures before client-visible commit; no labels",
+    },
+    MetricSpec {
         name: "gw_freeze_acquire_total",
         kind: MetricKind::Counter,
         help: "freeze acquire outcomes; label=outcome",

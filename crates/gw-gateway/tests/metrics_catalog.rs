@@ -128,6 +128,29 @@ fn billing_w3_t5_grace_metric_registered() {
 }
 
 #[test]
+fn stream_probe_metrics_registered_without_key_level_labels() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    for required in [
+        "gw_stream_probe_total",
+        "gw_stream_probe_failover_total",
+        "gw_stream_probe_buffer_bytes",
+        "gw_stream_probe_timeout_total",
+    ] {
+        assert!(names.contains(&required), "missing metric: {required}");
+    }
+
+    for metric in METRICS
+        .iter()
+        .filter(|m| m.name.starts_with("gw_stream_probe_"))
+    {
+        assert!(!metric.help.contains("key_id"));
+        assert!(!metric.help.contains("vendor_key"));
+        assert!(!metric.help.contains("api_key"));
+        assert!(!metric.help.contains("user_id"));
+    }
+}
+
+#[test]
 fn billing_w4_t3_emit_lag_t0_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(names.contains(&"gw_billing_emit_lag_t0_total"));

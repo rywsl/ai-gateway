@@ -128,6 +128,23 @@ fn next_failover_decision(
     executor.next_candidate_with_elapsed(remaining, attempt, failover_elapsed_ms(ctx))
 }
 
+fn reset_response_attempt_state(ctx: &mut ReqCtx, new_key: Arc<gw_core::entity::VendorKey>) {
+    ctx.inflight_guard = None;
+    ctx.picked_vendor_key = Some(new_key);
+    ctx.picked_vendor = None;
+    ctx.upstream_codec = None;
+    ctx.upstream_status = None;
+    ctx.body_started = false;
+    ctx.client_body_committed = false;
+    ctx.stream_phase = crate::stream_probe::StreamPhase::Connecting;
+    ctx.probe_started_at = None;
+    ctx.probe_buffer.clear();
+    ctx.pending_probe_failure = None;
+    ctx.stream_probe_retry_pending = false;
+    ctx.sse_leftover.clear();
+    ctx.pending_client_body = None;
+}
+
 fn adapter_body_head(body: &bytes::BytesMut) -> &[u8] {
     let cap = body.len().min(8192);
     &body[..cap]
@@ -600,6 +617,84 @@ impl LlmGateway {
             ),
         });
     }
+
+    fn retry_stream_probe_failure(
+        &self,
+        ctx: &mut ReqCtx,
+        failure: crate::stream_probe::ProbeFailure,
+    ) -> Result<bool> {
+        if !crate::stream_probe::can_retry_probe_failure(ctx, failure) {
+            return Ok(false);
+        }
+
+        ctx.pending_probe_failure = Some(failure);
+        ctx.stream_probe_retry_pending = true;
+        let strategy_name = ctx.strategy_name.unwrap_or("unknown");
+        let Some(candidates) = ctx.picked_candidates.as_ref() else {
+            ctx.upstream_error_code = Some(codes::GW_ROUTING_NO_FALLBACK_LEFT);
+            metrics::counter!(
+                "gw_stream_probe_failover_total",
+                "reason" => failure.as_label(),
+                "strategy" => strategy_name.to_owned(),
+                "outcome" => "exhausted",
+            )
+            .increment(1);
+            return Ok(false);
+        };
+        let remaining = remaining_failover_candidates(candidates, ctx);
+        let attempt = ctx.failover_attempt.saturating_add(1);
+        let decision = next_failover_decision(&self.failover_executor, &remaining, attempt, ctx);
+
+        match decision {
+            FailoverDecision::Retry(new_key) => {
+                crate::billing_lifecycle::settle_prior_attempt_spawn(
+                    ctx,
+                    self.inflight.clone(),
+                    self.ledger.clone(),
+                );
+                if let Some(k) = ctx.picked_vendor_key.as_ref() {
+                    if !ctx.retry_blacklist.iter().any(|id| id == &k.key_id) {
+                        ctx.retry_blacklist.push(k.key_id.clone());
+                    }
+                }
+                ctx.failover_attempt = attempt;
+                reset_response_attempt_state(ctx, new_key);
+                ctx.stream_probe_retry_pending = true;
+                ctx.pending_probe_failure = Some(failure);
+                metrics::counter!(
+                    "gw_stream_probe_failover_total",
+                    "reason" => failure.as_label(),
+                    "strategy" => strategy_name.to_owned(),
+                    "outcome" => "retry",
+                )
+                .increment(1);
+                Ok(true)
+            }
+            FailoverDecision::Exhausted => {
+                ctx.upstream_error_code = Some(codes::GW_ROUTING_NO_FALLBACK_LEFT);
+                metrics::counter!(
+                    "gw_stream_probe_failover_total",
+                    "reason" => failure.as_label(),
+                    "strategy" => strategy_name.to_owned(),
+                    "outcome" => "exhausted",
+                )
+                .increment(1);
+                Ok(false)
+            }
+            FailoverDecision::Timeout => {
+                ctx.upstream_error_code = Some(codes::GW_ROUTING_FAILOVER_TIMEOUT);
+                metrics::counter!(
+                    "gw_stream_probe_failover_total",
+                    "reason" => "timeout",
+                    "strategy" => strategy_name.to_owned(),
+                    "outcome" => "timeout",
+                )
+                .increment(1);
+                Ok(false)
+            }
+            FailoverDecision::NotRetryable => Ok(false),
+        }
+    }
 }
 
 #[async_trait]
@@ -1001,12 +1096,7 @@ impl ProxyHttp for LlmGateway {
                             )
                             .increment(1);
                             ctx.failover_attempt = attempt;
-                            ctx.inflight_guard = None;
-                            ctx.picked_vendor_key = Some(new_key);
-                            ctx.picked_vendor = None;
-                            ctx.upstream_codec = None;
-                            ctx.upstream_status = None;
-                            ctx.body_started = false;
+                            reset_response_attempt_state(ctx, new_key);
 
                             let mut e = Error::new(ErrorType::HTTPStatus(status));
                             e.as_up();
@@ -1084,12 +1174,7 @@ impl ProxyHttp for LlmGateway {
                                     }
                                 }
                                 ctx.failover_attempt = attempt;
-                                ctx.inflight_guard = None;
-                                ctx.picked_vendor_key = Some(new_key);
-                                ctx.picked_vendor = None;
-                                ctx.upstream_codec = None;
-                                ctx.upstream_status = None;
-                                ctx.body_started = false;
+                                reset_response_attempt_state(ctx, new_key);
 
                                 let mut e = Error::new(ErrorType::HTTPStatus(status));
                                 e.as_up();
@@ -1170,6 +1255,89 @@ impl ProxyHttp for LlmGateway {
         Ok(())
     }
 
+    fn upstream_response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        if !ctx.is_stream || ctx.client_body_committed {
+            return Ok(None);
+        }
+
+        let now = std::time::Instant::now();
+        let started_at = *ctx.probe_started_at.get_or_insert(now);
+        ctx.stream_phase = crate::stream_probe::StreamPhase::Probing;
+
+        let timeout_state = crate::stream_probe::StreamProbeState {
+            phase: ctx.stream_phase,
+            client_committed: ctx.client_body_committed,
+            started_at,
+            timeout: ctx.probe_timeout,
+            buffer: ctx.probe_buffer.clone(),
+        };
+        if crate::stream_probe::probe_timed_out(&timeout_state, now) {
+            metrics::counter!("gw_stream_probe_timeout_total").increment(1);
+            metrics::counter!("gw_stream_probe_total", "outcome" => "timeout").increment(1);
+            let failure = crate::stream_probe::ProbeFailure::Timeout;
+            if self.retry_stream_probe_failure(ctx, failure)? {
+                let mut e = Error::new(ErrorType::HTTPStatus(504));
+                e.as_up();
+                e.set_retry(true);
+                return Err(e);
+            }
+            return Ok(None);
+        }
+
+        let mut probe_state = crate::stream_probe::StreamProbeState {
+            phase: ctx.stream_phase,
+            client_committed: ctx.client_body_committed,
+            started_at,
+            timeout: ctx.probe_timeout,
+            buffer: std::mem::take(&mut ctx.probe_buffer),
+        };
+        let decision = crate::stream_probe::apply_probe_chunk_with_codec(
+            &mut probe_state,
+            ctx.upstream_codec.as_ref(),
+            body.take(),
+            end_of_stream,
+        );
+        ctx.stream_phase = probe_state.phase;
+        ctx.probe_buffer = probe_state.buffer;
+        metrics::histogram!("gw_stream_probe_buffer_bytes").record(ctx.probe_buffer.len() as f64);
+
+        match decision {
+            crate::stream_probe::ProbeDecision::NeedMore => {
+                *body = None;
+                Ok(None)
+            }
+            crate::stream_probe::ProbeDecision::Commit(bytes) => {
+                ctx.stream_phase = crate::stream_probe::StreamPhase::Streaming;
+                *body = Some(bytes);
+                metrics::counter!("gw_stream_probe_total", "outcome" => "commit").increment(1);
+                Ok(None)
+            }
+            crate::stream_probe::ProbeDecision::Fail(failure) => {
+                *body = None;
+                metrics::counter!(
+                    "gw_stream_probe_total",
+                    "outcome" => failure.as_label(),
+                )
+                .increment(1);
+                if self.retry_stream_probe_failure(ctx, failure)? {
+                    let mut e =
+                        Error::new(ErrorType::HTTPStatus(ctx.upstream_status.unwrap_or(502)));
+                    e.as_up();
+                    e.set_retry(true);
+                    return Err(e);
+                }
+                Ok(None)
+            }
+            crate::stream_probe::ProbeDecision::AlreadyCommitted => Ok(None),
+        }
+    }
+
     fn response_body_filter(
         &self,
         session: &mut Session,
@@ -1177,10 +1345,6 @@ impl ProxyHttp for LlmGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        if !ctx.body_started && body.is_some() {
-            ctx.body_started = true;
-        }
-
         // W3-T3 / W3-T5: deadline check + grace window.
         //
         // 1. `check_response_deadline` fires `observe_cancel(Deadline)` on
@@ -1257,6 +1421,10 @@ impl ProxyHttp for LlmGateway {
                     }
                 }
             }
+        }
+
+        if res.is_ok() && body.as_ref().map(|b| !b.is_empty()).unwrap_or(false) {
+            crate::stream_probe::mark_client_committed(ctx);
         }
 
         if end_of_stream {
@@ -1387,6 +1555,25 @@ impl ProxyHttp for LlmGateway {
                 }
             }
         }
+    }
+
+    fn error_while_proxy(
+        &self,
+        peer: &HttpPeer,
+        session: &mut Session,
+        mut e: Box<Error>,
+        ctx: &mut Self::CTX,
+        client_reused: bool,
+    ) -> Box<Error> {
+        if ctx.stream_probe_retry_pending {
+            ctx.stream_probe_retry_pending = false;
+            e.set_retry(true);
+            return e.more_context(format!("Peer: {}", peer));
+        }
+        let mut e = e.more_context(format!("Peer: {}", peer));
+        e.retry
+            .decide_reuse(client_reused && !session.as_ref().retry_buffer_truncated());
+        e
     }
 
     async fn fail_to_proxy(

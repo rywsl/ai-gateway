@@ -19,6 +19,7 @@ pub mod filters;
 pub mod gateway;
 pub mod mem;
 pub mod resilience;
+pub mod stream_probe;
 pub mod timeouts;
 
 pub use gateway::LlmGateway;

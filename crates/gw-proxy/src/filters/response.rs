@@ -259,6 +259,31 @@ pub fn run(
     Ok(None)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamParseProbe {
+    Valid,
+    Malformed,
+    UpstreamErrorBody,
+}
+
+pub fn probe_stream_event(codec: &AnyCodec, event_bytes: &[u8]) -> StreamParseProbe {
+    let data = split_sse_event(event_bytes).1;
+    if serde_json::from_slice::<serde_json::Value>(data)
+        .ok()
+        .and_then(|v| v.get("error").cloned())
+        .is_some()
+    {
+        return StreamParseProbe::UpstreamErrorBody;
+    }
+
+    let mut state = codec.new_stream_state();
+    match codec.parse_stream_chunk(state.as_mut(), event_bytes) {
+        Ok(events) if events.is_empty() => StreamParseProbe::Malformed,
+        Ok(_) => StreamParseProbe::Valid,
+        Err(_) => StreamParseProbe::Malformed,
+    }
+}
+
 #[cfg(test)]
 mod quota_snapshot_tests {
     use super::*;
