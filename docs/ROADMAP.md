@@ -75,17 +75,12 @@ No open roadmap items after W4 full IR task request/response persistence.
 
 ## 09 tunnel
 
-### HTTP<->WS frame bridge runtime — `decision-gated residual`
-- **Intent:** complete the runtime bridge that maps Pingora upstream HTTP streams into the tunnel frame protocol.
-- **Design points:** `docs/spec/09-tunnel.md` documents current coverage as storage/resolve + peer decision wiring. `WsTransport::send_open` and `send_data` exist, but no production caller turns an upstream request into `Open` / `Data` frames or relays response frames back to the client. Implementing this requires a runtime architecture decision and a remote-node contract, not just a docs cleanup.
-- **Source:** authoring pass over `crates/gw-tunnel-client` + `gw-proxy` (2026-06-08).
-
-### Full tunnel e2e round-trip — `decision-gated residual`
-- **Intent:** exercise the live WebSocket tunnel path after the bridge design is chosen.
-- **Design points:** `crates/gw-gateway/tests/e2e_tunnel.rs` remains `#![cfg(feature = "tunnel")]` and `#[ignore]`, and its header says the full Pingora → tunnel-node → fake-upstream round-trip is deferred. Current e2e coverage does not exercise `peer_for_node` with a live WS node, `ControlAuth`, `Open` frame forwarding, DNS/target denial, or response relay.
-- **Source:** authoring pass over `crates/gw-tunnel-client` + `gw-proxy` (2026-06-08).
+### Owned tunnel bridge and e2e — `closed in W8`
+- **Intent:** complete the owned tunnel runtime bridge that maps selected Pingora upstream HTTP traffic into WebSocket tunnel streams.
+- **Design points:** W8 defines `ailinkmax-tunnel` in `docs/spec/10-owned-tunnel-protocol.md`, implements first-party `gw-tunnel-server`, extends `gw-tunnel-client` with bidirectional `TunnelStream`, routes `TunnelStack::peer_for_node` to the loopback bridge instead of the node WebSocket endpoint, and adds ignored owned-server/client e2e coverage for positive round trip, no-live, target-denied, and auth-failure cases.
+- **Source:** W8 owned tunnel implementation (2026-06-10).
 
 ### Default artifact policy — `decision-gated residual`
 - **Intent:** decide whether tunnel should remain a separate operator-selected artifact or compile into the default release image.
-- **Design points:** `docs/spec/09-tunnel.md` documents the split model as current: default `latest` is non-tunnel, while `latest-tunnel` is built with `--features tunnel` for operators that opt in. Keep this split until the bridge and full e2e loop are closed; changing default `latest` is a release decision.
+- **Design points:** `docs/spec/09-tunnel.md` documents the split model as current: default `latest` is non-tunnel, while `latest-tunnel` is built with `--features tunnel` for operators that opt in. Keep this split until the user explicitly approves promotion; changing default `latest` is a release decision, not part of W8.
 - **Source:** deleted `tunnel-t-design` §1/§9.
