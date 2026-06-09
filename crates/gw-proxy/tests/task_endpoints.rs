@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gw_billing::TaskBillingConfig;
+use gw_codec::AnyCodec;
 use gw_core::ids::UserId;
 use gw_store::deduction::{DeductionState, DEDUCT};
 use gw_task::contract::{CancelReason, ClaimedTask, SettleOutcome};
@@ -181,6 +182,7 @@ async fn test_submit_endpoint_creates_task() {
             user_id: "user_task",
             api_key_id: Some("ak_task"),
             client_protocol: "openai",
+            client_codec: None,
             trace_id: "trace_task",
             request_id: "request_task",
             billing_config: None,
@@ -210,6 +212,7 @@ async fn test_freeze_guard_freezes_on_submit() {
             user_id,
             api_key_id: Some("ak_task"),
             client_protocol: "openai",
+            client_codec: None,
             trace_id: "trace_task",
             request_id: "request_task",
             billing_config: Some(TaskBillingConfig {
@@ -251,6 +254,7 @@ async fn test_freeze_guard_insufficient_balance() {
             user_id,
             api_key_id: Some("ak_task"),
             client_protocol: "openai",
+            client_codec: None,
             trace_id: "trace_task",
             request_id: "request_task",
             billing_config: Some(TaskBillingConfig {
@@ -312,6 +316,46 @@ async fn test_load_nonexistent_task() {
 
     assert_eq!(err.status, 404);
     assert_eq!(err.code, gw_core::error::codes::GW_TASK_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_submit_endpoint_stores_codec_rendered_full_ir_wire_body() {
+    let contract = MemoryTaskContract::default();
+
+    let response = gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"upstream_url":"https://example.invalid/v1/chat/completions","body":{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}]}}"#,
+            user_id: "user_task",
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai:chat",
+            client_codec: Some(&AnyCodec::OpenAi(gw_codec::openai::OpenAi)),
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: None,
+            available_balance_micro: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 201);
+    let submitted = contract.submitted.lock().unwrap();
+    let payload = &submitted[0].input_payload;
+    assert_eq!(payload["ir_wire_format"], "openai:chat");
+    assert_eq!(payload["ir_request"]["protocol"], "openai:chat");
+    assert_eq!(payload["ir_request"]["kind"], "request");
+    assert_eq!(
+        payload["ir_request"]["value"]["messages"][0]["content"]["value"],
+        "hi"
+    );
+    assert_eq!(payload["ir_wire_content_type"], "application/json");
+    let rendered = payload["ir_wire_body"].as_str().expect("rendered body");
+    let rendered_json: serde_json::Value =
+        serde_json::from_str(rendered).expect("rendered body is json");
+    assert_eq!(rendered_json["model"], "gpt-4.1-mini");
+    assert_eq!(rendered_json["messages"][0]["content"], "hi");
+    assert_eq!(payload["body"]["messages"][0]["content"], "hi");
 }
 
 fn seed_balance(user_id: &str, base_micro: i64) {

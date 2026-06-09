@@ -136,6 +136,7 @@ pub struct SubmitTaskRequest<'a> {
     pub user_id: &'a str,
     pub api_key_id: Option<&'a str>,
     pub client_protocol: &'a str,
+    pub client_codec: Option<&'a gw_codec::AnyCodec>,
     pub trace_id: &'a str,
     pub request_id: &'a str,
     pub billing_config: Option<TaskBillingConfig>,
@@ -153,8 +154,13 @@ async fn submit_endpoint_impl<C: TaskContract + Sync>(
     contract: &C,
     request: SubmitTaskRequest<'_>,
 ) -> std::result::Result<TaskHttpResponse, TaskHttpError> {
-    let input_payload: serde_json::Value = serde_json::from_slice(request.body)
+    let mut input_payload: serde_json::Value = serde_json::from_slice(request.body)
         .map_err(|err| TaskHttpError::submit_failed(format!("invalid task payload: {err}")))?;
+    attach_ir_wire_body(
+        &mut input_payload,
+        request.client_protocol,
+        request.client_codec,
+    )?;
     let now_ms = now_ms();
     let kind = infer_task_kind(&input_payload);
     let frozen_micro = request
@@ -336,6 +342,57 @@ fn infer_task_kind(payload: &serde_json::Value) -> TaskKind {
             _ => TaskKind::Generic,
         })
         .unwrap_or(TaskKind::Generic)
+}
+
+fn attach_ir_wire_body(
+    payload: &mut serde_json::Value,
+    client_protocol: &str,
+    codec: Option<&gw_codec::AnyCodec>,
+) -> std::result::Result<(), TaskHttpError> {
+    let Some(codec) = codec else {
+        return Ok(());
+    };
+    if codec.api_shape().is_cli() {
+        return Ok(());
+    }
+    let source = payload.get(gw_task::TASK_BODY).unwrap_or(payload);
+    let source_bytes = serde_json::to_vec(source)
+        .map_err(|err| TaskHttpError::submit_failed(format!("serialize task body: {err}")))?;
+    let ir = codec.parse_request(&source_bytes).map_err(|err| {
+        TaskHttpError::submit_failed(format!("codec parse task request: {}", err.message))
+    })?;
+    let ir_value = serde_json::to_value(&ir)
+        .map_err(|err| TaskHttpError::submit_failed(format!("serialize task request ir: {err}")))?;
+    let mut out = bytes::BytesMut::with_capacity(source_bytes.len());
+    codec.render_request(&ir, &mut out).map_err(|err| {
+        TaskHttpError::submit_failed(format!("codec render task request: {}", err.message))
+    })?;
+    let rendered = String::from_utf8(out.to_vec())
+        .map_err(|err| TaskHttpError::submit_failed(format!("rendered task body utf8: {err}")))?;
+    let Some(obj) = payload.as_object_mut() else {
+        return Err(TaskHttpError::submit_failed("task payload must be a JSON object"));
+    };
+    obj.insert(
+        gw_task::TASK_IR_REQUEST.to_string(),
+        serde_json::json!({
+            "protocol": client_protocol,
+            "kind": "request",
+            "value": ir_value,
+        }),
+    );
+    obj.insert(
+        gw_task::TASK_IR_WIRE_FORMAT.to_string(),
+        serde_json::Value::String(client_protocol.to_string()),
+    );
+    obj.insert(
+        gw_task::TASK_IR_WIRE_CONTENT_TYPE.to_string(),
+        serde_json::Value::String("application/json".to_string()),
+    );
+    obj.insert(
+        gw_task::TASK_IR_WIRE_BODY.to_string(),
+        serde_json::Value::String(rendered),
+    );
+    Ok(())
 }
 
 fn now_ms() -> u64 {

@@ -1018,6 +1018,7 @@ pub async fn run(
                             .client_shape
                             .map(|shape| shape.format_id())
                             .unwrap_or("unknown"),
+                        client_codec: ctx.client_codec.as_ref(),
                         trace_id: ctx.trace_id.as_ref(),
                         request_id: ctx.request_id.as_ref(),
                         billing_config: task_billing_config,
