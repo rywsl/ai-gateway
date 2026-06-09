@@ -6,6 +6,7 @@ pub enum ProtocolKind {
     OpenAi,
     Anthropic,
     Gemini,
+    Kiro,
 }
 
 impl ProtocolKind {
@@ -14,6 +15,7 @@ impl ProtocolKind {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
+            Self::Kiro => "kiro",
         }
     }
 }
@@ -39,11 +41,13 @@ pub enum ApiShape {
     OpenAiResponses,
     AnthropicMessages,
     GeminiGenerate,
+    KiroEventStream,
     // CLI variants (body passthrough, no IR conversion)
     ClaudeCli,
     OpenAiCli,
     OpenAiCompact,
     GeminiCli,
+    KiroCli,
 }
 
 impl ApiShape {
@@ -54,10 +58,12 @@ impl ApiShape {
             Self::OpenAiResponses => "openai:responses",
             Self::AnthropicMessages => "anthropic:messages",
             Self::GeminiGenerate => "gemini:generate",
+            Self::KiroEventStream => "kiro:eventstream",
             Self::ClaudeCli => "claude:cli",
             Self::OpenAiCli => "openai:cli",
             Self::OpenAiCompact => "openai:compact",
             Self::GeminiCli => "gemini:cli",
+            Self::KiroCli => "kiro:cli",
         }
     }
 
@@ -65,7 +71,11 @@ impl ApiShape {
     pub fn is_cli(&self) -> bool {
         matches!(
             self,
-            Self::ClaudeCli | Self::OpenAiCli | Self::OpenAiCompact | Self::GeminiCli
+            Self::ClaudeCli
+                | Self::OpenAiCli
+                | Self::OpenAiCompact
+                | Self::GeminiCli
+                | Self::KiroCli
         )
     }
 
@@ -77,6 +87,7 @@ impl ApiShape {
             }
             Self::AnthropicMessages | Self::ClaudeCli => ProtocolKind::Anthropic,
             Self::GeminiGenerate | Self::GeminiCli => ProtocolKind::Gemini,
+            Self::KiroEventStream | Self::KiroCli => ProtocolKind::Kiro,
         }
     }
 }
@@ -137,6 +148,15 @@ mod resolve_upstream_format_tests {
         assert_eq!(
             resolve_upstream_format(&[], ProtocolKind::Gemini),
             ProtocolKind::Gemini
+        );
+    }
+
+    #[test]
+    fn kiro_resolves_like_other_protocol_families() {
+        let acc = [ProtocolKind::Kiro];
+        assert_eq!(
+            resolve_upstream_format(&acc, ProtocolKind::Kiro),
+            ProtocolKind::Kiro
         );
     }
 }

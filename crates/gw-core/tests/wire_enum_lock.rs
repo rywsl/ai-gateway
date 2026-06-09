@@ -13,6 +13,7 @@ fn protocol_kind_serde_wire_form_locked() {
         (ProtocolKind::OpenAi, "open_ai"),
         (ProtocolKind::Anthropic, "anthropic"),
         (ProtocolKind::Gemini, "gemini"),
+        (ProtocolKind::Kiro, "kiro"),
     ];
     for (v, expected) in cases {
         let got = serde_json::to_value(v).unwrap();
@@ -32,6 +33,7 @@ fn protocol_kind_as_str_wire_form_locked() {
         (ProtocolKind::OpenAi, "openai"),
         (ProtocolKind::Anthropic, "anthropic"),
         (ProtocolKind::Gemini, "gemini"),
+        (ProtocolKind::Kiro, "kiro"),
     ];
     for (v, expected) in cases {
         assert_eq!(
@@ -50,10 +52,12 @@ fn api_shape_serde_wire_form_locked() {
         (OpenAiResponses, "open_ai_responses"),
         (AnthropicMessages, "anthropic_messages"),
         (GeminiGenerate, "gemini_generate"),
+        (KiroEventStream, "kiro_event_stream"),
         (ClaudeCli, "claude_cli"),
         (OpenAiCli, "open_ai_cli"),
         (OpenAiCompact, "open_ai_compact"),
         (GeminiCli, "gemini_cli"),
+        (KiroCli, "kiro_cli"),
     ];
     for (v, expected) in cases {
         let got = serde_json::to_value(v).unwrap();
@@ -74,10 +78,12 @@ fn api_shape_format_id_wire_form_locked() {
         (OpenAiResponses, "openai:responses"),
         (AnthropicMessages, "anthropic:messages"),
         (GeminiGenerate, "gemini:generate"),
+        (KiroEventStream, "kiro:eventstream"),
         (ClaudeCli, "claude:cli"),
         (OpenAiCli, "openai:cli"),
         (OpenAiCompact, "openai:compact"),
         (GeminiCli, "gemini:cli"),
+        (KiroCli, "kiro:cli"),
     ];
     for (v, expected) in cases {
         let got = v.format_id();
