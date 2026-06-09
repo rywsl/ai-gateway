@@ -3,9 +3,9 @@
 //! Owns the per-node `Arc<ReconnectingTransport>` pool, the live
 //! `Vec<ProxyNodeView>` snapshot (ArcSwap), and the `SafeDnsResolver`.
 //! `pick_peer` calls `resolve` and, when the result is `Use(node_id)`,
-//! `peer_for_node` materialises an `HttpPeer` whose socket terminates at
-//! the proxy node's WS endpoint (the real upstream is encoded in the
-//! tunnel frame payload).
+//! `peer_for_node` materialises a loopback bridge `HttpPeer`; the selected
+//! node and real upstream target are encoded in the bridge request context
+//! and tunnel frame payload.
 //!
 //! ADR-T-2, ADR-T-3, ADR-T-4 in
 //! `docs/spec/09-tunnel.md`.
