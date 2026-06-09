@@ -1904,17 +1904,16 @@ mod oauth_injection_tests {
         ))
         .expect("read source");
         assert!(
-            src.contains("ctx.vendor_key.oauth.as_ref()"),
-            "G3 oauth branch missing in default outbound adapter"
+            src.contains("ctx.vendor_key.oauth.is_some()"),
+            "W6 oauth branch missing in default outbound adapter"
         );
         assert!(
-            src.contains("oauth.access_token"),
-            "G3 access_token usage missing"
+            src.contains("ctx.oauth_runtime") && src.contains("access_token_for"),
+            "W6 runtime access_token lookup missing"
         );
         assert!(
-            src.contains("gw_oauth_token_near_expiry_total")
-                && src.contains("gw_oauth_token_expired_total"),
-            "G3 expiry metrics missing"
+            src.contains("refreshed_vendor_key") && src.contains("token.access_token"),
+            "W6 refreshed key/token usage missing"
         );
     }
 }

@@ -425,9 +425,19 @@ pub static METRICS: &[MetricSpec] = &[
         help: "upstream requests dispatched with already-expired access_token",
     },
     MetricSpec {
-        name: "gw_oauth_refresh_failed_xadd_total",
+        name: "gw_oauth_runtime_refresh_total",
         kind: MetricKind::Counter,
-        help: "OAuthListener reverse XADDs to events:entity (op=status_change field=oauth_failed)",
+        help: "Rust OAuth runtime refresh outcomes; label=result (ok/lock_lost/cas_lost/provider_error)",
+    },
+    MetricSpec {
+        name: "gw_oauth_runtime_writeback_total",
+        kind: MetricKind::Counter,
+        help: "Rust OAuth encrypted token write-back outcomes; label=result (ok/cas_lost/failed)",
+    },
+    MetricSpec {
+        name: "gw_oauth_refresh_status_xadd_total",
+        kind: MetricKind::Counter,
+        help: "OAuth status-only XADDs to events:entity after Rust-owned refresh failures",
     },
     // --- Billing robustness W1 ---
     MetricSpec {

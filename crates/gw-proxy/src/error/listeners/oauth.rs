@@ -1,11 +1,11 @@
 //! OAuth listener. Emits `gw_oauth_refresh_total` with vendor + outcome
 //! labels. On `OAuthSignal::RefreshFailed` (ADR-G3-4 / T2-B) the listener
-//! additionally reverse-XADDs an entry to `events:entity` so the Go
-//! task-worker can drive an async refresh:
+//! additionally reverse-XADDs a status-only entry to `events:entity`:
 //!
 //! ```text
 //! events:entity ns=vendor_key id=<key_id> op=status_change
-//!               field=oauth_failed reason=upstream_401 ts_ms=<now>
+//!               field=oauth_refresh_status status=rust_refresh_failed
+//!               reason=upstream_401 source=rust_oauth_refresh ts_ms=<now>
 //! ```
 //!
 //! The XADD is fire-and-forget via `tokio::spawn` — the listener trait is
@@ -36,8 +36,8 @@ impl ErrorListener for OAuthListener {
         )
         .increment(1);
 
-        // T2-B (ADR-G3-4): on RefreshFailed, reverse-XADD `events:entity`
-        // so the Go task-worker can drive an async refresh.
+        // Post-K-C: on RefreshFailed, reverse-XADD a status-only event.
+        // Go must not consume this as a runtime refresh command.
         if sig.kind != OAuthSignalKind::RefreshFailed {
             return;
         }
@@ -64,8 +64,10 @@ impl ErrorListener for OAuthListener {
                 ("ns", "vendor_key".to_string()),
                 ("id", key_id),
                 ("op", "status_change".to_string()),
-                ("field", "oauth_failed".to_string()),
+                ("field", "oauth_refresh_status".to_string()),
+                ("status", "rust_refresh_failed".to_string()),
                 ("reason", "upstream_401".to_string()),
+                ("source", "rust_oauth_refresh".to_string()),
                 ("ts_ms", now_ms_str),
             ];
             match client
@@ -73,7 +75,7 @@ impl ErrorListener for OAuthListener {
                 .await
             {
                 Ok(()) => {
-                    metrics::counter!("gw_oauth_refresh_failed_xadd_total").increment(1);
+                    metrics::counter!("gw_oauth_refresh_status_xadd_total").increment(1);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -164,7 +166,7 @@ mod tests {
     /// against accidental regression of the contract surface (stream name,
     /// field key, success metric, async spawn).
     #[test]
-    fn oauth_listener_emits_reverse_xadd_on_refresh_failed() {
+    fn oauth_listener_emits_status_only_xadd_on_refresh_failed() {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/error/listeners/oauth.rs"
@@ -174,14 +176,23 @@ mod tests {
             src.contains("events:entity"),
             "events:entity stream name missing"
         );
-        assert!(src.contains("oauth_failed"), "field=oauth_failed missing");
+        assert!(
+            src.contains("oauth_refresh_status"),
+            "field=oauth_refresh_status missing"
+        );
+        assert!(
+            src.contains("rust_refresh_failed"),
+            "status=rust_refresh_failed missing"
+        );
+        assert!(src.contains("source"), "source field missing");
+        assert!(
+            src.contains("gw_oauth_refresh_status_xadd_total"),
+            "success metric missing"
+        );
+        assert!(!src.contains("\"oauth_failed\""));
         assert!(src.contains("upstream_401"), "reason=upstream_401 missing");
         assert!(src.contains("vendor_key"), "ns=vendor_key missing");
         assert!(src.contains("status_change"), "op=status_change missing");
-        assert!(
-            src.contains("gw_oauth_refresh_failed_xadd_total"),
-            "success metric missing"
-        );
         assert!(
             src.contains("tokio::spawn"),
             "must spawn (sync listener trait)"
