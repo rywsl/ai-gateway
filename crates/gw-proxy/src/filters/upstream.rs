@@ -1277,7 +1277,10 @@ async fn apply_outbound_adapter(
         trace_id: ctx.trace_id.as_ref(),
         request_id: ctx.request_id.as_ref(),
     };
-    if adapter.request_patch_enabled() {
+    let is_cli_passthrough = ctx
+        .client_shape
+        .is_some_and(|shape| shape.is_cli());
+    if adapter.request_patch_enabled() && !is_cli_passthrough {
         outbound =
             patch_outbound_body(adapter.as_ref(), &adapter_ctx, upstream_protocol, &outbound)?;
         adapter_ctx.content_len = outbound.len();
@@ -2347,6 +2350,83 @@ mod regression_baseline_tests {
                 .as_ref()
                 .as_ref(),
             outbound.as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_compact_codex_adapter_preserves_passthrough_body_and_archive() {
+        let (mut ctx, mut req, _openai_key, vendor, _) = make_canonical_inputs();
+        let body = Bytes::from_static(
+            br#"{"model":"gpt-5.1-codex","input":"summarize","compact":true,"metadata":{"cli":"codex"}}"#,
+        );
+        let key = Arc::new(VendorKey {
+            key_id: KeyId::from("vk-codex"),
+            vendor_id: VendorId::from("codex"),
+            api_key: SecretString::new("sk-vendor-secret".into()),
+            accessible_models: Vec::new(),
+            model_mapping: HashMap::new(),
+            accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
+            protocol_conversion: false,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None::<Url>,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: Vec::new(),
+            forced_capabilities: Vec::new(),
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+            identity_snapshot: None,
+            quota_state: Default::default(),
+        });
+        ctx.client_shape = Some(gw_core::protocol::ApiShape::OpenAiCompact);
+        ctx.body = Some(crate::body::RequestBodyView::from_raw(
+            body.clone(),
+            gw_codec::compression::Encoding::Identity,
+        ));
+        let registry = Arc::new(gw_adapter::AdapterRegistry::default());
+        let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> = Arc::new(StaticOAuthRuntime);
+        let health = Arc::new(gw_health::store::KeyHealthStore::default());
+
+        let outbound = apply_outbound_adapter(
+            &mut ctx,
+            &mut req,
+            &key,
+            &vendor,
+            body.clone(),
+            &registry,
+            &oauth_runtime,
+            &health,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            gw_core::protocol::ProtocolKind::OpenAi,
+        )
+        .await
+        .expect("cli passthrough adapter rewrite");
+        archive_upstream_request(&mut ctx, &req, outbound.clone());
+
+        assert_eq!(outbound, body);
+        assert_eq!(
+            ctx.body.as_ref().unwrap().outbound_or_raw().as_ref(),
+            body.as_ref()
+        );
+        assert_eq!(
+            req.headers
+                .get("content-length")
+                .and_then(|v| v.to_str().ok()),
+            Some(body.len().to_string()).as_deref()
+        );
+        assert_eq!(
+            ctx.upstream_request_body
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .as_ref(),
+            body.as_ref()
         );
     }
 }
