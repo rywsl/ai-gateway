@@ -58,7 +58,7 @@
   "attempt_index": 0,              // 0 = 首次，多 key 路由时重试递增
   "vendor_exposure_state": "settled",  // settled | terminated | crash_fallback
   "usage_provenance": {
-    "input": "upstream_final",      // upstream_final | upstream_partial | estimated | crash_fallback | unknown
+    "input": "upstream_final",      // upstream_final | cli_extracted | upstream_partial | estimated | crash_fallback | unknown
     "output": "upstream_final",
     "cache_read": "upstream_final",
     "cache_creation": "upstream_final",
@@ -161,8 +161,26 @@ Rust 可能 emit **多条** `usage:records` 共享同一主键 `(request_id, att
 
 ```
 优先级（从高到低）：
-  upstream_final > upstream_partial > estimated > crash_fallback > unknown
+  upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback > unknown
 ```
+
+Go settler rank:
+
+| provenance | rank |
+|---|---:|
+| `upstream_final` | 5 |
+| `cli_extracted` | 4 |
+| `upstream_partial` | 3 |
+| `estimated` | 2 |
+| `crash_fallback` | 1 |
+| `unknown` | 0 |
+
+CLI billing guard:
+
+- A successful CLI-shaped billable attempt must not settle as free only because the upstream CLI wire response omitted usage.
+- If Rust emits `cli_extracted`, Go ranks it as 4 and may replace lower-rank duplicate records.
+- If Rust emits an estimated fallback for absent CLI usage, Go ranks it as 2 and settles it as a non-zero usage record.
+- If Go receives a successful CLI-shaped `UsageRecord` whose billable usage dimensions are all zero and whose provenance is still `unknown`, Go must reject or quarantine it as a billing-protection violation instead of treating it as free usage.
 
 **算法**：
 1. 维护短期 dedup 表 `(request_id, attempt_index) → 已 settle 的 output provenance level`，TTL 24h（与 InflightLedger EXPIRE 对齐）。

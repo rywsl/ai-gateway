@@ -15,10 +15,10 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 - **Remaining design points:** Kiro is not registered in `gw-codec/src/any.rs::AnyCodec` and has no `gw-core::ProtocolKind` / `ApiShape` cross-process shape yet. Do not treat it as full Kiro vendor integration until that protocol-contract decision is made.
 - **Source:** deleted `codec-s5-kiro-eventstream` + `adapter-a-t6-kiro-vendor` (git history).
 
-### `UsageSource::CliExtracted` provenance — `doc-divergence`
-- **Intent:** let billing distinguish CLI-extracted usage from parsed/estimated.
-- **Design points:** the ledger replaced the old `usage_source` field with `usage_provenance` (`crates/gw-ledger/src/usage.rs`); decide whether a CLI-extracted provenance value is needed and add it there rather than reviving `UsageSource`.
-- **Source:** deleted `cli-variants-design` ADR-CLI-10.
+### `UsageSource::CliExtracted` provenance — closed in spec
+- **Landed:** CLI body and stream extraction now stamp `usage_provenance` dimensions with `cli_extracted`, and the shared rank order is `upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback > unknown`.
+- **Spec:** `docs/spec/01-protocol-codec.md`, `docs/spec/06-billing-ledger.md`, `docs/go-contracts/parts/02-go-as-consumer.md`.
+- **Boundary:** the retired `UsageSource` field remains deleted; the as-built contract stays on per-dimension `usage_provenance`.
 
 ## 02 routing
 
