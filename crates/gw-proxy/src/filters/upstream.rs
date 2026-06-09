@@ -134,7 +134,7 @@ fn admit_preferred_candidate<'a>(
         .find(|candidate| {
             candidate.key_id != preferred.key_id && adaptive_rpm.try_admit(&candidate.key_id)
         })
-        .or(Some(preferred))
+        .or_else(|| ranked_candidates.first())
 }
 
 pub fn record_api_key_affinity(
@@ -1455,6 +1455,25 @@ mod affinity_tests {
             .expect("preferred should fall back to admitted alternative");
 
         assert_eq!(picked.key_id, alternative.key_id);
+    }
+
+    #[test]
+    fn denied_affinity_and_denied_alternatives_fall_back_to_ranked_first() {
+        let adaptive = gw_auth::ratelimit::adaptive::AdaptiveRpmManager::new(Default::default());
+        let first = key("vk-first");
+        let preferred = key("vk-preferred");
+        let ranked = vec![first.clone(), preferred.clone()];
+        for key in [&first.key_id, &preferred.key_id] {
+            adaptive.observe_429(key, 120, Some(1), 120, None);
+            adaptive.observe_429(key, 120, Some(1), 120, None);
+            assert_eq!(adaptive.should_enforce(key), Some(1));
+            assert!(adaptive.try_admit(key));
+        }
+
+        let picked = admit_preferred_candidate(&ranked, Some(&preferred), &adaptive)
+            .expect("all-over-ceiling fallback should still choose a key");
+
+        assert_eq!(picked.key_id, first.key_id);
     }
 
     #[test]
