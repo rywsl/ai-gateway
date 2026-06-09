@@ -53,6 +53,8 @@ Capture each item below from real Kiro CLI traffic. Store raw artifacts outside 
 - Create: `docs/superpowers/evidence/2026-06-10-w9-kiro-cli-samples.md`
 - Create: redacted fixture files under the repository's existing fixture location selected after `rg --files | rg 'fixture|sample|golden'`
 
+Operator helper: `scripts/capture_kiro_cli_samples/README.md` documents offline mitmproxy sample capture and `python3 scripts/capture_kiro_cli_samples/extract.py --input <raw-flow-outside-repo> --output-dir <redacted-output>`.
+
 - [ ] **Step 1: Inspect existing fixture layout**
 
 Run:
