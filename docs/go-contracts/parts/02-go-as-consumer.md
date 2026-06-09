@@ -157,7 +157,7 @@ Rust **不**自动裁剪 stream，避免数据丢失。Go 消费 + XACK + XTRIM 
 
 ### 2.1.8 去重契约（新增，billing-robustness W4-T1）
 
-Rust 可能 emit **多条** `usage:records` 共享同一主键 `(request_id, attempt_index)`（例如崩溃恢复 reconciler 先 emit `CrashFallback`，后续真实 emit 又抵达）。Go settler **必须** 按主键去重，同主键多条按 `usage_provenance.output` 优先级择高：
+Rust 可能 emit **多条** `usage:records` 共享同一主键 `(request_id, attempt_index)`（例如崩溃恢复 reconciler 先 emit `CrashFallback`，后续真实 emit 又抵达）。Go settler **必须** 按主键去重，同主键多条按 `usage_provenance` 各维度中的**最高**优先级择高：
 
 ```
 优先级（从高到低）：
@@ -183,7 +183,7 @@ CLI billing guard:
 - If Go receives a successful CLI-shaped `UsageRecord` whose billable usage dimensions are all zero and whose provenance is still `unknown`, Go must reject or quarantine it as a billing-protection violation instead of treating it as free usage.
 
 **算法**：
-1. 维护短期 dedup 表 `(request_id, attempt_index) → 已 settle 的 output provenance level`，TTL 24h（与 InflightLedger EXPIRE 对齐）。
+1. 维护短期 dedup 表 `(request_id, attempt_index) → 已 settle 的最高 provenance level`，TTL 24h（与 InflightLedger EXPIRE 对齐）。
 2. 收到一条 record：
    - 主键不存在 → settle，记入 dedup 表。
    - 主键存在 + 新 record 的 provenance 更高 → 应用 delta（新值 - 旧值）更新 balance，表更新到新 level。

@@ -46,5 +46,4 @@ The codec layer's CLI usage extractors and IR usage accumulation feed the usage 
 ## Not built → ROADMAP
 
 - **kiro / S5 EventStream registration** — `gw-codec::kiro` now contains the internal EventStream frame codec and embedded `<thinking>` parser, but Kiro is not an `AnyCodec` variant and has no `ProtocolKind` / `ApiShape` cross-process shape. Full Kiro vendor integration remains pending that protocol-contract decision.
-- **CLI usage provenance** — `UsageSource` remains deleted. CLI response-body and stream-event extractors stamp extracted dimensions with `usage_provenance.<dim> = "cli_extracted"` while continuing to increment `gw_cli_usage_extract_total{shape,source}`. The precedence order is `upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback > unknown`.
 - **CLI as `AnyCodec` variants** — the four CLI shapes live as a parallel `crates/gw-codec/src/cli/` module (body passthrough), not as variants of the `AnyCodec` enum.
