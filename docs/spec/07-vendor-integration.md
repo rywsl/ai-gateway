@@ -44,7 +44,9 @@ Workspace kill-switch: `[egress].disabled` (`EgressCfg.disabled`, `crates/gw-gat
 
 ### `gw-adapter` error analyzers (wired)
 
-`crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`patch_response`/`transport_profile`), an `AdapterRegistry`, an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait. The outbound `UpstreamAdapter` path is still not used by production request rewriting; the live request path uses inline `inject_vendor_headers` as described above. The response-side error analyzer path is wired: `gw-proxy::LlmGateway` holds an `AdapterRegistry`, calls `error_analyzer_for(vendor_id)` at response EOS with headers and an 8 KiB body head, and merges the resulting `ErrorOutcome` into the classifier outcome. Built-in analyzer fallback exists for codex/openai, anthropic/claude, and gemini/google vendor ids.
+`crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`patch_response`/`transport_profile`), an `AdapterRegistry`, an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait. The outbound `UpstreamAdapter` path is not used by production request rewriting; outbound v1 is the inline `gw-proxy` filter plus `gw-core::impersonate` profile code described above. The response-side error analyzer path is wired: `gw-proxy::LlmGateway` holds an `AdapterRegistry`, calls `error_analyzer_for(vendor_id)` at response EOS with headers and an 8 KiB body head, and merges the resulting `ErrorOutcome` into the classifier outcome. Built-in analyzer fallback exists for codex/openai, anthropic/claude, and gemini/google vendor ids.
+
+Outbound adapter dispatch remains experimental and decision-gated: wiring `AdapterRegistry::for_vendor` into the request path would move auth/header/body ownership out of `inject_vendor_headers` and the impersonation modules, and would need an explicit architecture decision rather than being treated as an unclosed bug in the current runtime.
 
 ## Deliberate behaviours
 
@@ -53,7 +55,9 @@ Workspace kill-switch: `[egress].disabled` (`EgressCfg.disabled`, `crates/gw-gat
 - **Tunnel and Impersonate are mutually exclusive.** When the tunnel feature would route an impersonate vendor through a tunnel node, `pick_peer` returns `GW_TUNNEL_IMPERSONATE_CONFLICT` instead of silently picking one. (`upstream.rs:436`–`448`)
 - **Auth header-name fallback is lenient, not fatal.** A malformed `auth_template` (colon present but the name isn't a header token) falls back to `authorization` plus a metric rather than failing the request — pre-production operator-misconfig tolerance. (`upstream.rs:1070`–`1073`)
 - **Identity persistence is lazy and fingerprint-stable.** A per-key `IdentitySnapshot` is derived once on first impersonated dispatch and persisted out-of-band; profile drift forces a re-derive. (`ensure.rs:19`–`36`)
-- **`gw-adapter::UpstreamAdapter` remains unwired by design-in-progress.** The production auth/transport path deliberately remains the inline filter code. Only `UpstreamErrorAnalyzer` is wired into `gw-proxy`.
+- **Outbound v1 is inline+impersonate.** The production auth/transport path deliberately remains the inline filter code plus `gw-core::impersonate` / `gw-egress-impersonate`; this is the documented as-built boundary, not a missing production hook.
+- **`gw-adapter::UpstreamAdapter` remains decision-gated.** Only `UpstreamErrorAnalyzer` is wired into `gw-proxy`. A full outbound adapter registry would be a boundary move that needs a user architecture decision.
+- **Rust OAuth is not a writer.** Rust decrypts and injects the access token, emits expiry/401 signals, and delegates refresh/write-back to Go. Moving refresh and encrypted write-back into Rust is a cross-process ownership decision.
 
 ## Cross-process touchpoints
 
@@ -75,10 +79,8 @@ These are governed by `docs/go-contracts/` (KEK rotation, encrypted column shape
 
 ## Not built → ROADMAP
 
-The following are designed/scaffolded but not on any live path. Tag: **capability-gap**.
+The following are outside outbound v1 and require an explicit decision before implementation. Tag: **decision-gated residual**.
 
-- **The A-T0..A-T6 outbound vendor adapter layer.** `gw-adapter`'s `AdapterRegistry::for_vendor` is still not called by a binary; 0 of 6 named outbound vendor adapters (claude_code / gemini_cli / vertex_ai / antigravity / codex / kiro) referenced in `trait_def.rs` exist — only `NoopAdapter`. Error analyzers are live, but outbound auth/transport/body rewrite remains inline in `gw-proxy`. (capability-gap)
-- **K-C: in-Rust OAuth refresh.** Rust injects pre-decrypted tokens and delegates refresh to Go via `events:entity`; no in-process refresh stack against `token_endpoint`/`refresh_token` exists. (capability-gap)
-- **Kiro adapter (A-T6).** No kiro profile or adapter. (capability-gap)
-- **Vertex AI service-account JWT signing.** No SA-JWT auth rewrite; `vertex_ai` is named in the adapter trait doc but unimplemented. (capability-gap)
-- **Codex request-body transform.** Codex impersonation injects headers only; no outbound request-body rewrite hook is active (`patch_request` defaults to no-op and outbound adapter dispatch is not wired). (capability-gap)
+- **Full outbound adapter registry (A-T0..A-T6).** `gw-adapter`'s `AdapterRegistry::for_vendor` is not called by a binary and only `NoopAdapter` exists, while response analyzers are wired. This is not a current-runtime bug because outbound v1 is inline+impersonate; build the outbound registry only if the architecture boundary moves from the proxy filter/profile modules into adapters. (decision-gated residual)
+- **In-Rust OAuth refresh/write-back (K-C).** Rust injects pre-decrypted tokens and delegates refresh to Go via `events:entity`. Do not add `OAuthRefresher`/cache/write-back in Rust unless ownership moves away from the Go delegated refresh model. (decision-gated residual)
+- **Heavy vendor-specific outbound transforms.** Kiro adapter/AWS SigV4, Vertex AI SA-JWT token exchange, and Codex request-body transforms all depend on choosing the outbound adapter registry or another explicit transform boundary. They are not required to complete the documented inline+impersonate outbound v1. (decision-gated residual)
