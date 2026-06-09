@@ -1226,15 +1226,17 @@ async fn apply_outbound_adapter(
         .kind();
     let upstream_host = vendor.value.base_urls.first().and_then(|u| u.host_str());
     let initial_path = upstream_request.uri.path().to_owned();
+    let initial_scheme = vendor
+        .value
+        .base_urls
+        .first()
+        .map(|u| u.scheme().to_owned())
+        .unwrap_or_else(|| "https".to_owned());
+    let initial_host = upstream_host.unwrap_or_default().to_owned();
     let mut headers = ProxyHeadersAccessor(upstream_request);
     let mut url = ProxyUrlAccessor {
-        scheme: vendor
-            .value
-            .base_urls
-            .first()
-            .map(|u| u.scheme().to_owned())
-            .unwrap_or_else(|| "https".to_owned()),
-        host: upstream_host.unwrap_or_default().to_owned(),
+        scheme: initial_scheme.clone(),
+        host: initial_host.clone(),
         path: initial_path.clone(),
     };
     let mut adapter_ctx = gw_adapter::AdapterCtx {
@@ -1268,6 +1270,12 @@ async fn apply_outbound_adapter(
         .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_rewrite_transport_failed")))?;
     drop(adapter_ctx);
     drop(headers);
+
+    if url.scheme != initial_scheme || url.host != initial_host {
+        return Err(Error::new(ErrorType::Custom(
+            "gw_adapter_transport_target_rewrite_unsupported",
+        )));
+    }
 
     if url.path != initial_path {
         let parsed = url
@@ -1913,6 +1921,7 @@ mod oauth_injection_tests {
 #[cfg(test)]
 mod regression_baseline_tests {
     use super::*;
+    use async_trait::async_trait;
     use gw_core::entity::KeyStatus;
     use gw_core::ids::{KeyId, RequestId, TraceId, VendorId};
     use secrecy::SecretString;
@@ -2051,6 +2060,58 @@ mod regression_baseline_tests {
         .await
         .expect("adapter rewrite");
         insta::assert_snapshot!(render(&req));
+    }
+
+    struct TargetRewriteAdapter;
+
+    #[async_trait]
+    impl gw_adapter::UpstreamAdapter for TargetRewriteAdapter {
+        fn name(&self) -> &'static str {
+            "target-rewrite"
+        }
+
+        async fn rewrite_auth(
+            &self,
+            _ctx: &mut gw_adapter::AdapterCtx<'_>,
+        ) -> Result<(), gw_adapter::AdapterError> {
+            Ok(())
+        }
+
+        fn rewrite_transport(
+            &self,
+            ctx: &mut gw_adapter::AdapterCtx<'_>,
+        ) -> Result<(), gw_adapter::AdapterError> {
+            ctx.url_mut.set_scheme("http");
+            ctx.url_mut.set_host("other.example.com");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_transport_target_rewrite_is_rejected() {
+        let (mut ctx, mut req, key, vendor, content_len) = make_canonical_inputs();
+        let registry = Arc::new(gw_adapter::AdapterRegistry::default());
+        registry.register_adapter(VendorId::from("openai"), Arc::new(TargetRewriteAdapter));
+        let health = Arc::new(gw_health::store::KeyHealthStore::default());
+
+        let err = apply_outbound_adapter(
+            &mut ctx,
+            &mut req,
+            &key,
+            &vendor,
+            content_len,
+            &registry,
+            &health,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            gw_core::protocol::ProtocolKind::OpenAi,
+        )
+        .await
+        .expect_err("transport target rewrite must fail closed in W5");
+
+        assert!(
+            format!("{err:?}").contains("gw_adapter_transport_target_rewrite_unsupported"),
+            "unexpected error: {err:?}"
+        );
     }
 }
 
