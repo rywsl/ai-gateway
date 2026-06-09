@@ -2,7 +2,9 @@
 
 - 日期：2026-06-09
 - 范围：W2/W3/W4/W6/W7/W8 源码执行前的集中决策确认
-- 状态：等待用户确认
+- 状态：已确认
+- 确认时间：2026-06-09
+- 最终执行记录：`docs/design/2026-06-09-roadmap-decision-record.md`
 - 依据：
   - `docs/plans/2026-06-09-w0-contract-evidence.md`
   - `docs/plans/2026-06-09-w2-stream-probe-failover.md`
@@ -15,9 +17,17 @@
 
 ## 背景
 
-`main` 已经包含 W0-W8 的详细计划，W1/W5 已实现。剩余 W2/W3/W4/W6/W7/W8 的源码执行存在需要用户确认的边界点。本文只汇总已由计划文件提出或支撑的开放决策，不新增计划外架构选择。
+`main` 已经包含 W0-W8 的详细计划，W1/W5 已实现。剩余 W2/W3/W4/W6/W7/W8 的源码执行曾存在需要用户确认的边界点。本文汇总已由计划文件提出或支撑的开放决策，并记录 2026-06-09 的用户确认结果，不新增计划外架构选择。
 
 ## 决策 1：W2 Stream Probe Header/Body Commit 语义
+
+最终选择：采用推荐选项。
+
+执行约束：
+
+- W2 按 `Connecting`、`Probing`、`Streaming` 三阶段实现。
+- 只有 `response_body_filter` 选定的客户端可见 body/event 才算 commit。
+- pre-commit 的 upstream error body、malformed frame、timeout 可分类为 probe failure 并触发候选 failover。
 
 推荐选项：
 
@@ -47,6 +57,15 @@
 
 ## 决策 2：W3 `cli_extracted` Provenance Priority
 
+最终选择：采用推荐选项，并增加 billing-critical 要求。
+
+执行约束：
+
+- 新增 `cli_extracted` provenance，优先级为 `upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback > unknown`。
+- CLI usage extraction 必须有硬测试保证，不能只依赖人工样例或宽松 smoke test。
+- 如果 CLI wire 没有给出可提取 usage，必须存在非零 fallback/settlement 机制。
+- 不能出现因 usage 缺失导致用户白用的 free usage 路径。
+
 推荐选项：
 
 - 新增 `ProvenanceTag::CliExtracted`，序列化为 `"cli_extracted"`。
@@ -75,6 +94,15 @@ upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback >
 - 阻塞 `ProvenanceTag` wire enum、`usage:records` provenance 合同、Go settler dedupe priority、`tests/e2e/client/soak/dedupe.py` rank 和相关 spec/ROADMAP closure。
 
 ## 决策 3：W4 Async Task Response Envelope
+
+最终选择：用户倾向完整 IR。执行前先评估完整 IR 难度；如果实现不是很困难，则做完整 IR。
+
+执行约束：
+
+- W4 源码执行前必须先评估 response-side 完整 IR 的实现难度和合同影响。
+- 如果完整 IR 不困难，W4 应升级为完整 IR response envelope，而不是只做最小 envelope。
+- 如果完整 IR 困难或会明显扩大合同风险，必须返回用户决策，不能静默退回 minimal envelope。
+- 原推荐的最小 envelope 只能作为待确认的 fallback，不再是自动执行默认值。
 
 推荐选项：
 
@@ -115,6 +143,14 @@ upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback >
 
 ## 决策 4：W6 `oauth_failed` 退休或改为 Status-Only
 
+最终选择：采用推荐选项。
+
+执行约束：
+
+- 旧 `oauth_failed` reverse-XADD 改为 status-only `oauth_refresh_status` 事件。
+- Go post-K-C 不再把任何 Rust OAuth runtime event 当作刷新命令。
+- 保留 operator / Go 侧可见的失败状态流，但消除 Go/Rust 双写 runtime OAuth token 的风险。
+
 推荐选项：
 
 - 将旧 `oauth_failed` reverse-XADD 改为 status-only 事件，不再作为 Go runtime refresh 命令。
@@ -152,6 +188,15 @@ field oauth_refresh_status status rust_refresh_failed reason upstream_401 source
 
 ## 决策 5：W7 Kiro EventStream-Only Contract
 
+最终选择：EventStream-only Kiro 继续做；Kiro CLI 也需要支持，但作为同一 W7 计划里的额外 `ApiShape` / 后续 lane。
+
+执行约束：
+
+- 本次 W7 继续推进标准 EventStream upstream protocol。
+- Kiro CLI 行为是确认需求，不能被记录为“不在产品范围内”。
+- Kiro CLI 不混入本次 EventStream adapter 实现；应在 W7 计划中新增后续 lane，补充独立 `ApiShape` 和 CLI 行为合同。
+- EventStream 不是 CLI 的替代品，两者应在合同层显式区分。
+
 推荐选项：
 
 - 将 Kiro 注册为标准 EventStream upstream protocol，不作为 CLI variant。
@@ -164,10 +209,10 @@ field oauth_refresh_status status rust_refresh_failed reason upstream_401 source
 - `AnyCodec::Kiro` 在现有 HTTP JSON surfaces 之后检测。
 - `WireFormat::KiroEventStream` 至少声明 `supports_thinking = true`，其他 capability 按当前 Kiro wire 实现逐项确定。
 
-替代选项：
+后续计划更新要求：
 
-- 用户选择不同 Kiro `ProtocolKind`、`ApiShape`、`FORMAT_ID`、codec registration 或 Go contract strings。
-- 如果产品需要 Kiro CLI 行为，将其作为未来单独 `ApiShape`，不混入本次 EventStream 注册。
+- W7 计划需要在 EventStream lane 之外新增 Kiro CLI lane。
+- Kiro CLI lane 至少需要定义独立 `ApiShape`、wire behavior、usage extraction/billing 证据，以及与 EventStream codec 的注册边界。
 
 影响：
 
@@ -184,7 +229,16 @@ field oauth_refresh_status status rust_refresh_failed reason upstream_401 source
 
 ## 决策 6：W8 Aether-Hub Tunnel Protocol
 
-推荐选项：
+最终选择：本仓库只是参考 aether，不需要完全兼容；W8 从“兼容 aether mock”改为自研 tunnel server/client。
+
+执行约束：
+
+- 当前 mock 只作为参考样例，不再作为必须兼容的外部合同。
+- W8 需要更新计划，目标改为本仓库自研 tunnel server 和 tunnel client。
+- 可接受较大改动；协议、server、client、测试替身和 e2e 都应围绕自研 tunnel 合同重订。
+- 不得继续以“真实 aether-hub 与 mock 一致”为 W8 实现前提。
+
+原推荐选项（已被用户调整，不再作为执行默认值）：
 
 - 仅在用户或 aether-hub owner 确认真实远端节点与当前 mock 合同一致时，采用当前 mock contract：
   - `Open` payload 是 raw `host:port`。
@@ -196,14 +250,14 @@ field oauth_refresh_status status rust_refresh_failed reason upstream_401 source
   - 收到 `ControlNodeInfo` 时 gateway 可忽略。
   - `max_streams_per_conn` 是并发 multiplex 上限。
 
-替代选项：
+原替代选项（已被用户调整，不再作为执行默认值）：
 
 - 如果真实 aether-hub 使用 URL 或结构化 JSON `Open` payload、远端 TLS termination、不同 `Error` payload、auth ack/error、必须等待 `ControlNodeInfo`，或额外 flow-control/multiplex 规则，则先同步更新 `gw-tunnel-client` 测试和 `crates/e2e-fake-upstream/src/tunnel_node.rs`，再实现 proxy bridge。
 
 影响：
 
-- 推荐选项允许 W8 按当前本地 mock 直接实现 raw TCP byte relay over `Open` / `Data` / `Close`。
-- 真实协议不同则本仓库 mock 不能作为 e2e 证明，需要先修正测试替身与 client frame/transport 合同。
+- W8 不再按当前本地 mock 直接实现 raw TCP byte relay over `Open` / `Data` / `Close`。
+- 真实 aether-hub 协议不再是本仓库必须兼容的目标，本仓库需要先定义自己的 tunnel server/client 合同。
 - W8 期间默认 artifact 仍保持非 tunnel，`latest-tunnel` 继续作为 operator-selected build；默认 artifact 是否升级仍是 post-e2e release decision。
 
 会解锁的 wave：
@@ -214,15 +268,15 @@ field oauth_refresh_status status rust_refresh_failed reason upstream_401 source
 
 - 阻塞 `gw-tunnel-client` bidirectional stream API、`gw-proxy` in-process HTTP/1 loopback bridge、live tunnel e2e、`docs/spec/09-tunnel.md` closure。未确认前不得改 Rust 源码实现 W8。
 
-## 推荐一次性确认文本
+## 已确认一次性决策文本
 
 ```text
-确认以下 roadmap 决策：
+已确认以下 roadmap 决策：
 
 1. W2 stream probe 采用 Connecting/Probing/Streaming 阶段；只有 response_body_filter 选定的客户端可见 body/event 才算 commit，pre-commit 的 upstream error body、malformed frame、timeout 可 failover。
-2. W3 新增 cli_extracted provenance，优先级为 upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback > unknown。
-3. W4 async task response 采用最小 output_payload envelope：body + ir_wire_format + ir_wire_content_type + best-effort ir_wire_body；暂不新增完整 IR response，也不改变 load/watch 投影。
+2. W3 新增 cli_extracted provenance，优先级为 upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback > unknown；CLI usage extraction 必须有硬测试保证；如果 CLI wire 未给 usage，必须有非零 fallback/settlement，不能出现 free usage。
+3. W4 用户倾向完整 IR。执行前先评估完整 IR 难度；若不困难则做完整 IR；若困难，必须返回用户决策，不能静默退回 minimal envelope。
 4. W6 将旧 oauth_failed reverse-XADD 改为 status-only oauth_refresh_status 事件，Go post-K-C 不再把任何 Rust OAuth runtime event 当作刷新命令。
-5. W7 Kiro 采用 EventStream-only standard protocol：ProtocolKind::Kiro、ApiShape::KiroEventStream、format_id kiro:eventstream、wire string kiro、accessible_endpoints ["kiro"]，不是 CLI variant。
-6. W8 若真实 aether-hub 与当前 mock 一致，则采用 raw host:port Open、gateway-owned TLS、Data 双向 opaque bytes、Close EOF、Error UTF-8 diagnostic、ControlAuth raw token no-ack、ControlNodeInfo ignored、max_streams_per_conn 并发上限；如不一致，先按真实协议更新 mock/client 测试再实现 bridge。
+5. W7 EventStream-only Kiro 继续做；Kiro CLI 也需要支持，但作为同一 W7 计划里的额外 ApiShape/后续 lane，需要计划更新。
+6. W8 本仓库只是参考 aether，不需要完全兼容；W8 改为自研 tunnel server/client，当前 mock 仅参考，W8 计划需要更新。
 ```
