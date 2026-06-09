@@ -2107,12 +2107,12 @@ dependencies = [
  "thiserror 1.0.69",
  "tikv-jemalloc-ctl",
  "time",
- "tokio-rustls",
- "webpki-roots 1.0.7",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
  "uuid",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
