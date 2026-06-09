@@ -4,6 +4,7 @@
 use crate::ctx::ReqCtx;
 use gw_auth::ratelimit::RateLimitGuard;
 use gw_core::permissions::MarkupChainSnapshot;
+use gw_core::usage::ProvenanceTag;
 use gw_core::usage::UsageSnapshot;
 use gw_health::{KeyHealthStore, OutcomeKind};
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
@@ -340,18 +341,35 @@ pub async fn run(
         )
         .increment(1);
 
-        for (dim, present) in [
-            ("input", ctx.usage.input_tokens > 0),
-            ("output", ctx.usage.output_tokens > 0),
-            ("cache_read", ctx.usage.cached_tokens.is_some()),
-            ("cache_creation", ctx.usage.cache_creation_tokens.is_some()),
-            ("thinking", ctx.usage.thinking_tokens.is_some()),
+        for (dim, provenance, present) in [
+            ("input", rec.usage_provenance.input, rec.usage.input_tokens > 0),
+            ("output", rec.usage_provenance.output, rec.usage.output_tokens > 0),
+            (
+                "cache_read",
+                rec.usage_provenance.cache_read,
+                rec.usage.cache_read_input_tokens.is_some(),
+            ),
+            (
+                "cache_creation",
+                rec.usage_provenance.cache_creation,
+                rec.usage.cache_creation_input_tokens.is_some(),
+            ),
+            (
+                "thinking",
+                rec.usage_provenance.thinking,
+                rec.usage.thinking_tokens.is_some(),
+            ),
             (
                 "multimodal_input",
-                ctx.usage.multimodal_input_tokens.is_some(),
+                rec.usage_provenance.multimodal_input,
+                rec.usage.multimodal_input_tokens.is_some(),
             ),
         ] {
-            let tag = if present { "upstream_final" } else { "unknown" };
+            let tag = if present {
+                provenance_label(provenance)
+            } else {
+                "unknown"
+            };
             metrics::counter!(
                 "gw_billing_provenance_total",
                 "dimension" => dim,
@@ -462,5 +480,16 @@ pub async fn run(
             affinity: Some(affinity),
         };
         handler.fanout(&hctx, oc);
+    }
+}
+
+fn provenance_label(tag: ProvenanceTag) -> &'static str {
+    match tag {
+        ProvenanceTag::UpstreamFinal => "upstream_final",
+        ProvenanceTag::CliExtracted => "cli_extracted",
+        ProvenanceTag::UpstreamPartial => "upstream_partial",
+        ProvenanceTag::Estimated => "estimated",
+        ProvenanceTag::CrashFallback => "crash_fallback",
+        ProvenanceTag::Unknown => "unknown",
     }
 }

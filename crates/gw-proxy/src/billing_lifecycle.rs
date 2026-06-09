@@ -32,6 +32,7 @@ pub fn is_terminal(v: VendorExposure) -> bool {
 }
 
 use crate::ctx::ReqCtx;
+use gw_core::usage::ProvenanceTag;
 use gw_ledger::FreezeGuard as _;
 use gw_ledger::{ClearKey, LedgerItem};
 
@@ -91,7 +92,6 @@ pub fn transition_to(ctx: &mut ReqCtx, to: VendorExposure) {
 /// UsageRecord is emitted for a request that never left the gateway.
 pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecord> {
     use gw_core::permissions::MarkupChainSnapshot;
-    use gw_core::usage::UsageSnapshot;
     use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -123,6 +123,8 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
         (Some(s), Some(t)) => Some(t.saturating_duration_since(s).as_millis() as u32),
         _ => None,
     };
+
+    let (usage, usage_provenance) = billing_protected_usage(ctx)?;
 
     Some(UsageRecord {
         ts_ms: now_ms,
@@ -160,14 +162,7 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
         status: UsageStatus::Error,
         error_code: None,
         http_status: ctx.upstream_status.unwrap_or(0),
-        usage: UsageSnapshot {
-            input_tokens: ctx.usage.input_tokens,
-            output_tokens: ctx.usage.output_tokens,
-            cache_read_input_tokens: ctx.usage.cached_tokens,
-            cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
-            thinking_tokens: ctx.usage.thinking_tokens,
-            multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
-        },
+        usage,
         attempt_index: ctx.attempt_index,
         vendor_exposure_state: match ctx.vendor_exposure {
             VendorExposure::Settled => VendorExposureState::Settled,
@@ -176,7 +171,7 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
             // (on_retry_sync forces it first) or as a defensive fallback.
             _ => VendorExposureState::Terminated,
         },
-        usage_provenance: ctx.usage_provenance,
+        usage_provenance,
         latency_ms,
         ttft_ms,
         is_stream: ctx.is_stream,
@@ -196,6 +191,45 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
         credits_consumed: ctx.credits_consumed,
         coef_table_version: ctx.coef_table_version_at_settle,
     })
+}
+
+fn billing_protected_usage(
+    ctx: &ReqCtx,
+) -> Option<(gw_core::usage::UsageSnapshot, gw_ledger::usage::UsageProvenance)> {
+    let mut usage = gw_core::usage::UsageSnapshot {
+        input_tokens: ctx.usage.input_tokens,
+        output_tokens: ctx.usage.output_tokens,
+        cache_read_input_tokens: ctx.usage.cached_tokens,
+        cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
+        thinking_tokens: ctx.usage.thinking_tokens,
+        multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
+    };
+    let mut provenance = ctx.usage_provenance;
+
+    if !ctx.client_shape.is_some_and(|shape| shape.is_cli()) {
+        return Some((usage, provenance));
+    }
+
+    let has_billable_usage = usage.input_tokens > 0
+        || usage.output_tokens > 0
+        || usage.cache_read_input_tokens.is_some()
+        || usage.cache_creation_input_tokens.is_some()
+        || usage.thinking_tokens.is_some()
+        || usage.multimodal_input_tokens.is_some();
+
+    if has_billable_usage {
+        return Some((usage, provenance));
+    }
+
+    let estimate = ctx.prompt_estimate_tokens?;
+    usage.input_tokens = estimate.max(1);
+    if provenance.input != ProvenanceTag::UpstreamFinal
+        && provenance.input != ProvenanceTag::CliExtracted
+        && provenance.input != ProvenanceTag::UpstreamPartial
+    {
+        provenance.input = ProvenanceTag::Estimated;
+    }
+    Some((usage, provenance))
 }
 
 /// Synchronous half of retry settlement. Called from `fail_to_connect`
