@@ -22,10 +22,10 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 
 ## 02 routing
 
-### R-D proxy wiring for api-key affinity — `capability-gap`
-- **Intent:** make the pure `gw-routing::affinity::AffinityManager` influence live upstream selection once proxy/auth exposes an `ApiKeyId` affinity dimension and selected-key recording point.
-- **Design points:** `crates/gw-routing/src/affinity.rs` now provides `AffinityManager` (`record_hit`/`get`/`invalidate_vendor_key`/`sweep_expired`), `AffinityRecord`, and `AffinityDimension` with API-key support. Remaining work is cross-module wiring only: decide where authenticated API-key identity enters `gw-proxy` routing, when a selected vendor key should call `record_hit`, and how vendor-key invalidation hooks should call `invalidate_vendor_key`. Do not change `strategy/cache_affinity.rs`; it remains message-hash request affinity.
-- **Source:** deleted `routing-r-d-affinity-manager`.
+### R-D proxy wiring for api-key affinity — closed in spec
+- **Landed:** `gw-routing::affinity::AffinityManager` is now held by gateway bootstrap and wired into live proxy upstream selection. `gw-proxy` uses authenticated `ReqCtx.api_key_id` as `AffinityDimension::ApiKey`, consults affinity after ranked candidates and before normal first-candidate selection, records the selected vendor key after outbound request rewrite succeeds, and invalidates bindings via vendor-key invalidation hooks plus key-health/OAuth error listeners.
+- **Boundary:** `strategy/cache_affinity.rs` remains unchanged and continues to implement message-hash request affinity, separate from API-key request-external affinity.
+- **Spec:** `docs/spec/02-routing.md`.
 
 ### R-F stream probe (first-chunk failover window) — `capability-gap`
 - **Intent:** allow failover when a stream fails *after* the upstream's first byte but *before* any SSE event reaches the client.
