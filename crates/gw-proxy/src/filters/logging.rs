@@ -240,96 +240,16 @@ pub async fn run(
         model.clone(),
         picked,
     ) {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let latency_ms = match (ctx.timing.start, ctx.timing.end) {
-            (Some(s), Some(e)) => e.saturating_duration_since(s).as_millis() as u32,
-            _ => 0,
-        };
-        let ttft_ms = match (ctx.timing.start, ctx.timing.ttft) {
-            (Some(s), Some(t)) => Some(t.saturating_duration_since(s).as_millis() as u32),
-            _ => None,
-        };
-        let is_subaccount = effective != auth_user_id;
-        let rec = UsageRecord {
-            ts_ms: now_ms,
-            request_id: ctx.request_id.0.clone(),
-            trace_id: ctx.trace_id.0.clone(),
-            user_id: effective.clone(),
-            child_id: if is_subaccount {
-                Some(auth_user_id.clone())
-            } else {
-                None
-            },
-            api_key_id: ctx.api_key_id.clone(),
-            client_protocol: ctx
-                .client_shape
-                .map(|s| s.format_id().to_owned())
-                .or_else(|| {
-                    ctx.client_codec
-                        .as_ref()
-                        .map(|c| c.kind().as_str().to_owned())
-                })
-                .unwrap_or_default(),
-            upstream_protocol: ctx
-                .upstream_shape
-                .map(|s| s.format_id().to_owned())
-                .or_else(|| {
-                    ctx.upstream_codec
-                        .as_ref()
-                        .map(|c| c.kind().as_str().to_owned())
-                })
-                .unwrap_or_default(),
-            model: model.clone(),
-            vendor_id: picked.vendor_id.clone(),
-            vendor_key_id: picked.key_id.clone(),
-            status: if ok {
-                UsageStatus::Ok
-            } else {
-                UsageStatus::Error
-            },
-            error_code: err.map(|e| format!("{:?}", e.etype)),
-            http_status: ctx.upstream_status.unwrap_or(0),
-            usage: UsageSnapshot {
-                input_tokens: ctx.usage.input_tokens,
-                output_tokens: ctx.usage.output_tokens,
-                cache_read_input_tokens: ctx.usage.cached_tokens,
-                cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
-                thinking_tokens: ctx.usage.thinking_tokens,
-                multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
-            },
-            attempt_index: ctx.attempt_index,
-            vendor_exposure_state: match ctx.vendor_exposure {
-                crate::billing_lifecycle::VendorExposure::Settled => VendorExposureState::Settled,
-                crate::billing_lifecycle::VendorExposure::Terminated => {
-                    VendorExposureState::Terminated
-                }
-                // Idle / Sent / Streaming should not reach logging without
-                // transition_to(Terminated) above, but guard defensively.
-                _ => VendorExposureState::Terminated,
-            },
-            usage_provenance: ctx.usage_provenance,
-            latency_ms,
-            ttft_ms,
-            is_stream: ctx.is_stream,
-            // Use the trait method (the field is pub(crate) on RequestFreeze).
-            freeze_amount_micro: ctx
-                .freeze_guard
-                .as_ref()
-                .map(|g| g.freeze_amount())
-                .unwrap_or(0),
-            estimate_pricing_version: ctx.estimate_pricing_version,
-            markup_chain_snapshot: ctx
-                .merged_perm
-                .as_ref()
-                .map(|m| m.markup_chain)
-                .unwrap_or_else(MarkupChainSnapshot::identity),
-            operation_id: ctx.operation_id.clone(),
-            pod_id: gw_ledger::instance_id::cached().unwrap_or_default(),
-            credits_consumed: ctx.credits_consumed,
-            coef_table_version: ctx.coef_table_version_at_settle,
+        let Some(rec) = build_final_usage_record(ctx, ok, err, &auth_user_id, &effective, &model, picked) else {
+            tracing::error!(
+                target: "gw_proxy::filters::logging",
+                request_id = %ctx.request_id,
+                trace_id = %ctx.trace_id,
+                client_shape = ?ctx.client_shape,
+                vendor_exposure = ?ctx.vendor_exposure,
+                "skipping final usage record emission due to CLI billing protection"
+            );
+            return;
         };
 
         // -----------------------------------------------------------------
@@ -491,5 +411,209 @@ fn provenance_label(tag: ProvenanceTag) -> &'static str {
         ProvenanceTag::Estimated => "estimated",
         ProvenanceTag::CrashFallback => "crash_fallback",
         ProvenanceTag::Unknown => "unknown",
+    }
+}
+
+fn build_final_usage_record(
+    ctx: &ReqCtx,
+    ok: bool,
+    err: Option<&pingora::Error>,
+    auth_user_id: &gw_core::ids::UserId,
+    effective: &gw_core::ids::UserId,
+    model: &gw_core::ids::ModelName,
+    picked: &gw_core::entity::VendorKey,
+) -> Option<UsageRecord> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let latency_ms = match (ctx.timing.start, ctx.timing.end) {
+        (Some(s), Some(e)) => e.saturating_duration_since(s).as_millis() as u32,
+        _ => 0,
+    };
+    let ttft_ms = match (ctx.timing.start, ctx.timing.ttft) {
+        (Some(s), Some(t)) => Some(t.saturating_duration_since(s).as_millis() as u32),
+        _ => None,
+    };
+    let is_subaccount = effective != auth_user_id;
+    let (usage, usage_provenance) = if ok {
+        crate::billing_lifecycle::billing_protected_usage(ctx)?
+    } else {
+        (
+            UsageSnapshot {
+                input_tokens: ctx.usage.input_tokens,
+                output_tokens: ctx.usage.output_tokens,
+                cache_read_input_tokens: ctx.usage.cached_tokens,
+                cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
+                thinking_tokens: ctx.usage.thinking_tokens,
+                multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
+            },
+            ctx.usage_provenance,
+        )
+    };
+
+    Some(UsageRecord {
+        ts_ms: now_ms,
+        request_id: ctx.request_id.0.clone(),
+        trace_id: ctx.trace_id.0.clone(),
+        user_id: effective.clone(),
+        child_id: if is_subaccount {
+            Some(auth_user_id.clone())
+        } else {
+            None
+        },
+        api_key_id: ctx.api_key_id.clone(),
+        client_protocol: ctx
+            .client_shape
+            .map(|s| s.format_id().to_owned())
+            .or_else(|| {
+                ctx.client_codec
+                    .as_ref()
+                    .map(|c| c.kind().as_str().to_owned())
+            })
+            .unwrap_or_default(),
+        upstream_protocol: ctx
+            .upstream_shape
+            .map(|s| s.format_id().to_owned())
+            .or_else(|| {
+                ctx.upstream_codec
+                    .as_ref()
+                    .map(|c| c.kind().as_str().to_owned())
+            })
+            .unwrap_or_default(),
+        model: model.clone(),
+        vendor_id: picked.vendor_id.clone(),
+        vendor_key_id: picked.key_id.clone(),
+        status: if ok {
+            UsageStatus::Ok
+        } else {
+            UsageStatus::Error
+        },
+        error_code: err.map(|e| format!("{:?}", e.etype)),
+        http_status: ctx.upstream_status.unwrap_or(0),
+        usage,
+        attempt_index: ctx.attempt_index,
+        vendor_exposure_state: match ctx.vendor_exposure {
+            crate::billing_lifecycle::VendorExposure::Settled => VendorExposureState::Settled,
+            crate::billing_lifecycle::VendorExposure::Terminated => {
+                VendorExposureState::Terminated
+            }
+            _ => VendorExposureState::Terminated,
+        },
+        usage_provenance,
+        latency_ms,
+        ttft_ms,
+        is_stream: ctx.is_stream,
+        freeze_amount_micro: ctx
+            .freeze_guard
+            .as_ref()
+            .map(|g| g.freeze_amount())
+            .unwrap_or(0),
+        estimate_pricing_version: ctx.estimate_pricing_version,
+        markup_chain_snapshot: ctx
+            .merged_perm
+            .as_ref()
+            .map(|m| m.markup_chain)
+            .unwrap_or_else(MarkupChainSnapshot::identity),
+        operation_id: ctx.operation_id.clone(),
+        pod_id: gw_ledger::instance_id::cached().unwrap_or_default(),
+        credits_consumed: ctx.credits_consumed,
+        coef_table_version: ctx.coef_table_version_at_settle,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::billing_lifecycle::{transition_to, VendorExposure};
+    use crate::ctx::ReqCtx;
+    use gw_core::entity::VendorKey;
+    use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
+    use gw_core::permissions::{MarkupChainSnapshot, MergedPermissions};
+    use gw_core::protocol::ApiShape;
+    use secrecy::SecretString;
+
+    fn seeded_vendor_key() -> VendorKey {
+        VendorKey {
+            key_id: KeyId::from("vk-1"),
+            vendor_id: VendorId::from("vendor-1"),
+            api_key: SecretString::from("secret".to_string()),
+            status: gw_core::entity::KeyStatus::Active,
+            accessible_models: vec![ModelName::from("gpt-4o")],
+            model_mapping: std::collections::HashMap::new(),
+            accessible_endpoints: vec![],
+            protocol_conversion: false,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None,
+            ip_allowlist: None,
+            expires_at: None,
+            tags: vec![],
+            forced_capabilities: vec![],
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+            identity_snapshot: None,
+            quota_state: Default::default(),
+        }
+    }
+
+    fn seeded_cli_ctx() -> (ReqCtx, UserId, UserId, ModelName, VendorKey) {
+        let mut ctx = ReqCtx::default();
+        ctx.client_shape = Some(ApiShape::OpenAiCli);
+        ctx.model = Some(ModelName::from("gpt-4o"));
+        ctx.upstream_status = Some(200);
+        ctx.merged_perm = Some(MergedPermissions {
+            user_id: UserId::from("user-1"),
+            effective_user_id: UserId::from("user-1"),
+            client_ip: "127.0.0.1".parse().unwrap(),
+            allowed_models: Default::default(),
+            allowed_channels: Default::default(),
+            allowed_groups: Default::default(),
+            forced_model_group: None,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_concurrent_streams: 0,
+            markup_chain: MarkupChainSnapshot::identity(),
+            model_whitelist_regex: None,
+        });
+        transition_to(&mut ctx, VendorExposure::Sent);
+        transition_to(&mut ctx, VendorExposure::Streaming);
+        transition_to(&mut ctx, VendorExposure::Settled);
+        (
+            ctx,
+            UserId::from("user-1"),
+            UserId::from("user-1"),
+            ModelName::from("gpt-4o"),
+            seeded_vendor_key(),
+        )
+    }
+
+    #[test]
+    fn cli_final_logging_uses_nonzero_estimate_instead_of_free_usage() {
+        let (mut ctx, auth_user_id, effective, model, picked) = seeded_cli_ctx();
+        ctx.prompt_estimate_tokens = Some(41);
+
+        let rec =
+            build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked)
+                .expect("final usage record");
+
+        assert!(matches!(rec.status, UsageStatus::Ok));
+        assert_eq!(rec.usage.input_tokens, 41);
+        assert_eq!(rec.usage_provenance.input, ProvenanceTag::Estimated);
+        assert!(rec.usage.input_tokens > 0 || rec.usage.output_tokens > 0);
+    }
+
+    #[test]
+    fn cli_final_logging_without_estimate_skips_successful_free_record() {
+        let (mut ctx, auth_user_id, effective, model, picked) = seeded_cli_ctx();
+        ctx.prompt_estimate_tokens = None;
+
+        let rec = build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked);
+
+        assert!(rec.is_none(), "final logging path must fail closed");
     }
 }

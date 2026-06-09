@@ -193,7 +193,7 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
     })
 }
 
-fn billing_protected_usage(
+pub(crate) fn billing_protected_usage(
     ctx: &ReqCtx,
 ) -> Option<(gw_core::usage::UsageSnapshot, gw_ledger::usage::UsageProvenance)> {
     let mut usage = gw_core::usage::UsageSnapshot {
