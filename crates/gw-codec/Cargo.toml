@@ -9,6 +9,7 @@ license.workspace = true
 gw-core = { path = "../gw-core" }
 gw-codec-macros = { path = "../gw-codec-macros" }
 bytes.workspace = true
+crc32fast.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true

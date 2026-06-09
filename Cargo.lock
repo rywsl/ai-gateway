@@ -1878,6 +1878,7 @@ dependencies = [
  "async-trait",
  "brotli 7.0.0",
  "bytes",
+ "crc32fast",
  "criterion",
  "flate2",
  "gw-codec-macros",

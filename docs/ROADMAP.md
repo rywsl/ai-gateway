@@ -9,7 +9,8 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 
 ### Kiro / S5 EventStream codec — `capability-gap`
 - **Intent:** decode Kiro upstreams (AWS EventStream binary frames + embedded `<thinking>` tags) — the heaviest of the six vendor codecs.
-- **Design points:** new `crates/gw-codec/src/kiro/` module: EventStream framer (length-prefixed + `crc32fast` CRCs — add the dep), wire request/response types, thinking-tag parser, request/response roundtrip. Register a Kiro variant in `gw-codec/src/any.rs::AnyCodec`. No code exists today (only stray comments in `gw-adapter`).
+- **Landed:** internal `crates/gw-codec/src/kiro/` EventStream frame codec (length-prefixed + `crc32fast` CRCs), embedded `<thinking>` parser/renderer, and focused roundtrip/error tests.
+- **Remaining design points:** Kiro is not registered in `gw-codec/src/any.rs::AnyCodec` and has no `gw-core::ProtocolKind` / `ApiShape` cross-process shape yet. Do not treat it as full Kiro vendor integration until that protocol-contract decision is made.
 - **Source:** deleted `codec-s5-kiro-eventstream` + `adapter-a-t6-kiro-vendor` (git history).
 
 ### `UsageSource::CliExtracted` provenance — `doc-divergence`

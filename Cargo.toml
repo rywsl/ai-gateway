@@ -80,6 +80,7 @@ jsonwebtoken = "9"
 governor = "0.7"
 ipnet = "2.10"
 hex = "0.4"
+crc32fast = "1.5"
 brotli = "7"
 flate2 = "1"
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode", "std"] }

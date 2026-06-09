@@ -45,6 +45,6 @@ The codec layer's CLI usage extractors and IR usage accumulation feed the usage 
 
 ## Not built → ROADMAP
 
-- **kiro / S5 EventStream codec** — no `EventStream`-shaped `AnyCodec` variant or codec exists; `kiro` appears only as an adapter-layer comment (`crates/gw-adapter/`), not a codec.
+- **kiro / S5 EventStream registration** — `gw-codec::kiro` now contains the internal EventStream frame codec and embedded `<thinking>` parser, but Kiro is not an `AnyCodec` variant and has no `ProtocolKind` / `ApiShape` cross-process shape. Full Kiro vendor integration remains pending that protocol-contract decision.
 - **`UsageSource::CliExtracted`** — no `UsageSource` enum exists in `gw-core`; there is no typed marker distinguishing CLI-extracted usage from IR-accumulated usage.
 - **CLI as `AnyCodec` variants** — the four CLI shapes live as a parallel `crates/gw-codec/src/cli/` module (body passthrough), not as variants of the `AnyCodec` enum.

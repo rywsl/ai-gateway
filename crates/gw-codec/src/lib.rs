@@ -17,6 +17,7 @@ pub mod compression;
 pub mod cross_render;
 pub mod error_passthrough;
 pub mod gemini;
+pub mod kiro;
 pub mod openai;
 pub mod passthrough;
 pub mod stream_accumulator;
