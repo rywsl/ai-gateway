@@ -16,7 +16,10 @@ Completed in this W7 run:
 - `7cedbf8` `feat(adapter): add kiro outbound transform` — added `KiroAdapter` SigV4 header injection, final body hash signing, secret redaction, and builtin vendor-id registration for `kiro`.
 - `d8b0591` `feat(adapter): add vertex service-account transform` — added `VertexJwtClaims`, runtime-token bearer injection via W6 `OAuthRuntime`, quota project header injection, and builtin `vertex` / `google_vertex` registration.
 - `4ace5ca` `feat(adapter): add codex request transform` — added `CodexAdapter` semantic OpenAI request metadata injection via `WireAnyRequest::OpenAi`, preserving model/messages/stream/tools/tool_choice and leaving Codex identity headers in `gw-core::impersonate::openai_codex`.
-- This docs commit (`docs(vendor): close heavy adapter transform roadmap entry`) — updates specs, go-contracts, ROADMAP, and this execution status.
+- `f5e9ddc` `docs(vendor): close heavy adapter transform roadmap entry` — updates specs, go-contracts, ROADMAP, and this execution status.
+- `528ae95` `fix(adapter): lock kiro signing dependencies` — updates `Cargo.lock` for the new Kiro SigV4 signing dependencies required by `--locked` verification.
+- `984d21f` `fix(adapter): preserve direct header snapshot` — keeps direct/noop snapshot coverage byte-identical while retaining the adapter hook regression.
+- `3aa8eb3` `docs(go-contracts): add spec check anchors` — adds the required `check-spec` structure and source anchors to go-contract part docs.
 
 Residual concern: Kiro CLI marker detection, usage extraction, and passthrough semantics were **not implemented** because no real Kiro CLI traffic sample exists. `ApiShape::KiroCli` remains registered and documented as a shape boundary; docs explicitly retain the detector/usage residual instead of treating it as complete.
 
