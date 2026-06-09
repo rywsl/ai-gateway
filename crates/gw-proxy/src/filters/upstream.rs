@@ -2325,7 +2325,10 @@ mod regression_baseline_tests {
 
     #[tokio::test]
     async fn adapter_patch_request_updates_final_body_len_hash_and_archive() {
-        let (mut ctx, mut req, key, vendor, body) = make_canonical_inputs();
+        let (mut ctx, mut req, key, vendor, _) = make_canonical_inputs();
+        let body = Bytes::from_static(
+            br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#,
+        );
         ctx.picked_vendor_key = Some(key.clone());
         ctx.picked_vendor = Some(vendor.clone());
         let registry = Arc::new(gw_adapter::AdapterRegistry::default());
