@@ -22,7 +22,6 @@ use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
 use gw_codec::passthrough::same_protocol_passthrough;
 use gw_codec::AnyCodec;
-use gw_codec::ProtocolCodec;
 use gw_core::entity::{ForcedParams, ModelGroup, Pricing, TimeoutSpec, Vendor, VendorKey};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ir::{ForcedMutations, Mutations};
@@ -2121,7 +2120,7 @@ mod regression_baseline_tests {
         req.insert_header("x-api-key-id", "should-be-stripped")
             .unwrap();
 
-        let body = Bytes::from_static(br#"{"model":"gpt-4","messages":[]}"#);
+        let body = Bytes::from_static(br#"{"model":"gpt-4","messages":[],"foo":true}"#);
 
         (ctx, req, Arc::new(key), versioned_vendor, body)
     }
