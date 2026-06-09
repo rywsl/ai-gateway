@@ -5,6 +5,7 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 ## Legend
 - **Priority**: `runtime-risk` (bug, fix first) > `capability-gap` (unbuilt feature) > `doc-divergence`.
 - **Decision-gated residual**: deliberate as-built boundary in `docs/spec/`; implement only after an explicit architecture or release decision, not as a bug fix.
+- **Decision confirmed**: the architecture decision has been made and the remaining work is implementation planning/execution. See `docs/design/2026-06-09-roadmap-authority-and-scope.md`.
 
 ## 01 protocol-codec
 
@@ -49,19 +50,19 @@ No open ROADMAP items.
 
 ## 07 vendor-integration
 
-### Full A-T0..A-T6 outbound adapter registry — `decision-gated residual`
-- **Intent:** optionally move per-vendor outbound rewrite (OAuth bearer, fingerprint headers, URL rewrite, body transforms) behind one trait, reused by proxy + task runtime.
-- **Design points:** `docs/spec/07-vendor-integration.md` blesses inline `gw-proxy::inject_vendor_headers` + `gw-core::impersonate` as outbound v1, and `gw-adapter` response-side `UpstreamErrorAnalyzer` is already wired into `gw-proxy`. Outbound `AdapterRegistry::for_vendor` remains experimental: do not implement the six outbound adapters or wire request dispatch unless the user chooses to move that boundary out of the proxy filter/profile modules. `AdapterCtx` also lacks the `oauth_cache` field its hooks assume (`ctx.rs` comment), so adopting this path is a broader adapter design change.
+### Full A-T0..A-T6 outbound adapter registry — `capability-gap` / decision confirmed
+- **Intent:** move per-vendor outbound rewrite (OAuth bearer, fingerprint headers, URL rewrite, body transforms) behind the standalone `gw-adapter` seam while preserving byte-identical direct-vendor behavior during incremental rollout.
+- **Design points:** F1 is confirmed by `docs/plans/2026-06-08-roadmap-implementation-program.md` and `docs/design/2026-06-09-roadmap-authority-and-scope.md`: keep `crates/gw-adapter`, make `AdapterRegistry::for_vendor` the proxy outbound seam, keep the task worker out of adapter dispatch, leave direct vendors as Noop/short-circuit, keep impersonate vendors backed by `gw-core::impersonate`, and put new heavy vendor transforms behind adapter hooks. `AdapterCtx` must gain the OAuth cache field required by the K-C work.
 - **Source:** deleted `adapter-a-t0..t6`, `adapter-layer-design`.
 
-### K-C in-Rust OAuth refresh/write-back — `decision-gated residual`
-- **Intent:** optionally refresh vendor OAuth tokens in Rust instead of delegating to Go.
-- **Design points:** `docs/spec/07-vendor-integration.md` documents Go-delegated refresh as the current ownership boundary. Rust injects a pre-decrypted, possibly-expired `access_token`, emits expiry metrics, and Go refreshes async via the `events:entity` reverse-XADD (`error/listeners/oauth.rs`). Build `OAuthRefresher`/`OauthCache`/`get_access_token` plus encrypted write-back only if the user decides Rust should become the OAuth writer.
+### K-C in-Rust OAuth refresh/write-back — `capability-gap` / decision confirmed
+- **Intent:** move runtime OAuth token refresh/write-back to Rust while leaving OAuth configuration and first-time authorization in Go.
+- **Design points:** F2 is confirmed by `docs/plans/2026-06-08-roadmap-implementation-program.md` and `docs/design/2026-06-09-roadmap-authority-and-scope.md`: Go remains the config writer, Rust becomes the sole runtime refresh writer, and there must be no double-writer path. Build `OAuthRefresher`/`OauthCache`/`get_access_token`, encrypted token write-back including rotated refresh tokens, version bump + entity broadcast, and cross-Pod single-flight or version-CAS. Retire or repurpose the previous Go runtime refresh reverse-XADD path with a Go-contract change.
 - **Source:** deleted `key-health-k-c-oauth-token`, `adapter-a-t1-claude-code`.
 
-### Heavy outbound adapter transforms — `decision-gated residual`
-- **Intent:** optionally add Kiro AWS SigV4 + EventStream outbound integration, Vertex AI RS256 service-account JWT signing + token exchange, and Codex request-body transforms.
-- **Design points:** these transforms depend on choosing an outbound transform boundary. Under current outbound v1, header/auth dispatch remains inline+impersonate and no adapter `patch_request` path is active. Treat these as follow-on work only after the outbound adapter registry, or an equivalent transform boundary, is explicitly selected.
+### Heavy outbound adapter transforms — `capability-gap` / decision confirmed
+- **Intent:** add Kiro AWS SigV4 + EventStream outbound integration, Vertex AI RS256 service-account JWT signing + token exchange, and Codex request-body transforms.
+- **Design points:** these transforms use the confirmed outbound adapter boundary from F1. Kiro also requires a protocol-contract plan because the internal `gw-codec::kiro` frame codec is not yet registered as an `AnyCodec` variant and has no `gw-core::ProtocolKind` / `ApiShape` shape.
 - **Source:** deleted `adapter-a-t3-vertex-ai`, `adapter-a-t5-codex`, `adapter-a-t6-kiro-vendor`.
 
 ## 08 async-tasks

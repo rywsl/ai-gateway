@@ -46,7 +46,7 @@ Workspace kill-switch: `[egress].disabled` (`EgressCfg.disabled`, `crates/gw-gat
 
 `crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`patch_response`/`transport_profile`), an `AdapterRegistry`, an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait. The outbound `UpstreamAdapter` path is not used by production request rewriting; outbound v1 is the inline `gw-proxy` filter plus `gw-core::impersonate` profile code described above. The response-side error analyzer path is wired: `gw-proxy::LlmGateway` holds an `AdapterRegistry`, calls `error_analyzer_for(vendor_id)` at response EOS with headers and an 8 KiB body head, and merges the resulting `ErrorOutcome` into the classifier outcome. Built-in analyzer fallback exists for codex/openai, anthropic/claude, and gemini/google vendor ids.
 
-Outbound adapter dispatch remains experimental and decision-gated: wiring `AdapterRegistry::for_vendor` into the request path would move auth/header/body ownership out of `inject_vendor_headers` and the impersonation modules, and would need an explicit architecture decision rather than being treated as an unclosed bug in the current runtime.
+Outbound adapter dispatch is not part of the current as-built runtime. The architecture decision to keep and incrementally wire the outbound adapter seam was confirmed after this as-built spec was written; see `docs/design/2026-06-09-roadmap-authority-and-scope.md`. Until that work lands, the production behavior remains inline header injection plus the existing impersonate path described here.
 
 ## Deliberate behaviours
 
@@ -56,8 +56,8 @@ Outbound adapter dispatch remains experimental and decision-gated: wiring `Adapt
 - **Auth header-name fallback is lenient, not fatal.** A malformed `auth_template` (colon present but the name isn't a header token) falls back to `authorization` plus a metric rather than failing the request — pre-production operator-misconfig tolerance. (`upstream.rs:1070`–`1073`)
 - **Identity persistence is lazy and fingerprint-stable.** A per-key `IdentitySnapshot` is derived once on first impersonated dispatch and persisted out-of-band; profile drift forces a re-derive. (`ensure.rs:19`–`36`)
 - **Outbound v1 is inline+impersonate.** The production auth/transport path deliberately remains the inline filter code plus `gw-core::impersonate` / `gw-egress-impersonate`; this is the documented as-built boundary, not a missing production hook.
-- **`gw-adapter::UpstreamAdapter` remains decision-gated.** Only `UpstreamErrorAnalyzer` is wired into `gw-proxy`. A full outbound adapter registry would be a boundary move that needs a user architecture decision.
-- **Rust OAuth is not a writer.** Rust decrypts and injects the access token, emits expiry/401 signals, and delegates refresh/write-back to Go. Moving refresh and encrypted write-back into Rust is a cross-process ownership decision.
+- **`gw-adapter::UpstreamAdapter` is not yet wired into outbound production traffic.** Only `UpstreamErrorAnalyzer` is wired into `gw-proxy` today. F1 confirms the target boundary is to keep `gw-adapter` and wire it incrementally; this spec continues to describe the current as-built runtime until that implementation lands.
+- **Rust OAuth is not yet the runtime writer.** Rust decrypts and injects the access token, emits expiry/401 signals, and currently delegates refresh/write-back to Go. F2 confirms the target ownership change: Go remains the config writer and Rust becomes the sole runtime refresh writer. That implementation is tracked in ROADMAP.
 
 ## Cross-process touchpoints
 
@@ -79,8 +79,8 @@ These are governed by `docs/go-contracts/` (KEK rotation, encrypted column shape
 
 ## Not built → ROADMAP
 
-The following are outside outbound v1 and require an explicit decision before implementation. Tag: **decision-gated residual**.
+The following are outside outbound v1. F1/F2 have been confirmed by `docs/design/2026-06-09-roadmap-authority-and-scope.md`, so these are implementation gaps rather than unresolved decisions.
 
-- **Full outbound adapter registry (A-T0..A-T6).** `gw-adapter`'s `AdapterRegistry::for_vendor` is not called by a binary and only `NoopAdapter` exists, while response analyzers are wired. This is not a current-runtime bug because outbound v1 is inline+impersonate; build the outbound registry only if the architecture boundary moves from the proxy filter/profile modules into adapters. (decision-gated residual)
-- **In-Rust OAuth refresh/write-back (K-C).** Rust injects pre-decrypted tokens and delegates refresh to Go via `events:entity`. Do not add `OAuthRefresher`/cache/write-back in Rust unless ownership moves away from the Go delegated refresh model. (decision-gated residual)
-- **Heavy vendor-specific outbound transforms.** Kiro adapter/AWS SigV4, Vertex AI SA-JWT token exchange, and Codex request-body transforms all depend on choosing the outbound adapter registry or another explicit transform boundary. They are not required to complete the documented inline+impersonate outbound v1. (decision-gated residual)
+- **Full outbound adapter registry (A-T0..A-T6).** `gw-adapter`'s `AdapterRegistry::for_vendor` is not called by a binary and only `NoopAdapter` exists, while response analyzers are wired. F1 confirms this crate stays and becomes the incremental proxy outbound seam. (capability-gap)
+- **In-Rust OAuth refresh/write-back (K-C).** Rust injects pre-decrypted tokens and delegates refresh to Go via `events:entity` today. F2 confirms the target state: Go config writer, Rust runtime refresh writer, no double-writer. (capability-gap)
+- **Heavy vendor-specific outbound transforms.** Kiro adapter/AWS SigV4, Vertex AI SA-JWT token exchange, and Codex request-body transforms land behind the confirmed outbound adapter boundary. (capability-gap)
