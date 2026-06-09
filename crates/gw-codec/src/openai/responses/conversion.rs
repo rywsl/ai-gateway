@@ -21,15 +21,21 @@ pub fn responses_to_chat(req: &OpenAiResponsesRequest) -> Result<Value, ConvertE
     if let Some(instr) = &req.instructions {
         messages.push(json!({"role": "system", "content": instr}));
     }
-    for p in &req.input {
-        let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match typ {
-            "input_text" | "text" => {
-                let text = p.get("text").cloned().unwrap_or(Value::Null);
-                messages.push(json!({"role": "user", "content": text}));
+    match &req.input {
+        Value::String(s) => messages.push(json!({"role": "user", "content": s})),
+        Value::Array(items) => {
+            for p in items {
+                let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match typ {
+                    "input_text" | "text" => {
+                        let text = p.get("text").cloned().unwrap_or(Value::Null);
+                        messages.push(json!({"role": "user", "content": text}));
+                    }
+                    other => return Err(ConvertError::Unsupported(other.into())),
+                }
             }
-            other => return Err(ConvertError::Unsupported(other.into())),
         }
+        _ => return Err(ConvertError::Unsupported("input".into())),
     }
     let mut out = json!({
         "model": req.model,
@@ -93,7 +99,7 @@ pub fn chat_to_responses(chat: &Value) -> Result<OpenAiResponsesRequest, Convert
     .increment(1);
     Ok(OpenAiResponsesRequest {
         model,
-        input,
+        input: Value::Array(input),
         stream: chat
             .get("stream")
             .and_then(|v| v.as_bool())
@@ -106,15 +112,21 @@ pub fn chat_to_responses(chat: &Value) -> Result<OpenAiResponsesRequest, Convert
 
 pub fn responses_to_anthropic(req: &OpenAiResponsesRequest) -> Result<Value, ConvertError> {
     let mut messages = Vec::new();
-    for p in &req.input {
-        let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match typ {
-            "input_text" | "text" => {
-                let text = p.get("text").cloned().unwrap_or(Value::Null);
-                messages.push(json!({"role": "user", "content": text}));
+    match &req.input {
+        Value::String(s) => messages.push(json!({"role": "user", "content": s})),
+        Value::Array(items) => {
+            for p in items {
+                let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match typ {
+                    "input_text" | "text" => {
+                        let text = p.get("text").cloned().unwrap_or(Value::Null);
+                        messages.push(json!({"role": "user", "content": text}));
+                    }
+                    other => return Err(ConvertError::Unsupported(other.into())),
+                }
             }
-            other => return Err(ConvertError::Unsupported(other.into())),
         }
+        _ => return Err(ConvertError::Unsupported("input".into())),
     }
     let mut out = json!({
         "model": req.model,
@@ -140,18 +152,27 @@ pub fn responses_to_anthropic(req: &OpenAiResponsesRequest) -> Result<Value, Con
 
 pub fn responses_to_gemini(req: &OpenAiResponsesRequest) -> Result<Value, ConvertError> {
     let mut contents = Vec::new();
-    for p in &req.input {
-        let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match typ {
-            "input_text" | "text" => {
-                let text = p.get("text").cloned().unwrap_or(Value::Null);
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{"text": text}]
-                }));
+    match &req.input {
+        Value::String(s) => contents.push(json!({
+            "role": "user",
+            "parts": [{"text": s}]
+        })),
+        Value::Array(items) => {
+            for p in items {
+                let typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match typ {
+                    "input_text" | "text" => {
+                        let text = p.get("text").cloned().unwrap_or(Value::Null);
+                        contents.push(json!({
+                            "role": "user",
+                            "parts": [{"text": text}]
+                        }));
+                    }
+                    other => return Err(ConvertError::Unsupported(other.into())),
+                }
             }
-            other => return Err(ConvertError::Unsupported(other.into())),
         }
+        _ => return Err(ConvertError::Unsupported("input".into())),
     }
     let mut out = json!({
         "contents": contents,

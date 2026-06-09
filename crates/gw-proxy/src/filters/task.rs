@@ -352,9 +352,11 @@ fn attach_ir_wire_body(
     let Some(codec) = codec else {
         return Ok(());
     };
-    if client_protocol_is_cli(client_protocol) {
+    let storage_protocol = ir_storage_protocol(payload, client_protocol, codec);
+    if storage_protocol.is_none() {
         return Ok(());
     }
+    let storage_protocol = storage_protocol.expect("checked above");
     let source = payload.get(gw_task::TASK_BODY).unwrap_or(payload);
     let source_bytes = serde_json::to_vec(source)
         .map_err(|err| TaskHttpError::submit_failed(format!("serialize task body: {err}")))?;
@@ -370,19 +372,21 @@ fn attach_ir_wire_body(
     let rendered = String::from_utf8(out.to_vec())
         .map_err(|err| TaskHttpError::submit_failed(format!("rendered task body utf8: {err}")))?;
     let Some(obj) = payload.as_object_mut() else {
-        return Err(TaskHttpError::submit_failed("task payload must be a JSON object"));
+        return Err(TaskHttpError::submit_failed(
+            "task payload must be a JSON object",
+        ));
     };
     obj.insert(
         gw_task::TASK_IR_REQUEST.to_string(),
         serde_json::json!({
-            "protocol": client_protocol,
+            "protocol": storage_protocol,
             "kind": "request",
             "value": ir_value,
         }),
     );
     obj.insert(
         gw_task::TASK_IR_WIRE_FORMAT.to_string(),
-        serde_json::Value::String(client_protocol.to_string()),
+        serde_json::Value::String(storage_protocol.to_string()),
     );
     obj.insert(
         gw_task::TASK_IR_WIRE_CONTENT_TYPE.to_string(),
@@ -395,11 +399,36 @@ fn attach_ir_wire_body(
     Ok(())
 }
 
-fn client_protocol_is_cli(client_protocol: &str) -> bool {
-    matches!(
-        client_protocol,
-        "claude:cli" | "openai:cli" | "openai:compact" | "gemini:cli"
-    )
+fn ir_storage_protocol<'a>(
+    payload: &serde_json::Value,
+    client_protocol: &'a str,
+    codec: &gw_codec::AnyCodec,
+) -> Option<&'a str> {
+    match client_protocol {
+        "openai:cli"
+            if matches!(codec, gw_codec::AnyCodec::OpenAiResponses(_))
+                && payload
+                    .get("background")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && !is_openai_responses_cli_semantic(payload) =>
+        {
+            Some("openai:responses")
+        }
+        "claude:cli" | "openai:cli" | "openai:compact" | "gemini:cli" => None,
+        other => Some(other),
+    }
+}
+
+fn is_openai_responses_cli_semantic(payload: &serde_json::Value) -> bool {
+    payload
+        .get("metadata")
+        .and_then(|metadata| metadata.get("cli"))
+        .is_some()
+        || payload
+            .get("compact")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
 }
 
 fn now_ms() -> u64 {

@@ -3,23 +3,30 @@
 //! `response.output_item.added`, `response.reasoning_summary_text.delta`,
 //! `response.function_call_arguments.delta`, `response.completed`, …).
 //!
-//! T4-B scope is the response side (`render_response` / `parse_response` /
-//! `parse_stream_chunk` / `render_stream_chunk` / `new_stream_state`). The
-//! request side: `parse_request` returns `bad_request_err` (Responses wire
-//! parsing requires a zero-copy `OpenAiResponsesRequest` variant); `render_request`
-//! falls back to the Chat wire form so callers can still serialise an IR.
+//! T4-B scope started with the response side (`render_response` /
+//! `parse_response` / `parse_stream_chunk` / `render_stream_chunk` /
+//! `new_stream_state`). W4 also wires request parse/render so async task
+//! submission can persist replayable full IR for `/v1/responses background:true`.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use bytes::{BufMut, BytesMut};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
-use gw_core::ir::{FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR, UsageIR};
+use gw_core::ir::{
+    ContentIR, ContentPart, FinishReasonIR, MessageIR, RequestIR, ResponseIR, StreamEventIR,
+    UsageIR,
+};
+use serde_json::value::RawValue;
+use serde_json::Value;
 
-use crate::common::{approx_tokens, bad_request_err, classify, internal_err, map_code};
-use crate::openai::wire::OpenAiRequest;
+use crate::common::{
+    approx_tokens, bad_request_err, classify, content_to_text, internal_err, map_code,
+};
 use crate::trait_def::{Headers, ProtocolCodec};
 
 use super::state::OpenAiResponsesStreamState;
+use super::wire_request::OpenAiResponsesRequest;
 use super::wire_response::OpenAiResponsesResponse;
 use super::wire_stream_chunk::{OpenAiResponsesStreamChunk, OpenAiResponsesStreamEventType};
 
@@ -35,18 +42,10 @@ impl ProtocolCodec for OpenAiResponsesCodec {
         }
     }
 
-    fn parse_request<'a>(&self, _body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
-        // T4-B scope is the response side (render/parse + stream chunks).
-        // Request-side parsing for the Responses shape is wired through
-        // `responses_to_chat` (in `super::conversion`) at the proxy layer in
-        // T6: the proxy detects `/v1/responses`, lifts to chat shape, and
-        // calls the OpenAI Chat codec. Exposing native Responses request
-        // parsing here would require a `Cow`-borrowing variant of
-        // `OpenAiResponsesRequest` (currently owned `String` everywhere),
-        // which is out of scope until T6 surfaces a concrete consumer.
-        Err(bad_request_err(
-            "openai responses parse_request not wired".to_owned(),
-        ))
+    fn parse_request<'a>(&self, body: &'a [u8]) -> Result<RequestIR<'a>, ErrorIR<'static>> {
+        let req: OpenAiResponsesRequest = serde_json::from_slice(body)
+            .map_err(|e| bad_request_err(format!("openai responses parse_request: {e}")))?;
+        Ok(responses_request_to_ir(req))
     }
 
     fn render_request(
@@ -54,14 +53,7 @@ impl ProtocolCodec for OpenAiResponsesCodec {
         ir: &RequestIR<'_>,
         buf: &mut BytesMut,
     ) -> Result<(), ErrorIR<'static>> {
-        // v1 path: render the IR back as OpenAI Chat JSON. Native Responses
-        // request rendering is wired through `conversion::chat_to_responses`
-        // when a request was originally Responses-shaped; the cross-render
-        // request path is owned by the proxy layer, not this codec method.
-        // For now we delegate request rendering to the Chat wire form so the
-        // gateway can use this codec end-to-end against an OpenAI-Chat-style
-        // upstream until per-shape request rendering lands.
-        let req = OpenAiRequest::try_from(ir)?;
+        let req = responses_request_from_ir(ir)?;
         let bytes = serde_json::to_vec(&req)
             .map_err(|_| internal_err("openai responses serialize failed"))?;
         buf.extend_from_slice(&bytes);
@@ -298,6 +290,188 @@ impl ProtocolCodec for OpenAiResponsesCodec {
             })
             .sum()
     }
+}
+
+const EXT_INPUT: &str = "openai_responses_input";
+const EXT_PREVIOUS_RESPONSE_ID: &str = "openai_responses_previous_response_id";
+
+fn responses_request_to_ir<'a>(req: OpenAiResponsesRequest) -> RequestIR<'a> {
+    let mut messages = Vec::new();
+    if let Some(instructions) = req.instructions {
+        messages.push(MessageIR::System {
+            content: ContentIR::Text(Cow::Owned(instructions)),
+        });
+    }
+    messages.extend(messages_from_responses_input(&req.input));
+
+    let mut extensions = value_map_to_raw_map(req.extras);
+    extensions.insert(EXT_INPUT.into(), value_to_raw(req.input));
+    if let Some(previous_response_id) = req.previous_response_id {
+        extensions.insert(
+            EXT_PREVIOUS_RESPONSE_ID.into(),
+            value_to_raw(Value::String(previous_response_id)),
+        );
+    }
+
+    RequestIR {
+        model: Cow::Owned(req.model),
+        messages,
+        stream: req.stream,
+        extensions: Some(extensions),
+        ..RequestIR::default()
+    }
+}
+
+fn messages_from_responses_input<'a>(input: &Value) -> Vec<MessageIR<'a>> {
+    match input {
+        Value::String(text) => vec![MessageIR::User {
+            content: ContentIR::Text(Cow::Owned(text.clone())),
+        }],
+        Value::Array(items) => items
+            .iter()
+            .filter_map(message_from_responses_item)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn message_from_responses_item<'a>(item: &Value) -> Option<MessageIR<'a>> {
+    let item = item.as_object()?;
+    match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "input_text" | "text" => {
+            let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
+            Some(MessageIR::User {
+                content: ContentIR::Text(Cow::Owned(text.to_owned())),
+            })
+        }
+        "message" => {
+            let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+            let content = item
+                .get("content")
+                .map(content_from_responses_content)
+                .unwrap_or_else(|| ContentIR::Text(Cow::Borrowed("")));
+            Some(match role {
+                "system" => MessageIR::System { content },
+                "developer" => MessageIR::Developer { content },
+                "assistant" => MessageIR::Assistant {
+                    content,
+                    tool_calls: None,
+                },
+                _ => MessageIR::User { content },
+            })
+        }
+        _ => None,
+    }
+}
+
+fn content_from_responses_content<'a>(value: &Value) -> ContentIR<'a> {
+    match value {
+        Value::String(text) => ContentIR::Text(Cow::Owned(text.clone())),
+        Value::Array(parts) => {
+            let mut out = smallvec::SmallVec::new();
+            for part in parts {
+                let typ = part.get("type").and_then(Value::as_str).unwrap_or_default();
+                if matches!(typ, "input_text" | "output_text" | "text") {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        out.push(ContentPart::Text(Cow::Owned(text.to_owned())));
+                    }
+                }
+            }
+            ContentIR::Parts(out)
+        }
+        _ => ContentIR::Text(Cow::Borrowed("")),
+    }
+}
+
+fn responses_request_from_ir(
+    ir: &RequestIR<'_>,
+) -> Result<OpenAiResponsesRequest, ErrorIR<'static>> {
+    let mut extras = raw_map_to_value_map(ir.extensions.as_ref())?;
+    let input = extras
+        .remove(EXT_INPUT)
+        .unwrap_or_else(|| input_from_ir_messages(&ir.messages));
+    let previous_response_id = extras
+        .remove(EXT_PREVIOUS_RESPONSE_ID)
+        .and_then(|v| v.as_str().map(str::to_owned));
+    let instructions = first_system_instruction(&ir.messages);
+
+    Ok(OpenAiResponsesRequest {
+        model: ir.model.to_string(),
+        input,
+        stream: ir.stream,
+        instructions,
+        previous_response_id,
+        extras,
+    })
+}
+
+fn input_from_ir_messages(messages: &[MessageIR<'_>]) -> Value {
+    let mut input = Vec::new();
+    for message in messages {
+        match message {
+            MessageIR::System { .. } | MessageIR::Developer { .. } => {}
+            MessageIR::User { content } => {
+                input.push(Value::String(content_to_text(content).into_owned()));
+            }
+            MessageIR::Assistant { content, .. } => {
+                input.push(serde_json::json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": content_to_text(content),
+                }));
+            }
+            MessageIR::Tool { content, .. } => {
+                input.push(serde_json::json!({
+                    "type": "message",
+                    "role": "tool",
+                    "content": content_to_text(content),
+                }));
+            }
+        }
+    }
+    if input.len() == 1 {
+        input.remove(0)
+    } else {
+        Value::Array(input)
+    }
+}
+
+fn first_system_instruction(messages: &[MessageIR<'_>]) -> Option<String> {
+    messages.iter().find_map(|message| match message {
+        MessageIR::System { content } | MessageIR::Developer { content } => {
+            Some(content_to_text(content).into_owned())
+        }
+        _ => None,
+    })
+}
+
+fn value_map_to_raw_map(
+    map: serde_json::Map<String, Value>,
+) -> HashMap<Cow<'static, str>, Box<RawValue>> {
+    map.into_iter()
+        .map(|(key, value)| (Cow::Owned(key), value_to_raw(value)))
+        .collect()
+}
+
+fn raw_map_to_value_map(
+    map: Option<&HashMap<Cow<'_, str>, Box<RawValue>>>,
+) -> Result<serde_json::Map<String, Value>, ErrorIR<'static>> {
+    let mut out = serde_json::Map::new();
+    let Some(map) = map else {
+        return Ok(out);
+    };
+    for (key, raw) in map {
+        let value = serde_json::from_str(raw.get())
+            .map_err(|_| internal_err("openai responses serialize failed"))?;
+        out.insert(key.to_string(), value);
+    }
+    Ok(out)
+}
+
+fn value_to_raw(value: Value) -> Box<RawValue> {
+    let serialized =
+        serde_json::to_string(&value).expect("serializing serde_json::Value is infallible");
+    RawValue::from_string(serialized).expect("serialized JSON value must be a valid RawValue")
 }
 
 // ─── streaming dispatch helpers ────────────────────────────────────────────

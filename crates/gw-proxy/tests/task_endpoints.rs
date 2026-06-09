@@ -365,7 +365,7 @@ async fn test_submit_endpoint_skips_ir_attachment_for_cli_protocol_with_response
     let response = gw_proxy::filters::task::submit_endpoint(
         &contract,
         gw_proxy::filters::task::SubmitTaskRequest {
-            body: br#"{"model":"gpt-5","background":true,"input":"hi"}"#,
+            body: br#"{"model":"gpt-5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"metadata":{"cli":"codex"}}"#,
             user_id: "user_task",
             api_key_id: Some("ak_task"),
             client_protocol: "openai:cli",
@@ -387,11 +387,122 @@ async fn test_submit_endpoint_skips_ir_attachment_for_cli_protocol_with_response
     let payload = &submitted[0].input_payload;
     assert_eq!(submitted[0].client_protocol, "openai:cli");
     assert_eq!(payload["model"], "gpt-5");
-    assert_eq!(payload["background"], true);
-    assert_eq!(payload["input"], "hi");
+    assert_eq!(payload["metadata"]["cli"], "codex");
     assert!(payload.get("ir_request").is_none());
     assert!(payload.get("ir_wire_body").is_none());
     assert!(payload.get("ir_wire_format").is_none());
+}
+
+#[tokio::test]
+async fn test_submit_endpoint_skips_ir_attachment_for_cli_semantic_background_body() {
+    let contract = MemoryTaskContract::default();
+
+    let response = gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"model":"gpt-5","background":true,"input":"hi","metadata":{"cli":"codex"}}"#,
+            user_id: "user_task",
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai:cli",
+            client_codec: Some(&AnyCodec::OpenAiResponses(
+                gw_codec::openai::responses::OpenAiResponsesCodec,
+            )),
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: None,
+            available_balance_micro: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 201);
+    let submitted = contract.submitted.lock().unwrap();
+    let payload = &submitted[0].input_payload;
+    assert_eq!(submitted[0].client_protocol, "openai:cli");
+    assert_eq!(payload["background"], true);
+    assert_eq!(payload["metadata"]["cli"], "codex");
+    assert!(payload.get("ir_request").is_none());
+    assert!(payload.get("ir_wire_body").is_none());
+    assert!(payload.get("ir_wire_format").is_none());
+}
+
+#[tokio::test]
+async fn test_submit_endpoint_stores_full_ir_for_responses_background() {
+    let contract = MemoryTaskContract::default();
+
+    let response = gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"model":"gpt-5","background":true,"input":"hi"}"#,
+            user_id: "user_task",
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai:responses",
+            client_codec: Some(&AnyCodec::OpenAiResponses(
+                gw_codec::openai::responses::OpenAiResponsesCodec,
+            )),
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: None,
+            available_balance_micro: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 201);
+    let submitted = contract.submitted.lock().unwrap();
+    let payload = &submitted[0].input_payload;
+    assert_eq!(submitted[0].client_protocol, "openai:responses");
+    assert_eq!(payload["ir_wire_format"], "openai:responses");
+    assert_eq!(payload["ir_request"]["protocol"], "openai:responses");
+    assert_eq!(payload["ir_request"]["kind"], "request");
+    assert_eq!(
+        payload["ir_request"]["value"]["messages"][0]["content"]["value"],
+        "hi"
+    );
+    let rendered = payload["ir_wire_body"].as_str().expect("rendered body");
+    let rendered_json: serde_json::Value =
+        serde_json::from_str(rendered).expect("rendered body is json");
+    assert_eq!(rendered_json["model"], "gpt-5");
+    assert_eq!(rendered_json["background"], true);
+    assert_eq!(rendered_json["input"], "hi");
+}
+
+#[tokio::test]
+async fn test_submit_endpoint_corrects_misdetected_cli_for_responses_background() {
+    let contract = MemoryTaskContract::default();
+
+    let response = gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"model":"gpt-5","background":true,"input":"hi"}"#,
+            user_id: "user_task",
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai:cli",
+            client_codec: Some(&AnyCodec::OpenAiResponses(
+                gw_codec::openai::responses::OpenAiResponsesCodec,
+            )),
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: None,
+            available_balance_micro: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 201);
+    let submitted = contract.submitted.lock().unwrap();
+    let payload = &submitted[0].input_payload;
+    assert_eq!(submitted[0].client_protocol, "openai:cli");
+    assert_eq!(payload["ir_wire_format"], "openai:responses");
+    assert_eq!(payload["ir_request"]["protocol"], "openai:responses");
+    let rendered = payload["ir_wire_body"].as_str().expect("rendered body");
+    let rendered_json: serde_json::Value =
+        serde_json::from_str(rendered).expect("rendered body is json");
+    assert_eq!(rendered_json["background"], true);
+    assert_eq!(rendered_json["input"], "hi");
 }
 
 fn seed_balance(user_id: &str, base_micro: i64) {

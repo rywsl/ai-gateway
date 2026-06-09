@@ -3,7 +3,7 @@ use gw_codec::openai::responses::{
     OpenAiResponsesResponse, OpenAiResponsesStreamChunk,
 };
 use gw_codec::ProtocolCodec;
-use gw_core::ir::{ContentIR, MessageIR, ResponseIR, StreamEventIR};
+use gw_core::ir::{ContentIR, MessageIR, RequestIR, ResponseIR, StreamEventIR};
 
 #[test]
 fn deserialize_minimal_request() {
@@ -11,7 +11,7 @@ fn deserialize_minimal_request() {
     let r: OpenAiResponsesRequest = serde_json::from_str(s).unwrap();
     assert_eq!(r.model, "gpt-5");
     assert!(r.stream);
-    assert_eq!(r.input.len(), 1);
+    assert_eq!(r.input.as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -54,6 +54,33 @@ fn deserialize_optional_fields() {
     let r: OpenAiResponsesRequest = serde_json::from_str(s).unwrap();
     assert_eq!(r.instructions.as_deref(), Some("be helpful"));
     assert_eq!(r.previous_response_id.as_deref(), Some("resp_0"));
+}
+
+#[test]
+fn responses_request_parse_render_round_trips_task_body() {
+    let body = br#"{"model":"gpt-5","background":true,"input":"hi","instructions":"be direct","stream":false}"#;
+    let ir = OpenAiResponsesCodec.parse_request(body).unwrap();
+
+    assert_eq!(ir.model, "gpt-5");
+    assert!(!ir.stream);
+    assert!(matches!(ir.messages[0], MessageIR::System { .. }));
+    assert!(matches!(ir.messages[1], MessageIR::User { .. }));
+
+    let stored = serde_json::to_value(&ir).expect("serialize request ir");
+    let restored: RequestIR<'static> = serde_json::from_value(stored).expect("restore request ir");
+
+    let mut rendered = bytes::BytesMut::new();
+    OpenAiResponsesCodec
+        .render_request(&restored, &mut rendered)
+        .expect("render restored responses request");
+    let rendered_json: serde_json::Value =
+        serde_json::from_slice(&rendered).expect("rendered request json");
+
+    assert_eq!(rendered_json["model"], "gpt-5");
+    assert_eq!(rendered_json["background"], true);
+    assert_eq!(rendered_json["instructions"], "be direct");
+    assert_eq!(rendered_json["input"], "hi");
+    assert_eq!(rendered_json["stream"], false);
 }
 
 #[test]

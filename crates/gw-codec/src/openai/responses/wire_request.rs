@@ -11,7 +11,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiResponsesRequest {
     pub model: String,
-    pub input: Vec<Value>,
+    pub input: Value,
     #[serde(default)]
     pub stream: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

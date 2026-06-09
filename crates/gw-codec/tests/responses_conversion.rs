@@ -20,6 +20,18 @@ fn responses_to_chat_lifts_input_to_messages() {
 }
 
 #[test]
+fn responses_to_chat_accepts_string_input() {
+    let req: OpenAiResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5",
+        "input": "hi"
+    }))
+    .unwrap();
+    let chat: Value = responses_to_chat(&req).unwrap();
+    assert_eq!(chat["messages"][0]["role"], "user");
+    assert_eq!(chat["messages"][0]["content"], "hi");
+}
+
+#[test]
 fn responses_to_chat_with_instructions_prepends_system() {
     let req: OpenAiResponsesRequest = serde_json::from_value(json!({
         "model": "gpt-5",
@@ -105,6 +117,6 @@ fn chat_to_responses_lifts_system_to_instructions() {
     });
     let r = chat_to_responses(&chat).unwrap();
     assert_eq!(r.instructions.as_deref(), Some("be helpful"));
-    assert_eq!(r.input.len(), 1);
+    assert_eq!(r.input.as_array().unwrap().len(), 1);
     assert_eq!(r.input[0]["text"], "hi");
 }
