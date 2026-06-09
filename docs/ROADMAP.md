@@ -20,9 +20,9 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 
 ## 02 routing
 
-### R-D AffinityManager (api-key → vendor-key affinity) — `capability-gap`
-- **Intent:** keep a user pinned to the same upstream key across requests to preserve prompt-cache continuity and reduce re-billing.
-- **Design points:** new `crates/gw-routing/src/affinity.rs`: `AffinityManager` (`record_hit`/`get`/`invalidate_vendor_key`/`sweep_expired`), `AffinityRecord`, an `AffinityDimension`, and a sweep loop. Distinct from the existing request-level `strategy/cache_affinity.rs` (message-hash).
+### R-D proxy wiring for api-key affinity — `capability-gap`
+- **Intent:** make the pure `gw-routing::affinity::AffinityManager` influence live upstream selection once proxy/auth exposes an `ApiKeyId` affinity dimension and selected-key recording point.
+- **Design points:** `crates/gw-routing/src/affinity.rs` now provides `AffinityManager` (`record_hit`/`get`/`invalidate_vendor_key`/`sweep_expired`), `AffinityRecord`, and `AffinityDimension` with API-key support. Remaining work is cross-module wiring only: decide where authenticated API-key identity enters `gw-proxy` routing, when a selected vendor key should call `record_hit`, and how vendor-key invalidation hooks should call `invalidate_vendor_key`. Do not change `strategy/cache_affinity.rs`; it remains message-hash request affinity.
 - **Source:** deleted `routing-r-d-affinity-manager`.
 
 ### R-F stream probe (first-chunk failover window) — `capability-gap`

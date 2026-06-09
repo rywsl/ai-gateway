@@ -1,5 +1,5 @@
 # 02 — Routing & Capability (as-built)
-- Family: R (routing) · Backing crates: gw-routing, gw-capability · Source-of-truth: `crates/gw-routing/src/strategy/`, `crates/gw-routing/src/{candidates.rs,pipeline/,failover.rs,in_flight.rs}`, `crates/gw-capability/src/{resolver.rs,filter.rs}`, `crates/gw-proxy/src/filters/upstream.rs` · Status: Candidate filter + 8 named selection strategies (plus a config-driven `MultiDim` variant) + scoring pipeline + response-side failover classifier + capability matching are all wired into the proxy upstream path.
+- Family: R (routing) · Backing crates: gw-routing, gw-capability · Source-of-truth: `crates/gw-routing/src/{affinity.rs,strategy/,candidates.rs,pipeline/,failover.rs,in_flight.rs}`, `crates/gw-capability/src/{resolver.rs,filter.rs}`, `crates/gw-proxy/src/filters/upstream.rs` · Status: Candidate filter + 8 named selection strategies (plus a config-driven `MultiDim` variant) + scoring pipeline + response-side failover classifier + capability matching are all wired into the proxy upstream path; `gw-routing` also owns a pure API-key affinity manager that is not yet consumed by proxy wiring.
 
 ## Purpose
 Given a resolved `ModelGroup` and request context, select one upstream `VendorKey` to proxy to: filter the group's members down to admissible candidates, rank/pick one via the group's configured strategy, and (on a retryable upstream response) hand the next candidate to the failover executor. Capability matching constrains which channels are even eligible. Cost is never computed here — `CostFirst` ranks by a priority/markup proxy, not per-token price (see §Deliberate behaviours).
@@ -44,6 +44,11 @@ The 8 named strategies (`crates/gw-routing/src/strategy/*.rs`):
 ### Per-key in-flight cap
 `in_flight.rs` (`crates/gw-routing/src/in_flight.rs`): `InFlightStore` (`DashMap<KeyId, Arc<InFlightCounter>>` of `AtomicU32`, `Relaxed`). `InFlightGuard::new` increments, `Drop` decrements (held on `ReqCtx`, releases on every termination path). `candidates::get_candidate_keys` drops keys at/over the cap; `LoadBalance` reads counts via `snapshot_counts`. The proxy constant `PER_KEY_INFLIGHT_CAP = 1024` (`upstream.rs`) is passed into `get_candidate_keys`.
 
+### API-key affinity manager
+`affinity.rs` (`crates/gw-routing/src/affinity.rs`) defines `AffinityManager`, a request-external binding table distinct from `strategy/sticky.rs` and `strategy/cache_affinity.rs`. It stores `AffinityRecord { dimension, vendor_key_id, expires_at }` in a `DashMap<AffinityDimension, AffinityRecord>`, where the first concrete dimension is `AffinityDimension::ApiKey(ApiKeyId)` and `AffinityDimension::Custom { name, value }` keeps the key space extensible without conflating dimensions that share the same textual value.
+
+All time-dependent methods take an explicit `Instant`, so TTL behavior is deterministic in tests and callers can drive sweeps from their own clock source. `record_hit(dimension, vendor_key_id, now)` upserts a record with `expires_at = now + ttl`; a later hit refreshes both the bound key and expiry. `get(dimension, now)` returns a cloned record only when `expires_at > now`; expired records are synchronously removed and treated as a miss. `invalidate_vendor_key(key_id)` removes every record bound to that vendor key and returns the removal count. `sweep_expired(now)` removes all expired records and returns the removal count. `Default` uses a 30-minute TTL.
+
 ### Capability resolution & matching
 `gw-capability` (`crates/gw-capability/src/`): `resolver.rs::CapabilityResolver::resolve` builds a `RequiredCapabilities` set by layering `key_forced_caps`, `model_caps`, header `require`, and a `retry_upgrade` hint (each tagged with a `CapabilityOrigin`), then sets `MatchMode` to `Exclusive`/`Compatible` from `match_mode_exclusive`; emits `gw_capability_resolve_total{match}`. `resolve_with_shape` additionally adds `Capability::OpenAiResponsesShape` for `ApiShape::OpenAiResponses`. `parse_capability` maps known names (`vision`, `audio`, `video`, `thinking`, `tool_use`, `streaming_only`, `openai_responses_shape`, `vertex_ai_service_account`) to typed `Capability`, unknowns to `Capability::Tagged` (`types.rs`). `filter.rs::candidate_matches` is the pure routing-candidate match used by the candidate filter: an empty advertised set is non-restrictive; otherwise every required cap must be present, and in exclusive mode (candidate or required) the candidate must advertise no cap outside the required set. `filter.rs::CapabilityFilter::evaluate` (ApiKey-keyed) additionally short-circuits to `ApiKeyDisabled` via a `RedosTracker` and returns `Match`/`Missing`/`ExtraCaps`.
 
@@ -58,10 +63,12 @@ The 8 named strategies (`crates/gw-routing/src/strategy/*.rs`):
 - **Unknown `MultiDim` preset is fail-operational**, not fatal: warn-once + metric + fall back to `fixed_order` (`strategy/set.rs`).
 - **Failover walks the first-attempt ranked list.** Pipeline-backed strategies (`FixedOrder`, `CostFirst`, `LatencyFirst`, `LoadBalance`, `MultiDim`) rank by their scoring policy; stateful/hash strategies keep their selected key first and append remaining candidates in input order to avoid changing their state semantics.
 - **`CacheAffinity` with no message hash degrades to first-available** rather than funnelling all of a model's traffic to one key (`cache_affinity.rs`).
+- **`AffinityManager` is pure `gw-routing` state today.** It does not read auth headers, mutate `ReqCtx`, or override strategy picks until a proxy/auth contract explicitly supplies the API-key dimension and chosen-key recording point.
 
 ## Cross-process touchpoints
 - **Failover retryable status set** is supplied by proxy config (`gateway.rs`, default `{429,500,502,503,504}`) and consumed by `classify_for_failover`; it governs which upstream HTTP statuses trigger a Rust-side replay rather than being surfaced to the client.
 - **Capability inputs** (`model_caps`, `key_forced_caps`, `match_mode_exclusive`, `exclusive_capability_match`) come from persisted entities loaded through `EntityStore` (`resolver.rs::ResolveBackend`, `backend::EntityStoreResolveBackend`); `exclusive_capability_match` is a `VendorKey` column.
+- **API-key affinity runtime wiring is residual:** `AffinityManager` exposes the pure manager API in `gw-routing`, but `gw-proxy` does not yet pass authenticated `ApiKeyId` into routing as an affinity dimension and does not yet record selected vendor keys through this manager.
 - No routing decision writes to Redis/PgSQL directly; selected-key identity flows into the usage/billing surfaces owned by other families. (The authoritative Rust↔Go contract index lives in `docs/go-contracts/`.)
 
 ## Invariants & lints
@@ -72,5 +79,5 @@ The 8 named strategies (`crates/gw-routing/src/strategy/*.rs`):
 
 ## Not built → ROADMAP
 The following are not present in the verified sources and are recorded only as pointers (no design detail here):
-- **R-D `AffinityManager`** — a dedicated affinity-binding manager distinct from the current `Sticky`/`CacheAffinity` per-strategy state.
 - **R-F stream probe** — pre-commit stream health probing.
+- **API-key affinity proxy wiring** — the pure `AffinityManager` exists in `gw-routing`, but proxy/auth has not yet supplied the api-key dimension or recording point.
