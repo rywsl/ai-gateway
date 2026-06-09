@@ -6,6 +6,7 @@ use crate::analyzer::{DefaultErrorAnalyzer, KeywordErrorAnalyzer, UpstreamErrorA
 use crate::kiro::KiroAdapter;
 use crate::noop::NoopAdapter;
 use crate::trait_def::UpstreamAdapter;
+use crate::vertex::VertexAdapter;
 use dashmap::DashMap;
 use gw_core::ids::VendorId;
 use std::sync::Arc;
@@ -68,6 +69,9 @@ fn builtin_adapter_for(vendor: &VendorId) -> Option<Arc<dyn UpstreamAdapter>> {
     let id = vendor.as_ref().to_ascii_lowercase();
     if id.contains("kiro") {
         return Some(Arc::new(KiroAdapter));
+    }
+    if id.contains("vertex") || id.contains("google_vertex") {
+        return Some(Arc::new(VertexAdapter));
     }
     None
 }

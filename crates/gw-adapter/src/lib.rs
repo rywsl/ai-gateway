@@ -17,6 +17,7 @@ pub mod noop;
 pub mod oauth_runtime;
 pub mod registry;
 pub mod trait_def;
+pub mod vertex;
 
 pub use analyzer::{
     BuiltinAnalyzerKind, DefaultErrorAnalyzer, ErrorKind, ErrorOutcome, HeaderView,
@@ -30,3 +31,4 @@ pub use kiro::KiroAdapter;
 pub use noop::NoopAdapter;
 pub use registry::AdapterRegistry;
 pub use trait_def::{ChromeVersion, TransportProfile, UpstreamAdapter};
+pub use vertex::{VertexAdapter, VertexJwtClaims};

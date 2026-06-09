@@ -50,6 +50,10 @@ fn lookup_returns_registered_adapter() {
 fn builtin_vendor_adapters_match_known_vendor_ids() {
     let r = AdapterRegistry::default();
     assert_eq!(r.for_vendor(&VendorId::from("kiro-prod")).name(), "kiro");
+    assert_eq!(
+        r.for_vendor(&VendorId::from("google_vertex_us")).name(),
+        "vertex"
+    );
 }
 
 #[test]
