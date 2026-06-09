@@ -528,6 +528,26 @@ mod tests {
     }
 
     #[test]
+    fn request_ir_json_storage_restores_for_render() {
+        let body =
+            br#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}]}"#;
+        let parsed = OpenAi.parse_request(body).expect("parse request");
+        let stored = serde_json::to_value(&parsed).expect("serialize request ir");
+        let restored: RequestIR<'static> =
+            serde_json::from_value(stored).expect("restore request ir");
+
+        let mut rendered = BytesMut::new();
+        OpenAi
+            .render_request(&restored, &mut rendered)
+            .expect("render restored request");
+        let rendered_json: serde_json::Value =
+            serde_json::from_slice(&rendered).expect("rendered request json");
+
+        assert_eq!(rendered_json["model"], "gpt-4.1-mini");
+        assert_eq!(rendered_json["messages"][0]["content"], "hi");
+    }
+
+    #[test]
     fn parse_response_without_cached_tokens_field() {
         let body = br#"{"id":"x","object":"chat.completion","created":0,"model":"m",
             "choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#;
@@ -537,6 +557,36 @@ mod tests {
         assert_eq!(usage.input_tokens, 5);
         assert_eq!(usage.output_tokens, 2);
         assert_eq!(usage.cached_tokens, None);
+    }
+
+    #[test]
+    fn response_ir_json_storage_restores_for_render() {
+        let body = br#"{
+            "id":"chatcmpl-task",
+            "object":"chat.completion",
+            "created":1700000000,
+            "model":"gpt-4.1-mini",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}
+        }"#;
+        let parsed = OpenAi.parse_response(body).expect("parse response");
+        let stored = serde_json::to_value(&parsed).expect("serialize response ir");
+        let restored: ResponseIR<'static> =
+            serde_json::from_value(stored).expect("restore response ir");
+
+        let mut rendered = BytesMut::new();
+        OpenAi
+            .render_response(&restored, &mut rendered)
+            .expect("render restored response");
+        let reparsed = OpenAi
+            .parse_response(&rendered)
+            .expect("reparse rendered response");
+
+        assert_eq!(reparsed.id, "chatcmpl-task");
+        assert_openai_assistant_text(&reparsed, "done").unwrap();
+        let usage = reparsed.usage.expect("usage");
+        assert_eq!(usage.input_tokens, 2);
+        assert_eq!(usage.output_tokens, 1);
     }
 
     #[test]

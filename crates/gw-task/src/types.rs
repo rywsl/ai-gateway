@@ -128,3 +128,39 @@ pub struct TaskRecord {
     pub duration_seconds: Option<u64>,
     pub billing_record_id: Option<String>,
 }
+
+pub const TASK_IR_REQUEST: &str = "ir_request";
+pub const TASK_IR_RESPONSE: &str = "ir_response";
+pub const TASK_IR_WIRE_BODY: &str = "ir_wire_body";
+pub const TASK_IR_WIRE_FORMAT: &str = "ir_wire_format";
+pub const TASK_IR_WIRE_CONTENT_TYPE: &str = "ir_wire_content_type";
+pub const TASK_BODY: &str = "body";
+
+#[must_use]
+pub fn task_ir_wire_body(payload: &serde_json::Value) -> Option<&str> {
+    payload.get(TASK_IR_WIRE_BODY).and_then(serde_json::Value::as_str)
+}
+
+#[must_use]
+pub fn task_ir_wire_format(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get(TASK_IR_WIRE_FORMAT)
+        .and_then(serde_json::Value::as_str)
+}
+
+#[must_use]
+pub fn task_ir_wire_content_type(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get(TASK_IR_WIRE_CONTENT_TYPE)
+        .and_then(serde_json::Value::as_str)
+}
+
+#[must_use]
+pub fn task_ir_request(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+    payload.get(TASK_IR_REQUEST)
+}
+
+#[must_use]
+pub fn task_ir_response(payload: &serde_json::Value) -> Option<&serde_json::Value> {
+    payload.get(TASK_IR_RESPONSE)
+}

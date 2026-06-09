@@ -73,6 +73,35 @@ fn test_task_record_serialize() {
 }
 
 #[test]
+fn test_ir_wire_body_helper_reads_optional_string() {
+    let payload = json!({
+        "body": {"model": "gpt-4.1-mini"},
+        "ir_wire_format": "openai:chat",
+        "ir_wire_content_type": "application/json",
+        "ir_wire_body": "{\"model\":\"gpt-4.1-mini\"}"
+    });
+
+    assert_eq!(
+        gw_task::task_ir_wire_body(&payload),
+        Some("{\"model\":\"gpt-4.1-mini\"}")
+    );
+    assert_eq!(gw_task::task_ir_wire_format(&payload), Some("openai:chat"));
+    assert_eq!(
+        gw_task::task_ir_wire_content_type(&payload),
+        Some("application/json")
+    );
+}
+
+#[test]
+fn test_ir_wire_body_helper_treats_absence_as_legacy_payload() {
+    let payload = json!({"body": {"prompt": "legacy"}});
+
+    assert_eq!(gw_task::task_ir_wire_body(&payload), None);
+    assert_eq!(gw_task::task_ir_wire_format(&payload), None);
+    assert_eq!(gw_task::task_ir_wire_content_type(&payload), None);
+}
+
+#[test]
 fn test_task_kind_enum() {
     let kinds = [
         TaskKind::Image,

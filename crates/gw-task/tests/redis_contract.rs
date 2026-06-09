@@ -55,7 +55,12 @@ fn sample_record() -> TaskRecord {
         request_id: Some("req-1".to_string()),
         provider_task_id: None,
         provider_first_response_ms: None,
-        input_payload: serde_json::json!({"prompt":"hello"}),
+        input_payload: serde_json::json!({
+            "body": {"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "hi"}]},
+            "ir_wire_format": "openai:chat",
+            "ir_wire_content_type": "application/json",
+            "ir_wire_body": "{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+        }),
         output_payload: None,
         error_message: None,
         frozen_micro: 123,
@@ -82,9 +87,16 @@ async fn test_submit_stores_and_queues() {
     assert_eq!(hash.get("id"), Some(&record.id.to_string()));
     assert_eq!(hash.get("schema_version"), Some(&"1".to_string()));
     assert_eq!(hash.get("status"), Some(&"queued".to_string()));
+    let stored_payload: serde_json::Value =
+        serde_json::from_str(hash.get("input_payload").expect("input_payload hash field"))
+            .expect("input_payload decodes");
     assert_eq!(
-        hash.get("input_payload"),
-        Some(&serde_json::json!({"prompt":"hello"}).to_string())
+        gw_task::task_ir_wire_body(&stored_payload),
+        Some("{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+    );
+    assert_eq!(
+        gw_task::task_ir_wire_format(&stored_payload),
+        Some("openai:chat")
     );
 
     let entries: RedisValue = pool

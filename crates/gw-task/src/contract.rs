@@ -63,6 +63,9 @@ pub trait TaskContract {
         amount: i64,
     ) -> Result<(), TaskError>;
 
+    /// Submit a full task record. `TaskRecord.input_payload.ir_wire_body` is
+    /// optional for backward compatibility; workers must fall back to legacy
+    /// `input_payload.body` when it is absent.
     async fn submit(&self, record: TaskRecord) -> Result<TaskId, TaskError>;
 
     async fn load(&self, id: &TaskId) -> Result<Option<TaskRecord>, TaskError>;

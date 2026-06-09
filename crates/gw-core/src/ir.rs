@@ -5,13 +5,13 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UntouchedFlags(pub u32);
 impl UntouchedFlags {
     pub const ALL_UNTOUCHED: Self = Self(u32::MAX);
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestIR<'a> {
     pub model: Cow<'a, str>,
     pub messages: Vec<MessageIR<'a>>,
@@ -22,20 +22,28 @@ pub struct RequestIR<'a> {
     pub top_k: Option<u32>,
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
+    #[serde(default)]
     pub stop: Option<Vec<Cow<'a, str>>>,
     pub seed: Option<u64>,
+    #[serde(default)]
     pub tools: Option<Vec<ToolIR<'a>>>,
+    #[serde(default)]
     pub tool_choice: Option<ToolChoiceIR<'a>>,
     pub response_format: Option<ResponseFormatIR>,
     pub cache_control: Option<CacheControlIR>,
     pub metadata: MetadataIR<'a>,
+    #[serde(default)]
     pub reasoning_config: Option<ReasoningConfig<'a>>,
+    #[serde(default)]
     pub audio_config: Option<AudioConfig<'a>>,
+    #[serde(default)]
     pub service_tier: Option<Cow<'a, str>>,
     pub web_search: Option<Box<RawValue>>,
     pub prediction: Option<Box<RawValue>>,
+    #[serde(default)]
     pub extensions: Option<HashMap<Cow<'a, str>, Box<RawValue>>>,
     pub passthrough_overrides: Option<HashMap<String, Box<RawValue>>>,
+    #[serde(default, skip)]
     pub untouched: UntouchedFlags,
 }
 
@@ -70,7 +78,8 @@ impl Default for RequestIR<'_> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum MessageIR<'a> {
     System {
         content: ContentIR<'a>,
@@ -83,6 +92,7 @@ pub enum MessageIR<'a> {
     },
     Assistant {
         content: ContentIR<'a>,
+        #[serde(default)]
         tool_calls: Option<Vec<ToolCallIR<'a>>>,
     },
     Tool {
@@ -91,22 +101,31 @@ pub enum MessageIR<'a> {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum ContentIR<'a> {
     Text(Cow<'a, str>),
     Parts(SmallVec<[ContentPart<'a>; 4]>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ContentPart<'a> {
     Text(Cow<'a, str>),
-    Image { source: ImageSource<'a> },
-    Audio { source: MediaSource<'a> },
-    File { source: MediaSource<'a> },
+    Image {
+        source: ImageSource<'a>,
+    },
+    Audio {
+        source: MediaSource<'a>,
+    },
+    File {
+        source: MediaSource<'a>,
+    },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ImageSource<'a> {
     Url(Cow<'a, str>),
     B64 {
@@ -115,7 +134,8 @@ pub enum ImageSource<'a> {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum MediaSource<'a> {
     Url(Cow<'a, str>),
     B64 {
@@ -124,78 +144,93 @@ pub enum MediaSource<'a> {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolIR<'a> {
     pub name: Cow<'a, str>,
+    #[serde(default)]
     pub description: Option<Cow<'a, str>>,
     pub parameters_jsonschema: Cow<'a, RawValue>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallIR<'a> {
     pub id: Cow<'a, str>,
     pub name: Cow<'a, str>,
     pub arguments_json: Cow<'a, RawValue>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ToolChoiceIR<'a> {
     Auto,
     None,
     Required,
-    Function { name: Cow<'a, str> },
+    Function {
+        name: Cow<'a, str>,
+    },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ResponseFormatIR {
     Text,
     JsonObject,
     JsonSchema(Box<RawValue>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheControlIR {
     pub kind: Cow<'static, str>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReasoningConfig<'a> {
+    #[serde(default)]
     pub effort: Option<Cow<'a, str>>,
     pub budget_tokens: Option<u32>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AudioConfig<'a> {
+    #[serde(default)]
     pub voice: Option<Cow<'a, str>>,
+    #[serde(default)]
     pub format: Option<Cow<'a, str>>,
+    #[serde(default)]
     pub modalities: Option<Vec<Cow<'a, str>>>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MetadataIR<'a> {
+    #[serde(default)]
     pub openai_logit_bias: Option<HashMap<Cow<'a, str>, f32>>,
+    #[serde(default)]
     pub openai_logprobs: Option<bool>,
+    #[serde(default)]
     pub anthropic_thinking: Option<AnthropicThinking<'a>>,
+    #[serde(default)]
     pub gemini_safety_settings: Option<Vec<GeminiSafetySetting<'a>>>,
+    #[serde(default)]
     pub extensions: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnthropicThinking<'a> {
     pub kind: Cow<'a, str>,
     pub budget_tokens: Option<u32>,
+    #[serde(default)]
     pub display: Option<Cow<'a, str>>,
     pub adaptive: Option<bool>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeminiSafetySetting<'a> {
     pub category: Cow<'a, str>,
     pub threshold: Cow<'a, str>,
 }
 
 /// Anthropic 风格 tool_use 块（wire 端 content array 内的 ToolUse 块，与 OpenAI 扁平 tool_calls 一一对应）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolUseBlockIR<'a> {
     pub id: Cow<'a, str>,
     pub name: Cow<'a, str>,
@@ -203,24 +238,25 @@ pub struct ToolUseBlockIR<'a> {
 }
 
 /// 响应侧 thinking 块集合（Anthropic 与 OpenAI Responses 共用）。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResponseThinkingIR<'a> {
     pub blocks: Vec<ThinkingBlockIR<'a>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThinkingBlockIR<'a> {
     pub text: Cow<'a, str>,
+    #[serde(default)]
     pub signature: Option<Cow<'a, str>>,
 }
 
 /// OpenAI Responses 风格 reasoning 摘要块。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReasoningBlockIR<'a> {
     pub summary: Cow<'a, str>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResponseIR<'a> {
     pub id: Cow<'a, str>,
     pub model: Cow<'a, str>,
@@ -228,13 +264,21 @@ pub struct ResponseIR<'a> {
     pub finish_reason: Option<FinishReasonIR>,
     pub usage: Option<UsageIR>,
     pub metadata: MetadataIR<'a>,
+    #[serde(default)]
     pub thinking: Option<ResponseThinkingIR<'a>>,
+    #[serde(default)]
     pub reasoning: Option<ReasoningBlockIR<'a>>,
+    #[serde(default)]
     pub tool_use_blocks: Option<Vec<ToolUseBlockIR<'a>>>,
+    #[serde(default)]
     pub refusal: Option<Cow<'a, str>>,
+    #[serde(default)]
     pub annotations: Option<Vec<AnnotationIR<'a>>>,
+    #[serde(default)]
     pub server_tool_blocks: Option<Vec<ServerToolBlockIR<'a>>>,
+    #[serde(default)]
     pub redacted_thinking: Option<Vec<RedactedThinkingIR<'a>>>,
+    #[serde(default)]
     pub service_tier: Option<Cow<'a, str>>,
 }
 
@@ -259,16 +303,18 @@ impl Default for ResponseIR<'_> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnnotationIR<'a> {
     pub kind: Cow<'a, str>,
+    #[serde(default)]
     pub url: Option<Cow<'a, str>>,
+    #[serde(default)]
     pub title: Option<Cow<'a, str>>,
     pub start_index: Option<u32>,
     pub end_index: Option<u32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerToolBlockIR<'a> {
     pub kind: Cow<'a, str>,
     pub id: Cow<'a, str>,
@@ -277,7 +323,7 @@ pub struct ServerToolBlockIR<'a> {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RedactedThinkingIR<'a> {
     pub data: Cow<'a, str>,
 }
