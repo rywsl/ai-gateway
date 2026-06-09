@@ -134,6 +134,27 @@ fn affinity_sweep_expired_removes_only_expired_records() {
 }
 
 #[test]
+fn affinity_cleanup_counts_actual_deleted_records() {
+    let now = Instant::now();
+    let manager = AffinityManager::new(Duration::from_secs(10));
+
+    manager.record_hit(
+        AffinityDimension::ApiKey(api_key("ak-active")),
+        vendor_key("vk-keep"),
+        now,
+    );
+
+    assert_eq!(manager.invalidate_vendor_key(&vendor_key("vk-missing")), 0);
+    assert_eq!(manager.sweep_expired(now + Duration::from_secs(9)), 0);
+    assert_eq!(manager.len(), 1);
+
+    assert_eq!(manager.invalidate_vendor_key(&vendor_key("vk-keep")), 1);
+    assert_eq!(manager.invalidate_vendor_key(&vendor_key("vk-keep")), 0);
+    assert_eq!(manager.sweep_expired(now + Duration::from_secs(10)), 0);
+    assert!(manager.is_empty());
+}
+
+#[test]
 fn affinity_dimensions_are_isolated() {
     let now = Instant::now();
     let manager = AffinityManager::new(Duration::from_secs(60));
