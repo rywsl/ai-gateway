@@ -19,6 +19,7 @@ members = [
     "crates/gw-gateway",
     "crates/gw-unified",
     "crates/gw-tunnel-client",
+    "crates/gw-tunnel-server",
     "crates/e2e-fake-upstream",
     "crates/e2e-fake-web",
     "crates/gw-egress-impersonate",

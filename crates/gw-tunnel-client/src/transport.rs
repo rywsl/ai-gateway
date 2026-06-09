@@ -1,14 +1,15 @@
 //! WebSocket transport — heartbeat + alive-tracking layer over the frame
 //! protocol. Reconnect orchestration lives in `pool::ReconnectingTransport`.
 
-use crate::frame::{decode_frame, encode_frame, Frame, MsgType};
+use crate::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use secrecy::{ExposeSecret, SecretString};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
@@ -37,7 +38,86 @@ pub struct WsTransport {
     alive: Arc<AtomicBool>,
     last_pong_ms: Arc<AtomicU64>,
     next_stream_id: Arc<AtomicU32>,
+    routes: Arc<Mutex<HashMap<u32, mpsc::Sender<TunnelEvent>>>>,
+    stream_permits: Arc<Semaphore>,
     out_tx: mpsc::Sender<Frame>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TunnelError {
+    #[error("transport is not alive")]
+    NotAlive,
+    #[error("stream cap exceeded")]
+    StreamCapExceeded,
+    #[error("stream closed")]
+    Closed,
+    #[error("remote tunnel error: {0}")]
+    Remote(String),
+    #[error("send failed: {0}")]
+    Send(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelEvent {
+    Data(Bytes),
+    Close,
+    Error(String),
+}
+
+pub struct TunnelStream {
+    stream_id: u32,
+    out_tx: mpsc::Sender<Frame>,
+    rx: mpsc::Receiver<TunnelEvent>,
+    routes: Arc<Mutex<HashMap<u32, mpsc::Sender<TunnelEvent>>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl std::fmt::Debug for TunnelStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelStream")
+            .field("stream_id", &self.stream_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TunnelStream {
+    pub fn stream_id(&self) -> u32 {
+        self.stream_id
+    }
+
+    pub async fn send_data(&self, payload: Bytes) -> Result<(), TunnelError> {
+        send_data_frames(&self.out_tx, self.stream_id, payload).await
+    }
+
+    pub async fn close(&self) -> Result<(), TunnelError> {
+        self.out_tx
+            .send(Frame {
+                msg_type: MsgType::Close,
+                flags: 0,
+                stream_id: self.stream_id,
+                payload: Bytes::new(),
+            })
+            .await
+            .map_err(|e| TunnelError::Send(e.to_string()))
+    }
+
+    pub async fn recv(&mut self) -> Result<TunnelEvent, TunnelError> {
+        match self.rx.recv().await {
+            Some(TunnelEvent::Error(err)) => Err(TunnelError::Remote(err)),
+            Some(event) => Ok(event),
+            None => Err(TunnelError::Closed),
+        }
+    }
+}
+
+impl Drop for TunnelStream {
+    fn drop(&mut self) {
+        let routes = self.routes.clone();
+        let stream_id = self.stream_id;
+        tokio::spawn(async move {
+            routes.lock().await.remove(&stream_id);
+        });
+    }
 }
 
 impl WsTransport {
@@ -48,6 +128,9 @@ impl WsTransport {
         let alive = Arc::new(AtomicBool::new(true));
         let last_pong_ms = Arc::new(AtomicU64::new(now_ms()));
         let missed = Arc::new(AtomicU32::new(0));
+        let routes: Arc<Mutex<HashMap<u32, mpsc::Sender<TunnelEvent>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let stream_permits = Arc::new(Semaphore::new(cfg.max_streams_per_conn.max(1) as usize));
 
         {
             let alive = alive.clone();
@@ -79,6 +162,8 @@ impl WsTransport {
             let alive = alive.clone();
             let last_pong_ms = last_pong_ms.clone();
             let missed = missed.clone();
+            let routes = routes.clone();
+            let pong_tx = out_tx.clone();
             tokio::spawn(async move {
                 while let Some(msg) = stream.next().await {
                     let m = match msg {
@@ -89,10 +174,51 @@ impl WsTransport {
                         }
                     };
                     if let Message::Binary(bin) = m {
-                        if let Ok(Some((f, _))) = decode_frame(&bin) {
-                            if f.msg_type == MsgType::Pong {
-                                last_pong_ms.store(now_ms(), Ordering::Release);
-                                missed.store(0, Ordering::Release);
+                        match decode_frame(&bin) {
+                            Ok(Some((f, _))) => match f.msg_type {
+                                MsgType::Pong => {
+                                    last_pong_ms.store(now_ms(), Ordering::Release);
+                                    missed.store(0, Ordering::Release);
+                                }
+                                MsgType::Data | MsgType::Close | MsgType::Error => {
+                                    let tx = routes.lock().await.get(&f.stream_id).cloned();
+                                    if let Some(tx) = tx {
+                                        let event = match f.msg_type {
+                                            MsgType::Data => TunnelEvent::Data(f.payload),
+                                            MsgType::Close => TunnelEvent::Close,
+                                            MsgType::Error => TunnelEvent::Error(
+                                                String::from_utf8_lossy(&f.payload).to_string(),
+                                            ),
+                                            _ => unreachable!(),
+                                        };
+                                        let terminal = matches!(
+                                            event,
+                                            TunnelEvent::Close | TunnelEvent::Error(_)
+                                        );
+                                        let _ = tx.send(event).await;
+                                        if terminal {
+                                            routes.lock().await.remove(&f.stream_id);
+                                        }
+                                    }
+                                }
+                                MsgType::Ping => {
+                                    // Server-originated pings are answered by the client.
+                                    let _ = pong_tx
+                                        .send(Frame {
+                                            msg_type: MsgType::Pong,
+                                            flags: 0,
+                                            stream_id: f.stream_id,
+                                            payload: f.payload,
+                                        })
+                                        .await;
+                                }
+                                MsgType::ControlNodeInfo | MsgType::Open | MsgType::ControlAuth => {
+                                }
+                            },
+                            Ok(None) => {}
+                            Err(_) => {
+                                alive.store(false, Ordering::Release);
+                                break;
                             }
                         }
                     }
@@ -139,6 +265,8 @@ impl WsTransport {
             alive,
             last_pong_ms,
             next_stream_id: Arc::new(AtomicU32::new(1)),
+            routes,
+            stream_permits,
             out_tx,
         })
     }
@@ -153,6 +281,38 @@ impl WsTransport {
 
     pub async fn send_open(&self, target: &str) -> anyhow::Result<u32> {
         let id = self.next_stream_id.fetch_add(1, Ordering::AcqRel);
+        self.send_open_with_id(id, target)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(id)
+    }
+
+    pub async fn open_stream(&self, target: &str) -> Result<TunnelStream, TunnelError> {
+        if !self.is_alive() {
+            return Err(TunnelError::NotAlive);
+        }
+        let permit = self
+            .stream_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| TunnelError::StreamCapExceeded)?;
+        let id = self.next_stream_id.fetch_add(1, Ordering::AcqRel);
+        let (tx, rx) = mpsc::channel(64);
+        self.routes.lock().await.insert(id, tx);
+        if let Err(err) = self.send_open_with_id(id, target).await {
+            self.routes.lock().await.remove(&id);
+            return Err(err);
+        }
+        Ok(TunnelStream {
+            stream_id: id,
+            out_tx: self.out_tx.clone(),
+            rx,
+            routes: self.routes.clone(),
+            _permit: permit,
+        })
+    }
+
+    async fn send_open_with_id(&self, id: u32, target: &str) -> Result<(), TunnelError> {
         let f = Frame {
             msg_type: MsgType::Open,
             flags: 0,
@@ -162,12 +322,23 @@ impl WsTransport {
         self.out_tx
             .send(f)
             .await
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        Ok(id)
+            .map_err(|e| TunnelError::Send(e.to_string()))
     }
 
     pub async fn send_data(&self, stream_id: u32, payload: Bytes) -> anyhow::Result<()> {
-        self.out_tx
+        send_data_frames(&self.out_tx, stream_id, payload)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+
+async fn send_data_frames(
+    out_tx: &mpsc::Sender<Frame>,
+    stream_id: u32,
+    payload: Bytes,
+) -> Result<(), TunnelError> {
+    if payload.len() <= MAX_PAYLOAD_LEN {
+        return out_tx
             .send(Frame {
                 msg_type: MsgType::Data,
                 flags: 0,
@@ -175,8 +346,20 @@ impl WsTransport {
                 payload,
             })
             .await
-            .map_err(|e| anyhow::anyhow!(e.to_string()))
+            .map_err(|e| TunnelError::Send(e.to_string()));
     }
+    for chunk in payload.chunks(MAX_PAYLOAD_LEN) {
+        out_tx
+            .send(Frame {
+                msg_type: MsgType::Data,
+                flags: 0,
+                stream_id,
+                payload: Bytes::copy_from_slice(chunk),
+            })
+            .await
+            .map_err(|e| TunnelError::Send(e.to_string()))?;
+    }
+    Ok(())
 }
 
 fn now_ms() -> u64 {
