@@ -358,6 +358,42 @@ async fn test_submit_endpoint_stores_codec_rendered_full_ir_wire_body() {
     assert_eq!(payload["body"]["messages"][0]["content"], "hi");
 }
 
+#[tokio::test]
+async fn test_submit_endpoint_skips_ir_attachment_for_cli_protocol_with_responses_codec() {
+    let contract = MemoryTaskContract::default();
+
+    let response = gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"model":"gpt-5","background":true,"input":"hi"}"#,
+            user_id: "user_task",
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai:cli",
+            client_codec: Some(&AnyCodec::OpenAiResponses(
+                gw_codec::openai::responses::OpenAiResponsesCodec,
+            )),
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: None,
+            available_balance_micro: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 201);
+    let submitted = contract.submitted.lock().unwrap();
+    assert_eq!(submitted.len(), 1);
+    let payload = &submitted[0].input_payload;
+    assert_eq!(submitted[0].client_protocol, "openai:cli");
+    assert_eq!(payload["model"], "gpt-5");
+    assert_eq!(payload["background"], true);
+    assert_eq!(payload["input"], "hi");
+    assert!(payload.get("ir_request").is_none());
+    assert!(payload.get("ir_wire_body").is_none());
+    assert!(payload.get("ir_wire_format").is_none());
+}
+
 fn seed_balance(user_id: &str, base_micro: i64) {
     let state = Arc::new(DeductionState {
         base_micro: AtomicI64::new(base_micro),

@@ -352,7 +352,7 @@ fn attach_ir_wire_body(
     let Some(codec) = codec else {
         return Ok(());
     };
-    if codec.api_shape().is_cli() {
+    if client_protocol_is_cli(client_protocol) {
         return Ok(());
     }
     let source = payload.get(gw_task::TASK_BODY).unwrap_or(payload);
@@ -393,6 +393,13 @@ fn attach_ir_wire_body(
         serde_json::Value::String(rendered),
     );
     Ok(())
+}
+
+fn client_protocol_is_cli(client_protocol: &str) -> bool {
+    matches!(
+        client_protocol,
+        "claude:cli" | "openai:cli" | "openai:compact" | "gemini:cli"
+    )
 }
 
 fn now_ms() -> u64 {
