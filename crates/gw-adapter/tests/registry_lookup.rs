@@ -47,6 +47,12 @@ fn lookup_returns_registered_adapter() {
 }
 
 #[test]
+fn builtin_vendor_adapters_match_known_vendor_ids() {
+    let r = AdapterRegistry::default();
+    assert_eq!(r.for_vendor(&VendorId::from("kiro-prod")).name(), "kiro");
+}
+
+#[test]
 fn analyzer_lookup_falls_back_to_default() {
     let r = AdapterRegistry::default();
     let v = VendorId::from("unknown".to_string());

@@ -12,6 +12,7 @@
 pub mod analyzer;
 pub mod ctx;
 pub mod error;
+pub mod kiro;
 pub mod noop;
 pub mod oauth_runtime;
 pub mod registry;
@@ -25,6 +26,7 @@ pub use ctx::{
     AdapterCtx, HeadersAccessor, HeadersMut, OAuthRuntime, OAuthTokenResult, UrlAccessor, UrlMut,
 };
 pub use error::AdapterError;
+pub use kiro::KiroAdapter;
 pub use noop::NoopAdapter;
 pub use registry::AdapterRegistry;
 pub use trait_def::{ChromeVersion, TransportProfile, UpstreamAdapter};

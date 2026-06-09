@@ -3,6 +3,7 @@
 //! Built at gateway / worker bootstrap; one shared instance per process.
 
 use crate::analyzer::{DefaultErrorAnalyzer, KeywordErrorAnalyzer, UpstreamErrorAnalyzer};
+use crate::kiro::KiroAdapter;
 use crate::noop::NoopAdapter;
 use crate::trait_def::UpstreamAdapter;
 use dashmap::DashMap;
@@ -48,6 +49,7 @@ impl AdapterRegistry {
         self.by_vendor
             .get(v)
             .map(|e| e.value().clone())
+            .or_else(|| builtin_adapter_for(v))
             .unwrap_or_else(|| (self.default_adapter.clone()) as Arc<dyn UpstreamAdapter>)
     }
 
@@ -60,6 +62,14 @@ impl AdapterRegistry {
                 (self.default_error_analyzer.clone()) as Arc<dyn UpstreamErrorAnalyzer>
             })
     }
+}
+
+fn builtin_adapter_for(vendor: &VendorId) -> Option<Arc<dyn UpstreamAdapter>> {
+    let id = vendor.as_ref().to_ascii_lowercase();
+    if id.contains("kiro") {
+        return Some(Arc::new(KiroAdapter));
+    }
+    None
 }
 
 fn builtin_error_analyzer_for(vendor: &VendorId) -> Option<Arc<dyn UpstreamErrorAnalyzer>> {
