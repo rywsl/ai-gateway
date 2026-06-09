@@ -20,6 +20,11 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 - **Spec:** `docs/spec/01-protocol-codec.md`, `docs/spec/06-billing-ledger.md`, `docs/go-contracts/parts/02-go-as-consumer.md`.
 - **Boundary:** the retired `UsageSource` field remains deleted; the as-built contract stays on per-dimension `usage_provenance`.
 
+### OpenAI/Kiro CLI body-level detection and ApiShape split — `capability-gap`
+- **Intent:** distinguish standard OpenAI Responses async tasks from OpenAI CLI/Kiro semantic request bodies without relying on test-only `client_protocol` injection.
+- **Design points:** W4 stores full IR for standard `/v1/responses background:true` and preserves `/v1/responses/compact` plus CLI-marked direct-submit compatibility. Real early detection still only has path/header/body-head inputs, so body-level OpenAI/Kiro markers and any dedicated Kiro/OpenAI CLI `ApiShape` registration belong in the W7/Kiro CLI lane.
+- **Source:** W4 final quality review (2026-06-09).
+
 ## 02 routing
 
 ### R-D proxy wiring for api-key affinity — closed in spec

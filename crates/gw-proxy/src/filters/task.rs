@@ -411,7 +411,7 @@ fn ir_storage_protocol<'a>(
                     .get("background")
                     .and_then(serde_json::Value::as_bool)
                     == Some(true)
-                && !is_openai_responses_cli_semantic(payload) =>
+                && !has_openai_responses_cli_body_marker(payload) =>
         {
             Some("openai:responses")
         }
@@ -420,7 +420,7 @@ fn ir_storage_protocol<'a>(
     }
 }
 
-fn is_openai_responses_cli_semantic(payload: &serde_json::Value) -> bool {
+fn has_openai_responses_cli_body_marker(payload: &serde_json::Value) -> bool {
     payload
         .get("metadata")
         .and_then(|metadata| metadata.get("cli"))

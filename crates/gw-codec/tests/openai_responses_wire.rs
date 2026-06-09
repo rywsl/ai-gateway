@@ -85,6 +85,64 @@ fn responses_request_parse_render_round_trips_task_body() {
 }
 
 #[test]
+fn responses_request_preserved_input_does_not_synthesize_absent_instructions() {
+    let body = br#"{
+        "model":"gpt-5",
+        "input":[
+            {"type":"message","role":"system","content":"system from input"},
+            {"type":"message","role":"developer","content":"developer from input"},
+            {"type":"message","role":"user","content":"hi"}
+        ]
+    }"#;
+    let ir = OpenAiResponsesCodec.parse_request(body).unwrap();
+
+    assert!(matches!(ir.messages[0], MessageIR::System { .. }));
+    assert!(matches!(ir.messages[1], MessageIR::Developer { .. }));
+    assert!(matches!(ir.messages[2], MessageIR::User { .. }));
+
+    let stored = serde_json::to_value(&ir).expect("serialize request ir");
+    let restored: RequestIR<'static> = serde_json::from_value(stored).expect("restore request ir");
+
+    let mut rendered = bytes::BytesMut::new();
+    OpenAiResponsesCodec
+        .render_request(&restored, &mut rendered)
+        .expect("render restored responses request");
+    let rendered_json: serde_json::Value =
+        serde_json::from_slice(&rendered).expect("rendered request json");
+
+    assert_eq!(rendered_json["model"], "gpt-5");
+    assert!(rendered_json.get("instructions").is_none());
+    assert_eq!(rendered_json["input"][0]["role"], "system");
+    assert_eq!(rendered_json["input"][1]["role"], "developer");
+}
+
+#[test]
+fn responses_request_preserved_input_round_trips_present_instructions() {
+    let body = br#"{
+        "model":"gpt-5",
+        "instructions":"top-level instructions",
+        "input":[
+            {"type":"message","role":"developer","content":"developer from input"},
+            {"type":"message","role":"user","content":"hi"}
+        ]
+    }"#;
+    let ir = OpenAiResponsesCodec.parse_request(body).unwrap();
+
+    let stored = serde_json::to_value(&ir).expect("serialize request ir");
+    let restored: RequestIR<'static> = serde_json::from_value(stored).expect("restore request ir");
+
+    let mut rendered = bytes::BytesMut::new();
+    OpenAiResponsesCodec
+        .render_request(&restored, &mut rendered)
+        .expect("render restored responses request");
+    let rendered_json: serde_json::Value =
+        serde_json::from_slice(&rendered).expect("rendered request json");
+
+    assert_eq!(rendered_json["instructions"], "top-level instructions");
+    assert_eq!(rendered_json["input"][0]["role"], "developer");
+}
+
+#[test]
 fn responses_request_render_reconstructed_ir_uses_item_array_input() {
     let ir = RequestIR {
         model: Cow::Borrowed("gpt-5"),

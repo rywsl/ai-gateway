@@ -293,19 +293,27 @@ impl ProtocolCodec for OpenAiResponsesCodec {
 }
 
 const EXT_INPUT: &str = "openai_responses_input";
+const EXT_INSTRUCTIONS: &str = "openai_responses_instructions";
 const EXT_PREVIOUS_RESPONSE_ID: &str = "openai_responses_previous_response_id";
 
 fn responses_request_to_ir<'a>(req: OpenAiResponsesRequest) -> RequestIR<'a> {
     let mut messages = Vec::new();
-    if let Some(instructions) = req.instructions {
+    let instructions = req.instructions;
+    if let Some(instructions) = instructions.as_ref() {
         messages.push(MessageIR::System {
-            content: ContentIR::Text(Cow::Owned(instructions)),
+            content: ContentIR::Text(Cow::Owned(instructions.clone())),
         });
     }
     messages.extend(messages_from_responses_input(&req.input));
 
     let mut extensions = value_map_to_raw_map(req.extras);
     extensions.insert(EXT_INPUT.into(), value_to_raw(req.input));
+    if let Some(instructions) = instructions {
+        extensions.insert(
+            EXT_INSTRUCTIONS.into(),
+            value_to_raw(Value::String(instructions)),
+        );
+    }
     if let Some(previous_response_id) = req.previous_response_id {
         extensions.insert(
             EXT_PREVIOUS_RESPONSE_ID.into(),
@@ -387,13 +395,21 @@ fn responses_request_from_ir(
     ir: &RequestIR<'_>,
 ) -> Result<OpenAiResponsesRequest, ErrorIR<'static>> {
     let mut extras = raw_map_to_value_map(ir.extensions.as_ref())?;
-    let input = extras
-        .remove(EXT_INPUT)
+    let preserved_input = extras.remove(EXT_INPUT);
+    let input = preserved_input
+        .clone()
         .unwrap_or_else(|| input_from_ir_messages(&ir.messages));
+    let preserved_instructions = extras
+        .remove(EXT_INSTRUCTIONS)
+        .and_then(|v| v.as_str().map(str::to_owned));
     let previous_response_id = extras
         .remove(EXT_PREVIOUS_RESPONSE_ID)
         .and_then(|v| v.as_str().map(str::to_owned));
-    let instructions = first_system_instruction(&ir.messages);
+    let instructions = if preserved_input.is_some() {
+        preserved_instructions
+    } else {
+        first_system_instruction(&ir.messages)
+    };
 
     Ok(OpenAiResponsesRequest {
         model: ir.model.to_string(),

@@ -394,7 +394,7 @@ async fn test_submit_endpoint_skips_ir_attachment_for_cli_protocol_with_response
 }
 
 #[tokio::test]
-async fn test_submit_endpoint_skips_ir_attachment_for_cli_semantic_background_body() {
+async fn test_submit_endpoint_preserves_direct_submit_for_cli_body_marker() {
     let contract = MemoryTaskContract::default();
 
     let response = gw_proxy::filters::task::submit_endpoint(
@@ -470,7 +470,7 @@ async fn test_submit_endpoint_stores_full_ir_for_responses_background() {
 }
 
 #[tokio::test]
-async fn test_submit_endpoint_corrects_misdetected_cli_for_responses_background() {
+async fn test_submit_endpoint_attaches_responses_ir_for_direct_submit_without_cli_body_marker() {
     let contract = MemoryTaskContract::default();
 
     let response = gw_proxy::filters::task::submit_endpoint(
