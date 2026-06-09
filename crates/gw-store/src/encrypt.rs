@@ -21,7 +21,7 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use arc_swap::ArcSwap;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -170,6 +170,34 @@ pub fn decrypt(enc: &EncryptedKey, cache: &KekCache) -> anyhow::Result<SecretStr
     Ok(SecretString::from(s))
 }
 
+pub fn encrypt_with_active_kek(
+    plain: &SecretString,
+    cache: &KekCache,
+) -> anyhow::Result<EncryptedKey> {
+    use aes_gcm::aead::{AeadCore, OsRng};
+
+    let kid = cache.active_kid();
+    let kek = cache
+        .get(&kid)
+        .ok_or_else(|| anyhow::anyhow!("active kek not found: {kid}"))?;
+    let cipher = Aes256Gcm::new(kek.into());
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ct = cipher
+        .encrypt(&nonce, plain.expose_secret().as_bytes())
+        .map_err(|_| anyhow::anyhow!("encrypt failed"))?;
+    let split_at = ct
+        .len()
+        .checked_sub(16)
+        .ok_or_else(|| anyhow::anyhow!("ciphertext too short"))?;
+    let (ciphertext, auth_tag) = ct.split_at(split_at);
+    Ok(EncryptedKey {
+        ciphertext: ciphertext.to_vec(),
+        nonce: nonce.to_vec(),
+        auth_tag: auth_tag.to_vec(),
+        kek_kid: kid,
+    })
+}
+
 /// FOR TESTS ONLY: encrypts plain into an EncryptedKey using the provided KEK.
 /// Do not call from production code — production data must come through KMS.
 /// This function is exposed for integration tests; future versions may gate
@@ -188,5 +216,25 @@ pub fn encrypt_for_test_only(plain: &str, kek: [u8; 32]) -> EncryptedKey {
         nonce: nonce.to_vec(),
         auth_tag: tag.to_vec(),
         kek_kid: "test".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod production_encrypt_tests {
+    use super::*;
+    use secrecy::ExposeSecret;
+
+    #[test]
+    fn encrypt_with_active_kek_roundtrips_secret() {
+        let kek = [7u8; 32];
+        let cache = KekCache::with_active(
+            std::collections::HashMap::from([("active".to_string(), kek)]),
+            Some("active"),
+        );
+        let secret = secrecy::SecretString::from("access-token-1");
+        let encrypted = encrypt_with_active_kek(&secret, &cache).unwrap();
+        assert_eq!(encrypted.kek_kid, "active");
+        let decrypted = decrypt(&encrypted, &cache).unwrap();
+        assert_eq!(decrypted.expose_secret(), "access-token-1");
     }
 }
