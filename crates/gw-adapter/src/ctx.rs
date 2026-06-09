@@ -5,13 +5,23 @@
 //! runtime implements these traits over their native types
 //! (pingora::http::RequestHeader, etc.) at the call site.
 
+use async_trait::async_trait;
 use gw_core::entity::VendorKey;
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::protocol::{ApiFormat, ProtocolKind};
 use gw_health::store::KeyHealthStore;
 use std::sync::Arc;
 
-/// Phase 1d carries health_store only; oauth_cache (K-C) is added in Phase 3.
+#[async_trait]
+pub trait OAuthRuntime: Send + Sync {
+    async fn get_access_token(
+        &self,
+        _vendor_key: &VendorKey,
+    ) -> Result<Option<secrecy::SecretString>, String> {
+        Ok(None)
+    }
+}
+
 pub struct AdapterCtx<'a> {
     pub vendor_id: VendorId,
     pub vendor_key_id: KeyId,
@@ -28,6 +38,10 @@ pub struct AdapterCtx<'a> {
     /// but never writes back (only K-B vendor analyzers and the logging
     /// filter do).
     pub health_store: &'a Arc<KeyHealthStore>,
+
+    /// Optional W6 runtime OAuth cache/refresher seam. W5 only carries this
+    /// handle so adapters can be wired without double-writing refresh state.
+    pub oauth_runtime: Option<&'a Arc<dyn OAuthRuntime>>,
 
     pub headers_mut: HeadersMut<'a>,
     pub url_mut: UrlMut<'a>,

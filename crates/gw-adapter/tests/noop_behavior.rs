@@ -91,6 +91,7 @@ async fn noop_injects_x_api_key_and_removes_authorization() {
         user_id: UserId::from("u-1".to_string()),
         api_format: ProtocolKind::OpenAi,
         health_store: &health,
+        oauth_runtime: None,
         headers_mut: HeadersMut { inner: &mut hdrs },
         url_mut: UrlMut { inner: &mut url },
         trace_id: "trace-1",

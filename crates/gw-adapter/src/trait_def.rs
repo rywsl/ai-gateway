@@ -1,8 +1,9 @@
-//! `UpstreamAdapter` v2 — 4 hooks + `transport_profile` declaration.
+//! `UpstreamAdapter` v2 - 4 hooks + `transport_profile` declaration.
 //!
-//! Spec: A-T0 §ADR-AT0-1. Each vendor adapter (claude_code / gemini_cli /
-//! vertex_ai / antigravity / codex / kiro) implements this trait; the proxy
-//! and the task runtime call into it via `AdapterRegistry::for_vendor`.
+//! Spec: A-T0 ADR-AT0-1 and F1. Each vendor adapter implements this trait
+//! for proxy outbound request rewriting. The task worker does not call
+//! adapters; task submission must pre-render wire bytes before enqueue and
+//! the worker sends those bytes verbatim.
 
 use crate::ctx::AdapterCtx;
 use crate::error::AdapterError;
@@ -37,9 +38,10 @@ pub trait UpstreamAdapter: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Browser-fingerprint declaration (A12). `None` = standard pingora
-    /// transport; `Some(profile)` = the http-client selector picks an
-    /// impersonate-capable backend.
+    /// Browser-fingerprint declaration. `None` means standard Pingora
+    /// transport; `Some(profile)` lets the proxy select its existing
+    /// impersonate-capable egress path. The adapter does not implement TLS
+    /// fingerprinting itself.
     fn transport_profile(&self) -> Option<TransportProfile> {
         None
     }
