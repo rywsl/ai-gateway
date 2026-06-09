@@ -32,10 +32,9 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 - **Boundary:** `strategy/cache_affinity.rs` remains unchanged and continues to implement message-hash request affinity, separate from API-key request-external affinity.
 - **Spec:** `docs/spec/02-routing.md`.
 
-### R-F stream probe (first-chunk failover window) — `capability-gap`
-- **Intent:** allow failover when a stream fails *after* the upstream's first byte but *before* any SSE event reaches the client.
-- **Design points:** `StreamPhase` (Connecting/Probing/Streaming) + `probe_timeout` watchdog + `ProbeFailure` (upstream-error-body / malformed-frame / timeout) + `gw_stream_probe_*` metrics. Today `gw-proxy/src/gateway.rs` conflates first-upstream-byte with first-client-byte via `body_started`.
-- **Source:** deleted `routing-r-f-stream-probe`.
+### R-F stream probe (first-chunk failover window) — closed in spec
+- **Landed:** `gw-proxy::stream_probe` now separates first upstream body bytes from first client-visible body commit. Streaming responses enter `Connecting` / `Probing` / `Streaming` phases, buffer probe bytes in `upstream_response_body_filter`, fail over on upstream error body, malformed first frame, or probe timeout before downstream commit, and preserve no-retry behavior after a valid event/body has been committed. `gw_stream_probe_*` metrics are registered without key-level labels.
+- **Spec:** `docs/spec/02-routing.md`.
 
 ## 03 key-health
 
