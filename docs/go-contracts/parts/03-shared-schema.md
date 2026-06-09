@@ -171,11 +171,29 @@ deleted_at  TIMESTAMPTZ NULL
 }
 ```
 
+`accessible_endpoints` 使用 Rust `ProtocolKind::as_str()` / JSONB wire string。当前标准协议字符串为 `openai`、`anthropic`、`gemini`、`kiro`。Kiro EventStream and Kiro CLI share `ProtocolKind::Kiro` / `kiro`; EventStream uses `ApiShape::KiroEventStream` with `ApiShape::format_id() == "kiro:eventstream"`, while CLI uses `ApiShape::KiroCli` with `ApiShape::format_id() == "kiro:cli"`. Runtime code must choose by `ApiShape`, not by protocol string alone.
+
 > **0004 列冗余说明**：migration 0004 在 `vendor_keys` 表上**同时**加了 top-level 列 `forced_capabilities JSONB` 与 `exclusive_capability_match BOOLEAN`，但 Rust 实际通过 `payload.forced_capabilities` / `payload.exclusive_capability_match` 反序列化（见 `loader.rs:101-141`）。top-level 列**仅供 Go 端建索引或查询**，不是 Rust 数据来源。Go 写入时**必须**同时写两处，否则 Rust 看不到。
 
 > **0009 `identity_snapshot` 列说明**：`vendor_keys.identity_snapshot` 是 top-level JSONB 列，不是 Go 写入 `payload` 的字段。Rust `load_vendor_key` 用 `jsonb_set(payload, '{identity_snapshot}', COALESCE(identity_snapshot, 'null'::jsonb), true)` 将该列折叠进反序列化 payload。Rust 首次 impersonated dispatch 通过 `PgSnapshotWriter::write_if_null` 懒写该列；Go 的 regenerate-identity 管理动作必须 `SET identity_snapshot = NULL, version = version + 1` 并发出 `events:entity ns=vendor_key`，详见 [`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md)。
 
 > **0010 `quota_state` 列说明**：`vendor_keys.quota_availability`、`quota_remaining`、`quota_limit`、`quota_reset_at`、`quota_observed_at`、`quota_source` 是 Rust 运行时 quota snapshot writer 的结构化列。Rust `load_vendor_key` 将这些列折叠为 `payload.quota_state`，路由在候选过滤阶段跳过 `availability = exhausted` 且未到 reset 的 key。Go 可读取这些列做报表/管理展示，但不得作为运行时 writer；Rust 写入后会自增 `version` 并发出 `events:entity ns=vendor_key op=quota_state`。
+
+#### Kiro SigV4 `api_key_enc` plaintext shape
+
+For Kiro vendor keys, the decrypted `api_key_enc` plaintext is not a raw bearer token. It is JSON consumed by Rust `KiroAdapter`:
+
+```json
+{
+  "access_key_id": "AKIA...",
+  "secret_access_key": "aws-secret",
+  "session_token": null,
+  "region": "us-east-1",
+  "service": "bedrock"
+}
+```
+
+`session_token` is optional and `service` defaults to `execute-api` when omitted. Go still stores this value through the existing encrypted `api_key_enc` envelope; Rust decrypts it into `VendorKey.api_key` and redacts it through `SecretString`.
 
 #### `tunnel_preference` 子结构(可选)
 
@@ -199,7 +217,8 @@ deleted_at  TIMESTAMPTZ NULL
   "refresh_token_enc": { /* AES-256-GCM 四元组 */ },
   "access_expires_at": "2026-05-22T12:00:00Z",
   "token_endpoint": "https://oauth.anthropic.com/token",
-  "scope": ["chat.completions"]
+  "scope": ["chat.completions"],
+  "quota_project_id": null
 }
 ```
 
@@ -208,6 +227,7 @@ deleted_at  TIMESTAMPTZ NULL
 - Go writes OAuth configuration and initial authorization seed data.
 - Rust writes runtime refresh results for `vendor_keys.payload.oauth`.
 - Rust reads `token_endpoint` for vendor-key runtime refresh.
+- Vertex/Google keys use this same OAuth runtime contract: W7 `VertexAdapter` consumes the W6 runtime access token and injects `Authorization: Bearer`; it reads `quota_project_id` to set `x-goog-user-project` when present. The adapter does not call PgSQL, Redis, or Google token endpoints directly.
 - Rust encrypts refreshed tokens with the active KEK and persists with version CAS.
 - Rust emits `events:entity ns=vendor_key op=upsert` after a successful write.
 - Go must not perform runtime refresh write-back for this sub-object after K-C.

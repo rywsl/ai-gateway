@@ -1,6 +1,6 @@
 # 07 — Vendor Integration (as-built)
 
-- Family: A (adapter/egress) · Backing crates: `gw-adapter`, `gw-egress-impersonate`, `gw-core::impersonate` · Source-of-truth: `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/gateway.rs`, `crates/gw-adapter/src/{ctx.rs,noop.rs,registry.rs,analyzer.rs}`, `crates/gw-core/src/impersonate/`, `crates/gw-egress-impersonate/src/`, `crates/gw-store/src/loader.rs`, `crates/gw-proxy/src/error/listeners/oauth.rs` · Status: outbound vendor header injection and OAuth-token injection run through `gw-adapter::AdapterRegistry::for_vendor`; egress impersonation remains in the existing proxy + `gw-core::impersonate` / `gw-egress-impersonate` path.
+- Family: A (adapter/egress) · Backing crates: `gw-adapter`, `gw-egress-impersonate`, `gw-core::impersonate` · Source-of-truth: `crates/gw-proxy/src/filters/upstream.rs`, `crates/gw-proxy/src/gateway.rs`, `crates/gw-adapter/src/{ctx.rs,noop.rs,registry.rs,kiro.rs,vertex.rs,codex.rs,analyzer.rs}`, `crates/gw-core/src/impersonate/`, `crates/gw-egress-impersonate/src/`, `crates/gw-store/src/loader.rs`, `crates/gw-proxy/src/error/listeners/oauth.rs` · Status: outbound vendor header injection, selected vendor-specific request transforms, and OAuth-token injection run through `gw-adapter::AdapterRegistry::for_vendor`; egress impersonation remains in the existing proxy + `gw-core::impersonate` / `gw-egress-impersonate` path.
 
 ## Purpose
 
@@ -16,7 +16,8 @@ Vendor auth/header work happens inside `rewrite_request` -> `apply_outbound_adap
 - The auth secret is chosen in `noop.rs`: if `ctx.vendor_key.oauth.is_some()` the adapter obtains a runtime access token from `ctx.oauth_runtime.access_token_for(...)`; otherwise `ctx.vendor_key.api_key` is exposed via `secrecy::ExposeSecret`.
 - The injection honors the **header name encoded in `Vendor.auth_template`**. The template is split on its first `:`; if the left side is a valid header-name token (`is_header_token`, `noop.rs`) the value is injected under that name (e.g. `x-goog-api-key: {api_key}` for native Gemini, `x-api-key: {api_key}` for Anthropic). A template with no colon (e.g. `Bearer {api_key}`) injects under `authorization`. A colon with an invalid token falls back leniently to `authorization` and ticks `gw_upstream_auth_header_invalid_total`. `{api_key}` is substituted in the value template after the split, so a secret containing a colon is safe.
 - `host` is set from the adapter context's `upstream_host`, derived from `vendor.value.base_urls.first()` in `apply_outbound_adapter` (`crates/gw-proxy/src/filters/upstream.rs`).
-- A W3C `traceparent` (`00-<trace_id>-<fresh-8-byte-span>-01`) is set per upstream hop by `NoopAdapter`; `content-length` is rewritten from the rendered body length carried in `AdapterCtx`.
+- A W3C `traceparent` (`00-<trace_id>-<fresh-8-byte-span>-01`) is set per upstream hop by `NoopAdapter`; `content-length` is rewritten from the final body length carried in `AdapterCtx`.
+- `apply_outbound_adapter` receives the already rendered upstream body, builds `AdapterCtx` with `content_len` and `body_sha256_hex`, invokes `patch_request` only for adapters whose `request_patch_enabled()` returns true, re-renders the typed `WireAnyRequest`, recomputes `content_len`/`body_sha256_hex`, then calls `rewrite_auth` and `rewrite_transport`. The final body is written back to `RequestBodyView` and archived only after adapter patching. Default/noop vendors keep byte-identical request bodies.
 - The upstream peer host/port also come from `Vendor.base_urls.first()` in `pick_peer` (`upstream.rs:362`–`371`); a vendor with no base URL is a hard `gw_vendor_no_base_url` 500.
 
 ### OAuth: Rust refreshes before bearer injection
@@ -47,7 +48,13 @@ Workspace kill-switch: `[egress].disabled` (`EgressCfg.disabled`, `crates/gw-gat
 
 ### `gw-adapter` outbound adapters and error analyzers (wired)
 
-`crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`patch_response`/`transport_profile`), an `AdapterRegistry`, an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait. The outbound `UpstreamAdapter` path is wired in production request rewriting through `apply_outbound_adapter` (`crates/gw-proxy/src/filters/upstream.rs`). `AdapterCtx` carries request metadata (`auth_template`, `upstream_host`, `content_len`) plus an optional inert `OAuthRuntime` slot for runtime OAuth cache/refresher ownership; this slot is not used for refresh/write-back in this spec state.
+`crates/gw-adapter/src/lib.rs` exports an `UpstreamAdapter` v2 trait (`trait_def.rs`: `rewrite_auth`/`rewrite_transport`/`patch_request`/`request_patch_enabled`/`patch_response`/`transport_profile`), an `AdapterRegistry`, an `AdapterCtx` carrier, and an `UpstreamErrorAnalyzer` trait. The outbound `UpstreamAdapter` path is wired in production request rewriting through `apply_outbound_adapter` (`crates/gw-proxy/src/filters/upstream.rs`). `AdapterCtx` carries request metadata (`auth_template`, `upstream_host`, final `content_len`, final `body_sha256_hex`) plus an optional `OAuthRuntime` slot for runtime OAuth cache/refresher ownership.
+
+Built-in outbound adapters:
+
+- `KiroAdapter` (`crates/gw-adapter/src/kiro.rs`) is selected for vendor ids containing `kiro`. It strips inbound auth, expects the decrypted `vendor_key.api_key` to be SigV4 credential JSON (`access_key_id`, `secret_access_key`, optional `session_token`, `region`, optional `service` defaulting to `execute-api`), sets `host`, `content-length`, `x-amz-content-sha256`, `x-amz-date`, optional `x-amz-security-token`, and an AWS4-HMAC-SHA256 `authorization` header. The signed payload hash is `AdapterCtx.body_sha256_hex`, so it covers the exact final EventStream bytes sent upstream. Secrets use `SecretString` and Debug output redacts key material.
+- `VertexAdapter` (`crates/gw-adapter/src/vertex.rs`) is selected for vendor ids containing `vertex` / `google_vertex`. It does not call Google, PgSQL, or Redis directly. It consumes `AdapterCtx.oauth_runtime.access_token_for(...)`, injects `Authorization: Bearer <runtime token>`, and writes `x-goog-user-project` from `vendor_key.oauth.quota_project_id` when present. `VertexJwtClaims` is the service-account JWT claim contract shape used by the OAuth runtime/control-plane integration boundary.
+- `CodexAdapter` (`crates/gw-adapter/src/codex.rs`) is selected for vendor ids containing `codex`. It opts into `patch_request` and only mutates `WireAnyRequest::OpenAi`, adding top-level `codex_gateway_metadata` to the OpenAI request `extra` map. It preserves typed OpenAI fields such as `model`, `messages`, `stream`, `tools`, and `tool_choice`. Codex identity headers remain owned by `gw-core::impersonate::openai_codex` and are not duplicated into the body.
 
 The response-side error analyzer path is also wired: `gw-proxy::LlmGateway` holds the same `AdapterRegistry`, calls `error_analyzer_for(vendor_id)` at response EOS with headers and an 8 KiB body head, and merges the resulting `ErrorOutcome` into the classifier outcome. Built-in analyzer fallback exists for codex/openai, anthropic/claude, and gemini/google vendor ids.
 
@@ -60,10 +67,14 @@ The response-side error analyzer path is also wired: `gw-proxy::LlmGateway` hold
 - **Identity persistence is lazy and fingerprint-stable.** A per-key `IdentitySnapshot` is derived once on first impersonated dispatch and persisted out-of-band; profile drift forces a re-derive. (`ensure.rs:19`–`36`)
 - **Outbound auth is adapter-based; impersonate remains external to the adapter.** The production auth/header path dispatches `gw-adapter::UpstreamAdapter`; TLS fingerprinting and identity headers remain in `gw-core::impersonate` / `gw-egress-impersonate`, called after adapter rewrite by `inject_egress_headers`.
 - **OAuth runtime errors fail before upstream auth injection.** An OAuth vendor key without an `OAuthRuntime`, a provider refresh error, or a write-back error returns an adapter auth error instead of sending an expired or stale bearer token as a best-effort fallback.
+- **Task runtime does not call adapters.** Async task submission must pre-render/freeze wire bytes; task runtime sends stored bytes verbatim and does not execute `rewrite_auth`, `rewrite_transport`, or `patch_request`.
+- **Kiro CLI is not Kiro EventStream.** Kiro CLI request detection/usage/passthrough remains a codec CLI-shape concern pending real traffic samples; the Kiro adapter only covers EventStream/SigV4 upstream auth.
 
 ## Cross-process touchpoints
 
 - **PgSQL `vendor_keys` payload** — `oauth` JSONB sub-object (`access_token_enc`, `refresh_token_enc`, `access_expires_at`, `token_endpoint`, `scope`, `quota_project_id`); tokens AES-256-GCM at rest, decrypted in `load_vendor_key`, and runtime-refreshed by Rust through `PgOAuthRefreshWriter`. (`loader.rs:131`, `loader.rs:290`, `oauth_refresh.rs`)
+- **PgSQL `vendor_keys.payload.api_key_enc` for Kiro** — decrypted into `VendorKey.api_key` as SigV4 credential JSON consumed by `KiroAdapter`: `access_key_id`, `secret_access_key`, optional `session_token`, `region`, and optional `service`.
+- **OpenAI request extra for Codex** — `CodexAdapter` adds `codex_gateway_metadata` to the upstream OpenAI request body. This is a Rust outbound-body transform, not a Go persistence field.
 - **PgSQL `vendor_keys.identity_snapshot` column** — written by the lazy-persist queue (Rust) and folded into the payload via `jsonb_set` on read (`loader.rs:224`); shape is `gw_core::impersonate::IdentitySnapshot`.
 - **Redis `events:entity` stream** — Rust publishes refreshed vendor-key upserts after OAuth write-back: `ns=vendor_key id=<key_id> op=upsert v=<new_version> source=rust_oauth_refresh ts_ms=<now>`. `OAuthListener` also emits status-only refresh failures: `ns=vendor_key id=<key_id> op=status_change field=oauth_refresh_status status=rust_refresh_failed reason=upstream_401 source=rust_oauth_refresh ts_ms=<now>`. Go must not consume either as a runtime refresh command. (`oauth_refresh.rs`, `oauth.rs`)
 - **KEK** — `OAuthCredentialsRow`/`VendorKeyRow` decryption uses the shared `KekCache` (`loader.rs:22`, `loader.rs:283`).
@@ -81,6 +92,4 @@ These are governed by `docs/go-contracts/` (KEK rotation, encrypted column shape
 
 ## Not built → ROADMAP
 
-The following are outside outbound v1. F2 and the heavy-transform boundary have been confirmed by `docs/design/2026-06-09-roadmap-authority-and-scope.md`, so these are implementation gaps rather than unresolved decisions.
-
-- **Heavy vendor-specific outbound transforms.** Kiro adapter/AWS SigV4, Vertex AI SA-JWT token exchange, and Codex request-body transforms land behind the confirmed outbound adapter boundary. (capability-gap)
+No open heavy outbound adapter transform remains in this spec. Kiro CLI detector/usage/passthrough remains tracked under `docs/spec/01-protocol-codec.md` because it requires real CLI traffic samples and is not part of the EventStream/SigV4 adapter path.

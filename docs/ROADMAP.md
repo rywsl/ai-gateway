@@ -12,7 +12,7 @@ Items here are **not in the as-built standard** (`docs/spec/`). Each carries act
 ### Kiro / S5 EventStream codec — closed in spec
 - **Intent:** decode Kiro upstreams (AWS EventStream binary frames + embedded `<thinking>` tags) — the heaviest of the six vendor codecs.
 - **Landed:** internal `crates/gw-codec/src/kiro/` EventStream frame codec (length-prefixed + `crc32fast` CRCs), embedded `<thinking>` parser/renderer, focused roundtrip/error tests, `gw-core::ProtocolKind::Kiro`, `ApiShape::KiroEventStream`, `ApiShape::KiroCli`, and `gw-codec::AnyCodec::Kiro` registration for standard EventStream detection via `content-type: application/vnd.amazon.eventstream` plus `/kiro` or `/s5` path.
-- **Boundary:** this closes only codec registration and cross-process shape registration. AWS SigV4, vendor auth injection, full Kiro upstream integration, Kiro CLI marker detection, Kiro CLI usage extraction, and Kiro CLI passthrough behavior remain out of scope.
+- **Boundary:** this closes codec registration and cross-process shape registration. Kiro EventStream outbound auth is now covered by the W7 Kiro adapter; Kiro CLI marker detection, Kiro CLI usage extraction, and Kiro CLI passthrough behavior remain out of scope pending a real CLI traffic sample.
 - **Source:** deleted `codec-s5-kiro-eventstream` + `adapter-a-t6-kiro-vendor` (git history).
 
 ### `UsageSource::CliExtracted` provenance — closed in spec
@@ -64,10 +64,10 @@ No open ROADMAP items.
 - **Contract:** Go remains the OAuth provider configuration and first-time authorization writer, but post-K-C Go must not refresh runtime vendor-key OAuth tokens. The old `oauth_failed` reverse-XADD command path is repurposed as status-only `oauth_refresh_status`.
 - **Spec:** `docs/spec/07-vendor-integration.md`, `docs/go-contracts/contract-change/2026-06-09-rust-oauth-refresh.md`.
 
-### Heavy outbound adapter transforms — `capability-gap` / decision confirmed
-- **Intent:** add Kiro AWS SigV4 + EventStream outbound integration, Vertex AI RS256 service-account JWT signing + token exchange, and Codex request-body transforms.
-- **Design points:** these transforms use the confirmed outbound adapter boundary from F1. Kiro protocol/API shapes and `AnyCodec::Kiro` EventStream registration are available, but SigV4, vendor auth injection, and full Kiro upstream integration remain unbuilt.
-- **Source:** deleted `adapter-a-t3-vertex-ai`, `adapter-a-t5-codex`, `adapter-a-t6-kiro-vendor`.
+### Heavy outbound adapter transforms — closed in spec
+- **Landed:** production `apply_outbound_adapter` now executes opt-in `patch_request` before archive/send and recomputes final `content-length` / `body_sha256_hex`; `WireAnyRequest` includes Kiro EventStream frames; built-in Kiro, Vertex, and Codex adapters are registered by vendor id.
+- **Boundary:** task runtime does not call adapters. Kiro CLI detector/usage remains a separate protocol-codec capability gap because no real CLI traffic sample exists.
+- **Spec:** `docs/spec/07-vendor-integration.md`.
 
 ## 08 async-tasks
 

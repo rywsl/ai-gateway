@@ -37,12 +37,12 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
 |---|---|---|
 | [parts/01-go-as-producer.md](parts/01-go-as-producer.md) | **Go → Rust** | Go 主动写、Rust 消费。涵盖：PgSQL 实体写、`events:entity`、`events:counter`、`counter:*` 余额、`entity:estimate_pricing`、`jwt:blacklist:*`、KEK 轮换 producer 责任 |
 | [parts/02-go-as-consumer.md](parts/02-go-as-consumer.md) | **Rust → Go** | Rust 主动写、Go 消费。涵盖：`usage:records`（吸收原 C-ε §2）、`usage:records:dlq`、`usage:detailed`、Rust 反向 `events:entity`（`vendor_key.rate_limited` / `ipblock` 自动封禁）、`counter:*:frozen_micro` / `daily_tokens` 读路径 |
-| [parts/03-shared-schema.md](parts/03-shared-schema.md) | **共享 schema** | 双方都接触的 PgSQL 表清单、entity payload JSONB shape、`version BIGINT` 协议、AES-256-GCM 加密 payload、KEK 轮换 |
+| [parts/03-shared-schema.md](parts/03-shared-schema.md) | **共享 schema** | 双方都接触的 PgSQL 表清单、entity payload JSONB shape、`version BIGINT` 协议、AES-256-GCM 加密 payload、KEK 轮换、Kiro/Vertex vendor-key payload touchpoints |
 | [parts/04-proxy-nodes.md](parts/04-proxy-nodes.md) | **Proxy Nodes** | Rust tunnel client ↔ Go Hub 契约;节点 entity / 心跳分工 / status 状态机 |
 | [parts/05-wallet-payment.md](parts/05-wallet-payment.md) | **Wallet / Payment** | 钱包余额计数器、`wallets` / `payments` 表、支付状态枚举、webhook 归一化 payload、`usage:records` 与冻结/解冻衔接 |
 | [parts/06-subscription-video.md](parts/06-subscription-video.md) | **Subscription / Video** | 订阅套餐、用户订阅、视频任务状态机、`operation_id` 关联、订阅 entitlement 到 Rust permission merge 的投影规则 |
 | [parts/07-oauth-ldap.md](parts/07-oauth-ldap.md) | **OAuth / LDAP** | OAuth provider 配置、token exchange / refresh cache、LDAP bind 配置、group→permission mapping、`auth_configs` seed 机制 |
-| [parts/08-control-plane.md](parts/08-control-plane.md) | **Control Plane** | Rust↔Go 透明控制平面:配置下行(`config_*` + `events:entity ns=config`)、能力/状态上行(`gateway:instance:<id>:{capability,effective,runtime}`)、命令通道(`commands:gateway` + `cmd_ack`)。**目标契约(design 阶段)** |
+| [parts/08-control-plane.md](parts/08-control-plane.md) | **Control Plane** | Rust↔Go 透明控制平面:配置下行(`config_*` + `events:entity ns=config`)、能力/状态上行(`gateway:instance:<id>:{capability,effective,runtime}`)、命令通道(`commands:gateway` + `cmd_ack`)；能力 payload includes protocol/API shape strings such as `kiro:eventstream` / `kiro:cli`。**目标契约(design 阶段)** |
 | [contract-change/](contract-change/) | **契约变更日志** | 每次跨进程契约改动的索引记录(触发 spec + parts 落点 + Go 模块) |
 | [contract-change/2026-05-29-vendor-validation.md](contract-change/2026-05-29-vendor-validation.md) | **Vendor validation** | EI-8 Go 写入期拒绝 tunnel+impersonate 冲突；EI-7 Go 管理动作清空 `vendor_keys.identity_snapshot` 并递增 `version` 以触发 Rust cache miss + 重新派生 |
 
@@ -167,6 +167,7 @@ Rust 端对应指标（前缀 `gateway_*`）在 [`docs/architecture.md`](../arch
 | `usage:records` / `usage:records:dlq` 字段 | parts/02 §2.1 / §2.2 |
 | Rust 反向写 entity 的 op 枚举 | parts/02 §2.4 |
 | PgSQL 表新列 / 表 | parts/03 + `crates/gw-store/migrations/` + architecture.md §5.1 |
+| `vendor_keys.payload` / decrypted vendor credential semantic changes（例如 Kiro SigV4 JSON、Vertex OAuth quota project） | parts/03 + relevant domain spec |
 | 加密 payload 列结构 | parts/03 §3.4 + architecture.md §4.3 |
 | KEK 轮换状态机 | parts/03 §3.5 + architecture.md §4.3 |
 | 新增 counter:* key | parts/01 §1.4 或 parts/02 §2.5 |

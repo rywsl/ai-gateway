@@ -66,8 +66,9 @@ SET gateway:instance:<id>:capability <json>   [无 TTL 或随心跳续]
 ```json
 {
   "instance_id": "…", "gateway_version": "1.5.0+<git_sha>", "started_at_ms": 0,
-  "protocols": ["openai","anthropic","gemini"],
-  "cli_variants": ["claude:cli","openai:cli","openai:compact","gemini:cli"],
+  "protocols": ["openai","anthropic","gemini","kiro"],
+  "api_shapes": ["openai:chat","openai:responses","anthropic:messages","gemini:generate","kiro:eventstream","kiro:cli"],
+  "cli_variants": ["claude:cli","openai:cli","openai:compact","gemini:cli","kiro:cli"],
   "routing_strategies": ["FixedOrder","RoundRobin","LoadBalance","WeightedRr",
                          "CostFirst","LatencyFirst","CacheAffinity","Sticky"],
   "features": {"tunnel": false, "egress_impersonate": true, "credit_lease": true,
@@ -166,4 +167,3 @@ result = { "status": "ok|failed|skipped|not_applicable", "detail": "…", "appli
 - **上线 ordering**:Rust 先上(读 `default.toml` 兜底可单跑)→ Go 写 `config_*` + 发 `events:entity ns=config` 接管控制。破坏性变更直接做(main §3.6,项目未上线)。
 
 > Sync rule:本 part 任何接触点改动须同步 [main.md](../main.md) §2/§3.3/§7;Rust 侧实现细节见三个 [SP design doc](../../design/)。
-

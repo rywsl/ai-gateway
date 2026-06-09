@@ -4,6 +4,22 @@
 
 **Goal:** Land Kiro EventStream, Kiro CLI shape registration, Vertex AI service-account auth, and Codex request-body transforms behind the W5 outbound adapter seam.
 
+## Execution status
+
+Status after W7 implementation on branch `sp/w7-heavy-transforms`: **DONE_WITH_CONCERNS**.
+
+Already present on `main` before this W7 run (W6 / earlier commits): `ProtocolKind::Kiro`, `ApiShape::KiroEventStream`, `ApiShape::KiroCli`, `AnyCodec::Kiro`, EventStream codec registration, Kiro cross-render format, and cross-process Kiro protocol/shape strings.
+
+Completed in this W7 run:
+
+- `7d0a959` `feat(adapter): execute request patch hook` — added `WireAnyRequest::Kiro`, `AdapterCtx.body_sha256_hex`, production opt-in `patch_request` execution before archive/send, final body length/hash recomputation, and proxy regression coverage.
+- `7cedbf8` `feat(adapter): add kiro outbound transform` — added `KiroAdapter` SigV4 header injection, final body hash signing, secret redaction, and builtin vendor-id registration for `kiro`.
+- `d8b0591` `feat(adapter): add vertex service-account transform` — added `VertexJwtClaims`, runtime-token bearer injection via W6 `OAuthRuntime`, quota project header injection, and builtin `vertex` / `google_vertex` registration.
+- `4ace5ca` `feat(adapter): add codex request transform` — added `CodexAdapter` semantic OpenAI request metadata injection via `WireAnyRequest::OpenAi`, preserving model/messages/stream/tools/tool_choice and leaving Codex identity headers in `gw-core::impersonate::openai_codex`.
+- This docs commit (`docs(vendor): close heavy adapter transform roadmap entry`) — updates specs, go-contracts, ROADMAP, and this execution status.
+
+Residual concern: Kiro CLI marker detection, usage extraction, and passthrough semantics were **not implemented** because no real Kiro CLI traffic sample exists. `ApiShape::KiroCli` remains registered and documented as a shape boundary; docs explicitly retain the detector/usage residual instead of treating it as complete.
+
 **Architecture:** Split work into one shared contract lane, one Kiro CLI contract lane, and three independent vendor lanes. The shared lane makes `ProtocolKind`, `ApiShape`, `AnyCodec`, `WireAnyRequest`, Go contract strings, and `apply_outbound_adapter` hook execution agree before vendor-specific adapters rely on them. The Kiro CLI lane registers CLI detection and hints as a separate `ApiShape` under `ProtocolKind::Kiro`; it must not be conflated with Kiro EventStream. Vendor lanes then add isolated adapters for Kiro SigV4/EventStream, Vertex service-account JWT/token exchange, and Codex semantic request mutation.
 
 **Tech Stack:** Rust 1.88 workspace, `gw-core`, `gw-codec`, `gw-adapter`, `gw-proxy`, `gw-capability`, Pingora request rewrite filters, AWS EventStream, AWS SigV4, Google OAuth service-account JWT bearer grant, Go PgSQL/Redis contracts.
