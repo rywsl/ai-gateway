@@ -13,13 +13,14 @@ use gw_core::ir::{FinishReasonIR, ResponseIR};
 
 use crate::trait_def::ProtocolCodec;
 
-/// 4 个 wire form 的标识。
+/// Standard wire-form identifiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireFormat {
     OpenAiChat,
     OpenAiResponses,
     AnthropicMessages,
     GeminiGenerate,
+    KiroEventStream,
 }
 
 impl WireFormat {
@@ -29,6 +30,7 @@ impl WireFormat {
             WireFormat::OpenAiResponses => "openai_responses",
             WireFormat::AnthropicMessages => "anthropic_messages",
             WireFormat::GeminiGenerate => "gemini_generate",
+            WireFormat::KiroEventStream => "kiro_eventstream",
         }
     }
 
@@ -46,6 +48,7 @@ impl WireFormat {
             AnyCodec::OpenAiResponses(_) => WireFormat::OpenAiResponses,
             AnyCodec::Anthropic(_) => WireFormat::AnthropicMessages,
             AnyCodec::Gemini(_) => WireFormat::GeminiGenerate,
+            AnyCodec::Kiro(_) => WireFormat::KiroEventStream,
         }
     }
 
@@ -148,6 +151,31 @@ impl WireFormat {
                 supports_inference_geo: false,
                 supports_reasoning_config: true,
                 supports_grounding: true,
+                supports_citations: false,
+                supports_mcp: false,
+            },
+            WireFormat::KiroEventStream => WireCapabilities {
+                supports_thinking: true,
+                supports_reasoning: false,
+                supports_tool_use_blocks: false,
+                supports_tool_calls_flat: false,
+                supports_function_call_parts: false,
+                supports_reasoning_tokens: false,
+                supports_prediction: false,
+                supports_thoughts_tokens: false,
+                supports_cache_creation_detail: false,
+                supports_cached_tokens: false,
+                supports_server_tool_usage: false,
+                supports_refusal: false,
+                supports_annotations: false,
+                supports_server_tool_blocks: false,
+                supports_redacted_thinking: false,
+                supports_audio: false,
+                supports_document_blocks: false,
+                supports_service_tier: false,
+                supports_inference_geo: false,
+                supports_reasoning_config: false,
+                supports_grounding: false,
                 supports_citations: false,
                 supports_mcp: false,
             },

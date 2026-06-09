@@ -4,6 +4,7 @@
 //! - OpenAI: `{"error": {"type": ..., "message": ..., "code": null}}`
 //! - Anthropic: `{"type": "error", "error": {"type": ..., "message": ...}}`
 //! - Gemini: `{"error": {"code": <int>, "status": ..., "message": ...}}`
+//! - Kiro: `{"type": "error", "code": ..., "message": ...}`
 //!
 //! For SSE responses, wrap as `event: error\ndata: <json>\n\n`.
 
@@ -60,6 +61,11 @@ fn json_for_protocol(
         ProtocolKind::Gemini => json!({
             "error": { "code": b.upstream_status, "status": typ, "message": msg }
         }),
+        ProtocolKind::Kiro => json!({
+            "type": "error",
+            "code": typ,
+            "message": msg
+        }),
     }
 }
 
@@ -76,6 +82,10 @@ fn error_type_for(p: ProtocolKind, status: u16) -> &'static str {
         (ProtocolKind::Gemini, 429) => "RESOURCE_EXHAUSTED",
         (ProtocolKind::Gemini, 500..=599) => "INTERNAL",
         (ProtocolKind::Gemini, _) => "INTERNAL",
+        (ProtocolKind::Kiro, 401) => "authentication_error",
+        (ProtocolKind::Kiro, 429) => "rate_limit_error",
+        (ProtocolKind::Kiro, 500..=599) => "service_unavailable",
+        (ProtocolKind::Kiro, _) => "api_error",
     }
 }
 

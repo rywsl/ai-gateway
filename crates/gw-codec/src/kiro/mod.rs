@@ -2,8 +2,8 @@
 //!
 //! Kiro streams use AWS EventStream binary frames. This module keeps the
 //! binary framer and the embedded `<thinking>` payload parser inside
-//! `gw-codec`; Kiro is not added to `gw-core::protocol` until the gateway
-//! cross-process protocol contract grows a Kiro shape.
+//! `gw-codec`; full upstream integration is handled outside this internal
+//! EventStream codec.
 
 use bytes::{BufMut, BytesMut};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
@@ -222,10 +222,9 @@ impl ProtocolCodec for Kiro {
                 && v.to_ascii_lowercase()
                     .contains("application/vnd.amazon.eventstream")
         });
-        let eventstream_body =
-            body_head.len() >= EVENTSTREAM_MIN_LEN && decode_frame_prefix(body_head).is_some();
+        let _ = body_head;
 
-        if eventstream_header && (kiro_path || eventstream_body) {
+        if eventstream_header && kiro_path {
             Some(Kiro)
         } else {
             None
@@ -469,19 +468,6 @@ impl ProtocolCodec for Kiro {
             })
             .sum()
     }
-}
-
-fn decode_frame_prefix(frame: &[u8]) -> Option<()> {
-    if frame.len() < EVENTSTREAM_MIN_LEN {
-        return None;
-    }
-    let declared = u32::from_be_bytes(frame[0..4].try_into().ok()?) as usize;
-    let headers_len = u32::from_be_bytes(frame[4..8].try_into().ok()?) as usize;
-    let prelude_crc = u32::from_be_bytes(frame[8..12].try_into().ok()?);
-    let plausible = declared >= EVENTSTREAM_MIN_LEN
-        && declared <= EVENTSTREAM_MAX_FRAME_LEN
-        && headers_len <= declared.saturating_sub(EVENTSTREAM_MIN_LEN);
-    (plausible && crc32fast::hash(&frame[..8]) == prelude_crc).then_some(())
 }
 
 fn finish_reason_label(reason: &FinishReasonIR) -> &str {

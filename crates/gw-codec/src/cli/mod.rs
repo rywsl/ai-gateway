@@ -89,6 +89,8 @@ mod tests {
         assert_eq!(ApiShape::OpenAiCli.format_id(), FORMAT_OPENAI_CLI);
         assert_eq!(ApiShape::GeminiCli.format_id(), FORMAT_GEMINI_CLI);
         assert_eq!(ApiShape::OpenAiCompact.format_id(), FORMAT_OPENAI_COMPACT);
+        assert_eq!(ApiShape::KiroCli.format_id(), "kiro:cli");
+        assert_eq!(ApiShape::KiroEventStream.format_id(), "kiro:eventstream");
     }
 
     #[test]
@@ -97,11 +99,13 @@ mod tests {
         assert!(ApiShape::OpenAiCli.is_cli());
         assert!(ApiShape::OpenAiCompact.is_cli());
         assert!(ApiShape::GeminiCli.is_cli());
+        assert!(ApiShape::KiroCli.is_cli());
 
         assert!(!ApiShape::OpenAiChat.is_cli());
         assert!(!ApiShape::OpenAiResponses.is_cli());
         assert!(!ApiShape::AnthropicMessages.is_cli());
         assert!(!ApiShape::GeminiGenerate.is_cli());
+        assert!(!ApiShape::KiroEventStream.is_cli());
     }
 
     #[test]
@@ -115,6 +119,11 @@ mod tests {
             ProtocolKind::OpenAi
         );
         assert_eq!(ApiShape::GeminiCli.protocol_kind(), ProtocolKind::Gemini);
+        assert_eq!(ApiShape::KiroCli.protocol_kind(), ProtocolKind::Kiro);
+        assert_eq!(
+            ApiShape::KiroEventStream.protocol_kind(),
+            ProtocolKind::Kiro
+        );
     }
 
     #[test]

@@ -33,6 +33,9 @@ fn codec_for(w: WireFormat) -> Box<dyn ProtocolCodec> {
         WireFormat::OpenAiResponses => Box::new(OpenAiResponsesCodec),
         WireFormat::AnthropicMessages => Box::new(Anthropic),
         WireFormat::GeminiGenerate => Box::new(Gemini),
+        WireFormat::KiroEventStream => {
+            panic!("Kiro EventStream is not part of the legacy HTTP JSON 4x4 matrix")
+        }
     }
 }
 

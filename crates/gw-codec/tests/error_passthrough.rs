@@ -63,6 +63,25 @@ fn gemini_429_renders_with_status_field() {
 }
 
 #[test]
+fn kiro_error_renders_minimal_eventstream_error_payload_shape() {
+    let body = PassthroughBody {
+        upstream_status: 500,
+        body_json: json!({"message":"upstream failed"}),
+        is_sse: false,
+    };
+    let out = render_error_to_client(
+        ProtocolKind::Kiro,
+        &body,
+        ErrorClass::UpstreamTransient,
+        NO_RULES,
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "service_unavailable");
+    assert_eq!(v["message"], "upstream failed");
+}
+
+#[test]
 fn sse_error_emits_event_error_frame() {
     let body = PassthroughBody {
         upstream_status: 500,

@@ -1,5 +1,4 @@
-//! `AnyCodec` — enum dispatcher across the four supported wire shapes
-//! (OpenAI Chat, OpenAI Responses, Anthropic Messages, Gemini Generate).
+//! `AnyCodec` — enum dispatcher across the supported standard wire shapes.
 
 use bytes::BytesMut;
 use gw_core::error::ErrorIR;
@@ -8,6 +7,7 @@ use gw_core::protocol::{ApiShape, ProtocolKind};
 
 use crate::anthropic::Anthropic;
 use crate::gemini::Gemini;
+use crate::kiro::Kiro;
 use crate::openai::responses::OpenAiResponsesCodec;
 use crate::openai::OpenAi;
 use crate::trait_def::{Headers, ProtocolCodec};
@@ -17,6 +17,7 @@ pub enum AnyCodec {
     OpenAiResponses(OpenAiResponsesCodec),
     Anthropic(Anthropic),
     Gemini(Gemini),
+    Kiro(Kiro),
 }
 
 impl AnyCodec {
@@ -30,6 +31,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(_) => ProtocolKind::OpenAi,
             AnyCodec::Anthropic(_) => ProtocolKind::Anthropic,
             AnyCodec::Gemini(_) => ProtocolKind::Gemini,
+            AnyCodec::Kiro(_) => ProtocolKind::Kiro,
         }
     }
 
@@ -45,6 +47,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(_) => ApiShape::OpenAiResponses,
             AnyCodec::Anthropic(_) => ApiShape::AnthropicMessages,
             AnyCodec::Gemini(_) => ApiShape::GeminiGenerate,
+            AnyCodec::Kiro(_) => ApiShape::KiroEventStream,
         }
     }
 
@@ -65,6 +68,9 @@ impl AnyCodec {
         if let Some(c) = Gemini::detect_request(path, h, body_head) {
             return Some(AnyCodec::Gemini(c));
         }
+        if let Some(c) = Kiro::detect_request(path, h, body_head) {
+            return Some(AnyCodec::Kiro(c));
+        }
         None
     }
 
@@ -78,6 +84,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(_) => OpenAiResponsesCodec::path_implies_stream(path),
             AnyCodec::Anthropic(_) => Anthropic::path_implies_stream(path),
             AnyCodec::Gemini(_) => Gemini::path_implies_stream(path),
+            AnyCodec::Kiro(_) => Kiro::path_implies_stream(path),
         }
     }
 
@@ -90,6 +97,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(_) => OpenAiResponsesCodec::extract_path_model(path),
             AnyCodec::Anthropic(_) => Anthropic::extract_path_model(path),
             AnyCodec::Gemini(_) => Gemini::extract_path_model(path),
+            AnyCodec::Kiro(_) => Kiro::extract_path_model(path),
         }
     }
 
@@ -100,6 +108,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.parse_request(body),
             AnyCodec::Anthropic(c) => c.parse_request(body),
             AnyCodec::Gemini(c) => c.parse_request(body),
+            AnyCodec::Kiro(c) => c.parse_request(body),
         }
     }
 
@@ -114,6 +123,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.render_request(ir, buf),
             AnyCodec::Anthropic(c) => c.render_request(ir, buf),
             AnyCodec::Gemini(c) => c.render_request(ir, buf),
+            AnyCodec::Kiro(c) => c.render_request(ir, buf),
         }
     }
 
@@ -124,6 +134,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.new_stream_state(),
             AnyCodec::Anthropic(c) => c.new_stream_state(),
             AnyCodec::Gemini(c) => c.new_stream_state(),
+            AnyCodec::Kiro(c) => c.new_stream_state(),
         }
     }
 
@@ -138,6 +149,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.parse_stream_chunk(state, chunk),
             AnyCodec::Anthropic(c) => c.parse_stream_chunk(state, chunk),
             AnyCodec::Gemini(c) => c.parse_stream_chunk(state, chunk),
+            AnyCodec::Kiro(c) => c.parse_stream_chunk(state, chunk),
         }
     }
 
@@ -152,6 +164,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.render_stream_chunk(ir, buf),
             AnyCodec::Anthropic(c) => c.render_stream_chunk(ir, buf),
             AnyCodec::Gemini(c) => c.render_stream_chunk(ir, buf),
+            AnyCodec::Kiro(c) => c.render_stream_chunk(ir, buf),
         }
     }
 
@@ -162,6 +175,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.parse_response(body),
             AnyCodec::Anthropic(c) => c.parse_response(body),
             AnyCodec::Gemini(c) => c.parse_response(body),
+            AnyCodec::Kiro(c) => c.parse_response(body),
         }
     }
 
@@ -176,6 +190,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.render_response(ir, buf),
             AnyCodec::Anthropic(c) => c.render_response(ir, buf),
             AnyCodec::Gemini(c) => c.render_response(ir, buf),
+            AnyCodec::Kiro(c) => c.render_response(ir, buf),
         }
     }
 
@@ -186,6 +201,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.parse_error(status, body),
             AnyCodec::Anthropic(c) => c.parse_error(status, body),
             AnyCodec::Gemini(c) => c.parse_error(status, body),
+            AnyCodec::Kiro(c) => c.parse_error(status, body),
         }
     }
 
@@ -196,6 +212,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.render_error(err, buf),
             AnyCodec::Anthropic(c) => c.render_error(err, buf),
             AnyCodec::Gemini(c) => c.render_error(err, buf),
+            AnyCodec::Kiro(c) => c.render_error(err, buf),
         }
     }
 
@@ -206,6 +223,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c.estimate_input_tokens(ir),
             AnyCodec::Anthropic(c) => c.estimate_input_tokens(ir),
             AnyCodec::Gemini(c) => c.estimate_input_tokens(ir),
+            AnyCodec::Kiro(c) => c.estimate_input_tokens(ir),
         }
     }
 
@@ -223,6 +241,7 @@ impl AnyCodec {
             AnyCodec::OpenAiResponses(c) => c,
             AnyCodec::Anthropic(c) => c,
             AnyCodec::Gemini(c) => c,
+            AnyCodec::Kiro(c) => c,
         }
     }
 }
