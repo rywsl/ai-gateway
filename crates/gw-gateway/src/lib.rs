@@ -379,6 +379,14 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     let redis = gw_store::redis_client::RedisCtx::connect(cfg.redis.url_str(), cfg.redis.pool_size)
         .await
         .context("redis connect failed")?;
+    // Keep EntityStore cold loads on a small, non-blocking Redis pool. The
+    // main RedisCtx is shared by long BLOCKing XREADGROUP loops
+    // (events:entity, commands:gateway, task streams). If the loader's Redis
+    // L1 HGETALL lands on one of those blocked connections, a real PG row can
+    // be reported as "not found" after cold_load_timeout_ms.
+    let loader_redis = gw_store::redis_client::RedisCtx::connect(cfg.redis.url_str(), 2)
+        .await
+        .context("redis loader connect failed")?;
 
     let pg = gw_store::pg_client::connect(cfg.pgsql.url_str(), cfg.pgsql.max_connections)
         .await
@@ -387,7 +395,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     // 3. EntityStore with loader. Cache misses on the *_or_load methods now
     // fall through to Redis L1 -> PG L2 -> Redis write-back.
     let loader = gw_store::LoaderCtx {
-        redis: redis.clone(),
+        redis: loader_redis,
         pg: pg.clone(),
         kek: kek_cache,
     };
