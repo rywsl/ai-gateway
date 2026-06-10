@@ -136,6 +136,7 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "vendor_key" => store.invalidate_vendor_key(&KeyId::from(id)).await,
         "model_group" => store.model_group.invalidate(&Group::from(id)).await,
         "pricing" => store.pricing.invalidate(&ModelName::from(id)).await,
+        "estimate_pricing" => store.estimate_pricing.invalidate(&ModelName::from(id)).await,
         "model" => store.model.invalidate(&ModelName::from(id)).await,
         "auth_config" => {
             store.auth_config.invalidate(&id.to_string()).await;
@@ -327,6 +328,48 @@ mod model_tests {
 
         assert!(
             store.model.get(&model_name).await.is_none(),
+            "cache entry must be absent after invalidation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod estimate_pricing_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use gw_core::entity::EstimatePricing;
+    use gw_core::ids::ModelName;
+    use gw_core::versioned::Versioned;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_estimate_pricing() {
+        let store = Arc::new(EntityStore::new());
+        let model_name = ModelName::from("gpt-test");
+        let versioned = Arc::new(Versioned {
+            version: 1,
+            value: Arc::new(EstimatePricing {
+                model: model_name.clone(),
+                conservative_per_token_micro: 7,
+                safety_factor: 1.0,
+                default_max_tokens: 4096,
+                hard_cap_tokens: 200_000,
+            }),
+        });
+
+        store
+            .estimate_pricing
+            .insert(model_name.clone(), versioned)
+            .await;
+        assert!(
+            store.estimate_pricing.get(&model_name).await.is_some(),
+            "pre-condition: cache entry must be present before invalidation"
+        );
+
+        apply_entity_event(&store, "estimate_pricing", "gpt-test").await;
+
+        assert!(
+            store.estimate_pricing.get(&model_name).await.is_none(),
             "cache entry must be absent after invalidation"
         );
     }

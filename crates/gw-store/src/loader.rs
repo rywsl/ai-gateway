@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use fred::interfaces::{HashesInterface, KeysInterface};
-use fred::types::RedisMap;
+use fred::types::{RedisKey, RedisMap, RedisValue};
 use secrecy::SecretString;
 use sqlx::{PgPool, Row};
 
@@ -44,14 +44,12 @@ where
     let key = format!("entity:{namespace}:{id}");
     let client = ctx.redis.pool.next();
 
-    // L1: Redis hash {v, enc, d}
-    let hash: std::collections::HashMap<String, String> = client.hgetall(&key).await?;
+    // L1: Redis hash {v, enc, d}. Go writes `d` as []byte; read the raw
+    // RedisValue map so the contract does not depend on string coercion.
+    let raw: RedisValue = client.hgetall(&key).await?;
+    let hash = raw.into_map()?;
     if !hash.is_empty() {
-        let v: u64 = hash.get("v").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let d = hash.get("d").ok_or_else(|| {
-            anyhow::anyhow!("missing payload field 'd' in entity:{namespace}:{id}")
-        })?;
-        let parsed: serde_json::Value = serde_json::from_str(d)?;
+        let (v, parsed) = decode_entity_envelope(namespace, id, &hash)?;
         let value = decode_fn(&parsed)?;
         return Ok(Versioned {
             version: v,
@@ -84,6 +82,70 @@ where
         version: v,
         value: Arc::new(value),
     })
+}
+
+fn decode_entity_envelope(
+    namespace: &str,
+    id: &str,
+    hash: &RedisMap,
+) -> anyhow::Result<(u64, serde_json::Value)> {
+    let v = redis_hash_get(hash, "v")
+        .ok_or_else(|| anyhow::anyhow!("missing version field 'v' in entity:{namespace}:{id}"))?;
+    let v = redis_value_to_u64(v)
+        .ok_or_else(|| anyhow::anyhow!("invalid version field 'v' in entity:{namespace}:{id}"))?;
+
+    let enc = redis_hash_get(hash, "enc").ok_or_else(|| {
+        anyhow::anyhow!("missing encoding field 'enc' in entity:{namespace}:{id}")
+    })?;
+    let enc = redis_value_to_str(enc).ok_or_else(|| {
+        anyhow::anyhow!("invalid encoding field 'enc' in entity:{namespace}:{id}")
+    })?;
+    anyhow::ensure!(
+        enc == "json",
+        "unsupported entity encoding '{enc}' in entity:{namespace}:{id}"
+    );
+
+    let d = redis_hash_get(hash, "d")
+        .ok_or_else(|| anyhow::anyhow!("missing payload field 'd' in entity:{namespace}:{id}"))?;
+    let payload = redis_value_to_bytes(d)
+        .ok_or_else(|| anyhow::anyhow!("invalid payload field 'd' in entity:{namespace}:{id}"))?;
+    let parsed: serde_json::Value = serde_json::from_slice(payload)?;
+
+    Ok((v, parsed))
+}
+
+fn redis_hash_get<'a>(hash: &'a RedisMap, field: &str) -> Option<&'a RedisValue> {
+    match field {
+        "v" => hash.get(&RedisKey::from_static_str("v")),
+        "enc" => hash.get(&RedisKey::from_static_str("enc")),
+        "d" => hash.get(&RedisKey::from_static_str("d")),
+        _ => None,
+    }
+}
+
+fn redis_value_to_u64(value: &RedisValue) -> Option<u64> {
+    match value {
+        RedisValue::Integer(v) => (*v).try_into().ok(),
+        RedisValue::String(v) => v.parse().ok(),
+        RedisValue::Bytes(v) => std::str::from_utf8(v).ok()?.parse().ok(),
+        _ => None,
+    }
+}
+
+fn redis_value_to_str(value: &RedisValue) -> Option<&str> {
+    match value {
+        RedisValue::String(v) => Some(std::ops::Deref::deref(v)),
+        RedisValue::Bytes(v) => std::str::from_utf8(v).ok(),
+        _ => None,
+    }
+}
+
+fn redis_value_to_bytes(value: &RedisValue) -> Option<&[u8]> {
+    match value {
+        RedisValue::String(v) => Some(v.as_bytes()),
+        RedisValue::Bytes(v) => Some(v.as_ref()),
+        _ => None,
+    }
 }
 
 fn ttl_for(ns: &str) -> u64 {
