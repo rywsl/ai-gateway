@@ -1574,9 +1574,9 @@ impl ProxyHttp for LlmGateway {
         if ctx.stream_probe_retry_pending {
             ctx.stream_probe_retry_pending = false;
             e.set_retry(true);
-            return e.more_context(format!("Peer: {}", peer));
+            return e.more_context(format!("Peer: {peer}"));
         }
-        let mut e = e.more_context(format!("Peer: {}", peer));
+        let mut e = e.more_context(format!("Peer: {peer}"));
         e.retry
             .decide_reuse(client_reused && !session.as_ref().retry_buffer_truncated());
         e
@@ -1962,9 +1962,11 @@ mod tests {
     fn connect_failure_invalidates_affinity_for_picked_vendor_key() {
         let affinity = AffinityManager::default();
         let picked = make_test_key("vk-connect-failed");
-        let mut ctx = crate::ctx::ReqCtx::default();
-        ctx.api_key_id = Some(ApiKeyId::from("ak-connect"));
-        ctx.picked_vendor_key = Some(picked.clone());
+        let ctx = crate::ctx::ReqCtx {
+            api_key_id: Some(ApiKeyId::from("ak-connect")),
+            picked_vendor_key: Some(picked.clone()),
+            ..crate::ctx::ReqCtx::default()
+        };
         affinity.record_hit(
             AffinityDimension::ApiKey(ApiKeyId::from("ak-connect")),
             picked.key_id.clone(),

@@ -209,24 +209,26 @@ fn seeded_vendor_key() -> Arc<VendorKey> {
 }
 
 fn seeded_cli_ctx() -> ReqCtx {
-    let mut ctx = ReqCtx::default();
-    ctx.client_shape = Some(ApiShape::OpenAiCli);
-    ctx.model = Some(ModelName::from("gpt-4o"));
-    ctx.picked_vendor_key = Some(seeded_vendor_key());
-    ctx.merged_perm = Some(MergedPermissions {
-        user_id: UserId::from("user-1"),
-        effective_user_id: UserId::from("user-1"),
-        client_ip: "127.0.0.1".parse().unwrap(),
-        allowed_models: Default::default(),
-        allowed_channels: Default::default(),
-        allowed_groups: Default::default(),
-        forced_model_group: None,
-        rpm_limit: 0,
-        tpm_limit: 0,
-        max_concurrent_streams: 0,
-        markup_chain: MarkupChainSnapshot::identity(),
-        model_whitelist_regex: None,
-    });
+    let mut ctx = ReqCtx {
+        client_shape: Some(ApiShape::OpenAiCli),
+        model: Some(ModelName::from("gpt-4o")),
+        picked_vendor_key: Some(seeded_vendor_key()),
+        merged_perm: Some(MergedPermissions {
+            user_id: UserId::from("user-1"),
+            effective_user_id: UserId::from("user-1"),
+            client_ip: "127.0.0.1".parse().unwrap(),
+            allowed_models: Default::default(),
+            allowed_channels: Default::default(),
+            allowed_groups: Default::default(),
+            forced_model_group: None,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_concurrent_streams: 0,
+            markup_chain: MarkupChainSnapshot::identity(),
+            model_whitelist_regex: None,
+        }),
+        ..ReqCtx::default()
+    };
     transition_to(&mut ctx, VendorExposure::Sent);
     transition_to(&mut ctx, VendorExposure::Streaming);
     transition_to(&mut ctx, VendorExposure::Settled);

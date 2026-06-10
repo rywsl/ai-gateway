@@ -50,7 +50,7 @@ pub fn classify_for_failover(
         return FailoverClass::NotRetryable;
     }
 
-    if matches!(status, 401 | 402 | 403) {
+    if matches!(status, 401..=403) {
         FailoverClass::SwitchKey4xx
     } else if status == 429 {
         FailoverClass::Retryable429

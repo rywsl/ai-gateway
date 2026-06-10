@@ -1238,6 +1238,10 @@ impl gw_adapter::UrlAccessor for ProxyUrlAccessor {
     }
 }
 
+// Adapter application crosses request context, selected key/vendor, body,
+// adapter registry, OAuth runtime, health state, and protocol pair. Keep this
+// helper explicit so call sites show which moving parts participate.
+#[allow(clippy::too_many_arguments)]
 async fn apply_outbound_adapter(
     ctx: &mut ReqCtx,
     upstream_request: &mut RequestHeader,
@@ -1272,53 +1276,53 @@ async fn apply_outbound_adapter(
         .map(|u| u.scheme().to_owned())
         .unwrap_or_else(|| "https".to_owned());
     let initial_host = upstream_host.unwrap_or_default().to_owned();
-    let mut headers = ProxyHeadersAccessor(upstream_request);
     let mut url = ProxyUrlAccessor {
         scheme: initial_scheme.clone(),
         host: initial_host.clone(),
         path: initial_path.clone(),
     };
-    let adapter = adapter_registry.for_vendor(&picked.vendor_id);
-    let mut adapter_ctx = gw_adapter::AdapterCtx {
-        vendor_id: vendor.value.id.clone(),
-        vendor_key_id: picked.key_id.clone(),
-        vendor_key: picked.clone(),
-        client_protocol,
-        upstream_protocol,
-        model,
-        user_id,
-        api_format,
-        health_store,
-        oauth_runtime: Some(oauth_runtime),
-        headers_mut: gw_adapter::HeadersMut {
-            inner: &mut headers,
-        },
-        url_mut: gw_adapter::UrlMut { inner: &mut url },
-        auth_template: vendor.value.auth_template.as_str(),
-        upstream_host,
-        content_len: outbound.len(),
-        body_sha256_hex: sha256_hex(&outbound),
-        trace_id: ctx.trace_id.as_ref(),
-        request_id: ctx.request_id.as_ref(),
-    };
-    let is_cli_passthrough = ctx.client_shape.is_some_and(|shape| shape.is_cli());
-    if adapter.request_patch_enabled() && !is_cli_passthrough {
-        outbound =
-            patch_outbound_body(adapter.as_ref(), &adapter_ctx, upstream_protocol, &outbound)?;
-        adapter_ctx.content_len = outbound.len();
-        adapter_ctx.body_sha256_hex = sha256_hex(&outbound);
-    } else {
-        let _ = adapter.name();
+    {
+        let mut headers = ProxyHeadersAccessor(upstream_request);
+        let adapter = adapter_registry.for_vendor(&picked.vendor_id);
+        let mut adapter_ctx = gw_adapter::AdapterCtx {
+            vendor_id: vendor.value.id.clone(),
+            vendor_key_id: picked.key_id.clone(),
+            vendor_key: picked.clone(),
+            client_protocol,
+            upstream_protocol,
+            model,
+            user_id,
+            api_format,
+            health_store,
+            oauth_runtime: Some(oauth_runtime),
+            headers_mut: gw_adapter::HeadersMut {
+                inner: &mut headers,
+            },
+            url_mut: gw_adapter::UrlMut { inner: &mut url },
+            auth_template: vendor.value.auth_template.as_str(),
+            upstream_host,
+            content_len: outbound.len(),
+            body_sha256_hex: sha256_hex(&outbound),
+            trace_id: ctx.trace_id.as_ref(),
+            request_id: ctx.request_id.as_ref(),
+        };
+        let is_cli_passthrough = ctx.client_shape.is_some_and(|shape| shape.is_cli());
+        if adapter.request_patch_enabled() && !is_cli_passthrough {
+            outbound =
+                patch_outbound_body(adapter.as_ref(), &adapter_ctx, upstream_protocol, &outbound)?;
+            adapter_ctx.content_len = outbound.len();
+            adapter_ctx.body_sha256_hex = sha256_hex(&outbound);
+        } else {
+            let _ = adapter.name();
+        }
+        adapter
+            .rewrite_auth(&mut adapter_ctx)
+            .await
+            .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_rewrite_auth_failed")))?;
+        adapter
+            .rewrite_transport(&mut adapter_ctx)
+            .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_rewrite_transport_failed")))?;
     }
-    adapter
-        .rewrite_auth(&mut adapter_ctx)
-        .await
-        .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_rewrite_auth_failed")))?;
-    adapter
-        .rewrite_transport(&mut adapter_ctx)
-        .map_err(|_| Error::new(ErrorType::Custom("gw_adapter_rewrite_transport_failed")))?;
-    drop(adapter_ctx);
-    drop(headers);
 
     if url.scheme != initial_scheme || url.host != initial_host {
         return Err(Error::new(ErrorType::Custom(
@@ -1593,8 +1597,10 @@ mod affinity_tests {
     #[test]
     fn api_key_affinity_prefers_recorded_candidate() {
         let affinity = AffinityManager::default();
-        let mut ctx = ReqCtx::default();
-        ctx.api_key_id = Some(ApiKeyId::from("ak-affinity"));
+        let ctx = ReqCtx {
+            api_key_id: Some(ApiKeyId::from("ak-affinity")),
+            ..ReqCtx::default()
+        };
         let first = key("vk-first");
         let preferred = key("vk-preferred");
         let ranked = vec![first, preferred.clone()];
@@ -1615,8 +1621,10 @@ mod affinity_tests {
     #[test]
     fn api_key_affinity_ignores_missing_blacklisted_or_unhealthy_candidate() {
         let affinity = AffinityManager::default();
-        let mut ctx = ReqCtx::default();
-        ctx.api_key_id = Some(ApiKeyId::from("ak-affinity"));
+        let mut ctx = ReqCtx {
+            api_key_id: Some(ApiKeyId::from("ak-affinity")),
+            ..ReqCtx::default()
+        };
         let first = key("vk-first");
         let preferred = key("vk-preferred");
         let ranked = vec![first, preferred.clone()];
@@ -1641,8 +1649,10 @@ mod affinity_tests {
     #[test]
     fn api_key_affinity_checks_resolved_upstream_health_bucket() {
         let affinity = AffinityManager::default();
-        let mut ctx = ReqCtx::default();
-        ctx.api_key_id = Some(ApiKeyId::from("ak-affinity"));
+        let ctx = ReqCtx {
+            api_key_id: Some(ApiKeyId::from("ak-affinity")),
+            ..ReqCtx::default()
+        };
         let preferred = key_with_protocols("vk-convert", vec![ProtocolKind::Anthropic], true);
         let ranked = vec![preferred.clone()];
         affinity.record_hit(

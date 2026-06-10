@@ -218,7 +218,7 @@ impl AsyncRead for TunnelStreamReader {
                     return Poll::Ready(Ok(()));
                 }
                 Poll::Ready(Some(TunnelEvent::Error(err))) => {
-                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, err)));
+                    return Poll::Ready(Err(std::io::Error::other(err)));
                 }
                 Poll::Pending => return Poll::Pending,
             }
