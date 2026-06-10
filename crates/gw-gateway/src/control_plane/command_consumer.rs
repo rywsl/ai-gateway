@@ -497,7 +497,12 @@ async fn invalidate_cache(store: &Arc<EntityStore>, ns: &str, id: &str) -> Resul
         "vendor_key" => store.invalidate_vendor_key(&KeyId::from(id)).await,
         "model_group" => store.model_group.invalidate(&Group::from(id)).await,
         "pricing" => store.pricing.invalidate(&ModelName::from(id)).await,
-        "estimate_pricing" => store.estimate_pricing.invalidate(&ModelName::from(id)).await,
+        "estimate_pricing" => {
+            store
+                .estimate_pricing
+                .invalidate(&ModelName::from(id))
+                .await
+        }
         "model" => store.model.invalidate(&ModelName::from(id)).await,
         "auth_config" => {
             store.auth_config.invalidate(&id.to_string()).await;
