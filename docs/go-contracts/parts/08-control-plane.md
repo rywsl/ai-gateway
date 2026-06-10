@@ -30,8 +30,8 @@
 | SP-B | `gateway:instance:<id>:effective` | Rust(reload) | Go | 配置生效值回报(闭环 SP-A) |
 | SP-B | `gateway:instance:<id>:runtime` | Rust(周期 2s) | Go | 运行状态慢快照(覆盖式,不积压) |
 | SP-B | `gateway:instance:<id>:heartbeat` | Rust(**已存在**) | Go reaper | 实例存活,`gw_ledger::instance_id` |
-| **SP-C** | `commands:gateway` | **Go** | Rust(每实例独立 group) | 命令索引/通知流(广播 + 定向,主体在 command entity) |
-| SP-C | `entity:gateway_command:<command_id>` | **Go** | Rust | Go-owned 命令主体,Rust 消费后删除 |
+| **SP-C** | `commands:gateway` | **Go** | Rust(每实例独立 group) | 命令索引/通知流(广播 + 定向,主体在 command delivery entity) |
+| SP-C | `entity:gateway_command_delivery:<delivery_id>` | **Go** | Rust | Go-owned per-instance delivery 主体,Rust 消费后删除 |
 | SP-C | `gateway:instance:<id>:cmd_ack` | Rust | Go | 命令 ACK |
 
 > `<id>` = `gw_ledger::instance_id::resolve` 的结果(L0 `GW_INSTANCE_ID` env / L2 `gateway:instance:<hostname>`)。Go 经现有心跳 reaper 发现存活实例集合,再读其 `:capability`/`:effective`/`:runtime`/`:cmd_ack`。
@@ -133,18 +133,32 @@ Go 用现有心跳 reaper(`gateway:instance:<id>:heartbeat`,TTL 600s)已知存�
 ### 8.4.1 `commands:gateway` 索引/通知结构
 
 ```
-XADD commands:gateway * command_id <id> target <t> delivery <durable|ephemeral> issued_at_ms <ts>
+XADD commands:gateway * command_id <id> delivery_id <delivery_id> target_instance_id <instance_id> delivery_mode <durable|ephemeral> issued_at_ms <ts>
 ```
 - `commands:gateway` 只做命令索引/通知,**不承载** `action`/`args`/完整命令主体。
-- **寻址**:每实例 boot 时 `XGROUP CREATE commands:gateway group:<instance_id> $`(每实例独立 group → 广播语义);`target` = `"all"` | `"<instance_id>"`,消费侧过滤决定是否执行。
-- Rust 收到 stream entry 后,用 `command_id` 读取 `entity:gateway_command:<command_id>`;缺失或 decode 失败时写 ACK 后再 `XACK`。
+- **寻址**:每实例 boot 时 `XGROUP CREATE commands:gateway group:<instance_id> $`(每实例独立 group → 广播语义)。Go 侧 `target_scope=all` 不是单个可消费命令,而是 command batch selector;Go 按下发瞬间 ready/capability 快照 fan-out 出多个 delivery,每条 stream entry 只指向一个 `target_instance_id`。
+- Rust 收到 stream entry 后,如果 `target_instance_id != 自己 instance_id`,只 `XACK`,不得写 ACK、不得删除 entity。只有目标实例用 `delivery_id` 读取 `entity:gateway_command_delivery:<delivery_id>`;缺失时按 Go 审计事实可能是 cancel/expire,目标 Rust 只写 `skipped` ACK 并 `XACK`。
 
-### 8.4.2 命令主体 `entity:gateway_command:<command_id>`
+### 8.4.2 命令 batch 与 delivery entity
 
-Go 先写命令主体,再写 `commands:gateway` 索引/通知:
+Go 先创建 `command_batch`(管理员意图),再按目标实例创建 `command_delivery`。只有 delivery 是 Rust 可消费 entity。
+
+`command_batch` 字段:
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `command_id` | yes | 管理员动作批次 id |
+| `action` | yes | 命令动作 |
+| `target_scope` | yes | `all` 或显式实例集合 |
+| `delivery_mode` | yes | `durable` / `ephemeral` |
+| `args` | yes | 命令参数 |
+| `issued_at_ms` | yes | Go 下发时间 |
+| `issued_by` | yes | 管理员/系统来源 |
+
+Go 写每个 delivery 主体,再写 `commands:gateway` 索引/通知:
 
 ```
-HSET entity:gateway_command:<command_id> v <version> enc json d <command_json>
+HSET entity:gateway_command_delivery:<delivery_id> v <version> enc json d <delivery_json>
 ```
 
 Redis HASH 字段遵循 main §3.2 entity 信封:
@@ -160,26 +174,28 @@ Redis HASH 字段遵循 main §3.2 entity 信封:
 ```json
 {
   "command_id": "cmd_...",
+  "delivery_id": "cmd_...:gw-a",
   "action": "reload-config",
-  "target": "all",
+  "target_scope": "all",
+  "target_instance_id": "gw-a",
   "args": {"table": "config_control_plane"},
-  "delivery": "durable",
+  "delivery_mode": "durable",
   "issued_at_ms": 0,
   "expires_at_ms": null,
   "issued_by": "admin_..."
 }
 ```
 
-必填字段:`command_id` / `action` / `target` / `args` / `delivery` / `issued_at_ms` / `issued_by`。`expires_at_ms` 只在 `delivery=ephemeral` 时必填。
+必填字段:`command_id` / `delivery_id` / `action` / `target_scope` / `target_instance_id` / `args` / `delivery_mode` / `issued_at_ms` / `issued_by`。`expires_at_ms` 只在 `delivery_mode=ephemeral` 时必填。
 
 Delivery 语义:
 
-| delivery | Go 写 entity | Rust 消费 | Go 判定 |
+| delivery_mode | Go 写 entity | Rust 消费 | Go 判定 |
 |---|---|---|---|
-| `durable` | 不设置 Redis TTL | 执行或跳过后删除 entity | entity 消失表示 Rust 已消费 |
-| `ephemeral` | 必须设置 `expires_at_ms` 和 Redis TTL | 若发现过期,写 ACK `status=skipped` / `message=expired`,删除 entity | entity 可能由 Rust 删除;超时未消费由 Go reconciliation 处理 |
+| `durable` | 不设置 Redis TTL | 执行或跳过后删除 entity | 目标 ACK `ok` 且 delivery entity 消失才算成功 |
+| `ephemeral` | 必须设置 `expires_at_ms` 和 Redis TTL | 若发现过期,写 ACK `status=skipped` / `message=expired`,删除 entity | TTL 到期不算成功;Go 标记 expired/skipped |
 
-Go 不自动删除 durable command entity;durable 超时未消费由 Go 标记 `pending_timeout` 并告警。Rust 只有成功读取命令主体并执行/跳过后才删除 `entity:gateway_command:<command_id>`。
+Go 不自动删除 durable delivery entity;durable 超时未消费由 Go 标记 `pending_timeout` 并告警。管理员取消时,Go 直接删除尚未被 Rust 消费的 delivery entity,并把 delivery 审计状态标记为 `cancelled`;已经不存在的 entity 表示 Rust 已消费或 TTL 已过,不能回滚。Rust 只有成功读取目标 delivery 并执行/跳过后才删除 `entity:gateway_command_delivery:<delivery_id>`。
 
 ### 8.4.3 命令集 + args + 内部映射
 
@@ -200,19 +216,21 @@ Go 不自动删除 durable command entity;durable 超时未消费由 Go 标记 `
 ### 8.4.4 ACK(`gateway:instance:<id>:cmd_ack`)
 
 ```
-HSET gateway:instance:<id>:cmd_ack <command_id> <result_json>   + EXPIRE
-result = { "status": "ok|failed|skipped|not_applicable", "message": "…", "finished_at_ms": 0 }
+HSET gateway:instance:<id>:cmd_ack <delivery_id> <result_json>   + EXPIRE
+result = { "command_id": "cmd_...", "delivery_id": "cmd_...:gw-a", "status": "ok|failed|skipped|not_applicable", "message": "…", "finished_at_ms": 0 }
 ```
 Rust 处理顺序:
 
-1. 从 `commands:gateway` 取得 `command_id` / `target` / `delivery` / `issued_at_ms`。
-2. 读取 `entity:gateway_command:<command_id>` 并解码 `d`。
-3. 执行、跳过或判定 disabled/expired。
-4. 写 `gateway:instance:<id>:cmd_ack`。
-5. 删除 `entity:gateway_command:<command_id>`。
-6. `XACK commands:gateway group:<instance_id> <stream_id>`。
+1. 从 `commands:gateway` 取得 `command_id` / `delivery_id` / `target_instance_id` / `delivery_mode` / `issued_at_ms`。
+2. 如果 `target_instance_id != 自己 instance_id`,只 `XACK` 当前 stream entry,不写 ACK、不读/删 entity。
+3. 读取 `entity:gateway_command_delivery:<delivery_id>` 并解码 `d`。
+4. 校验 stream 元数据与 delivery JSON 一致。
+5. 执行、跳过或判定 disabled/expired。
+6. 写 `gateway:instance:<id>:cmd_ack` hash field `<delivery_id>`。
+7. 删除 `entity:gateway_command_delivery:<delivery_id>`。
+8. `XACK commands:gateway group:<instance_id> <stream_id>`。
 
-广播命令结果聚合:Go 用 §8.3.5 实例发现 → 读所有存活实例同一 `command_id` 的 ACK,并检查 `entity:gateway_command:<command_id>` 是否不存在。Go 只有同时看到目标实例 ACK `status=ok` 且 entity 不存在,才算命令成功。只看到 ACK 但 entity 仍存在,或 entity 已删除但 ACK 缺失,均为 `inconsistent`。某实例无 ACK(超时)= 未执行或 pending。
+命令结果聚合:Go 以 `command_delivery` 为最小确认单位,读取目标实例 `<delivery_id>` ACK,并检查 `entity:gateway_command_delivery:<delivery_id>` 是否不存在。Go 只有同时看到目标实例 ACK `status=ok` 且 delivery entity 不存在,才算该 delivery 成功。只看到 ACK 但 entity 仍存在,或 entity 已删除但 ACK 缺失,均为 `inconsistent`。一个 batch 只有所有目标 delivery 都成功时才显示成功;部分 failed/skipped/expired/cancelled 必须显示 partial/final,不能夸大为成功。
 
 ### 8.4.5 权限
 
@@ -225,8 +243,9 @@ Rust 处理顺序:
 | config validate 失败 | 拒绝该次 reload,保留旧 `TableCfg`,`:effective` version 不前进 | 读 `:effective` 见 version 滞后 → 知未生效,告警 |
 | `events:entity ns=config` 丢失 | `version` 单调 + 启动冷加载兜底(同 §3.4) | 重发或等冷加载 |
 | `:runtime` 推送失败 | 下个 tick 覆盖重试(无积压) | 读到 stale(TTL 内)或 key 缺失(TTL 过) |
-| 命令 handler 失败 | ACK `status=failed` + message | 按 `command_id` 读 ACK 处理 |
-| 命令 entity 已过期 | ACK `status=skipped` + message=`expired`,删除 entity,再 XACK | 记录 skipped/expired,不计成功 |
+| 命令 handler 失败 | 以 `delivery_id` 写 ACK `status=failed` + message,删除 delivery entity,再 XACK | 按 `delivery_id` 读 ACK,聚合到 batch |
+| 命令 entity 已过期 | 以 `delivery_id` 写 ACK `status=skipped` + message=`expired`,删除 entity,再 XACK | 记录 skipped/expired,不计成功 |
+| 管理员取消命令 | 目标 Rust 若稍后读到 stream 但 entity 已缺失,只 ACK stream 或写 skipped ACK | Go 删除未消费 delivery entity 并标记 cancelled;不等待 Rust 反向改写 |
 | ACK/entity 不一致 | 保持 ACK/entity 事实状态,不伪造成功 | 标记 `inconsistent` 并告警/人工处理 |
 | `refresh-oauth` 广播 | 必须复用 K-C `SETNX lock:oauth:refresh:<key_id>` 全局单飞 | 期望单次刷新 |
 | 实例宕机 | 全部 `gateway:instance:<id>:*` TTL 过期 | 心跳 reaper 摘除,不读 stale |
