@@ -142,7 +142,6 @@ pub enum TaskIrWireBodyError {
     InvalidType,
 }
 
-#[must_use]
 pub fn task_ir_wire_body(payload: &serde_json::Value) -> Result<Option<&str>, TaskIrWireBodyError> {
     match payload.get(TASK_IR_WIRE_BODY) {
         None => Ok(None),
