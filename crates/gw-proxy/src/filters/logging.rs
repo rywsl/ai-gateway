@@ -247,7 +247,9 @@ pub async fn run(
         model.clone(),
         picked,
     ) {
-        let Some(rec) = build_final_usage_record(ctx, ok, err, &auth_user_id, &effective, &model, picked) else {
+        let Some(rec) =
+            build_final_usage_record(ctx, ok, err, &auth_user_id, &effective, &model, picked)
+        else {
             tracing::error!(
                 target: "gw_proxy::filters::logging",
                 request_id = %ctx.request_id,
@@ -269,8 +271,16 @@ pub async fn run(
         .increment(1);
 
         for (dim, provenance, present) in [
-            ("input", rec.usage_provenance.input, rec.usage.input_tokens > 0),
-            ("output", rec.usage_provenance.output, rec.usage.output_tokens > 0),
+            (
+                "input",
+                rec.usage_provenance.input,
+                rec.usage.input_tokens > 0,
+            ),
+            (
+                "output",
+                rec.usage_provenance.output,
+                rec.usage.output_tokens > 0,
+            ),
             (
                 "cache_read",
                 rec.usage_provenance.cache_read,
@@ -510,9 +520,7 @@ fn build_final_usage_record(
         attempt_index: ctx.attempt_index,
         vendor_exposure_state: match ctx.vendor_exposure {
             crate::billing_lifecycle::VendorExposure::Settled => VendorExposureState::Settled,
-            crate::billing_lifecycle::VendorExposure::Terminated => {
-                VendorExposureState::Terminated
-            }
+            crate::billing_lifecycle::VendorExposure::Terminated => VendorExposureState::Terminated,
             _ => VendorExposureState::Terminated,
         },
         usage_provenance,
@@ -644,7 +652,8 @@ mod tests {
         let (mut ctx, auth_user_id, effective, model, picked) = seeded_cli_ctx();
         ctx.prompt_estimate_tokens = None;
 
-        let rec = build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked);
+        let rec =
+            build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked);
 
         assert!(rec.is_none(), "final logging path must fail closed");
     }
@@ -684,7 +693,10 @@ mod tests {
         let rec =
             build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked);
 
-        assert!(rec.is_none(), "zero cache dims must not count as billable usage");
+        assert!(
+            rec.is_none(),
+            "zero cache dims must not count as billable usage"
+        );
     }
 
     #[test]
@@ -709,6 +721,9 @@ mod tests {
 
         let actual = gw_ledger::actual_usage_credits(version, model_id.as_str(), &usage)
             .expect("actual usage credits");
-        assert!(actual > 0, "protected settlement credits must stay billable");
+        assert!(
+            actual > 0,
+            "protected settlement credits must stay billable"
+        );
     }
 }

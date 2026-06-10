@@ -465,7 +465,13 @@ fn apply_cli_delta(delta: gw_codec::cli::CliUsageDelta, ctx: &mut ReqCtx) {
         has_cache_creation = true;
     }
 
-    mark_cli_extracted_usage(ctx, has_input, has_output, has_cache_read, has_cache_creation);
+    mark_cli_extracted_usage(
+        ctx,
+        has_input,
+        has_output,
+        has_cache_read,
+        has_cache_creation,
+    );
 }
 
 fn cli_usage_extractor(shape: ApiShape) -> &'static dyn gw_codec::cli::CliUsageExtractor {
@@ -1083,8 +1089,8 @@ mod non_stream_branch_tests {
     use crate::ctx::ReqCtx;
     use bytes::Bytes;
     use gw_codec::openai::OpenAi;
-    use gw_core::usage::ProvenanceTag;
     use gw_codec::AnyCodec;
+    use gw_core::usage::ProvenanceTag;
 
     fn make_ctx_non_stream() -> ReqCtx {
         // `ReqCtx::default()` builds a fully-initialised context with empty
@@ -1252,8 +1258,7 @@ mod non_stream_branch_tests {
                 > provenance_rank(ProvenanceTag::CrashFallback)
         );
         assert!(
-            provenance_rank(ProvenanceTag::CrashFallback)
-                > provenance_rank(ProvenanceTag::Unknown)
+            provenance_rank(ProvenanceTag::CrashFallback) > provenance_rank(ProvenanceTag::Unknown)
         );
     }
 

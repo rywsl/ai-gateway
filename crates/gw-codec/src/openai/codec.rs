@@ -529,8 +529,7 @@ mod tests {
 
     #[test]
     fn request_ir_json_storage_restores_for_render() {
-        let body =
-            br#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}]}"#;
+        let body = br#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}]}"#;
         let parsed = OpenAi.parse_request(body).expect("parse request");
         let stored = serde_json::to_value(&parsed).expect("serialize request ir");
         let restored: RequestIR<'static> =

@@ -354,8 +354,7 @@ mod tests {
             Some("session-token-123")
         );
         let auth = ctx.headers_mut.get("authorization").unwrap();
-        assert!(auth.contains(
-            "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
-        ));
+        assert!(auth
+            .contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"));
     }
 }

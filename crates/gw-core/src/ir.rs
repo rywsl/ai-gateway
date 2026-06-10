@@ -113,15 +113,9 @@ pub enum ContentIR<'a> {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ContentPart<'a> {
     Text(Cow<'a, str>),
-    Image {
-        source: ImageSource<'a>,
-    },
-    Audio {
-        source: MediaSource<'a>,
-    },
-    File {
-        source: MediaSource<'a>,
-    },
+    Image { source: ImageSource<'a> },
+    Audio { source: MediaSource<'a> },
+    File { source: MediaSource<'a> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -165,9 +159,7 @@ pub enum ToolChoiceIR<'a> {
     Auto,
     None,
     Required,
-    Function {
-        name: Cow<'a, str>,
-    },
+    Function { name: Cow<'a, str> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
