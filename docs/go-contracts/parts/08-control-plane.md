@@ -2,7 +2,7 @@
 
 > 本 part 描述 **Rust 网关与 Go 管理面之间的控制平面契约**:Go 完全控制 Rust(配置下发 + 命令),Rust 对 Go 完全透明(能力/状态上行)。索引见 [main.md](../main.md)。
 >
-> **状态:目标契约(design 阶段,尚未实现)** —— 对应设计 doc [SP-A 配置下行](../../design/2026-06-08-control-plane-sp-a-config-downlink.md) / [SP-B 能力上行](../../design/2026-06-08-control-plane-sp-b-capability-uplink.md) / [SP-C 命令通道](../../design/2026-06-08-control-plane-sp-c-command-channel.md)。Go 团队可据此**并行实现**;Rust 侧随各 SP 的实现 plan 落地。本 part 遵循 [main.md §3](../main.md) 通用约定(`ts_ms` 毫秒 / `snake_case` / entity 信封 §3.2 / 写顺序 §3.4)。
+> **状态:Rust Wave 1 部分实现** —— Rust 已落地 `gw-core::control_plane` DTO/key helpers、`gw-gateway` capability/runtime 覆盖式快照 writer、`commands:gateway` delivery consumer 和安全命令 handler 子集。SP-A 全量配置下行、`:effective` 生效版本闭环、Go 侧 command batch/delivery 管理仍按本 part 和设计 doc [SP-A 配置下行](../../design/2026-06-08-control-plane-sp-a-config-downlink.md) / [SP-B 能力上行](../../design/2026-06-08-control-plane-sp-b-capability-uplink.md) / [SP-C 命令通道](../../design/2026-06-08-control-plane-sp-c-command-channel.md) 推进。本 part 遵循 [main.md §3](../main.md) 通用约定(`ts_ms` 毫秒 / `snake_case` / entity 信封 §3.2 / 写顺序 §3.4)。
 
 ## Purpose
 
@@ -11,12 +11,15 @@
 ## As-built surface
 
 - Runtime instance identity and heartbeat anchors live in `crates/gw-ledger/src/instance_id.rs`.
-- Protocol and API-shape capability strings mirror `crates/gw-core/src/protocol.rs`, including `kiro`, `kiro:eventstream`, and `kiro:cli`.
-- OAuth refresh commands are consumed by Rust runtime code; W7 Vertex adapter consumes runtime tokens through `crates/gw-adapter/src/vertex.rs` and does not call PgSQL, Redis, or Google token endpoints directly.
+- Control-plane DTOs and Redis key helpers live in `crates/gw-core/src/control_plane.rs`.
+- Rust Wave 1 starts `crates/gw-gateway/src/control_plane::{state_writer,command_consumer}.rs` when `[control_plane].enabled = true`.
+- Capability snapshots truthfully advertise `kiro:eventstream` as production ready and `kiro:cli` as not production ready with `reason=requires_real_cli_sample`.
+- Executable Rust command hooks are limited to `reload-config`, `cooldown-key`, `clear-cooldown`, and supported `clear-cache` namespaces. `set-log-level`, `refresh-oauth`, drain/restart, and KEK rotation remain visible disabled capabilities and return failed ACKs if sent.
 
 ## Not built
 
-- SP-A/SP-B/SP-C control-plane Redis surfaces remain a design contract until their implementation plans land.
+- SP-A full `config_*` PgSQL downlink and `gateway:instance:<id>:effective` applied-version feedback are not complete in Rust Wave 1.
+- Go-side command batch/delivery persistence, fan-out, reconciliation, and frontend disablement are owned by Go waves.
 - Kiro CLI remains capability-advertised only; detector and usage extraction require a real CLI traffic sample.
 
 ## 8.1 概览(三线接触点)
@@ -122,7 +125,8 @@ SET gateway:instance:<id>:runtime <json>   EX <2×push_interval>
 ### 8.3.4 频率(Go 控频)+ TTL(死实例自清理)
 
 - 推送间隔 = 配置项 `config_control_plane.runtime_push_interval_ms`(经 **SP-A** 下发,默认 `2000`,**下限 `1000`**,Rust validate 拒绝 < 1000)。
-- `:runtime` TTL = `2×interval`;`:capability`/`:effective` 随心跳续期。实例宕机 → 全部 `gateway:instance:<id>:*` 在 TTL 内过期,Go 不读 stale。
+- Rust Wave 1 配置字段为 `[control_plane] runtime_push_interval_ms / snapshot_ttl_ms / command_group / command_consumer_name / command_block_ms`。`snapshot_ttl_ms >= 2×runtime_push_interval_ms`,`command_block_ms` 范围为 `1000..=30000`。
+- `:capability`/`:runtime` 使用覆盖式 `SET ... PX snapshot_ttl_ms`,不产生积压。`:effective` 随 SP-A reload hook 后续落地。实例宕机 → `gateway:instance:<id>:*` 在 TTL 内过期,Go 不读 stale。
 
 ### 8.3.5 实例发现 + 语义
 
@@ -229,6 +233,8 @@ Rust 处理顺序:
 6. 写 `gateway:instance:<id>:cmd_ack` hash field `<delivery_id>`。
 7. 删除 `entity:gateway_command_delivery:<delivery_id>`。
 8. `XACK commands:gateway group:<instance_id> <stream_id>`。
+
+Rust Wave 1 的 malformed entity 处理遵循同一顺序:能解析 stream delivery metadata 时写 `failed` ACK,删除该 delivery entity,再 `XACK`;若 stream entry 自身缺少 `delivery_id` 等索引字段,无法可靠写 delivery ACK,仅记录 warn 并 `XACK`。
 
 命令结果聚合:Go 以 `command_delivery` 为最小确认单位,读取目标实例 `<delivery_id>` ACK,并检查 `entity:gateway_command_delivery:<delivery_id>` 是否不存在。Go 只有同时看到目标实例 ACK `status=ok` 且 delivery entity 不存在,才算该 delivery 成功。只看到 ACK 但 entity 仍存在,或 entity 已删除但 ACK 缺失,均为 `inconsistent`。一个 batch 只有所有目标 delivery 都成功时才显示成功;部分 failed/skipped/expired/cancelled 必须显示 partial/final,不能夸大为成功。
 

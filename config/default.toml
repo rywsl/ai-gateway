@@ -17,6 +17,14 @@ health_port = 8080
 [admin]
 upstream_url = "http://localhost:3000"
 
+[control_plane]
+enabled = true
+runtime_push_interval_ms = 2000
+snapshot_ttl_ms = 10000
+command_group = "group"
+command_consumer_name = ""
+command_block_ms = 5000
+
 [redis]
 url = "redis://localhost:6379"
 pool_size = 8

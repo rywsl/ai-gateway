@@ -68,6 +68,8 @@ pub struct Config {
     pub quota_state_probe: QuotaStateProbeCfg,
     #[serde(default)]
     pub oauth_refresh: OAuthRefreshCfg,
+    #[serde(default)]
+    pub control_plane: ControlPlaneCfg,
     /// Credit-lease protection mode (Spec 2026-05-29-credit-lease-design).
     /// `enabled = false` (the default) keeps the legacy `frozen_micro` soft
     /// defense path; flipping it on activates the per-Pod hard upper bound.
@@ -98,6 +100,77 @@ impl Default for AdminCfg {
             upstream_url: default_admin_upstream_url(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ControlPlaneCfg {
+    #[serde(default = "default_control_plane_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_control_plane_runtime_push_interval_ms")]
+    pub runtime_push_interval_ms: u64,
+    #[serde(default = "default_control_plane_snapshot_ttl_ms")]
+    pub snapshot_ttl_ms: u64,
+    #[serde(default = "default_control_plane_command_group")]
+    pub command_group: String,
+    #[serde(default)]
+    pub command_consumer_name: String,
+    #[serde(default = "default_control_plane_command_block_ms")]
+    pub command_block_ms: u64,
+}
+
+impl ControlPlaneCfg {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.runtime_push_interval_ms < 1_000 {
+            anyhow::bail!("invalid config: control_plane.runtime_push_interval_ms must be >= 1000");
+        }
+        if self.snapshot_ttl_ms < self.runtime_push_interval_ms.saturating_mul(2) {
+            anyhow::bail!(
+                "invalid config: control_plane.snapshot_ttl_ms must be at least 2x runtime_push_interval_ms"
+            );
+        }
+        if self.command_group.trim().is_empty() {
+            anyhow::bail!("invalid config: control_plane.command_group must be non-empty");
+        }
+        if !(1_000..=30_000).contains(&self.command_block_ms) {
+            anyhow::bail!(
+                "invalid config: control_plane.command_block_ms must be between 1000 and 30000"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Default for ControlPlaneCfg {
+    fn default() -> Self {
+        Self {
+            enabled: default_control_plane_enabled(),
+            runtime_push_interval_ms: default_control_plane_runtime_push_interval_ms(),
+            snapshot_ttl_ms: default_control_plane_snapshot_ttl_ms(),
+            command_group: default_control_plane_command_group(),
+            command_consumer_name: String::new(),
+            command_block_ms: default_control_plane_command_block_ms(),
+        }
+    }
+}
+
+fn default_control_plane_enabled() -> bool {
+    true
+}
+
+fn default_control_plane_runtime_push_interval_ms() -> u64 {
+    2_000
+}
+
+fn default_control_plane_snapshot_ttl_ms() -> u64 {
+    10_000
+}
+
+fn default_control_plane_command_group() -> String {
+    "group".to_string()
+}
+
+fn default_control_plane_command_block_ms() -> u64 {
+    5_000
 }
 
 #[derive(Debug, Deserialize)]
@@ -1109,6 +1182,7 @@ impl Config {
         if self.pgsql.max_connections == 0 {
             anyhow::bail!("invalid config: pgsql.max_connections must be > 0");
         }
+        self.control_plane.validate()?;
         if self.routing.presets.is_empty() {
             anyhow::bail!("invalid config: routing.presets must not be empty");
         }
@@ -1305,6 +1379,41 @@ mod egress_cfg_tests {
     use super::*;
     use figment::providers::{Format, Toml};
     use figment::Figment;
+
+    #[test]
+    fn control_plane_defaults_match_delivery_contract() {
+        let cfg = ControlPlaneCfg::default();
+
+        assert!(cfg.enabled);
+        assert_eq!(cfg.runtime_push_interval_ms, 2_000);
+        assert_eq!(cfg.snapshot_ttl_ms, 10_000);
+        assert_eq!(cfg.command_group, "group");
+        assert_eq!(cfg.command_consumer_name, "");
+        assert_eq!(cfg.command_block_ms, 5_000);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn control_plane_validation_rejects_unsafe_ranges() {
+        let mut cfg = ControlPlaneCfg {
+            runtime_push_interval_ms: 999,
+            ..ControlPlaneCfg::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        cfg = ControlPlaneCfg {
+            runtime_push_interval_ms: 2_000,
+            snapshot_ttl_ms: 3_999,
+            ..ControlPlaneCfg::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        cfg = ControlPlaneCfg {
+            command_block_ms: 30_001,
+            ..ControlPlaneCfg::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
 
     #[test]
     fn egress_default_values() {

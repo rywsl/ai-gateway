@@ -35,6 +35,7 @@
 //! long as the receiver's runtime is alive somewhere in the process.
 
 pub mod config;
+pub mod control_plane;
 pub mod health;
 pub mod kms;
 pub mod metrics_catalog;
@@ -718,6 +719,27 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         target: "gw_gateway",
         "stream consumer started (events:entity, events:counter) with XREADGROUP invalidate-on-event"
     );
+
+    if cfg.control_plane.enabled {
+        let _control_plane = control_plane::start(
+            redis.clone(),
+            store.clone(),
+            health.clone(),
+            in_flight.clone(),
+            instance_id.clone(),
+            &cfg.control_plane,
+        );
+        tracing::info!(
+            target: "gw_gateway",
+            %instance_id,
+            "control-plane state writer and command consumer started"
+        );
+    } else {
+        tracing::info!(
+            target: "gw_gateway",
+            "control-plane disabled by config"
+        );
+    }
 
     // T1-E (G6) + R7b — populate the hot-reloadable validator handle from
     // AuthConfig.global. Absent → handle stays None and request_filter falls

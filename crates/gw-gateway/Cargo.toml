@@ -42,6 +42,7 @@ tracing-subscriber.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 figment.workspace = true
+fred.workspace = true
 # `pingora` provides the Server runtime; `pingora-proxy` provides the
 # `http_proxy_service` constructor + `ProxyHttp` trait that `gw-proxy`
 # implements against. Both are needed at link time.

@@ -1980,6 +1980,7 @@ dependencies = [
  "bytes",
  "e2e-fake-upstream",
  "figment",
+ "fred",
  "gw-adapter",
  "gw-auth",
  "gw-billing",

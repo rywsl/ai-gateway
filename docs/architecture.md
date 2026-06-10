@@ -122,6 +122,7 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 |-------|----------------|-------|
 | `[server]` | `business_port` (8000), `metrics_port` (9090), `health_port` (8080) | |
 | `[admin]` | `upstream_url` (`http://localhost:3000`) | Verified `/admin/*` requests are reverse-proxied to this Go control-plane upstream. |
+| `[control_plane]` | `enabled` (true), `runtime_push_interval_ms` (2000), `snapshot_ttl_ms` (10000), `command_group` (`group`), `command_consumer_name` (empty = instance id), `command_block_ms` (5000) | Rust Wave 1 control-plane runtime. Publishes capability/runtime snapshots under `gateway:instance:<id>:*` and consumes Go-owned delivery entities from `commands:gateway`. Validates push interval >= 1000 ms, snapshot TTL >= 2x interval, and command block between 1000 and 30000 ms. |
 | `[redis]` | URL, pool size | |
 | `[pgsql]` | URL, max connections | |
 | `[ratelimit]` | Workspace `global_rpm` ceiling (per-user lives in DB) | |
@@ -194,6 +195,11 @@ Migrations live at `crates/gw-store/migrations/`. **Not auto-applied** — run `
 | `counter:{scope}:{id}:{field}` | Runtime counters (`base_micro`, `deducted_micro`, `frozen_micro`, RPM, TPM) | Go billing service for base/deducted, Rust frozen-delta worker for frozen, `CounterStore::incrby` | `request_filter` available-balance check, RPM guard |
 | `events:entity` | Cache-invalidation stream | Control plane | `StreamConsumer` → `EntityStore::invalidate` |
 | `events:counter` | Counter event echo (Phase 5) | (deferred) | `StreamConsumer` (observability only in v1) |
+| `gateway:instance:{id}:capability` | Gateway capability snapshot. JSON, overwrite key with `PX control_plane.snapshot_ttl_ms`. Includes Kiro API shapes and visible disabled command reasons. | `gw-gateway::control_plane::StateWriter` | Go control plane |
+| `gateway:instance:{id}:runtime` | Slow runtime snapshot. JSON, overwrite key with `PX control_plane.snapshot_ttl_ms`; no stream backlog. | `gw-gateway::control_plane::StateWriter` | Go control plane |
+| `gateway:instance:{id}:cmd_ack` | Command delivery ACK hash. Field is `<delivery_id>`, value is JSON ACK payload. | `gw-gateway::control_plane::CommandConsumer` | Go control plane |
+| `commands:gateway` | Go-owned command delivery notification stream. Entries carry only `command_id`, `delivery_id`, `target_instance_id`, `delivery_mode`, `issued_at_ms`; command body is `entity:gateway_command_delivery:{delivery_id}`. | Go control plane | `gw-gateway::control_plane::CommandConsumer` with per-instance group `group:{instance_id}` by default |
+| `entity:gateway_command_delivery:{delivery_id}` | Go-owned per-instance delivery entity hash (`v`, `enc=json`, `d`). Rust reads only its targeted delivery, writes ACK, deletes entity, then XACKs. | Go control plane | `gw-gateway::control_plane::CommandConsumer` |
 | `usage:records` | Billing records | `Ledger` flusher (XADD batched), `RedisTaskContract::settle` for `task_usage_v1` payloads | Go billing service |
 | `usage:detailed` | Wire-fidelity per-surface archive. 5 entries per request (downstream/upstream × request/response + summary). `encoding` ∈ {raw,lz4,zstd}+json picked by size. Headers + bodies stored raw (no redaction). XADD MAXLEN bounds Redis memory; Go drainer is mandatory consumer for 180d retention. Drop-on-outage (no DLQ). See [`detailed-log`](spec/06-billing-ledger.md). | `DetailedFlusher` (async pool, per-surface XADD) | Go drainer (mandatory) |
 | `entity:task:<id>` | Task record hash. Flat fields: `task_id`, `user_id`, `api_key_id`, `status`, `kind`, `model`, `vendor_key_id`, `input_payload` (JSON string), `output_payload`, `frozen_micro`, `actual_micro`, `provider_task_id`, lifecycle timestamps (`created_at_ms`, `updated_at_ms`, `settled_at_ms`, `lease_until_ms`). Written by `RedisTaskContract::submit`, updated by worker loops. | `gw-task` (`RedisTaskContract`), `gw-task-worker` | Gateway task endpoints (load/watch/cancel), worker exec/cancel/watchdog loops |
@@ -226,6 +232,7 @@ spawn bootstrap thread  ────────────►    KMS init
                                           RateLimitGuard, CounterStore
                                          Ledger::start         (spawned task)
                                          StreamConsumer::start (spawned task)
+                                         control_plane::start  (spawned tasks, if enabled)
                                          ip_blocks preload     (100-row pages, fail-closed)
                                          health::run_server   (spawned task)
                                          Prometheus exporter   (spawned task)
