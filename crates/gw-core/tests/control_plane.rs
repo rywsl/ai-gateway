@@ -1,7 +1,8 @@
 use gw_core::control_plane::{
     command_ack_hash_key, command_delivery_entity_key, default_gateway_capability,
-    GatewayCommandAck, GatewayCommandAction, GatewayCommandDeliveryEntity, GatewayCommandStatus,
-    GatewayCommandStreamEntry,
+    CommandConsumerState, GatewayCommandAck, GatewayCommandAction, GatewayCommandDeliveryEntity,
+    GatewayCommandStatus, GatewayCommandStreamEntry, GatewayRuntimeSnapshot, RuntimeConfigSample,
+    StreamLagSnapshot, CONTROL_PLANE_SCHEMA_VERSION,
 };
 use serde_json::json;
 
@@ -116,4 +117,51 @@ fn capability_reports_kiro_shapes_and_disabled_commands_truthfully() {
         refresh_oauth.reason.as_deref(),
         Some("oauth_force_refresh_hook_missing")
     );
+}
+
+#[test]
+fn runtime_snapshot_carries_full_control_plane_status_fields() {
+    let snapshot = GatewayRuntimeSnapshot {
+        schema_version: CONTROL_PLANE_SCHEMA_VERSION,
+        instance_id: "gw-a".to_string(),
+        generated_at_ms: 100,
+        ts_ms: 100,
+        uptime_ms: 50,
+        active_requests: 2,
+        inflight_tokens: 3,
+        provider_health: Vec::new(),
+        key_health: Vec::new(),
+        command_consumer: CommandConsumerState {
+            stream: "commands:gateway".to_string(),
+            group: "group:gw-a".to_string(),
+            consumer: "gw-a".to_string(),
+            last_seen_ms: Some(90),
+        },
+        tunnel: Vec::new(),
+        oauth_rotation: Vec::new(),
+        impersonate_active: json!({}),
+        inflight_total: 2,
+        stream_lag: vec![StreamLagSnapshot {
+            stream: "commands:gateway".to_string(),
+            group: "group:gw-a".to_string(),
+            pending: None,
+            lag: None,
+            last_seen_ms: Some(90),
+        }],
+        config_sample: RuntimeConfigSample {
+            runtime_push_interval_ms: 2_000,
+            snapshot_ttl_ms: 10_000,
+            command_block_ms: 5_000,
+        },
+    };
+
+    let value = serde_json::to_value(snapshot).unwrap();
+
+    assert_eq!(value["ts_ms"], 100);
+    assert_eq!(value["inflight_total"], 2);
+    assert_eq!(value["tunnel"], json!([]));
+    assert_eq!(value["oauth_rotation"], json!([]));
+    assert_eq!(value["impersonate_active"], json!({}));
+    assert_eq!(value["stream_lag"][0]["stream"], "commands:gateway");
+    assert_eq!(value["config_sample"]["runtime_push_interval_ms"], 2_000);
 }

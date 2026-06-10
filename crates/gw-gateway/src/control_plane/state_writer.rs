@@ -3,7 +3,8 @@ use fred::interfaces::KeysInterface;
 use fred::types::Expiration;
 use gw_core::control_plane::{
     default_gateway_capability, gateway_capability_key, gateway_runtime_key, CommandConsumerState,
-    GatewayRuntimeSnapshot, KeyHealthSummary, ProviderHealthSummary, CONTROL_PLANE_SCHEMA_VERSION,
+    GatewayRuntimeSnapshot, KeyHealthSummary, ProviderHealthSummary, RuntimeConfigSample,
+    StreamLagSnapshot, CONTROL_PLANE_SCHEMA_VERSION,
 };
 use gw_health::KeyHealthStore;
 use gw_routing::InFlightStore;
@@ -124,6 +125,10 @@ impl StateWriter {
 
     async fn write_runtime(&self) -> anyhow::Result<()> {
         let values = self.dynamic.snapshot();
+        let generated_at_ms = now_ms();
+        let last_seen_ms =
+            Some(self.observed.last_command_stream_ms.load(Ordering::Acquire) as i64)
+                .filter(|v| *v > 0);
         let active_requests = self
             .in_flight
             .snapshot_existing()
@@ -133,8 +138,9 @@ impl StateWriter {
         let snapshot = GatewayRuntimeSnapshot {
             schema_version: CONTROL_PLANE_SCHEMA_VERSION,
             instance_id: self.instance_id.clone(),
-            generated_at_ms: now_ms(),
-            uptime_ms: now_ms().saturating_sub(self.started_at_ms) as u64,
+            generated_at_ms,
+            ts_ms: generated_at_ms,
+            uptime_ms: generated_at_ms.saturating_sub(self.started_at_ms) as u64,
             active_requests,
             inflight_tokens: 0,
             provider_health: Vec::<ProviderHealthSummary>::new(),
@@ -143,10 +149,23 @@ impl StateWriter {
                 stream: "commands:gateway".to_string(),
                 group: format!("{}:{}", self.command_group, self.instance_id),
                 consumer: self.command_consumer.clone(),
-                last_seen_ms: Some(
-                    self.observed.last_command_stream_ms.load(Ordering::Acquire) as i64
-                )
-                .filter(|v| *v > 0),
+                last_seen_ms,
+            },
+            tunnel: Vec::new(),
+            oauth_rotation: Vec::new(),
+            impersonate_active: serde_json::json!({}),
+            inflight_total: active_requests,
+            stream_lag: vec![StreamLagSnapshot {
+                stream: "commands:gateway".to_string(),
+                group: format!("{}:{}", self.command_group, self.instance_id),
+                pending: None,
+                lag: None,
+                last_seen_ms,
+            }],
+            config_sample: RuntimeConfigSample {
+                runtime_push_interval_ms: values.interval_ms,
+                snapshot_ttl_ms: values.snapshot_ttl_ms,
+                command_block_ms: values.command_block_ms,
             },
         };
         let payload = serde_json::to_string(&snapshot)?;

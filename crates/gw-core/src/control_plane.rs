@@ -42,6 +42,7 @@ pub struct GatewayRuntimeSnapshot {
     pub schema_version: u32,
     pub instance_id: String,
     pub generated_at_ms: i64,
+    pub ts_ms: i64,
     pub uptime_ms: u64,
     pub active_requests: u64,
     pub inflight_tokens: u64,
@@ -50,6 +51,16 @@ pub struct GatewayRuntimeSnapshot {
     #[serde(default)]
     pub key_health: Vec<KeyHealthSummary>,
     pub command_consumer: CommandConsumerState,
+    #[serde(default)]
+    pub tunnel: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub oauth_rotation: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub impersonate_active: serde_json::Value,
+    pub inflight_total: u64,
+    #[serde(default)]
+    pub stream_lag: Vec<StreamLagSnapshot>,
+    pub config_sample: RuntimeConfigSample,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +88,25 @@ pub struct CommandConsumerState {
     pub group: String,
     pub consumer: String,
     pub last_seen_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamLagSnapshot {
+    pub stream: String,
+    pub group: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lag: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeConfigSample {
+    pub runtime_push_interval_ms: u64,
+    pub snapshot_ttl_ms: u64,
+    pub command_block_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
