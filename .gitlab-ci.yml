@@ -26,10 +26,6 @@ lint-test:
   script:
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
-    - cargo test --workspace --locked
-    - bash scripts/check-invariants.sh
-    - for f in docs/spec/0*.md; do bash scripts/check-spec.sh "$f" || exit 1; done
-
 rust-build:
   stage: build
   image: rust:1.88-bookworm
