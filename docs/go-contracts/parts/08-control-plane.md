@@ -30,7 +30,8 @@
 | SP-B | `gateway:instance:<id>:effective` | Rust(reload) | Go | 配置生效值回报(闭环 SP-A) |
 | SP-B | `gateway:instance:<id>:runtime` | Rust(周期 2s) | Go | 运行状态慢快照(覆盖式,不积压) |
 | SP-B | `gateway:instance:<id>:heartbeat` | Rust(**已存在**) | Go reaper | 实例存活,`gw_ledger::instance_id` |
-| **SP-C** | `commands:gateway` | **Go** | Rust(每实例独立 group) | 命令流(广播 + 定向) |
+| **SP-C** | `commands:gateway` | **Go** | Rust(每实例独立 group) | 命令索引/通知流(广播 + 定向,主体在 command entity) |
+| SP-C | `entity:gateway_command:<command_id>` | **Go** | Rust | Go-owned 命令主体,Rust 消费后删除 |
 | SP-C | `gateway:instance:<id>:cmd_ack` | Rust | Go | 命令 ACK |
 
 > `<id>` = `gw_ledger::instance_id::resolve` 的结果(L0 `GW_INSTANCE_ID` env / L2 `gateway:instance:<hostname>`)。Go 经现有心跳 reaper 发现存活实例集合,再读其 `:capability`/`:effective`/`:runtime`/`:cmd_ack`。
@@ -129,40 +130,93 @@ Go 用现有心跳 reaper(`gateway:instance:<id>:heartbeat`,TTL 600s)已知存�
 
 ## 8.4 SP-C 命令通道(Go → Rust + ACK)
 
-### 8.4.1 `commands:gateway` 命令结构
+### 8.4.1 `commands:gateway` 索引/通知结构
 
 ```
-XADD commands:gateway * command_id <id> action <action> target <t> args <json> issued_at_ms <ts> [sig <hmac>]
+XADD commands:gateway * command_id <id> target <t> delivery <durable|ephemeral> issued_at_ms <ts>
 ```
+- `commands:gateway` 只做命令索引/通知,**不承载** `action`/`args`/完整命令主体。
 - **寻址**:每实例 boot 时 `XGROUP CREATE commands:gateway group:<instance_id> $`(每实例独立 group → 广播语义);`target` = `"all"` | `"<instance_id>"`,消费侧过滤决定是否执行。
-- **幂等**:`command_id` 去重 `SETNX seen:cmd:<command_id>`(TTL),已见即 `XACK` 跳过。
+- Rust 收到 stream entry 后,用 `command_id` 读取 `entity:gateway_command:<command_id>`;缺失或 decode 失败时写 ACK 后再 `XACK`。
 
-### 8.4.2 命令集 + args + 内部映射
+### 8.4.2 命令主体 `entity:gateway_command:<command_id>`
 
-| action | args | 默认 target | 内部 API(Rust) |
+Go 先写命令主体,再写 `commands:gateway` 索引/通知:
+
+```
+HSET entity:gateway_command:<command_id> v <version> enc json d <command_json>
+```
+
+Redis HASH 字段遵循 main §3.2 entity 信封:
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `v` | yes | 单调版本号 |
+| `enc` | yes | `json` |
+| `d` | yes | command JSON |
+
+`d` 是 JSON:
+
+```json
+{
+  "command_id": "cmd_...",
+  "action": "reload-config",
+  "target": "all",
+  "args": {"table": "config_control_plane"},
+  "delivery": "durable",
+  "issued_at_ms": 0,
+  "expires_at_ms": null,
+  "issued_by": "admin_..."
+}
+```
+
+必填字段:`command_id` / `action` / `target` / `args` / `delivery` / `issued_at_ms` / `issued_by`。`expires_at_ms` 只在 `delivery=ephemeral` 时必填。
+
+Delivery 语义:
+
+| delivery | Go 写 entity | Rust 消费 | Go 判定 |
 |---|---|---|---|
-| `cooldown-key` | `key_id, format, ttl_secs` | all | `KeyHealthStore::apply_cooldown` |
-| `clear-cooldown` | `key_id, format` | all | `KeyHealthStore::clear_cooldown` |
-| `refresh-oauth` | `key_id` | all(leader 单飞) | F2 K-C Rust `OAuthRuntime` single-flight refresher; Go issues the command, Rust performs refresh and write-back |
-| `reload-config` | `table`(或 `"*"`) | all | SP-A `ConfigReloadRegistry` |
-| `restart-component` | `component` | all/instance | SP-A `Reconfigurable`(强制重建) |
-| `drain` / `undrain` | — | instance | graceful-upgrade `GracefulDrain` |
-| `restart-instance` | — | instance | Pingora graceful upgrade |
-| `rotate-kek` | `new_kid` | all | `KekCache` 轮换(已有 DualRead) |
-| `set-log-level` | `level` | all/instance | `tracing` reload handle |
-| `clear-cache` | `ns, id` | all | `EntityStore` invalidate |
+| `durable` | 不设置 Redis TTL | 执行或跳过后删除 entity | entity 消失表示 Rust 已消费 |
+| `ephemeral` | 必须设置 `expires_at_ms` 和 Redis TTL | 若发现过期,写 ACK `status=skipped` / `message=expired`,删除 entity | entity 可能由 Rust 删除;超时未消费由 Go reconciliation 处理 |
 
-### 8.4.3 ACK(`gateway:instance:<id>:cmd_ack`)
+Go 不自动删除 durable command entity;durable 超时未消费由 Go 标记 `pending_timeout` 并告警。Rust 只有成功读取命令主体并执行/跳过后才删除 `entity:gateway_command:<command_id>`。
+
+### 8.4.3 命令集 + args + 内部映射
+
+| action | args | 默认 target | 首批状态 | 内部 API(Rust) |
+|---|---|---|---|---|
+| `reload-config` | `table`(或 `"*"`) | all | executable | SP-A `ConfigReloadRegistry` |
+| `cooldown-key` | `key_id, format, ttl_secs` | all | executable | `KeyHealthStore::apply_cooldown` |
+| `clear-cooldown` | `key_id, format` | all | executable | `KeyHealthStore::clear_cooldown` |
+| `clear-cache` | `ns, id` | all | executable | `EntityStore` invalidate |
+| `set-log-level` | `level` | all/instance | disabled + reason | tracing reload handle 未接入 |
+| `refresh-oauth` | `key_id` | all(leader 单飞) | disabled + reason | F2 K-C Rust `OAuthRuntime` 尚未暴露 force-refresh hook |
+| `drain` / `undrain` | — | instance | disabled + reason | graceful-upgrade `GracefulDrain` 尚未接入命令面 |
+| `restart-instance` | — | instance | disabled + reason | Pingora graceful upgrade 尚未接入命令面 |
+| `rotate-kek` | `new_kid` | all | disabled + reason | `KekCache` 轮换尚未接入命令面 |
+
+禁用命令可以在 capability 中可见,但必须带 `enabled=false` 和 `reason`;Go/前端不得把 disabled 命令作为可执行动作开放。
+
+### 8.4.4 ACK(`gateway:instance:<id>:cmd_ack`)
 
 ```
 HSET gateway:instance:<id>:cmd_ack <command_id> <result_json>   + EXPIRE
-result = { "status": "ok|failed|skipped|not_applicable", "detail": "…", "applied_at_ms": 0 }
+result = { "status": "ok|failed|skipped|not_applicable", "message": "…", "finished_at_ms": 0 }
 ```
-广播命令结果聚合:Go 用 §8.3.5 实例发现 → 读所有存活实例同一 `command_id` 的 ACK → 判全局成功/部分失败。某实例无 ACK(超时)= 未执行。
+Rust 处理顺序:
 
-### 8.4.4 权限
+1. 从 `commands:gateway` 取得 `command_id` / `target` / `delivery` / `issued_at_ms`。
+2. 读取 `entity:gateway_command:<command_id>` 并解码 `d`。
+3. 执行、跳过或判定 disabled/expired。
+4. 写 `gateway:instance:<id>:cmd_ack`。
+5. 删除 `entity:gateway_command:<command_id>`。
+6. `XACK commands:gateway group:<instance_id> <stream_id>`。
 
-沿用现有 redis 可信边界(与 `events:entity` 同等信任,Go 已能改 entity);全命令 `command_id` 审计,敏感命令(`drain`/`rotate-kek`/`restart-*`)记 audit log。redis 多租户/不可信时启用 `sig` HMAC(可选,默认关)。
+广播命令结果聚合:Go 用 §8.3.5 实例发现 → 读所有存活实例同一 `command_id` 的 ACK,并检查 `entity:gateway_command:<command_id>` 是否不存在。Go 只有同时看到目标实例 ACK `status=ok` 且 entity 不存在,才算命令成功。只看到 ACK 但 entity 仍存在,或 entity 已删除但 ACK 缺失,均为 `inconsistent`。某实例无 ACK(超时)= 未执行或 pending。
+
+### 8.4.5 权限
+
+沿用现有 redis 可信边界(与 `events:entity` 同等信任,Go 已能改 entity);全命令 `command_id` 审计,敏感命令(`drain`/`rotate-kek`/`restart-*`)记 audit log。redis 多租户/不可信时需新增已确认的签名字段设计;本 wave 不引入未确认的 HMAC 字段。
 
 ## 8.5 失败语义(扩展 main §3.5)
 
@@ -171,7 +225,9 @@ result = { "status": "ok|failed|skipped|not_applicable", "detail": "…", "appli
 | config validate 失败 | 拒绝该次 reload,保留旧 `TableCfg`,`:effective` version 不前进 | 读 `:effective` 见 version 滞后 → 知未生效,告警 |
 | `events:entity ns=config` 丢失 | `version` 单调 + 启动冷加载兜底(同 §3.4) | 重发或等冷加载 |
 | `:runtime` 推送失败 | 下个 tick 覆盖重试(无积压) | 读到 stale(TTL 内)或 key 缺失(TTL 过) |
-| 命令 handler 失败 | ACK `status=failed` + detail | 按 `command_id` 读 ACK 处理 |
+| 命令 handler 失败 | ACK `status=failed` + message | 按 `command_id` 读 ACK 处理 |
+| 命令 entity 已过期 | ACK `status=skipped` + message=`expired`,删除 entity,再 XACK | 记录 skipped/expired,不计成功 |
+| ACK/entity 不一致 | 保持 ACK/entity 事实状态,不伪造成功 | 标记 `inconsistent` 并告警/人工处理 |
 | `refresh-oauth` 广播 | 必须复用 K-C `SETNX lock:oauth:refresh:<key_id>` 全局单飞 | 期望单次刷新 |
 | 实例宕机 | 全部 `gateway:instance:<id>:*` TTL 过期 | 心跳 reaper 摘除,不读 stale |
 
