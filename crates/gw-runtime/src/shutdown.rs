@@ -71,17 +71,26 @@ pub struct PhaseHandle {
     state: Arc<AtomicU8>,
 }
 
-impl Default for PhaseHandle {
-    fn default() -> Self {
-        Self {
-            state: Arc::new(AtomicU8::new(ShutdownPhase::Running as u8)),
-        }
-    }
-}
-
 impl PhaseHandle {
     pub fn current(&self) -> ShutdownPhase {
         ShutdownPhase::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    /// Construct a `PhaseHandle` that is **not** wired to any
+    /// `ShutdownCoordinator`. It permanently reports
+    /// `ShutdownPhase::Running` because nothing will ever transition it.
+    ///
+    /// This is intended **only** for tests and harness placeholders that
+    /// need a handle-shaped value. Production code MUST obtain a handle via
+    /// [`ShutdownCoordinator::phase_handle`]; using a detached handle in
+    /// production silently breaks `/readyz` drain semantics.
+    ///
+    /// The name carries the warning so the footgun is visible at every call
+    /// site; do not rename to something innocuous like `new()` / `default()`.
+    pub fn detached_for_test() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(ShutdownPhase::Running as u8)),
+        }
     }
 }
 

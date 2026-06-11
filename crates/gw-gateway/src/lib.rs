@@ -166,6 +166,13 @@ struct Wired {
     /// `/readyz` to flip the listener to 503 during phase 1.
     #[allow(dead_code)]
     phase_handle: gw_runtime::PhaseHandle,
+    /// Aggregate "any Supervisor exhausted its restart budget" flag (T2.3 /
+    /// T3). The `/readyz` handler ORs this into its 503 decision so an
+    /// unhealthy supervised task takes the Pod out of the LB rotation. Held
+    /// on `Wired` so T3 supervisors can `clone()` the Arc and `store(true)`
+    /// on budget exhaustion without re-plumbing bootstrap.
+    #[allow(dead_code)]
+    supervisor_unhealthy: Arc<std::sync::atomic::AtomicBool>,
     /// Sharded append-only spill root. T4 migrates `EmergencyDlqWriter` and
     /// T5 the response archive on top of this.
     #[allow(dead_code)]
@@ -1257,6 +1264,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     let health_backpressure_state = backpressure_gate.state_handle();
     let health_phase_handle = phase_handle.clone();
     let supervisor_unhealthy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let health_supervisor_unhealthy = supervisor_unhealthy.clone();
     tokio::spawn(async move {
         if let Err(e) = health::run_health_server(
             health_port,
@@ -1265,7 +1273,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
             health_blacklist,
             health_phase_handle,
             health_backpressure_state,
-            supervisor_unhealthy,
+            health_supervisor_unhealthy,
         )
         .await
         {
@@ -1353,6 +1361,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
             backpressure_gate,
             shutdown_token,
             phase_handle,
+            supervisor_unhealthy,
             spill_root,
             redis_oom_reporter,
         },

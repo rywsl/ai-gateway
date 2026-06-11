@@ -39,7 +39,7 @@ async fn start_server() -> Option<(u16, tokio::task::JoinHandle<anyhow::Result<(
         #[cfg(feature = "tunnel")]
         tunnel_stack: None,
     };
-    let phase_handle = gw_runtime::PhaseHandle::default();
+    let phase_handle = gw_runtime::PhaseHandle::detached_for_test();
     let backpressure_state = Arc::new(AtomicU8::new(0));
     let supervisor_unhealthy = Arc::new(AtomicBool::new(false));
     let h = tokio::spawn(gw_gateway::health::run_health_server(
