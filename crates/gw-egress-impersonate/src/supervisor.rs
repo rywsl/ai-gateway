@@ -1,114 +1,59 @@
-//! Supervisor — wraps `Listener::spawn` with bounded restart on panic/error.
-//!
-//! Caps at 5 restarts per 60 s. Beyond that, logs critical and exits the
-//! supervisor task. The process keeps running; egress is down until the next
-//! process restart (gw-proxy treats connect_refused as retryable).
+//! Thin compatibility wrapper around `gw_runtime::Supervisor`. Existing call
+//! sites continue to call `supervise(bind, pool, shutdown_rx)`; internally
+//! this now uses the shared Supervisor primitive.
 
 use crate::handle::EgressBind;
 use crate::pool::ClientPool;
 use crate::server::{Handler, Listener};
+use gw_runtime::{RestartPolicy, ShutdownToken, Supervisor};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-/// Run the egress listener under supervision.
-///
-/// Loops until either:
-/// - A graceful shutdown signal is received on `shutdown_rx`.
-/// - The restart rate exceeds 5 restarts / 60 s (gives up; logs critical).
-///
-/// On each iteration the listener is re-bound and re-spawned. The `shutdown_rx`
-/// is also checked before each bind attempt so we don't restart after shutdown.
 pub async fn supervise(
     bind: EgressBind,
     pool: Arc<ClientPool>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
-    let mut restarts: Vec<Instant> = Vec::new();
+    let token = ShutdownToken::new();
+    let token_for_listener = token.clone();
 
-    loop {
-        // Bail immediately if a shutdown was requested.
-        if shutdown_rx.try_recv().is_ok() {
-            break;
-        }
+    // Bridge the broadcast receiver to the new token.
+    let token_for_bridge = token.clone();
+    tokio::spawn(async move {
+        let _ = shutdown_rx.recv().await;
+        token_for_bridge.cancel();
+    });
 
-        // Build a per-restart Handler. This is lightweight (wraps the shared
-        // ClientPool Arc) and gives each restart a clean hyper connection state.
-        let handler = Arc::new(Handler::new_with_pool(Arc::clone(&pool)));
+    let bind = Arc::new(bind);
+    let handle = Supervisor::new(
+        "egress_impersonate",
+        RestartPolicy::default(),
+        token_for_listener,
+    )
+    .spawn(move |tok| {
+        let bind = (*bind).clone();
+        let pool = Arc::clone(&pool);
+        async move {
+            let handler = Arc::new(Handler::new_with_pool(pool));
+            let listener = Listener::bind(bind, handler)
+                .await
+                .map_err(|e| anyhow::anyhow!("bind failed: {e}"))?;
+            let mut handle = listener.spawn();
 
-        let listener = match Listener::bind(bind.clone(), handler).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("gw-egress-impersonate: listener bind failed: {e}");
-                metrics::counter!(
-                    "gw_egress_supervisor_restart_total",
-                    "reason" => "bind_failed"
-                )
-                .increment(1);
-                tokio::time::sleep(backoff(restarts.len())).await;
-                continue;
-            }
-        };
-
-        let mut handle = listener.spawn();
-
-        // Race: listener task end vs. external shutdown signal.
-        tokio::select! {
-            res = &mut handle.task => {
-                match res {
-                    // Graceful listener exit: the Listener's own shutdown_tx fired
-                    // (i.e. we forwarded the signal on a previous iteration).
-                    Ok(Ok(())) => break,
-                    Ok(Err(e)) => tracing::warn!("gw-egress-impersonate: listener exited with error: {e}"),
-                    Err(e) if e.is_panic() => {
-                        tracing::error!("gw-egress-impersonate: listener panicked: {e:?}");
+            tokio::select! {
+                res = &mut handle.task => {
+                    match res {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(anyhow::anyhow!("listener error: {e}")),
+                        Err(e) => Err(anyhow::anyhow!("listener join error: {e}")),
                     }
-                    Err(e) => tracing::warn!("gw-egress-impersonate: listener join error: {e}"),
+                }
+                _ = tok.cancelled() => {
+                    handle.shutdown().await;
+                    Ok(())
                 }
             }
-            _ = shutdown_rx.recv() => {
-                // Forward shutdown into the listener and await clean exit.
-                handle.shutdown().await;
-                break;
-            }
         }
+    });
 
-        // Rate-limit restarts.
-        let now = Instant::now();
-        restarts.retain(|t| now.duration_since(*t) <= Duration::from_secs(60));
-        restarts.push(now);
-
-        if restarts.len() > 5 {
-            // Note: if bind is a UDS path, the socket file may be left on
-            // disk. The next bind attempt will pre-clean it, but operators
-            // should correlate the stale socket path with this log entry.
-            tracing::error!(
-                bind = ?bind,
-                "gw-egress-impersonate: supervisor: >5 restarts/min, giving up"
-            );
-            metrics::counter!(
-                "gw_egress_supervisor_restart_total",
-                "reason" => "exhausted"
-            )
-            .increment(1);
-            break;
-        }
-
-        metrics::counter!(
-            "gw_egress_supervisor_restart_total",
-            "reason" => "panic_or_err"
-        )
-        .increment(1);
-        tokio::time::sleep(backoff(restarts.len())).await;
-    }
-}
-
-fn backoff(restart_count: usize) -> Duration {
-    let secs = match restart_count {
-        0 => 1,
-        1 => 2,
-        2 => 4,
-        3 => 8,
-        _ => 16,
-    };
-    Duration::from_secs(secs)
+    let _ = handle.await;
 }

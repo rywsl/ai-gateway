@@ -19,3 +19,6 @@ pub use handle::{EgressBind, EgressHandle};
 
 /// Error classification constants for downstream consumers.
 pub use error::{ErrorClass, HDR_CLASS, HDR_DETAIL};
+
+/// Re-export from `gw_runtime` so consumers get the canonical Supervisor.
+pub use gw_runtime::Supervisor;
