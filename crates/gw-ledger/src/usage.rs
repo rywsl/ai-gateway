@@ -40,7 +40,7 @@ pub struct UsageProvenance {
     pub multimodal_input: ProvenanceTag,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UsageRecord {
     // --- Identity / trace ---
     pub ts_ms: u64,
@@ -116,7 +116,7 @@ pub struct UsageRecord {
     pub coef_table_version: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageStatus {
     Ok,

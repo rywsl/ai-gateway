@@ -22,7 +22,7 @@ pub struct DlqMeta {
     pub dlq_layer: DlqLayer,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DlqEnvelope {
     pub dlq_meta: DlqMeta,
     pub usage_record: UsageRecord,
@@ -234,7 +234,8 @@ mod tests {
     }
 
     /// Round-trip test: append two envelopes, flush, read back, and
-    /// verify the serialised JSON lines contain the expected fields.
+    /// deserialise them back into `DlqEnvelope`s. T4.4 BacklogRecovery
+    /// depends on this `from_slice` path to replay spilled DLQ lines.
     #[tokio::test]
     async fn dlq_writer_round_trip() {
         let tmp = TempDir::new().unwrap();
@@ -271,21 +272,22 @@ mod tests {
         let all_bytes: Vec<u8> = shards.into_iter().flatten().collect();
         let text = String::from_utf8(all_bytes).unwrap();
 
-        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
-        assert_eq!(lines.len(), 2, "two JSONL lines expected");
+        // Round-trip the on-disk JSONL format back into DlqEnvelope. This is
+        // the path BacklogRecovery::replay_file will take.
+        let deserialized: Vec<DlqEnvelope> = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| serde_json::from_slice::<DlqEnvelope>(line.as_bytes()).unwrap())
+            .collect();
 
-        // Verify first envelope fields via JSON value inspection.
-        let v1: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(v1["dlq_meta"]["retry_count_before_dlq"], 1);
-        assert_eq!(v1["dlq_meta"]["dlq_layer"], "mem");
-        assert_eq!(v1["dlq_meta"]["first_failure_ts_ms"], 1000);
-        assert_eq!(v1["usage_record"]["request_id"], "req-dlq-1");
-
-        // Verify second envelope fields.
-        let v2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(v2["dlq_meta"]["retry_count_before_dlq"], 2);
-        assert_eq!(v2["dlq_meta"]["dlq_layer"], "redis");
-        assert_eq!(v2["dlq_meta"]["first_failure_ts_ms"], 2000);
-        assert_eq!(v2["usage_record"]["request_id"], "req-dlq-2");
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized[0].dlq_meta.retry_count_before_dlq, 1);
+        assert_eq!(deserialized[0].dlq_meta.dlq_layer, DlqLayer::Mem);
+        assert_eq!(deserialized[0].dlq_meta.first_failure_ts_ms, 1000);
+        assert_eq!(deserialized[0].usage_record.request_id, "req-dlq-1");
+        assert_eq!(deserialized[1].dlq_meta.retry_count_before_dlq, 2);
+        assert_eq!(deserialized[1].dlq_meta.dlq_layer, DlqLayer::Redis);
+        assert_eq!(deserialized[1].dlq_meta.first_failure_ts_ms, 2000);
+        assert_eq!(deserialized[1].usage_record.request_id, "req-dlq-2");
     }
 }
