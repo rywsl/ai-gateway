@@ -2089,6 +2089,7 @@ dependencies = [
  "gw-health",
  "gw-ledger",
  "gw-routing",
+ "gw-runtime",
  "gw-store",
  "gw-task",
  "gw-tunnel-client",

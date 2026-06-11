@@ -25,9 +25,223 @@ use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
 use gw_routing::in_flight::InFlightGuard;
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
+use gw_runtime::{SpillFile, SpillRoot};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Cap policy for response-archive accumulation. See [`ArchiveState`].
+///
+/// `soft_cap_bytes` is the in-memory ceiling: once exceeded, the accumulator
+/// transitions to disk spill. `hard_cap_bytes` is the disk ceiling: once
+/// exceeded, the accumulator transitions to `Truncated` and further bytes
+/// are dropped (counted, not lost silently).
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveCaps {
+    pub soft_cap_bytes: usize,
+    pub hard_cap_bytes: usize,
+}
+
+impl Default for ArchiveCaps {
+    fn default() -> Self {
+        // Conservative defaults; bootstrap (T5.2) overrides from
+        // `cfg.proxy.archive.{soft_cap_bytes,hard_cap_bytes}`.
+        Self {
+            soft_cap_bytes: 4 * 1024 * 1024,
+            hard_cap_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+/// Bounded archive accumulator for detailed-log response surfaces.
+///
+/// Lifecycle:
+/// - Starts as [`ArchiveState::InMemory`] backed by a `BytesMut`.
+/// - On crossing `soft_cap_bytes`, transitions to [`ArchiveState::Spilled`]:
+///   the in-memory buffer is flushed to a sharded [`SpillFile`] and the
+///   incoming chunk is appended to disk.
+/// - On crossing `hard_cap_bytes`, or on any spill I/O failure, transitions
+///   to [`ArchiveState::Truncated`]: subsequent bytes are dropped and only
+///   the `dropped` counter advances.
+///
+/// `append_chunk` never returns an error — failures are logged via
+/// `tracing::warn!` with `request_id` / `surface` / `bytes_written` /
+/// `bytes_dropped`, and accounted via the `gw_archive_*_total` counters.
+pub enum ArchiveState {
+    InMemory(BytesMut),
+    Spilled {
+        file: Box<SpillFile>,
+        written: u64,
+    },
+    Truncated {
+        written: u64,
+        dropped: u64,
+    },
+}
+
+impl Default for ArchiveState {
+    fn default() -> Self {
+        Self::InMemory(BytesMut::new())
+    }
+}
+
+impl ArchiveState {
+    pub fn len(&self) -> u64 {
+        match self {
+            Self::InMemory(b) => b.len() as u64,
+            Self::Spilled { written, .. } => *written,
+            Self::Truncated { written, .. } => *written,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn dropped(&self) -> u64 {
+        match self {
+            Self::Truncated { dropped, .. } => *dropped,
+            _ => 0,
+        }
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        matches!(self, Self::Truncated { .. })
+    }
+
+    /// Append a chunk; transition InMemory → Spilled at soft cap,
+    /// Spilled → Truncated at hard cap. Never returns error to the caller —
+    /// failures are logged + counted but the response path is not blocked.
+    pub async fn append_chunk(
+        &mut self,
+        chunk: &[u8],
+        caps: &ArchiveCaps,
+        spill_root: &Arc<SpillRoot>,
+        request_id: &str,
+        surface: &'static str,
+    ) {
+        let new_total = self.len().saturating_add(chunk.len() as u64);
+
+        match self {
+            Self::InMemory(buf) => {
+                if new_total <= caps.soft_cap_bytes as u64 {
+                    buf.extend_from_slice(chunk);
+                    return;
+                }
+                // Transition to Spilled.
+                let key = format!("archive-{request_id}-{surface}");
+                match spill_root
+                    .create(&key, std::num::NonZeroUsize::new(1).unwrap())
+                    .await
+                {
+                    Ok(file) => {
+                        if let Err(e) = file.append(buf).await {
+                            tracing::warn!(
+                                target: "gw_proxy::archive",
+                                request_id,
+                                surface,
+                                bytes_written = buf.len(),
+                                bytes_dropped = chunk.len(),
+                                error = %e,
+                                "archive_spill_append_failed"
+                            );
+                            *self = Self::Truncated {
+                                written: buf.len() as u64,
+                                dropped: chunk.len() as u64,
+                            };
+                            metrics::counter!("gw_archive_truncated_total").increment(1);
+                            return;
+                        }
+                        if let Err(e) = file.append(chunk).await {
+                            tracing::warn!(
+                                target: "gw_proxy::archive",
+                                request_id,
+                                surface,
+                                bytes_written = buf.len(),
+                                bytes_dropped = chunk.len(),
+                                error = %e,
+                                "archive_spill_append_failed"
+                            );
+                            *self = Self::Truncated {
+                                written: buf.len() as u64,
+                                dropped: chunk.len() as u64,
+                            };
+                            metrics::counter!("gw_archive_truncated_total").increment(1);
+                            return;
+                        }
+                        let written = (buf.len() + chunk.len()) as u64;
+                        *self = Self::Spilled {
+                            file: Box::new(file),
+                            written,
+                        };
+                        metrics::counter!("gw_archive_spilled_total").increment(1);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "gw_proxy::archive",
+                            request_id,
+                            surface,
+                            size = buf.len(),
+                            error = %e,
+                            "archive_spill_create_failed"
+                        );
+                        *self = Self::Truncated {
+                            written: buf.len() as u64,
+                            dropped: chunk.len() as u64,
+                        };
+                        metrics::counter!("gw_archive_truncated_total").increment(1);
+                        metrics::counter!("gw_archive_disk_full_total").increment(1);
+                    }
+                }
+            }
+            Self::Spilled { file, written } => {
+                if new_total > caps.hard_cap_bytes as u64 {
+                    *self = Self::Truncated {
+                        written: *written,
+                        dropped: chunk.len() as u64,
+                    };
+                    metrics::counter!("gw_archive_truncated_total").increment(1);
+                    return;
+                }
+                if let Err(e) = file.append(chunk).await {
+                    tracing::warn!(
+                        target: "gw_proxy::archive",
+                        request_id,
+                        surface,
+                        bytes_written = *written,
+                        bytes_dropped = chunk.len(),
+                        error = %e,
+                        "archive_spill_append_failed"
+                    );
+                    *self = Self::Truncated {
+                        written: *written,
+                        dropped: chunk.len() as u64,
+                    };
+                    metrics::counter!("gw_archive_truncated_total").increment(1);
+                } else {
+                    *written += chunk.len() as u64;
+                }
+            }
+            Self::Truncated { dropped, .. } => {
+                *dropped += chunk.len() as u64;
+            }
+        }
+    }
+
+    /// Read accumulated bytes for emission to the detailed-archive sink.
+    /// `Spilled` shards are concatenated; `Truncated` returns `Vec::new()`
+    /// (callers should consult `is_truncated()` / `dropped()` for metadata).
+    pub async fn read_for_emit(&self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::InMemory(b) => Ok(b.to_vec()),
+            Self::Spilled { file, .. } => {
+                let shards = file.read_all().await?;
+                Ok(shards.into_iter().next().unwrap_or_default())
+            }
+            Self::Truncated { .. } => Ok(Vec::new()),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DownstreamRequestMeta {
@@ -327,9 +541,9 @@ pub struct ReqCtx {
     pub upstream_request_meta: Option<UpstreamRequestMeta>,
     /// Accumulator for raw upstream response bytes (always-on; the legacy B1
     /// `upstream_body_accum` was streaming-conditional and is now subsumed).
-    pub archive_upstream_response_body: bytes::BytesMut,
+    pub archive_upstream_response_body: ArchiveState,
     /// Accumulator for downstream-bound (post-render) response bytes.
-    pub archive_downstream_response_body: bytes::BytesMut,
+    pub archive_downstream_response_body: ArchiveState,
     /// Upstream response headers + status snapshot, taken in `response_filter`.
     pub archive_upstream_response_meta: Option<ResponseMeta>,
     /// Vendor quota snapshot extracted from upstream response headers.
@@ -452,8 +666,8 @@ impl ReqCtx {
             downstream_request_meta: None,
             upstream_request_body: None,
             upstream_request_meta: None,
-            archive_upstream_response_body: bytes::BytesMut::new(),
-            archive_downstream_response_body: bytes::BytesMut::new(),
+            archive_upstream_response_body: ArchiveState::default(),
+            archive_downstream_response_body: ArchiveState::default(),
             archive_upstream_response_meta: None,
             quota_snapshot: None,
             archive_downstream_response_meta: None,

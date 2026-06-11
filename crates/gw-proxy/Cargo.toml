@@ -25,6 +25,7 @@ gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
 tokio-rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 gw-egress-impersonate = { path = "../gw-egress-impersonate" }
+gw-runtime = { path = "../gw-runtime" }
 async-trait.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
