@@ -15,6 +15,7 @@
 //! dropping; `try_send` retains the original drop-on-full behaviour for
 //! callers that explicitly opt out of the blocking fallback.
 
+use crate::backlog::BillingBacklog;
 use crate::dlq::{DlqEnvelope, DlqLayer, EmergencyDlqWriter};
 use crate::usage::UsageRecord;
 use arc_swap::ArcSwapOption;
@@ -69,8 +70,9 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Start the Ledger with all three supervised background workers
-    /// (billing flusher, frozen-delta worker, DLQ retry worker).
+    /// Start the Ledger with all four supervised background workers
+    /// (billing flusher, frozen-delta worker, DLQ retry worker,
+    /// billing backlog drainer).
     ///
     /// Returns the `Ledger` paired with the `JoinHandle`s of all spawned
     /// supervised tasks. The caller MUST register every handle with the
@@ -83,6 +85,11 @@ impl Ledger {
     /// It MUST be strictly less than `phase2_task_drain_ms` so the worker
     /// returns before the coordinator's phase-2 timeout aborts it.
     /// See `RuntimeShutdownConfig::billing_drain_ms` (default 20 s).
+    ///
+    /// The backlog used here is a private, fresh `BillingBacklog`. Callers
+    /// that need to share a backlog across crates (e.g. for
+    /// `BacklogRecovery` on bootstrap, T4.4) should use
+    /// [`Ledger::start_with_spill_root`] and pass their own.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         redis: RedisCtx,
@@ -103,6 +110,7 @@ impl Ledger {
             flush_interval,
             spill_root,
             dlq_shards,
+            Arc::new(BillingBacklog::new()),
             shutdown,
             drain_budget,
         )
@@ -117,6 +125,7 @@ impl Ledger {
         flush_interval: Duration,
         spill_root: Arc<SpillRoot>,
         dlq_shards: usize,
+        backlog: Arc<BillingBacklog>,
         shutdown: ShutdownToken,
         drain_budget: Duration,
     ) -> (Self, Vec<JoinHandle<()>>) {
@@ -129,6 +138,7 @@ impl Ledger {
         let dlq_fallback = DlqFallback {
             writer: Arc::new(EmergencyDlqWriter::new(spill_root, shards)),
             retry_tx: dlq_retry_tx,
+            backlog: backlog.clone(),
         };
         let dlq_handle = spawn_dlq_retry_worker(
             redis.clone(),
@@ -139,6 +149,12 @@ impl Ledger {
         );
         let frozen_handle =
             spawn_frozen_delta_worker(redis.clone(), frozen_rx, shutdown.clone(), drain_budget);
+        let backlog_handle = spawn_backlog_drainer(
+            redis.clone(),
+            dlq_fallback.writer.clone(),
+            backlog,
+            shutdown.clone(),
+        );
         let worker_redis = redis.clone();
         let worker_instance = instance_id.clone();
         let worker_dlq = dlq_fallback.clone();
@@ -237,7 +253,7 @@ impl Ledger {
                 instance_id,
                 dlq_fallback,
             },
-            vec![flusher_handle, dlq_handle, frozen_handle],
+            vec![flusher_handle, dlq_handle, frozen_handle, backlog_handle],
         )
     }
 
@@ -265,6 +281,7 @@ impl Ledger {
             dlq_fallback: DlqFallback {
                 writer: Arc::new(EmergencyDlqWriter::new(spill_root, dlq_shards)),
                 retry_tx,
+                backlog: Arc::new(BillingBacklog::new()),
             },
         }
     }
@@ -296,7 +313,7 @@ impl Ledger {
                             DlqLayer::Redis,
                             now_ms(),
                         );
-                        route_to_dlq(&self.redis, &envelope, &self.dlq_fallback).await;
+                        route_to_dlq(&self.dlq_fallback, envelope).await;
                         if item_back.clear.is_some() {
                             metrics::counter!(
                                 "gw_billing_inflight_clear_total",
@@ -333,7 +350,7 @@ impl Ledger {
                             DlqLayer::Redis,
                             now_ms(),
                         );
-                        route_to_dlq(&self.redis, &envelope, &self.dlq_fallback).await;
+                        route_to_dlq(&self.dlq_fallback, envelope).await;
                         if item_back.clear.is_some() {
                             metrics::counter!(
                                 "gw_billing_inflight_clear_total",
@@ -547,9 +564,10 @@ fn frozen_counter_key(uid: &UserId) -> String {
 }
 
 #[derive(Clone)]
-struct DlqFallback {
-    writer: Arc<EmergencyDlqWriter>,
-    retry_tx: mpsc::Sender<DlqEnvelope>,
+pub struct DlqFallback {
+    pub writer: Arc<EmergencyDlqWriter>,
+    pub retry_tx: mpsc::Sender<DlqEnvelope>,
+    pub backlog: Arc<BillingBacklog>,
 }
 
 fn now_ms() -> u64 {
@@ -557,6 +575,89 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Background drainer for `BillingBacklog` — the unbounded last-fallback
+/// in-memory queue populated by `route_to_dlq` when both the in-memory retry
+/// channel AND the SpillFile DLQ have failed.
+///
+/// Every 500 ms tick, pops all current backlog entries and tries to push each
+/// to the Redis DLQ stream via `dlq_xadd`. On Redis failure, falls back to
+/// `EmergencyDlqWriter::append` (disk). If both fail, the envelope is pushed
+/// **back** to the tail of the backlog and the drainer breaks out of the
+/// inner loop, waiting for the next tick. This is the must-deliver invariant
+/// in `docs/superpowers/specs/2026-06-11-resilience-fixes-design.md` §6.
+///
+/// **Re-push reordering**: `BillingBacklog` exposes only tail-`push`, so a
+/// failed re-push lands at the tail rather than the head it came from. This
+/// is acceptable — `usage:records` ordering is not strictly preserved across
+/// failure cascades anyway (the consumer reconciles by `request_id` +
+/// `attempt_index`), and the alternative (a `push_front`) would invite
+/// pathological tight loops on a sustained Redis+disk outage.
+///
+/// Supervised under `RestartPolicy::default()` so panics restart cleanly.
+pub fn spawn_backlog_drainer(
+    redis: RedisCtx,
+    writer: Arc<EmergencyDlqWriter>,
+    backlog: Arc<BillingBacklog>,
+    shutdown: ShutdownToken,
+) -> JoinHandle<()> {
+    Supervisor::new("billing_backlog_drainer", RestartPolicy::default(), shutdown).spawn(
+        move |tok| {
+            let redis = redis.clone();
+            let writer = writer.clone();
+            let backlog = backlog.clone();
+            async move {
+                let mut tick = interval(Duration::from_millis(500));
+                loop {
+                    tokio::select! {
+                        _ = tok.cancelled() => {
+                            tracing::info!(
+                                target: "gw_ledger",
+                                pending = backlog.pending_count(),
+                                "billing_backlog_drainer: shutdown — backlog persistence is T4.5",
+                            );
+                            return Ok(());
+                        }
+                        _ = tick.tick() => {
+                            while let Some(env) = backlog.pop().await {
+                                match dlq_xadd(&redis, &env).await {
+                                    Ok(()) => {
+                                        metrics::counter!(
+                                            "gw_billing_backlog_drained_total",
+                                            "outcome" => "redis"
+                                        )
+                                        .increment(1);
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        let disk = env.with_layer(DlqLayer::Disk);
+                                        if writer.append(&disk).await.is_ok() {
+                                            metrics::counter!(
+                                                "gw_billing_backlog_drained_total",
+                                                "outcome" => "disk"
+                                            )
+                                            .increment(1);
+                                            continue;
+                                        }
+                                        // Re-push to tail (slight reordering quirk; see
+                                        // doc comment above). Never drops.
+                                        metrics::counter!(
+                                            "gw_billing_backlog_drained_total",
+                                            "outcome" => "re_pushed"
+                                        )
+                                        .increment(1);
+                                        backlog.push(disk).await;
+                                        break; // back off until next tick
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
 }
 
 fn spawn_dlq_retry_worker(
@@ -751,17 +852,22 @@ async fn permanent_failed_xadd(
         .map_err(|e| e.to_string())
 }
 
-async fn route_to_dlq(redis: &RedisCtx, envelope: &DlqEnvelope, fallback: &DlqFallback) {
-    if dlq_xadd(redis, &envelope.with_layer(DlqLayer::Redis))
-        .await
-        .is_ok()
-    {
-        return;
-    }
-    match fallback
-        .retry_tx
-        .try_send(envelope.with_layer(DlqLayer::Mem))
-    {
+/// Failure cascade for a DLQ-bound envelope.
+///
+/// Order: in-memory retry channel (fast path) → SpillFile (disk) → unbounded
+/// `BillingBacklog` (last-resort, never drops). The drainer task
+/// (`spawn_backlog_drainer`) periodically flushes the backlog back to Redis.
+///
+/// The primary Redis XADD attempt happens upstream in `flush()` / `emit()` —
+/// only failures land here, so we skip a redundant DLQ-stream XADD and head
+/// straight to the in-memory cascade. The `dlq_retry_worker` (consumer of
+/// `retry_tx`) is responsible for the eventual Redis DLQ-stream XADD.
+/// This matches the must-deliver invariant in
+/// `docs/superpowers/specs/2026-06-11-resilience-fixes-design.md` §6.
+async fn route_to_dlq(fallback: &DlqFallback, mut env: DlqEnvelope) {
+    // Try retry channel first (in-memory bounded mpsc — fast path).
+    env.dlq_meta.dlq_layer = DlqLayer::Mem;
+    match fallback.retry_tx.try_send(env.clone()) {
         Ok(()) => {
             metrics::counter!("gw_usage_dlq_retry_queue_total", "outcome" => "enqueued")
                 .increment(1);
@@ -774,10 +880,13 @@ async fn route_to_dlq(redis: &RedisCtx, envelope: &DlqEnvelope, fallback: &DlqFa
             metrics::counter!("gw_usage_dlq_retry_queue_total", "outcome" => "closed").increment(1);
         }
     }
-    match fallback.writer.append(&envelope.with_layer(DlqLayer::Disk)).await {
+    // Then disk via SpillFile.
+    let disk = env.with_layer(DlqLayer::Disk);
+    match fallback.writer.append(&disk).await {
         Ok(()) => {
             metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "success")
                 .increment(1);
+            return;
         }
         Err(err) => {
             metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error")
@@ -785,16 +894,13 @@ async fn route_to_dlq(redis: &RedisCtx, envelope: &DlqEnvelope, fallback: &DlqFa
             tracing::error!(
                 target: "gw_ledger",
                 error = %err,
-                "emergency DLQ JSONL write failed"
+                "emergency DLQ JSONL write failed; falling back to in-memory backlog"
             );
-            if permanent_failed_xadd(redis, envelope, &format!("emergency_file_failed: {err}"))
-                .await
-                .is_err()
-            {
-                metrics::counter!("gateway_usage_records_lost_total").increment(1);
-            }
         }
     }
+    // Last fallback: unbounded BillingBacklog. Never drops.
+    fallback.backlog.push(disk).await;
+    metrics::counter!("gw_usage_dlq_backlog_pushed_total").increment(1);
 }
 
 
@@ -883,7 +989,7 @@ async fn flush(
                     DlqLayer::Redis,
                     now_ms(),
                 );
-                route_to_dlq(redis, &envelope, dlq_fallback).await;
+                route_to_dlq(dlq_fallback, envelope).await;
                 // No DEL — DLQ path leaves inflight key for reconciler.
                 if clears[*idx].is_some() {
                     metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "skipped_dlq").increment(1);
@@ -901,7 +1007,7 @@ async fn flush(
             DlqLayer::Redis,
             now_ms(),
         );
-        route_to_dlq(redis, &envelope, dlq_fallback).await;
+        route_to_dlq(dlq_fallback, envelope).await;
         if clears[idx].is_some() {
             metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "skipped_dlq")
                 .increment(1);

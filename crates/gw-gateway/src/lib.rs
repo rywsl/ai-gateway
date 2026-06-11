@@ -912,12 +912,17 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
 
     // 4a. Ledger flusher.
     //
-    // `Ledger::start_with_spill_root` returns the JoinHandles of all
-    // three supervised workers (flusher, dlq-retry, frozen-delta). They
-    // MUST be registered with `shutdown` so the coordinator awaits their
+    // `Ledger::start_with_spill_root` returns the JoinHandles of all four
+    // supervised workers (flusher, dlq-retry, frozen-delta, backlog-drainer).
+    // They MUST be registered with `shutdown` so the coordinator awaits their
     // cancel-drain — otherwise revenue records emitted during phase-1 of
     // shutdown can be lost. The drain budget caps how long each worker
     // keeps recv-ing after the cancel signal; it MUST be < phase2 timeout.
+    //
+    // The `BillingBacklog` is constructed here so future bootstrap stages
+    // (T4.4 `BacklogRecovery`) can pre-populate it from on-disk spill files
+    // before the drainer task starts pulling from it.
+    let billing_backlog = Arc::new(gw_ledger::backlog::BillingBacklog::new());
     let (ledger_inner, ledger_handles) = Ledger::start_with_spill_root(
         redis.clone(),
         instance_id.clone(),
@@ -926,6 +931,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
         Duration::from_millis(cfg.ledger.flush_interval_ms),
         spill_root.clone(),
         cfg.runtime.spill_io.dlq_shards,
+        billing_backlog.clone(),
         shutdown_token.clone(),
         Duration::from_millis(cfg.runtime.shutdown.billing_drain_ms),
     );
