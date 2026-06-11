@@ -14,4 +14,5 @@ pub mod spill_io;
 pub mod supervisor;
 
 pub use shutdown::{DrainOutcome, PhaseHandle, ShutdownCoordinator, ShutdownPhase, ShutdownToken};
+pub use spill_io::{SpillFile, SpillRoot, SpillRootConfig};
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorError};
