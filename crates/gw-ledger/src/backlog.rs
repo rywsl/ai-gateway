@@ -100,6 +100,34 @@ impl BillingBacklog {
         self.oldest_ns.store(0, Ordering::Release);
         out
     }
+
+    /// Drain all pending envelopes and persist them to a shutdown-spill file
+    /// so they survive a process restart. Returns the number of envelopes
+    /// written. On I/O failure the caller should log a fatal error and
+    /// `std::process::exit(2)` — billing data must never be silently dropped.
+    pub async fn dump_to_shutdown_file(&self, root: &gw_runtime::SpillRoot) -> io::Result<usize> {
+        let drained = self.drain_to_vec().await;
+        if drained.is_empty() {
+            return Ok(0);
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let key = format!("backlog_shutdown_{ts}");
+        let file = root
+            .create(&key, std::num::NonZeroUsize::new(1).unwrap())
+            .await?;
+        for env in &drained {
+            let mut bytes = serde_json::to_vec(env)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            bytes.push(b'\n');
+            file.append(&bytes).await?;
+        }
+        file.fsync().await?;
+        metrics::gauge!("gw_billing_backlog_shutdown_dump_bytes").set(drained.len() as f64);
+        Ok(drained.len())
+    }
 }
 
 /// Loads persisted DLQ / backlog-shutdown files from a `SpillRoot` into a

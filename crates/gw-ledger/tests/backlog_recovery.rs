@@ -88,3 +88,37 @@ async fn recovery_loads_and_quarantines() {
     // Valid file was deleted after successful replay.
     assert!(!tmp.path().join("dlq.0.jsonl").exists());
 }
+
+#[tokio::test]
+async fn dump_then_recover_round_trip() {
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 1024 * 1024,
+        buffer_size: 4096,
+    }));
+    root.ensure_dir().await.unwrap();
+
+    let backlog1 = BillingBacklog::new();
+    for _ in 0..5 {
+        backlog1
+            .push(DlqEnvelope::new(
+                make_record(),
+                "x",
+                0,
+                DlqLayer::Disk,
+                0,
+            ))
+            .await;
+    }
+    let dumped = backlog1.dump_to_shutdown_file(&root).await.unwrap();
+    assert_eq!(dumped, 5);
+
+    let backlog2 = BillingBacklog::new();
+    let loaded = BacklogRecovery::new(root.clone())
+        .load_into(&backlog2)
+        .await
+        .unwrap();
+    assert_eq!(loaded, 5);
+    assert_eq!(backlog2.pending_count(), 5);
+}

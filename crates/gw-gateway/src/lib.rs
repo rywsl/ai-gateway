@@ -262,7 +262,13 @@ pub fn run() -> anyhow::Result<()> {
 /// health server, stream consumer, etc.) that live for the life of that
 /// runtime.
 pub(crate) async fn bootstrap_gateway(
-) -> anyhow::Result<(Wired, gw_runtime::ShutdownCoordinator, config::Config)> {
+) -> anyhow::Result<(
+    Wired,
+    gw_runtime::ShutdownCoordinator,
+    config::Config,
+    Arc<gw_ledger::backlog::BillingBacklog>,
+    Arc<gw_runtime::SpillRoot>,
+)> {
     // Pin rustls to the `ring` crypto provider. Both `aws-lc-rs` (rustls
     // 0.23's default feature) and `ring` (pingora-rustls direct dep) end up
     // linked in this build, so rustls refuses to auto-select at handshake
@@ -282,8 +288,8 @@ pub(crate) async fn bootstrap_gateway(
         "gw-gateway starting"
     );
 
-    let (wired, coordinator) = bootstrap(&cfg).await?;
-    Ok((wired, coordinator, cfg))
+    let (wired, coordinator, billing_backlog, spill_root) = bootstrap(&cfg).await?;
+    Ok((wired, coordinator, cfg, billing_backlog, spill_root))
 }
 
 /// Build the Pingora `Server`, attach the LLM gateway service, and run it
@@ -452,7 +458,7 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
         let mut sigint =
             signal(SignalKind::interrupt()).context("installing SIGINT handler")?;
 
-        let (wired, coordinator, cfg) = bootstrap_gateway().await?;
+        let (wired, coordinator, cfg, billing_backlog, spill_root) = bootstrap_gateway().await?;
 
         // Capture shutdown timings before `cfg` is moved or borrowed
         // elsewhere — `coordinator.drain` takes them as Duration args.
@@ -531,20 +537,53 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
         match outcome {
             gw_runtime::DrainOutcome::Clean => {
                 tracing::info!(target: "gw_gateway", "shutdown drain complete (Clean)");
-                Ok(())
             }
             gw_runtime::DrainOutcome::Forced => {
                 tracing::warn!(
                     target: "gw_gateway",
                     "shutdown drain complete (Forced); exiting with code 1"
                 );
-                std::process::exit(1);
             }
+        }
+
+        // T4.5 — Dump any un-drained billing backlog to disk so it survives a
+        // process restart. This MUST run even on Forced drain — the backlog
+        // may still contain envelopes that the drainer didn't consume before
+        // the hard deadline. A dump failure is fatal (exit 2) because billing
+        // data must never be silently dropped.
+        match billing_backlog.dump_to_shutdown_file(&spill_root).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(
+                    target: "gw_gateway",
+                    n,
+                    "shutdown: backlog dumped to disk"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(
+                    target: "gw_gateway",
+                    error = %e,
+                    "shutdown: backlog dump FAILED; exiting 2"
+                );
+                metrics::counter!("gw_billing_backlog_shutdown_dump_failed_total").increment(1);
+                std::process::exit(2);
+            }
+        }
+
+        match outcome {
+            gw_runtime::DrainOutcome::Clean => Ok(()),
+            gw_runtime::DrainOutcome::Forced => std::process::exit(1),
         }
     })
 }
 
-async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::ShutdownCoordinator)> {
+async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(
+    Wired,
+    gw_runtime::ShutdownCoordinator,
+    Arc<gw_ledger::backlog::BillingBacklog>,
+    Arc<gw_runtime::SpillRoot>,
+)> {
     let admin_upstream_url = url::Url::parse(&cfg.admin.upstream_url)
         .with_context(|| format!("invalid admin.upstream_url: {}", cfg.admin.upstream_url))?;
     match admin_upstream_url.scheme() {
@@ -1541,10 +1580,12 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
             shutdown_token,
             phase_handle,
             supervisor_unhealthy,
-            spill_root,
+            spill_root: spill_root.clone(),
             redis_oom_reporter,
         },
         shutdown,
+        billing_backlog,
+        spill_root,
     ))
 }
 
