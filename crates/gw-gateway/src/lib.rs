@@ -399,16 +399,30 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
 /// Library entrypoint with SIGTERM/SIGINT handling (resilience-fixes T2.2).
 ///
 /// Builds a multi-threaded tokio runtime that:
-///   1. Calls [`bootstrap_gateway`] to construct `Wired` + the live
+///   1. Installs SIGTERM + SIGINT handlers FIRST, before anything else.
+///      `tokio::signal::unix::signal` only queues signals delivered *after*
+///      the call returns, so arming the listeners before `bootstrap_gateway`
+///      is critical — bootstrap can spend seconds on PG preloads / Redis
+///      cold-loads, and a SIGTERM during that window would otherwise hit
+///      the default disposition (terminate) instead of our graceful drain.
+///   2. Calls [`bootstrap_gateway`] to construct `Wired` + the live
 ///      `ShutdownCoordinator`. All background tasks spawned in `bootstrap`
 ///      (Ledger flusher, health server, stream consumer, etc.) live on
 ///      this runtime.
-///   2. Spawns the Pingora server on a dedicated OS thread via
-///      [`serve_gateway`].
-///   3. Installs SIGTERM + SIGINT handlers. On the first signal it
-///      triggers `coordinator.drain(...)`; a second signal during drain
-///      forces `coordinator.emergency_abort()`.
-///   4. Returns `Ok(())` on clean drain (exit code 0) or `Err(...)`
+///   3. Spawns the Pingora server on a dedicated OS thread via
+///      [`serve_gateway`] and wraps the resulting `std::thread::JoinHandle`
+///      in `spawn_blocking` so its termination is observable as a future.
+///      If the Pingora thread dies (Server::new error, run_forever panic),
+///      the select! arm returns `Err` rather than hanging on `recv()`.
+///   4. Waits on `tokio::select!` for the first signal, the Pingora thread
+///      to die, or — once drain is running — the drain task to complete.
+///      On a second signal during drain, the process exits immediately
+///      with code 1 (the spawned drain task cannot be `emergency_abort`-ed
+///      in place after the coordinator was moved into the task;
+///      `hard_deadline_ms` still bounds the in-flight drain). The
+///      `ShutdownCoordinator::emergency_abort` API is still covered by
+///      integration tests.
+///   5. Returns `Ok(())` on clean drain (exit code 0) or `Err(...)`
 ///      with `std::process::exit(1)` on forced drain.
 pub fn run_with_signal_handler() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -418,6 +432,17 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
         .context("tokio runtime build failed")?;
 
     rt.block_on(async {
+        // Step 1 — arm signal handlers FIRST. `tokio::signal::unix::signal`
+        // only catches signals delivered after this call returns. Bootstrap
+        // does heavy synchronous-feeling work (PG preload, Redis cold-load,
+        // KMS init) that can take seconds; a SIGTERM landing during that
+        // window must not fall through to the default disposition.
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+        let mut sigint =
+            signal(SignalKind::interrupt()).context("installing SIGINT handler")?;
+
         let (wired, coordinator, cfg) = bootstrap_gateway().await?;
 
         // Capture shutdown timings before `cfg` is moved or borrowed
@@ -427,20 +452,15 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
         let hard_deadline_ms = cfg.runtime.shutdown.hard_deadline_ms;
 
         // Spawn Pingora on its own OS thread (run_forever is sync + `-> !`).
-        // The JoinHandle is held only for diagnostics — the thread is
-        // effectively detached; when the runtime exits after `drain`, the
-        // process exits and the thread is killed.
-        let _pingora_thread = serve_gateway(wired)?;
+        // Wrap the std::thread::JoinHandle in `spawn_blocking` so we get a
+        // future we can `select!` on — without this, a thread death during
+        // Server::new error or run_forever panic would silently leave the
+        // parent hanging on `sigterm.recv()`.
+        let pingora_thread = serve_gateway(wired)?;
+        let mut pingora_done =
+            tokio::task::spawn_blocking(move || pingora_thread.join());
 
-        // SIGTERM/SIGINT install. tokio::signal::unix is Unix-only;
-        // gw-gateway targets Linux production + macOS dev, both Unix.
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate())
-            .context("installing SIGTERM handler")?;
-        let mut sigint = signal(SignalKind::interrupt())
-            .context("installing SIGINT handler")?;
-
-        // Wait for the first signal.
+        // Step 2 — wait for the first signal (or Pingora dying first).
         tokio::select! {
             _ = sigterm.recv() => {
                 tracing::info!(target: "gw_gateway", "SIGTERM received; initiating graceful shutdown");
@@ -448,23 +468,27 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
             _ = sigint.recv() => {
                 tracing::info!(target: "gw_gateway", "SIGINT received; initiating graceful shutdown");
             }
+            res = &mut pingora_done => {
+                tracing::error!(
+                    target: "gw_gateway",
+                    result = ?res,
+                    "Pingora thread exited unexpectedly before any shutdown signal"
+                );
+                return Err(anyhow::anyhow!("pingora thread died before shutdown"));
+            }
         }
 
-        // Race coordinator.drain against a second signal. A second
-        // SIGTERM/SIGINT during drain triggers emergency_abort.
+        // Step 3 — run coordinator.drain in a task and race it against a
+        // second signal / Pingora death. A second SIGTERM/SIGINT during
+        // drain triggers an immediate `std::process::exit(1)` because
+        // `drain` consumed the coordinator by value and we can't call
+        // `emergency_abort` on the moved value; `hard_deadline_ms` still
+        // upper-bounds the in-flight drain.
         let drain_fut = coordinator.drain(
             Duration::from_millis(phase1_ms),
             Duration::from_millis(phase2_ms),
             Duration::from_millis(hard_deadline_ms),
         );
-
-        // We need to be able to call emergency_abort while drain is
-        // running, but `drain` takes `self` by value. Resolution: run
-        // drain in a tokio task, and watch for a second signal in
-        // parallel; if it arrives, we can't call `emergency_abort` on the
-        // moved coordinator, so the hard_deadline acts as the upper bound
-        // and we additionally `std::process::exit(1)` immediately on the
-        // second signal.
         let drain_handle = tokio::spawn(drain_fut);
 
         let outcome = tokio::select! {
@@ -482,6 +506,14 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
                 tracing::warn!(
                     target: "gw_gateway",
                     "second SIGINT during drain; emergency exit"
+                );
+                std::process::exit(1);
+            }
+            res = &mut pingora_done => {
+                tracing::error!(
+                    target: "gw_gateway",
+                    result = ?res,
+                    "Pingora thread exited during drain"
                 );
                 std::process::exit(1);
             }
