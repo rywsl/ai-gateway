@@ -862,6 +862,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
         cfg.ledger.batch_size,
         Duration::from_millis(cfg.ledger.flush_interval_ms),
         cfg.ledger.emergency_dlq_dir.clone(),
+        shutdown_token.clone(),
     ));
 
     // 4b. Detailed-log archive (T10). Workers is auto when configured to 0:
@@ -926,6 +927,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
         instance_id.clone(),
         cfg.billing.reaper_interval_secs,
         cfg.billing.emit_lag_t0_secs,
+        shutdown_token.clone(),
     );
     let inflight = Arc::new(gw_ledger::inflight::InflightLedger::new(
         (*redis.pool).clone(),

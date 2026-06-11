@@ -10,6 +10,7 @@ use gw_core::usage::UsageSnapshot;
 use gw_ledger::flusher::LedgerItem;
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
+use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
 use std::time::Duration;
 use testcontainers_modules::redis::Redis;
@@ -66,6 +67,7 @@ async fn batch_flush_writes_usage_stream_no_balance_decr() {
         1024,
         2,
         Duration::from_millis(100),
+        ShutdownToken::new(),
     );
     let rec = make_record();
     ledger
@@ -114,6 +116,7 @@ async fn emit_bypasses_to_sync_xadd_when_channel_full() {
         1,
         100,
         Duration::from_secs(60),
+        ShutdownToken::new(),
     );
 
     // Fill the channel: first try_send may succeed (capacity=1), subsequent

@@ -10,20 +10,38 @@ use fred::clients::RedisPool;
 use fred::interfaces::HashesInterface;
 use fred::types::Scanner;
 use futures::StreamExt;
+use gw_runtime::{RestartPolicy, ShutdownToken, Supervisor};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Spawn the periodic T0 watchdog. Returns immediately; task runs until process exit.
-pub fn spawn(pool: RedisPool, instance_id: String, interval_secs: u64, emit_lag_t0_secs: u64) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
-        loop {
-            tick.tick().await;
-            if let Err(e) = run_once(&pool, &instance_id, emit_lag_t0_secs).await {
-                tracing::warn!(error = ?e, "inflight reaper iteration failed");
+/// Spawn the periodic T0 watchdog supervised by a `Supervisor`. Returns
+/// immediately; the task runs until cancelled via `ShutdownToken` (graceful
+/// shutdown) or until the restart budget is exhausted.
+pub fn spawn(pool: RedisPool, instance_id: String, interval_secs: u64, emit_lag_t0_secs: u64, shutdown: ShutdownToken) {
+    let _handle = Supervisor::new("inflight_reaper", RestartPolicy::default(), shutdown)
+        .spawn(move |tok| {
+            let pool = pool.clone();
+            let instance_id = instance_id.clone();
+            async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+                loop {
+                    tokio::select! {
+                        _ = tok.cancelled() => {
+                            tracing::info!(
+                                target: "gw_ledger",
+                                "inflight_reaper: shutdown requested"
+                            );
+                            return Ok(());
+                        }
+                        _ = tick.tick() => {
+                            if let Err(e) = run_once(&pool, &instance_id, emit_lag_t0_secs).await {
+                                tracing::warn!(error = ?e, "inflight reaper iteration failed");
+                            }
+                        }
+                    }
+                }
             }
-        }
-    });
+        });
 }
 
 /// Single sweep. Returns the count of stale keys detected (mostly for tests).

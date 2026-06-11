@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 gw-core = { path = "../gw-core" }
 gw-store = { path = "../gw-store" }
+gw-runtime = { path = "../gw-runtime" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

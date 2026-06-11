@@ -22,13 +22,14 @@ use fred::interfaces::{KeysInterface, StreamsInterface};
 use fred::types::{XCap, XCapKind, XCapTrim};
 use futures::FutureExt;
 use gw_core::ids::UserId;
+use gw_runtime::{RestartPolicy, ShutdownToken, Supervisor};
 use gw_store::redis_client::RedisCtx;
 use once_cell::sync::Lazy;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval, Duration};
 
 const USAGE_STREAM: &str = "usage:records";
@@ -72,6 +73,7 @@ impl Ledger {
         channel_capacity: usize,
         batch_size: usize,
         flush_interval: Duration,
+        shutdown: ShutdownToken,
     ) -> Self {
         Self::start_with_emergency_dir(
             redis,
@@ -80,6 +82,7 @@ impl Ledger {
             batch_size,
             flush_interval,
             PathBuf::from("data/ledger"),
+            shutdown,
         )
     }
 
@@ -90,8 +93,10 @@ impl Ledger {
         batch_size: usize,
         flush_interval: Duration,
         emergency_dlq_dir: impl Into<PathBuf>,
+        shutdown: ShutdownToken,
     ) -> Self {
-        let (tx, mut rx) = mpsc::channel::<LedgerItem>(channel_capacity);
+        let (tx, rx) = mpsc::channel::<LedgerItem>(channel_capacity);
+        let rx = Arc::new(Mutex::new(rx));
         let (dlq_retry_tx, dlq_retry_rx) = mpsc::channel::<DlqEnvelope>(DLQ_RETRY_CAPACITY);
         let (frozen_tx, frozen_rx) = mpsc::channel::<FrozenDelta>(FROZEN_DELTA_CAPACITY);
         FROZEN_DELTA_TX.store(Some(Arc::new(frozen_tx)));
@@ -99,21 +104,75 @@ impl Ledger {
             writer: Arc::new(EmergencyDlqWriter::new(emergency_dlq_dir.into())),
             retry_tx: dlq_retry_tx,
         };
-        spawn_dlq_retry_worker(redis.clone(), dlq_retry_rx, dlq_fallback.writer.clone());
-        spawn_frozen_delta_worker(redis.clone(), frozen_rx);
+        spawn_dlq_retry_worker(redis.clone(), dlq_retry_rx, dlq_fallback.writer.clone(), shutdown.clone());
+        spawn_frozen_delta_worker(redis.clone(), frozen_rx, shutdown.clone());
         let worker_redis = redis.clone();
         let worker_instance = instance_id.clone();
         let worker_dlq = dlq_fallback.clone();
-        tokio::spawn(async move {
-            let mut buf: Vec<LedgerItem> = Vec::with_capacity(batch_size);
-            let mut ticker = interval(flush_interval);
-            loop {
-                tokio::select! {
-                    maybe_item = rx.recv() => {
-                        match maybe_item {
-                            Some(item) => {
-                                buf.push(item);
-                                if buf.len() >= batch_size {
+        let _flusher_handle = Supervisor::new("billing_flusher", RestartPolicy::default(), shutdown)
+            .spawn(move |tok| {
+                let rx = rx.clone();
+                let worker_redis = worker_redis.clone();
+                let worker_instance = worker_instance.clone();
+                let worker_dlq = worker_dlq.clone();
+                async move {
+                    let mut buf: Vec<LedgerItem> = Vec::with_capacity(batch_size);
+                    let mut ticker = interval(flush_interval);
+                    loop {
+                        tokio::select! {
+                            _ = tok.cancelled() => {
+                                // Cancel-drain: must-deliver semantic.
+                                // Synchronously drain the channel then flush.
+                                let mut rx_guard = rx.lock().await;
+                                while let Ok(item) = rx_guard.try_recv() {
+                                    buf.push(item);
+                                }
+                                if !buf.is_empty() {
+                                    let mut taken = std::mem::take(&mut buf);
+                                    let _ = AssertUnwindSafe(
+                                        flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
+                                    ).catch_unwind().await;
+                                }
+                                tracing::info!(
+                                    target: "gw_ledger",
+                                    "billing_flusher: shutdown drain complete"
+                                );
+                                return Ok(());
+                            }
+                            maybe_item = async {
+                                let mut guard = rx.lock().await;
+                                guard.recv().await
+                            } => {
+                                match maybe_item {
+                                    Some(item) => {
+                                        buf.push(item);
+                                        if buf.len() >= batch_size {
+                                            let mut taken = std::mem::take(&mut buf);
+                                            let result = AssertUnwindSafe(
+                                                flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
+                                            ).catch_unwind().await;
+                                            if let Err(_panic) = result {
+                                                metrics::counter!("gw_billing_flusher_panic_total").increment(1);
+                                                tracing::error!(
+                                                    target: "gw_ledger",
+                                                    "flusher: flush() panicked; channel kept open, batch lost (inflight keys remain for reconciler)"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        if !buf.is_empty() {
+                                            let mut taken = std::mem::take(&mut buf);
+                                            let _ = AssertUnwindSafe(
+                                                flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
+                                            ).catch_unwind().await;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            _ = ticker.tick() => {
+                                if !buf.is_empty() {
                                     let mut taken = std::mem::take(&mut buf);
                                     let result = AssertUnwindSafe(
                                         flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
@@ -122,41 +181,16 @@ impl Ledger {
                                         metrics::counter!("gw_billing_flusher_panic_total").increment(1);
                                         tracing::error!(
                                             target: "gw_ledger",
-                                            "flusher: flush() panicked; channel kept open, batch lost (inflight keys remain for reconciler)"
+                                            "flusher: flush() panicked on tick; channel kept open"
                                         );
                                     }
                                 }
                             }
-                            None => {
-                                if !buf.is_empty() {
-                                    let mut taken = std::mem::take(&mut buf);
-                                    let _ = AssertUnwindSafe(
-                                        flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
-                                    ).catch_unwind().await;
-                                    // No metric on graceful-shutdown final flush panic — process is exiting anyway.
-                                }
-                                break;
-                            }
                         }
                     }
-                    _ = ticker.tick() => {
-                        if !buf.is_empty() {
-                            let mut taken = std::mem::take(&mut buf);
-                            let result = AssertUnwindSafe(
-                                flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
-                            ).catch_unwind().await;
-                            if let Err(_panic) = result {
-                                metrics::counter!("gw_billing_flusher_panic_total").increment(1);
-                                tracing::error!(
-                                    target: "gw_ledger",
-                                    "flusher: flush() panicked on tick; channel kept open"
-                                );
-                            }
-                        }
-                    }
+                    Ok(())
                 }
-            }
-        });
+            });
         Self {
             tx,
             redis,
@@ -319,29 +353,59 @@ impl Drop for FrozenDeltaSenderGuard {
     }
 }
 
-fn spawn_frozen_delta_worker(redis: RedisCtx, mut rx: mpsc::Receiver<FrozenDelta>) {
-    tokio::spawn(async move {
-        while let Some(delta) = rx.recv().await {
-            let key = frozen_counter_key(&delta.uid);
-            let client = redis.pool.next();
-            match client.incr_by::<i64, _>(&key, delta.delta_micro).await {
-                Ok(_) => {
-                    metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "ok")
-                        .increment(1);
+fn spawn_frozen_delta_worker(
+    redis: RedisCtx,
+    rx: mpsc::Receiver<FrozenDelta>,
+    shutdown: ShutdownToken,
+) {
+    let rx = Arc::new(Mutex::new(rx));
+    let _handle = Supervisor::new("frozen_delta_worker", RestartPolicy::default(), shutdown)
+        .spawn(move |tok| {
+            let rx = rx.clone();
+            let redis = redis.clone();
+            async move {
+                loop {
+                    tokio::select! {
+                        _ = tok.cancelled() => {
+                            tracing::info!(
+                                target: "gw_ledger",
+                                "frozen_delta_worker: shutdown requested"
+                            );
+                            return Ok(());
+                        }
+                        delta = async {
+                            let mut guard = rx.lock().await;
+                            guard.recv().await
+                        } => {
+                            match delta {
+                                Some(delta) => {
+                                    let key = frozen_counter_key(&delta.uid);
+                                    let client = redis.pool.next();
+                                    match client.incr_by::<i64, _>(&key, delta.delta_micro).await {
+                                        Ok(_) => {
+                                            metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "ok")
+                                                .increment(1);
+                                        }
+                                        Err(err) => {
+                                            metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "error")
+                                                .increment(1);
+                                            tracing::warn!(
+                                                target: "gw_ledger",
+                                                error = %err,
+                                                key,
+                                                "frozen_micro Redis sync failed"
+                                            );
+                                        }
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
                 }
-                Err(err) => {
-                    metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "error")
-                        .increment(1);
-                    tracing::warn!(
-                        target: "gw_ledger",
-                        error = %err,
-                        key,
-                        "frozen_micro Redis sync failed"
-                    );
-                }
+                Ok(())
             }
-        }
-    });
+        });
 }
 
 fn frozen_counter_key(uid: &UserId) -> String {
@@ -363,40 +427,68 @@ fn now_ms() -> u64 {
 
 fn spawn_dlq_retry_worker(
     redis: RedisCtx,
-    mut rx: mpsc::Receiver<DlqEnvelope>,
+    rx: mpsc::Receiver<DlqEnvelope>,
     writer: Arc<EmergencyDlqWriter>,
+    shutdown: ShutdownToken,
 ) {
-    tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_secs(30));
-        while let Some(mut envelope) = rx.recv().await {
-            ticker.tick().await;
-            envelope.dlq_meta.retry_count_before_dlq =
-                envelope.dlq_meta.retry_count_before_dlq.saturating_add(1);
-            if dlq_xadd(&redis, &envelope).await.is_ok() {
-                continue;
-            }
-            let disk_envelope = envelope.with_layer(DlqLayer::Disk);
-            if let Err(err) = writer.append(&disk_envelope) {
-                metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error")
-                    .increment(1);
-                tracing::error!(
-                    target: "gw_ledger",
-                    error = %err,
-                    "DLQ retry failed and emergency JSONL write failed"
-                );
-                if permanent_failed_xadd(
-                    &redis,
-                    &disk_envelope,
-                    &format!("retry_dlq_and_emergency_file_failed: {err}"),
-                )
-                .await
-                .is_err()
-                {
-                    metrics::counter!("gateway_usage_records_lost_total").increment(1);
+    let rx = Arc::new(Mutex::new(rx));
+    let _handle = Supervisor::new("dlq_retry_worker", RestartPolicy::default(), shutdown)
+        .spawn(move |tok| {
+            let rx = rx.clone();
+            let redis = redis.clone();
+            let writer = writer.clone();
+            async move {
+                let mut ticker = interval(Duration::from_secs(30));
+                loop {
+                    tokio::select! {
+                        _ = tok.cancelled() => {
+                            tracing::info!(
+                                target: "gw_ledger",
+                                "dlq_retry_worker: shutdown requested"
+                            );
+                            return Ok(());
+                        }
+                        envelope = async {
+                            let mut guard = rx.lock().await;
+                            guard.recv().await
+                        } => {
+                            match envelope {
+                                Some(mut envelope) => {
+                                    ticker.tick().await;
+                                    envelope.dlq_meta.retry_count_before_dlq =
+                                        envelope.dlq_meta.retry_count_before_dlq.saturating_add(1);
+                                    if dlq_xadd(&redis, &envelope).await.is_ok() {
+                                        continue;
+                                    }
+                                    let disk_envelope = envelope.with_layer(DlqLayer::Disk);
+                                    if let Err(err) = writer.append(&disk_envelope) {
+                                        metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error")
+                                            .increment(1);
+                                        tracing::error!(
+                                            target: "gw_ledger",
+                                            error = %err,
+                                            "DLQ retry failed and emergency JSONL write failed"
+                                        );
+                                        if permanent_failed_xadd(
+                                            &redis,
+                                            &disk_envelope,
+                                            &format!("retry_dlq_and_emergency_file_failed: {err}"),
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            metrics::counter!("gateway_usage_records_lost_total").increment(1);
+                                        }
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
                 }
+                Ok(())
             }
-        }
-    });
+        });
 }
 
 /// Build the Redis key for an inflight billing hash.

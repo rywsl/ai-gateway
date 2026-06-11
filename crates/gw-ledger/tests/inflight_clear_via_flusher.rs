@@ -12,6 +12,7 @@ use gw_ledger::flusher::{ClearKey, LedgerItem};
 use gw_ledger::inflight::{InflightLedger, InflightRegistration};
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
+use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
 use std::time::Duration;
 use testcontainers_modules::redis::Redis;
@@ -83,6 +84,7 @@ async fn flusher_dels_inflight_key_on_xadd_success() {
         64,
         4,
         Duration::from_millis(50),
+        ShutdownToken::new(),
     );
 
     // 3. Emit with clear: Some.
@@ -142,6 +144,7 @@ async fn full_bypass_sync_xadd_dels_inflight_key() {
         1,
         1,
         Duration::from_secs(600), // ticker effectively disabled
+        ShutdownToken::new(),
     );
     // First emit fills the channel.
     ledger

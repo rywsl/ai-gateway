@@ -20,6 +20,7 @@ use gw_ledger::inflight::{InflightLedger, InflightRegistration};
 use gw_ledger::inflight_reconciler;
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
+use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -93,6 +94,7 @@ async fn reconciler_emits_crashfallback_for_un_emitted_request() {
         16,
         16,
         Duration::from_secs(3600), // ticker effectively disabled
+        ShutdownToken::new(),
     );
 
     // 3. Emit a record with clear: Some — under normal flow this would clear

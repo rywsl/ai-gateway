@@ -14,6 +14,7 @@ use gw_core::usage::UsageSnapshot;
 use gw_ledger::flusher::LedgerItem;
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
+use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
 use std::time::Duration;
 use testcontainers_modules::redis::Redis;
@@ -79,6 +80,7 @@ async fn primary_xadd_failure_routes_to_dlq_stream() {
         1024,
         2,
         Duration::from_millis(100),
+        ShutdownToken::new(),
     );
     ledger
         .try_send(LedgerItem {
