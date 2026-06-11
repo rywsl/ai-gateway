@@ -2,6 +2,7 @@
 //! (ADR-004 + C-γ §ADR-Cγ-2), mpsc-backed usage-record flusher with Redis
 //! pipeline, and detailed-archive writer.
 
+pub mod backlog;
 pub mod deduct_gc;
 pub mod dlq;
 pub mod encoding;
