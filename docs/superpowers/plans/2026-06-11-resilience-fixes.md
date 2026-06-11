@@ -2310,7 +2310,7 @@ git commit -m "refactor(gw-egress-impersonate): use gw_runtime::Supervisor"
 gw-runtime = { path = "../gw-runtime" }
 ```
 
-- [ ] **Step 2: Refactor flusher to take a `ShutdownToken`**
+- [ ] **Step 2: Refactor flusher to take a `ShutdownToken` and a drain budget**
 
 In `crates/gw-ledger/src/flusher.rs:107`, the bare `tokio::spawn` becomes a Supervisor::spawn. Replace the spawn block with:
 
@@ -2332,21 +2332,50 @@ let flusher_handle = Supervisor::new("billing_flusher", RestartPolicy::default()
             let mut buf: Vec<LedgerItem> = Vec::with_capacity(batch_size);
             let mut ticker = interval(flush_interval);
             loop {
-                let mut rx_guard = rx.lock().await;
                 tokio::select! {
                     _ = tok.cancelled() => {
-                        // Final drain on shutdown.
-                        while let Ok(item) = rx_guard.try_recv() {
-                            buf.push(item);
+                        // Cancel-drain: must-deliver semantic.
+                        //
+                        // The cancel arm MUST keep recv-ing until the channel closes
+                        // or the drain budget expires. A one-shot `try_recv` loses
+                        // records emitted during phase-1 of `ShutdownCoordinator::drain`
+                        // (default 5 s), because Pingora continues serving in-flight
+                        // requests on its own thread and every `Ledger::emit` during
+                        // that window calls `try_send` Ok (channel has 65 k capacity)
+                        // — the record sits in the unread channel and is silently
+                        // dropped on exit.
+                        let deadline = tokio::time::Instant::now() + drain_budget;
+                        let mut rx_guard = rx.lock().await;
+                        loop {
+                            while let Ok(item) = rx_guard.try_recv() {
+                                buf.push(item);
+                            }
+                            let at_deadline = tokio::time::Instant::now() >= deadline;
+                            if buf.len() >= batch_size || (!buf.is_empty() && at_deadline) {
+                                let mut taken = std::mem::take(&mut buf);
+                                let _ = AssertUnwindSafe(
+                                    flush(&redis, &instance, &dlq, &mut taken)
+                                ).catch_unwind().await;
+                            }
+                            if at_deadline { break; }
+                            match tokio::time::timeout_at(deadline, rx_guard.recv()).await {
+                                Ok(Some(item)) => buf.push(item),
+                                Ok(None) => break,  // all tx dropped; truly drained
+                                Err(_) => break,    // budget exhausted
+                            }
                         }
                         if !buf.is_empty() {
+                            let mut taken = std::mem::take(&mut buf);
                             let _ = AssertUnwindSafe(
-                                flush(&redis, &instance, &dlq, &mut buf)
+                                flush(&redis, &instance, &dlq, &mut taken)
                             ).catch_unwind().await;
                         }
                         return Ok(());
                     }
-                    maybe_item = rx_guard.recv() => {
+                    maybe_item = async {
+                        let mut guard = rx.lock().await;
+                        guard.recv().await
+                    } => {
                         match maybe_item {
                             Some(item) => {
                                 buf.push(item);
@@ -2384,27 +2413,57 @@ let flusher_handle = Supervisor::new("billing_flusher", RestartPolicy::default()
     });
 ```
 
-`shutdown: ShutdownToken` is now a new parameter on the public flusher entry point (`pub fn spawn_flusher(...)` or equivalent). Thread it from `gw-gateway/src/lib.rs` (the bootstrap holds `shutdown_token`).
+`shutdown: ShutdownToken` AND `drain_budget: Duration` are new parameters on the public flusher entry point (`pub fn spawn_flusher(...)` or equivalent). Thread `shutdown_token` from `gw-gateway/src/lib.rs` (the bootstrap holds it). For `drain_budget`, plumb `cfg.runtime.shutdown.billing_drain_ms` (default 20 s) — it MUST be strictly less than `phase2_task_drain_ms` (default 25 s) so the worker finishes draining before the coordinator's phase-2 timeout aborts it.
+
+> **The cancel arm must keep recv-ing until the channel closes or the drain budget expires; a one-shot `try_recv` loses records emitted during phase-1.** The same hazard applies to the frozen-delta and DLQ-retry workers in step 3 — apply the same `timeout_at(deadline, rx.recv())` pattern to each.
 
 - [ ] **Step 3: Same treatment for frozen-delta worker (`flusher.rs:323`) and DLQ retry worker (`flusher.rs:369`)**
 
-Pattern:
+Both workers receive a `drain_budget: Duration` parameter and apply the same `timeout_at(deadline, rx.recv())` cancel-drain pattern as the billing flusher — late `enqueue_frozen_delta` and `route_to_dlq` calls during phase-1 land in the channel and must be applied/retried before exit. For the DLQ retry worker, skip the 30 s inter-retry ticker inside the drain loop (we're shutting down).
+
+Sketch:
 
 ```rust
-fn spawn_frozen_delta_worker(redis: RedisCtx, mut rx: mpsc::Receiver<FrozenDelta>, shutdown: ShutdownToken) {
+fn spawn_frozen_delta_worker(
+    redis: RedisCtx,
+    rx: mpsc::Receiver<FrozenDelta>,
+    shutdown: ShutdownToken,
+    drain_budget: Duration,
+) -> tokio::task::JoinHandle<()> {
+    let rx = Arc::new(tokio::sync::Mutex::new(rx));
     Supervisor::new("frozen_delta_worker", RestartPolicy::default(), shutdown)
         .spawn(move |tok| {
+            let rx = rx.clone();
             let redis = redis.clone();
             async move {
                 loop {
                     tokio::select! {
-                        _ = tok.cancelled() => return Ok(()),
-                        Some(delta) = rx.recv() => { /* existing body */ }
-                        else => return Ok(()),
+                        _ = tok.cancelled() => {
+                            // Budget-bounded drain — see flusher step 2 commentary.
+                            let deadline = tokio::time::Instant::now() + drain_budget;
+                            let mut guard = rx.lock().await;
+                            loop {
+                                while let Ok(delta) = guard.try_recv() {
+                                    apply_frozen_delta(&redis, &delta).await;
+                                }
+                                match tokio::time::timeout_at(deadline, guard.recv()).await {
+                                    Ok(Some(delta)) => apply_frozen_delta(&redis, &delta).await,
+                                    Ok(None) | Err(_) => break,
+                                }
+                            }
+                            return Ok(());
+                        }
+                        delta = async { rx.lock().await.recv().await } => {
+                            match delta {
+                                Some(delta) => apply_frozen_delta(&redis, &delta).await,
+                                None => break,
+                            }
+                        }
                     }
                 }
+                Ok(())
             }
-        });
+        })
 }
 ```
 
@@ -2447,7 +2506,9 @@ pub fn spawn(
 
 - [ ] **Step 5: Register flusher / worker / reaper JoinHandles with the ShutdownCoordinator**
 
-In `gw-gateway/src/lib.rs` bootstrap, capture each `JoinHandle` returned by the spawn helpers and call `shutdown.register(handle)` so they participate in drain.
+In `gw-gateway/src/lib.rs` bootstrap, capture each `JoinHandle` returned by the spawn helpers and call `shutdown.register(handle)` so they participate in drain. This is REQUIRED for the cancel-drain semantic to take effect: if the handle isn't registered, `ShutdownCoordinator::drain` returns as soon as phase-2 timeout elapses without observing whether the flusher finished its budget-bounded drain, and the process may exit mid-flush.
+
+`Ledger::start_with_emergency_dir` should return `(Self, Vec<JoinHandle<()>>)` covering the flusher + dlq-retry + frozen-delta handles; `inflight_reaper::spawn` returns its single handle. Register them all on the mutable `ShutdownCoordinator` constructed in the bootstrap-runtime block.
 
 - [ ] **Step 6: Test — supervised flusher restarts on panic**
 
