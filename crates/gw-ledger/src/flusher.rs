@@ -22,11 +22,12 @@ use fred::interfaces::{KeysInterface, StreamsInterface};
 use fred::types::{XCap, XCapKind, XCapTrim};
 use futures::FutureExt;
 use gw_core::ids::UserId;
+use gw_runtime::spill_io::SpillRoot;
 use gw_runtime::{RestartPolicy, ShutdownToken, Supervisor};
 use gw_store::redis_client::RedisCtx;
 use once_cell::sync::Lazy;
+use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
@@ -82,35 +83,40 @@ impl Ledger {
     /// It MUST be strictly less than `phase2_task_drain_ms` so the worker
     /// returns before the coordinator's phase-2 timeout aborts it.
     /// See `RuntimeShutdownConfig::billing_drain_ms` (default 20 s).
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         redis: RedisCtx,
         instance_id: String,
         channel_capacity: usize,
         batch_size: usize,
         flush_interval: Duration,
+        spill_root: Arc<SpillRoot>,
+        dlq_shards: usize,
         shutdown: ShutdownToken,
         drain_budget: Duration,
     ) -> (Self, Vec<JoinHandle<()>>) {
-        Self::start_with_emergency_dir(
+        Self::start_with_spill_root(
             redis,
             instance_id,
             channel_capacity,
             batch_size,
             flush_interval,
-            PathBuf::from("data/ledger"),
+            spill_root,
+            dlq_shards,
             shutdown,
             drain_budget,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn start_with_emergency_dir(
+    pub fn start_with_spill_root(
         redis: RedisCtx,
         instance_id: String,
         channel_capacity: usize,
         batch_size: usize,
         flush_interval: Duration,
-        emergency_dlq_dir: impl Into<PathBuf>,
+        spill_root: Arc<SpillRoot>,
+        dlq_shards: usize,
         shutdown: ShutdownToken,
         drain_budget: Duration,
     ) -> (Self, Vec<JoinHandle<()>>) {
@@ -119,8 +125,9 @@ impl Ledger {
         let (dlq_retry_tx, dlq_retry_rx) = mpsc::channel::<DlqEnvelope>(DLQ_RETRY_CAPACITY);
         let (frozen_tx, frozen_rx) = mpsc::channel::<FrozenDelta>(FROZEN_DELTA_CAPACITY);
         FROZEN_DELTA_TX.store(Some(Arc::new(frozen_tx)));
+        let shards = NonZeroUsize::new(dlq_shards.max(1)).expect("dlq_shards must be >= 1");
         let dlq_fallback = DlqFallback {
-            writer: Arc::new(EmergencyDlqWriter::new(emergency_dlq_dir.into())),
+            writer: Arc::new(EmergencyDlqWriter::new(spill_root, shards)),
             retry_tx: dlq_retry_tx,
         };
         let dlq_handle = spawn_dlq_retry_worker(
@@ -243,12 +250,22 @@ impl Ledger {
     /// (closed `rx`). Production code uses `Ledger::start`, which spawns
     /// the worker task internally.
     #[doc(hidden)]
-    pub fn from_parts(tx: mpsc::Sender<LedgerItem>, redis: RedisCtx, instance_id: String) -> Self {
+    pub fn from_parts(
+        tx: mpsc::Sender<LedgerItem>,
+        redis: RedisCtx,
+        instance_id: String,
+        spill_root: Arc<SpillRoot>,
+        dlq_shards: NonZeroUsize,
+    ) -> Self {
+        let (retry_tx, _rx) = mpsc::channel(1);
         Self {
             tx,
             redis,
             instance_id,
-            dlq_fallback: default_dlq_fallback(),
+            dlq_fallback: DlqFallback {
+                writer: Arc::new(EmergencyDlqWriter::new(spill_root, dlq_shards)),
+                retry_tx,
+            },
         }
     }
 
@@ -601,7 +618,7 @@ async fn process_dlq_envelope(
         return;
     }
     let disk_envelope = envelope.with_layer(DlqLayer::Disk);
-    if let Err(err) = writer.append(&disk_envelope) {
+    if let Err(err) = writer.append(&disk_envelope).await {
         metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error").increment(1);
         tracing::error!(
             target: "gw_ledger",
@@ -757,7 +774,7 @@ async fn route_to_dlq(redis: &RedisCtx, envelope: &DlqEnvelope, fallback: &DlqFa
             metrics::counter!("gw_usage_dlq_retry_queue_total", "outcome" => "closed").increment(1);
         }
     }
-    match fallback.writer.append(&envelope.with_layer(DlqLayer::Disk)) {
+    match fallback.writer.append(&envelope.with_layer(DlqLayer::Disk)).await {
         Ok(()) => {
             metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "success")
                 .increment(1);
@@ -780,13 +797,6 @@ async fn route_to_dlq(redis: &RedisCtx, envelope: &DlqEnvelope, fallback: &DlqFa
     }
 }
 
-fn default_dlq_fallback() -> DlqFallback {
-    let (retry_tx, _rx) = mpsc::channel(1);
-    DlqFallback {
-        writer: Arc::new(EmergencyDlqWriter::new("data/ledger")),
-        retry_tx,
-    }
-}
 
 async fn flush(
     redis: &RedisCtx,

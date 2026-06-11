@@ -10,11 +10,26 @@ use gw_core::usage::UsageSnapshot;
 use gw_ledger::flusher::LedgerItem;
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
+use gw_runtime::spill_io::{SpillRoot, SpillRootConfig};
 use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
+use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+fn make_spill_root() -> (TempDir, Arc<SpillRoot>) {
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 16 * 1024 * 1024,
+        buffer_size: 4096,
+    }));
+    (tmp, root)
+}
+
+const DLQ_SHARDS: usize = 4;
 
 fn make_record() -> UsageRecord {
     UsageRecord {
@@ -61,12 +76,15 @@ async fn batch_flush_writes_usage_stream_no_balance_decr() {
     let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
         .await
         .unwrap();
+    let (_tmp, spill_root) = make_spill_root();
     let (ledger, _handles) = Ledger::start(
         redis.clone(),
         "test-instance".to_string(),
         1024,
         2,
         Duration::from_millis(100),
+        spill_root,
+        DLQ_SHARDS,
         ShutdownToken::new(),
         Duration::from_secs(5),
     );
@@ -108,6 +126,7 @@ async fn emit_bypasses_to_sync_xadd_when_channel_full() {
         .await
         .unwrap();
 
+    let (_tmp, spill_root) = make_spill_root();
     // capacity=1 so the channel fills after the first record.
     // The flusher worker has a 60-second flush interval — it won't drain
     // before we overflow the channel with rapid try_send calls.
@@ -117,6 +136,8 @@ async fn emit_bypasses_to_sync_xadd_when_channel_full() {
         1,
         100,
         Duration::from_secs(60),
+        spill_root,
+        DLQ_SHARDS,
         ShutdownToken::new(),
         Duration::from_secs(5),
     );

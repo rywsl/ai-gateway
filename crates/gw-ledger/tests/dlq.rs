@@ -14,11 +14,26 @@ use gw_core::usage::UsageSnapshot;
 use gw_ledger::flusher::LedgerItem;
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
+use gw_runtime::spill_io::{SpillRoot, SpillRootConfig};
 use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
+use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+const DLQ_SHARDS: usize = 4;
+
+fn make_spill_root() -> (TempDir, Arc<SpillRoot>) {
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 16 * 1024 * 1024,
+        buffer_size: 4096,
+    }));
+    (tmp, root)
+}
 
 fn sample_record() -> UsageRecord {
     UsageRecord {
@@ -74,12 +89,15 @@ async fn primary_xadd_failure_routes_to_dlq_stream() {
         .await
         .unwrap();
 
+    let (_tmp, spill_root) = make_spill_root();
     let (ledger, _handles) = Ledger::start(
         redis.clone(),
         "test-instance".to_string(),
         1024,
         2,
         Duration::from_millis(100),
+        spill_root,
+        DLQ_SHARDS,
         ShutdownToken::new(),
         Duration::from_secs(5),
     );

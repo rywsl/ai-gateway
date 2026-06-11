@@ -1,9 +1,10 @@
 use crate::usage::UsageRecord;
+use gw_runtime::spill_io::{SpillFile, SpillRoot};
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::io;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,38 +54,66 @@ impl DlqEnvelope {
     }
 }
 
+/// Emergency DLQ writer backed by a sharded async `SpillFile`.
+///
+/// Replaces the former sync `std::fs::File` + `std::sync::Mutex` with an
+/// async append-only file from `gw_runtime::spill_io`. The `SpillFile` is
+/// lazily initialised on the first `append` call via a `OnceCell`.
+///
+/// Each process gets a unique key (`gw-ledger-emergency-dlq-<uuid>`) and N
+/// shard files under the shared `SpillRoot`. The quota enforcer on
+/// `SpillRoot` prunes old spill files when total disk usage exceeds the
+/// configured limit.
 pub struct EmergencyDlqWriter {
-    root: PathBuf,
-    file: Mutex<Option<File>>,
+    spill_root: Arc<SpillRoot>,
+    key: String,
+    shards: NonZeroUsize,
+    file: OnceCell<SpillFile>,
 }
 
 impl EmergencyDlqWriter {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(spill_root: Arc<SpillRoot>, shards: NonZeroUsize) -> Self {
         Self {
-            root: root.into(),
-            file: Mutex::new(None),
+            spill_root,
+            key: format!("gw-ledger-emergency-dlq-{}", uuid::Uuid::new_v4()),
+            shards,
+            file: OnceCell::new(),
         }
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn append(&self, envelope: &DlqEnvelope) -> io::Result<()> {
-        std::fs::create_dir_all(&self.root)?;
-        let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.is_none() {
-            let path = self.root.join(format!(
-                "gw-ledger-emergency-dlq-{}.jsonl",
-                uuid::Uuid::new_v4()
-            ));
-            *guard = Some(OpenOptions::new().create(true).append(true).open(path)?);
-        }
-        let file = guard.as_mut().expect("file initialized above");
-        serde_json::to_writer(&mut *file, envelope)?;
-        file.write_all(b"\n")?;
-        file.flush()?;
+    /// Append a serialised `DlqEnvelope` as a JSONL line.
+    ///
+    /// The `SpillFile` is lazily created on the first call. Subsequent calls
+    /// reuse the same sharded file.
+    pub async fn append(&self, envelope: &DlqEnvelope) -> io::Result<()> {
+        let file = self
+            .file
+            .get_or_try_init(|| self.spill_root.create(&self.key, self.shards))
+            .await?;
+        let bytes = serde_json::to_vec(envelope)?;
+        let mut buf = bytes;
+        buf.push(b'\n');
+        file.append(&buf).await?;
         Ok(())
+    }
+
+    /// Flush all shard buffers to the underlying files.
+    pub async fn flush(&self) -> io::Result<()> {
+        if let Some(file) = self.file.get() {
+            file.flush().await?;
+        }
+        Ok(())
+    }
+
+    /// Read back all data from all shards.
+    ///
+    /// Returns one `Vec<u8>` per shard, in shard index order. Returns an
+    /// empty vector if no data has been written yet.
+    pub async fn read_all(&self) -> io::Result<Vec<Vec<u8>>> {
+        match self.file.get() {
+            Some(file) => file.read_all().await,
+            None => Ok(vec![]),
+        }
     }
 }
 
@@ -95,6 +124,8 @@ mod tests {
     use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
     use gw_core::permissions::MarkupChainSnapshot;
     use gw_core::usage::UsageSnapshot;
+    use gw_runtime::spill_io::SpillRootConfig;
+    use tempfile::TempDir;
 
     fn record() -> UsageRecord {
         UsageRecord {
@@ -133,6 +164,14 @@ mod tests {
         }
     }
 
+    fn spill_root(tmp: &TempDir) -> Arc<SpillRoot> {
+        Arc::new(SpillRoot::new(SpillRootConfig {
+            root_dir: tmp.path().to_path_buf(),
+            max_total_bytes: 16 * 1024 * 1024,
+            buffer_size: 4096,
+        }))
+    }
+
     #[test]
     fn dlq_envelope_matches_go_contract_shape() {
         let envelope = DlqEnvelope::new(record(), "primary xadd failed", 3, DlqLayer::Mem, 1234);
@@ -153,10 +192,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn emergency_writer_appends_json_lines() {
-        let root = std::env::temp_dir().join(format!("gw-dlq-test-{}", uuid::Uuid::new_v4()));
-        let writer = EmergencyDlqWriter::new(root.clone());
+    #[tokio::test]
+    async fn emergency_writer_appends_json_lines() {
+        let tmp = TempDir::new().unwrap();
+        let root = spill_root(&tmp);
+        let writer = EmergencyDlqWriter::new(
+            root,
+            NonZeroUsize::new(1).unwrap(),
+        );
 
         writer
             .append(&DlqEnvelope::new(
@@ -166,6 +209,7 @@ mod tests {
                 DlqLayer::Disk,
                 99,
             ))
+            .await
             .unwrap();
         writer
             .append(&DlqEnvelope::new(
@@ -175,16 +219,73 @@ mod tests {
                 DlqLayer::Disk,
                 100,
             ))
+            .await
             .unwrap();
 
-        let entries = std::fs::read_dir(&root)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(entries.len(), 1, "one JSONL file per process is enough");
-        let text = std::fs::read_to_string(entries[0].path()).unwrap();
+        writer.flush().await.unwrap();
+        let shards = writer.read_all().await.unwrap();
+        // 1 shard → 1 Vec<u8> containing both lines.
+        assert_eq!(shards.len(), 1, "single shard expected");
+        let text = String::from_utf8(shards.into_iter().flatten().collect()).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 2, "two JSONL lines");
         assert!(lines[0].contains("\"dlq_layer\":\"disk\""));
+        assert!(lines[1].contains("\"dlq_layer\":\"disk\""));
+    }
+
+    /// Round-trip test: append two envelopes, flush, read back, and
+    /// verify the serialised JSON lines contain the expected fields.
+    #[tokio::test]
+    async fn dlq_writer_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let root = spill_root(&tmp);
+        let writer = EmergencyDlqWriter::new(
+            root,
+            NonZeroUsize::new(4).unwrap(),
+        );
+
+        let env1 = DlqEnvelope::new(
+            record(),
+            "redis OOM",
+            1,
+            DlqLayer::Mem,
+            1000,
+        );
+        let env2 = DlqEnvelope::new(
+            UsageRecord {
+                request_id: "req-dlq-2".into(),
+                ..record()
+            },
+            "xadd failed",
+            2,
+            DlqLayer::Redis,
+            2000,
+        );
+
+        writer.append(&env1).await.unwrap();
+        writer.append(&env2).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let shards = writer.read_all().await.unwrap();
+        // 4 shards: at least 2 must contain data (round-robin).
+        let all_bytes: Vec<u8> = shards.into_iter().flatten().collect();
+        let text = String::from_utf8(all_bytes).unwrap();
+
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2, "two JSONL lines expected");
+
+        // Verify first envelope fields via JSON value inspection.
+        let v1: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(v1["dlq_meta"]["retry_count_before_dlq"], 1);
+        assert_eq!(v1["dlq_meta"]["dlq_layer"], "mem");
+        assert_eq!(v1["dlq_meta"]["first_failure_ts_ms"], 1000);
+        assert_eq!(v1["usage_record"]["request_id"], "req-dlq-1");
+
+        // Verify second envelope fields.
+        let v2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(v2["dlq_meta"]["retry_count_before_dlq"], 2);
+        assert_eq!(v2["dlq_meta"]["dlq_layer"], "redis");
+        assert_eq!(v2["dlq_meta"]["first_failure_ts_ms"], 2000);
+        assert_eq!(v2["usage_record"]["request_id"], "req-dlq-2");
     }
 }

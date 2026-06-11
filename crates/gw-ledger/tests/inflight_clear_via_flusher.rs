@@ -12,11 +12,27 @@ use gw_ledger::flusher::{ClearKey, LedgerItem};
 use gw_ledger::inflight::{InflightLedger, InflightRegistration};
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
+use gw_runtime::spill_io::{SpillRoot, SpillRootConfig};
 use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+const DLQ_SHARDS: usize = 4;
+
+fn make_spill_root() -> (TempDir, Arc<SpillRoot>) {
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 16 * 1024 * 1024,
+        buffer_size: 4096,
+    }));
+    (tmp, root)
+}
 
 fn fresh_usage_record(req_id: &str, attempt: u32) -> UsageRecord {
     UsageRecord {
@@ -78,12 +94,15 @@ async fn flusher_dels_inflight_key_on_xadd_success() {
     assert_eq!(exists_before, 1, "inflight key registered");
 
     // 2. Start a Ledger with very short flush interval.
+    let (_tmp, spill_root) = make_spill_root();
     let (ledger, _handles) = Ledger::start(
         redis.clone(),
         instance.clone(),
         64,
         4,
         Duration::from_millis(50),
+        spill_root,
+        DLQ_SHARDS,
         ShutdownToken::new(),
         Duration::from_secs(5),
     );
@@ -139,12 +158,15 @@ async fn full_bypass_sync_xadd_dels_inflight_key() {
     assert_eq!(redis.pool.exists::<u64, _>(&key).await.unwrap(), 1);
 
     // Force the channel to be Full immediately: capacity = 1, ticker disabled.
+    let (_tmp, spill_root) = make_spill_root();
     let (ledger, _handles) = Ledger::start(
         redis.clone(),
         instance.clone(),
         1,
         1,
         Duration::from_secs(600), // ticker effectively disabled
+        spill_root,
+        DLQ_SHARDS,
         ShutdownToken::new(),
         Duration::from_secs(5),
     );
@@ -204,7 +226,14 @@ async fn closed_branch_routes_through_sync_xadd_with_del() {
     // end immediately. Subsequent emits hit the Closed branch.
     let (tx, rx) = tokio::sync::mpsc::channel::<LedgerItem>(8);
     drop(rx); // channel is now Closed
-    let ledger = Ledger::from_parts(tx, redis.clone(), instance.clone());
+    let (_tmp, spill_root) = make_spill_root();
+    let ledger = Ledger::from_parts(
+        tx,
+        redis.clone(),
+        instance.clone(),
+        spill_root,
+        NonZeroUsize::new(DLQ_SHARDS).unwrap(),
+    );
 
     ledger
         .emit(LedgerItem {

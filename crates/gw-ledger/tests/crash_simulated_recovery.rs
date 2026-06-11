@@ -20,14 +20,28 @@ use gw_ledger::inflight::{InflightLedger, InflightRegistration};
 use gw_ledger::inflight_reconciler;
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
+use gw_runtime::spill_io::{SpillRoot, SpillRootConfig};
 use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+const DLQ_SHARDS: usize = 4;
+
+fn make_spill_root() -> (TempDir, Arc<SpillRoot>) {
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 16 * 1024 * 1024,
+        buffer_size: 4096,
+    }));
+    (tmp, root)
+}
 
 fn fresh_usage_record(req_id: &str, attempt: u32) -> UsageRecord {
     UsageRecord {
@@ -88,12 +102,15 @@ async fn reconciler_emits_crashfallback_for_un_emitted_request() {
 
     // 2. Build a Ledger with a paused ticker — emit will queue into mpsc but
     //    the flusher will never fire within the test (3600 s interval).
+    let (_tmp, spill_root) = make_spill_root();
     let (ledger, _handles) = Ledger::start(
         redis.clone(),
         instance.clone(),
         16,
         16,
         Duration::from_secs(3600), // ticker effectively disabled
+        spill_root,
+        DLQ_SHARDS,
         ShutdownToken::new(),
         Duration::from_secs(5),
     );

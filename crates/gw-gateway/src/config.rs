@@ -210,12 +210,6 @@ pub struct LedgerCfg {
     pub channel_capacity: usize,
     pub batch_size: usize,
     pub flush_interval_ms: u64,
-    #[serde(default = "default_emergency_dlq_dir")]
-    pub emergency_dlq_dir: String,
-}
-
-fn default_emergency_dlq_dir() -> String {
-    "data/ledger".to_string()
 }
 
 #[derive(Debug, Deserialize)]

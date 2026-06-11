@@ -35,3 +35,5 @@ testcontainers-modules.workspace = true
 serde_json.workspace = true
 metrics.workspace = true
 toml = "0.8"
+tempfile = "3"
+gw-runtime = { path = "../gw-runtime" }
