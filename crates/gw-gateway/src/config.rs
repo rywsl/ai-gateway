@@ -75,6 +75,16 @@ pub struct Config {
     /// defense path; flipping it on activates the per-Pod hard upper bound.
     #[serde(default)]
     pub protection: gw_ledger::ProtectionConfig,
+    /// Shared runtime primitives configuration (resilience-fixes T2.1).
+    /// Drives ShutdownCoordinator, SystemHealthMonitor, BackpressureGate,
+    /// SpillRoot, and RegexCache bootstrap.
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+    /// Proxy-layer subsystem configuration (resilience-fixes T2.1).
+    /// Currently holds the `[proxy.archive]` block; T5 will wire it into
+    /// gw-proxy's response-archive flow.
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1135,6 +1145,235 @@ impl Default for BillingCfg {
             emit_lag_t0_secs: default_emit_lag_t0_secs(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             heartbeat_ttl_secs: default_heartbeat_ttl_secs(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime primitives configuration (resilience-fixes T2.1)
+// ---------------------------------------------------------------------------
+
+/// Top-level `[runtime]` block. Houses the configuration for the shared
+/// `gw-runtime` primitives (Supervisor, ShutdownCoordinator, SpillRoot,
+/// RegexCache, SystemHealthMonitor) that the gateway bootstraps in
+/// `gw-gateway/src/lib.rs`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub supervisor: RuntimeSupervisorConfig,
+    #[serde(default)]
+    pub shutdown: RuntimeShutdownConfig,
+    #[serde(default)]
+    pub spill_io: RuntimeSpillIoConfig,
+    #[serde(default)]
+    pub regex_cache: RuntimeRegexCacheConfig,
+    #[serde(default)]
+    pub health: RuntimeHealthConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeSupervisorConfig {
+    #[serde(default = "default_supervisor_max_restarts")]
+    pub default_max_restarts: u32,
+    #[serde(default = "default_supervisor_window_ms")]
+    pub default_window_ms: u64,
+    #[serde(default = "default_supervisor_backoff_initial_ms")]
+    pub default_backoff_initial_ms: u64,
+    #[serde(default = "default_supervisor_backoff_max_ms")]
+    pub default_backoff_max_ms: u64,
+    #[serde(default = "default_supervisor_backoff_multiplier")]
+    pub default_backoff_multiplier: f64,
+    #[serde(default = "default_supervisor_backoff_jitter")]
+    pub default_backoff_jitter: f64,
+}
+
+fn default_supervisor_max_restarts() -> u32 {
+    5
+}
+fn default_supervisor_window_ms() -> u64 {
+    60_000
+}
+fn default_supervisor_backoff_initial_ms() -> u64 {
+    100
+}
+fn default_supervisor_backoff_max_ms() -> u64 {
+    30_000
+}
+fn default_supervisor_backoff_multiplier() -> f64 {
+    2.0
+}
+fn default_supervisor_backoff_jitter() -> f64 {
+    0.2
+}
+
+impl Default for RuntimeSupervisorConfig {
+    fn default() -> Self {
+        Self {
+            default_max_restarts: default_supervisor_max_restarts(),
+            default_window_ms: default_supervisor_window_ms(),
+            default_backoff_initial_ms: default_supervisor_backoff_initial_ms(),
+            default_backoff_max_ms: default_supervisor_backoff_max_ms(),
+            default_backoff_multiplier: default_supervisor_backoff_multiplier(),
+            default_backoff_jitter: default_supervisor_backoff_jitter(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeShutdownConfig {
+    #[serde(default = "default_shutdown_phase1_accept_stop_ms")]
+    pub phase1_accept_stop_ms: u64,
+    #[serde(default = "default_shutdown_phase2_task_drain_ms")]
+    pub phase2_task_drain_ms: u64,
+    #[serde(default = "default_shutdown_hard_deadline_ms")]
+    pub hard_deadline_ms: u64,
+    #[serde(default = "default_shutdown_billing_drain_ms")]
+    pub billing_drain_ms: u64,
+}
+
+fn default_shutdown_phase1_accept_stop_ms() -> u64 {
+    5_000
+}
+fn default_shutdown_phase2_task_drain_ms() -> u64 {
+    25_000
+}
+fn default_shutdown_hard_deadline_ms() -> u64 {
+    35_000
+}
+fn default_shutdown_billing_drain_ms() -> u64 {
+    20_000
+}
+
+impl Default for RuntimeShutdownConfig {
+    fn default() -> Self {
+        Self {
+            phase1_accept_stop_ms: default_shutdown_phase1_accept_stop_ms(),
+            phase2_task_drain_ms: default_shutdown_phase2_task_drain_ms(),
+            hard_deadline_ms: default_shutdown_hard_deadline_ms(),
+            billing_drain_ms: default_shutdown_billing_drain_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeSpillIoConfig {
+    #[serde(default = "default_spill_io_root_dir")]
+    pub root_dir: std::path::PathBuf,
+    #[serde(default = "default_spill_io_max_total_bytes")]
+    pub max_total_bytes: u64,
+    #[serde(default = "default_spill_io_buffer_size")]
+    pub buffer_size: usize,
+    #[serde(default = "default_spill_io_dlq_shards")]
+    pub dlq_shards: usize,
+}
+
+fn default_spill_io_root_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("/data/cnexus/spill")
+}
+fn default_spill_io_max_total_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+fn default_spill_io_buffer_size() -> usize {
+    65_536
+}
+fn default_spill_io_dlq_shards() -> usize {
+    4
+}
+
+impl Default for RuntimeSpillIoConfig {
+    fn default() -> Self {
+        Self {
+            root_dir: default_spill_io_root_dir(),
+            max_total_bytes: default_spill_io_max_total_bytes(),
+            buffer_size: default_spill_io_buffer_size(),
+            dlq_shards: default_spill_io_dlq_shards(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeRegexCacheConfig {
+    #[serde(default = "default_regex_cache_capacity")]
+    pub capacity: u64,
+    #[serde(default = "default_regex_cache_tti_secs")]
+    pub tti_secs: u64,
+}
+
+fn default_regex_cache_capacity() -> u64 {
+    4_096
+}
+fn default_regex_cache_tti_secs() -> u64 {
+    3_600
+}
+
+impl Default for RuntimeRegexCacheConfig {
+    fn default() -> Self {
+        Self {
+            capacity: default_regex_cache_capacity(),
+            tti_secs: default_regex_cache_tti_secs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeHealthConfig {
+    #[serde(default = "default_runtime_health_evaluate_interval_ms")]
+    pub evaluate_interval_ms: u64,
+    #[serde(default = "default_runtime_health_hysteresis_healthy_ticks")]
+    pub hysteresis_healthy_ticks: u8,
+}
+
+fn default_runtime_health_evaluate_interval_ms() -> u64 {
+    1_000
+}
+fn default_runtime_health_hysteresis_healthy_ticks() -> u8 {
+    3
+}
+
+impl Default for RuntimeHealthConfig {
+    fn default() -> Self {
+        Self {
+            evaluate_interval_ms: default_runtime_health_evaluate_interval_ms(),
+            hysteresis_healthy_ticks: default_runtime_health_hysteresis_healthy_ticks(),
+        }
+    }
+}
+
+/// Top-level `[proxy]` block. T2.1 introduces it solely to house
+/// `[proxy.archive]`; T5 will wire it through to `gw-proxy`'s response
+/// archive flow.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProxyConfig {
+    #[serde(default)]
+    pub archive: ProxyArchiveConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProxyArchiveConfig {
+    #[serde(default = "default_proxy_archive_soft_cap_bytes")]
+    pub soft_cap_bytes: usize,
+    #[serde(default = "default_proxy_archive_hard_cap_bytes")]
+    pub hard_cap_bytes: usize,
+    #[serde(default = "default_proxy_archive_spill_dir")]
+    pub spill_dir: std::path::PathBuf,
+}
+
+fn default_proxy_archive_soft_cap_bytes() -> usize {
+    4 * 1024 * 1024
+}
+fn default_proxy_archive_hard_cap_bytes() -> usize {
+    8 * 1024 * 1024
+}
+fn default_proxy_archive_spill_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("/data/cnexus/spill/archive")
+}
+
+impl Default for ProxyArchiveConfig {
+    fn default() -> Self {
+        Self {
+            soft_cap_bytes: default_proxy_archive_soft_cap_bytes(),
+            hard_cap_bytes: default_proxy_archive_hard_cap_bytes(),
+            spill_dir: default_proxy_archive_spill_dir(),
         }
     }
 }

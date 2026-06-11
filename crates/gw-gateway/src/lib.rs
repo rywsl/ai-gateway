@@ -147,6 +147,34 @@ struct Wired {
     /// Per-conversation turn-state cache (Task 4.6).
     turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
     pg: sqlx::PgPool,
+    // --- Resilience-fixes T2.1 runtime primitives ---
+    /// Compiled-regex cache shared with future ModelPermission / passthrough
+    /// rule consumers (T6). Held in `Wired` so filter wiring in later tasks
+    /// can pick it up without re-plumbing bootstrap.
+    #[allow(dead_code)]
+    regex_cache: Arc<gw_runtime::RegexCache>,
+    /// Force-majeure backpressure gate. T7.1 will consult this in early.rs;
+    /// for now it just rides along so the wiring exists.
+    #[allow(dead_code)]
+    backpressure_gate: Arc<gw_runtime::BackpressureGate>,
+    /// Two-phase drain token. T2.2 will install the SIGTERM handler that
+    /// triggers `ShutdownCoordinator::drain`; long-running tasks supervised
+    /// in T3 will observe this token.
+    #[allow(dead_code)]
+    shutdown_token: gw_runtime::ShutdownToken,
+    /// Snapshot of the current shutdown phase. T2.3 will read this from
+    /// `/readyz` to flip the listener to 503 during phase 1.
+    #[allow(dead_code)]
+    phase_handle: gw_runtime::PhaseHandle,
+    /// Sharded append-only spill root. T4 migrates `EmergencyDlqWriter` and
+    /// T5 the response archive on top of this.
+    #[allow(dead_code)]
+    spill_root: Arc<gw_runtime::SpillRoot>,
+    /// Reporter handle for the RedisOomHook. T3 will pass this into the
+    /// fred wrappers in `gw-store` / `gw-ledger` so they can `record()` on
+    /// `OOM command not allowed when used memory > 'maxmemory'`.
+    #[allow(dead_code)]
+    redis_oom_reporter: gw_runtime::health::redis_oom::RedisOomReporter,
 }
 
 /// Build a hybrid [`gw_auth::jwt::JwtValidator`] from an `AuthConfig`, wiring
@@ -369,6 +397,93 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
     if admin_upstream_url.host_str().is_none() {
         anyhow::bail!("admin.upstream_url must include a host");
     }
+
+    // 0. Shared runtime primitives (resilience-fixes T2.1).
+    //
+    // Stand up the `gw-runtime` primitives early so subsequent bootstrap
+    // steps (and the `Wired` handoff) can reference them. T2.1 is plumbing
+    // only — the SIGTERM handler (T2.2), `/readyz` integration (T2.3), and
+    // BackpressureGate admit check (T7.1) land in later tasks. Long-running
+    // tasks spawned below still use bare `tokio::spawn`; T3 wraps them in
+    // `Supervisor` and threads the `ShutdownToken` through.
+    let (
+        shutdown_token,
+        phase_handle,
+        spill_root,
+        regex_cache,
+        backpressure_gate,
+        redis_oom_reporter,
+        _monitor_handle,
+    ) = {
+        use gw_runtime::health::{
+            disk::SpillDiskFullHook, fd::FdPressureHook, memory::MemoryPressureHook,
+            redis_oom::RedisOomHook,
+        };
+        use gw_runtime::{
+            BackpressureGate, RegexCache, RegexCacheConfig as RuntimeRegexCacheConfig,
+            ShutdownCoordinator, SpillRoot, SpillRootConfig, SystemHealthMonitor,
+        };
+
+        let mut shutdown = ShutdownCoordinator::new();
+        let shutdown_token = shutdown.token();
+        let phase_handle = shutdown.phase_handle();
+
+        let spill_root = Arc::new(SpillRoot::new(SpillRootConfig {
+            root_dir: cfg.runtime.spill_io.root_dir.clone(),
+            max_total_bytes: cfg.runtime.spill_io.max_total_bytes,
+            buffer_size: cfg.runtime.spill_io.buffer_size,
+        }));
+        spill_root
+            .ensure_dir()
+            .await
+            .with_context(|| {
+                format!(
+                    "ensuring spill root {:?} exists",
+                    cfg.runtime.spill_io.root_dir
+                )
+            })?;
+
+        let regex_cache = Arc::new(RegexCache::new(RuntimeRegexCacheConfig {
+            capacity: cfg.runtime.regex_cache.capacity,
+            tti: Duration::from_secs(cfg.runtime.regex_cache.tti_secs),
+        }));
+
+        let redis_oom_hook = RedisOomHook::new();
+        let redis_oom_reporter = redis_oom_hook.handle();
+
+        let mut monitor = SystemHealthMonitor::new(cfg.runtime.health.hysteresis_healthy_ticks);
+        monitor
+            .add_hook(MemoryPressureHook::new())
+            .add_hook(FdPressureHook::new())
+            .add_hook(SpillDiskFullHook::new(spill_root.root_dir().to_path_buf()))
+            .add_hook(redis_oom_hook);
+
+        let backpressure_state = monitor.state_handle();
+        let backpressure_gate = Arc::new(BackpressureGate::from_state(backpressure_state));
+        let monitor_handle = monitor.into_loop(Duration::from_millis(
+            cfg.runtime.health.evaluate_interval_ms,
+        ));
+        shutdown.register(monitor_handle);
+
+        // `shutdown` (the ShutdownCoordinator) is intentionally dropped here.
+        // T2.2 will refactor `bootstrap()` to return it to the caller so the
+        // signal handler can drive `drain()`. For T2.1 we only need the
+        // token + phase handle; the monitor task continues running because
+        // its JoinHandle was registered with `shutdown` before drop, and
+        // dropping a ShutdownCoordinator without calling `drain` does NOT
+        // abort registered handles — they live for the bootstrap runtime.
+        std::mem::drop(shutdown);
+
+        (
+            shutdown_token,
+            phase_handle,
+            spill_root,
+            regex_cache,
+            backpressure_gate,
+            redis_oom_reporter,
+            (),
+        )
+    };
 
     // 1. KMS — load and validate KEK material so config errors surface at
     // startup. The cache is moved into LoaderCtx so vendor_key decryption
@@ -1078,6 +1193,12 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         identity_persist,
         turn_state_cache,
         pg,
+        regex_cache,
+        backpressure_gate,
+        shutdown_token,
+        phase_handle,
+        spill_root,
+        redis_oom_reporter,
     })
 }
 

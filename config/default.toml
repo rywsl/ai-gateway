@@ -220,3 +220,40 @@ lease_grace_ms = 5000
 # Fallback `max_tokens` ceiling for credit estimation when the request has no
 # explicit `max_tokens` and the model's entity config also lacks a default.
 default_output_ceiling_tokens = 8192
+
+# ---------------------------------------------------------------------------
+# Shared runtime primitives (resilience-fixes T2.1)
+# ---------------------------------------------------------------------------
+
+[runtime.supervisor]
+default_max_restarts = 5
+default_window_ms = 60000
+default_backoff_initial_ms = 100
+default_backoff_max_ms = 30000
+default_backoff_multiplier = 2.0
+default_backoff_jitter = 0.2
+
+[runtime.shutdown]
+phase1_accept_stop_ms = 5000
+phase2_task_drain_ms = 25000
+hard_deadline_ms = 35000
+billing_drain_ms = 20000
+
+[runtime.spill_io]
+root_dir = "/data/cnexus/spill"
+max_total_bytes = 10737418240
+buffer_size = 65536
+dlq_shards = 4
+
+[runtime.regex_cache]
+capacity = 4096
+tti_secs = 3600
+
+[runtime.health]
+evaluate_interval_ms = 1000
+hysteresis_healthy_ticks = 3
+
+[proxy.archive]
+soft_cap_bytes = 4194304
+hard_cap_bytes = 8388608
+spill_dir = "/data/cnexus/spill/archive"
