@@ -903,7 +903,6 @@ async fn route_to_dlq(fallback: &DlqFallback, mut env: DlqEnvelope) {
     metrics::counter!("gw_usage_dlq_backlog_pushed_total").increment(1);
 }
 
-
 async fn flush(
     redis: &RedisCtx,
     instance_id: &str,
