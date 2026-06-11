@@ -88,3 +88,22 @@ async fn heartbeat_key_format() {
     let key = gw_ledger::instance_id::heartbeat_key("inst-x");
     assert_eq!(key, "gateway:instance:inst-x:heartbeat");
 }
+
+#[tokio::test]
+async fn heartbeat_and_control_plane_keys_share_instance_prefix() {
+    let instance_id = "inst-x";
+    let prefix = format!("gateway:instance:{instance_id}:");
+
+    assert_eq!(
+        gw_ledger::instance_id::heartbeat_key(instance_id),
+        format!("{prefix}heartbeat")
+    );
+    assert_eq!(
+        gw_core::control_plane::gateway_capability_key(instance_id),
+        format!("{prefix}capability")
+    );
+    assert_eq!(
+        gw_core::control_plane::gateway_runtime_key(instance_id),
+        format!("{prefix}runtime")
+    );
+}

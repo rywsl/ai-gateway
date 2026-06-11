@@ -262,4 +262,17 @@ Rust Wave 1 的 malformed entity 处理遵循同一顺序:能解析 stream deliv
 - **依赖关系**:SP-A 是基础;SP-B `:effective` 写入点挂 SP-A reload hook;SP-C `reload-config`/`restart`/`drain` 复用 SP-A 机制;SP-C `refresh-oauth` 依赖 [F2 K-C](../../ROADMAP.md)。
 - **上线 ordering**:Rust 先上(读 `default.toml` 兜底可单跑)→ Go 写 `config_*` + 发 `events:entity ns=config` 接管控制。破坏性变更直接做(main §3.6,项目未上线)。
 
+## 8.7 Wire compatibility addendum (2026-06-11)
+
+Rust `gateway:instance:<id>:capability` emits both legacy and detailed API-shape fields:
+
+- `api_shapes`: plain string array for older Go readers that only need shape names.
+- `api_shape_capabilities`: detailed per-shape objects with `api_shape`, `readiness`, `production_ready`, and optional `reason`.
+- `kiro_cli`: top-level Kiro CLI readiness object.
+- `readiness.kiro_cli`: the same Kiro CLI readiness object nested under the general readiness surface.
+
+Kiro CLI is advertised but not production ready until a real CLI traffic sample exists. Go must not infer Kiro CLI production readiness from membership in `api_shapes`; use `kiro_cli.production_enabled` and `kiro_cli.usage_ready`.
+
+Rust `gateway:instance:<id>:runtime` emits `readiness.runtime_snapshot=true` from the state writer and `readiness.command_consumer=true` once the command consumer is started. Runtime snapshots also include `readiness.kiro_cli` so Go can render runtime readiness without treating the gateway capability as missing.
+
 > Sync rule:本 part 任何接触点改动须同步 [main.md](../main.md) §2/§3.3/§7;Rust 侧实现细节见三个 [SP design doc](../../design/)。

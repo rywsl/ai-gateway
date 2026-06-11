@@ -46,15 +46,39 @@ gateway:instance:<id>:runtime          (新: 运行状态慢快照, 覆盖式周
 ```json
 {
   "instance_id": "…", "gateway_version": "1.5.0+<git_sha>", "started_at_ms": 0,
-  "protocols": ["openai","anthropic","gemini"],
-  "cli_variants": ["claude:cli","openai:cli","openai:compact","gemini:cli"],
+  "protocols": ["openai","anthropic","gemini","kiro"],
+  "api_shapes": ["openai:chat","openai:responses","anthropic:messages","gemini:generate","kiro:eventstream","kiro:cli"],
+  "api_shape_capabilities": [
+    {"api_shape":"openai:chat","readiness":"ready","production_ready":true},
+    {"api_shape":"kiro:cli","readiness":"partial","production_ready":false,
+     "reason":"requires_real_cli_sample"}
+  ],
+  "cli_variants": ["claude:cli","openai:cli","openai:compact","gemini:cli","kiro:cli"],
   "routing_strategies": ["FixedOrder","RoundRobin","LoadBalance","WeightedRr",
                          "CostFirst","LatencyFirst","CacheAffinity","Sticky"],
   "features": {"tunnel": false, "egress_impersonate": true, "credit_lease": true,
                "detailed_log": true, "task_worker": false},
-  "impersonate_identities": ["claude_code_chrome131","openai_codex","gemini_cli"]
+  "impersonate_identities": ["claude_code_chrome131","openai_codex","gemini_cli"],
+  "readiness": {
+    "capability_snapshot": true,
+    "kiro_cli": {
+      "advertised": true,
+      "detector_ready": false,
+      "production_enabled": false,
+      "usage_ready": false,
+      "reason": "requires_real_cli_sample"
+    }
+  },
+  "kiro_cli": {
+    "advertised": true,
+    "detector_ready": false,
+    "production_enabled": false,
+    "usage_ready": false,
+    "reason": "requires_real_cli_sample"
+  }
 }
 ```
+- Kiro CLI remains advertised-only until a real CLI traffic sample lands. Go reads production readiness from `kiro_cli.production_enabled` / `usage_ready`, not from `api_shapes` membership.
 - 写时机:boot 完成后一次 `SET gateway:instance:<id>:capability <json>`(无 TTL,或长 TTL + 心跳续)。
 - 来源:编译期常量(协议/策略/身份枚举)+ 启动时 feature/配置开关(`Wired`)。版本/feature 变(=新部署)才重写。
 
