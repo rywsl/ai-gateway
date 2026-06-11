@@ -232,9 +232,28 @@ async fn rebuild_jwt_validator_and_swap(
     }
 }
 
-/// Library entrypoint. The bin's `main` calls this after installing the
-/// jemalloc global allocator.
+/// Library entrypoint. The bin's `main` calls [`run_with_signal_handler`]
+/// instead; this helper remains for compatibility with callers that don't
+/// want the SIGTERM/SIGINT handling layer (e.g. internal smoke tests).
 pub fn run() -> anyhow::Result<()> {
+    run_with_signal_handler()
+}
+
+/// Bootstrap the gateway: load config + observability, then run the async
+/// `bootstrap` to construct `Wired` and the live `ShutdownCoordinator`.
+///
+/// Returns the wiring bundle, the coordinator (so the signal handler can
+/// drive `drain()`), and the loaded `Config` (the caller needs the shutdown
+/// timings to call `drain()`).
+///
+/// `pub(crate)` because `Wired` is private; the only intended caller is
+/// `run_with_signal_handler` in this same crate. This is a `pub(crate)`
+/// async function — it must be called from inside a tokio runtime, because
+/// `bootstrap()` spawns long-running background tasks (Ledger flusher,
+/// health server, stream consumer, etc.) that live for the life of that
+/// runtime.
+pub(crate) async fn bootstrap_gateway(
+) -> anyhow::Result<(Wired, gw_runtime::ShutdownCoordinator, config::Config)> {
     // Pin rustls to the `ring` crypto provider. Both `aws-lc-rs` (rustls
     // 0.23's default feature) and `ring` (pingora-rustls direct dep) end up
     // linked in this build, so rustls refuses to auto-select at handshake
@@ -254,140 +273,237 @@ pub fn run() -> anyhow::Result<()> {
         "gw-gateway starting"
     );
 
-    // Bootstrap thread owns the tokio runtime that hosts:
-    //   - async init (KMS, Redis, PgSQL)
-    //   - the Ledger flusher background task
-    //   - the /livez /readyz HTTP server
-    //   - (future) stream consumer, health checker, key scanner
-    //
-    // The handoff channel carries `Wired` so the main thread can build the
-    // Pingora service once init succeeds.
-    let (tx, rx) = std::sync::mpsc::sync_channel::<anyhow::Result<Wired>>(1);
+    let (wired, coordinator) = bootstrap(&cfg).await?;
+    Ok((wired, coordinator, cfg))
+}
 
-    let bootstrap_handle = std::thread::Builder::new()
-        .name("gw-bootstrap".into())
+/// Build the Pingora `Server`, attach the LLM gateway service, and run it
+/// on a dedicated OS thread. Returns the JoinHandle of that thread.
+///
+/// Pingora's [`pingora::server::Server::run_forever`] consumes the server
+/// and is `-> !` (never returns; it manages its own internal tokio
+/// runtimes per service). We dedicate an OS thread to it so the parent
+/// tokio runtime stays free to handle SIGTERM/SIGINT and drive the
+/// `ShutdownCoordinator`.
+///
+/// The thread is detached: when `run_with_signal_handler` finishes the
+/// drain and returns, the process exits, terminating the Pingora thread.
+/// Pingora's own internal SIGINT/SIGTERM handling is best-effort here —
+/// the primary cancellation path for background tasks is the
+/// `ShutdownToken` registered with the coordinator (T3 wires it through
+/// the supervised spawns).
+fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
+    let business_port = wired.business_port;
+
+    let handle = std::thread::Builder::new()
+        .name("gw-pingora".into())
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("gw-bg")
-                .build()
-            {
-                Ok(rt) => rt,
+            // Pingora server lives on this dedicated thread and never
+            // returns. Any panic here is intentional — the supervising
+            // tokio runtime will see the thread die and the process will
+            // exit shortly after.
+            let mut server = match pingora::server::Server::new(None) {
+                Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("tokio runtime build failed: {e}")));
+                    tracing::error!(
+                        target: "gw_gateway",
+                        error = %e,
+                        "pingora Server::new failed; serve thread exiting"
+                    );
                     return;
                 }
             };
+            server.bootstrap();
 
-            let outcome = rt.block_on(async { bootstrap(&cfg).await });
+            let mut gw = LlmGateway::new(
+                wired.store,
+                wired.health,
+                wired.in_flight,
+                wired.latency_tracker,
+                wired.ratelimit,
+                wired.ip_allowlist,
+                wired.ip_ratelimit,
+                wired.adaptive_rpm,
+                wired.ip_allowlist_mode,
+                wired.ledger,
+                wired.counters,
+                wired.global_rpm,
+                wired.admin_upstream_url,
+                wired.trust_xff,
+                wired.signature_required,
+                wired.task_enabled,
+                wired.task_contract,
+                wired.task_billing_config,
+                wired.jwt_validator,
+                wired.strategies,
+                wired.affinity,
+                gw_routing::FailoverExecutor::with_total_budget_ms(
+                    3,
+                    wired.error_failover_total_budget_ms,
+                ),
+                wired.capability_resolver,
+                wired.mgmt_blacklist,
+                wired.resilience,
+                #[cfg(feature = "tunnel")]
+                wired.tunnel,
+                wired.egress,
+                wired.egress_disabled,
+                wired.identity_persist,
+                wired.turn_state_cache,
+                wired.detailed_archive,
+                wired.inflight,
+                wired.response_deadline_ms,
+                wired.cancel_grace_ms,
+                wired.hard_cap_cfg,
+                wired.protection_cfg.clone(),
+                wired.classifier,
+                wired.adapter_registry,
+                wired.oauth_runtime,
+                wired.quota_state_updates,
+                wired.retryable_codes,
+                wired.error_passthrough_enabled,
+                wired.error_passthrough_rules,
+                wired.reservation_view,
+                wired.frequency_tracker,
+                wired.pg.clone(),
+            );
+            gw.body_rules = wired.body_rules;
 
-            match outcome {
-                Ok(wired) => {
-                    let _ = tx.send(Ok(wired));
-                    // Keep the runtime parked indefinitely so the spawned
-                    // background tasks (Ledger flusher, health server) keep
-                    // running for the life of the process.
-                    rt.block_on(async {
-                        std::future::pending::<()>().await;
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                }
-            }
+            let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
+            business.add_tcp(&format!("0.0.0.0:{business_port}"));
+            server.add_service(business);
+
+            tracing::info!(
+                target: "gw_gateway",
+                port = business_port,
+                "pingora business service starting"
+            );
+
+            // Flip readiness right before `run_forever()`. `add_service` above
+            // registers the service synchronously and pingora binds the listening
+            // sockets prior to entering the run loop, so by the time external probes
+            // reach `/readyz` the business port is accepting connections.
+            health::READY.store(true, std::sync::atomic::Ordering::Release);
+
+            // `run_forever` consumes the server and is `-> !`. It manages
+            // its own SIGTERM/SIGINT handling internally; the
+            // `ShutdownCoordinator` in the parent runtime drives the
+            // background-task drain in parallel.
+            server.run_forever();
         })
-        .context("spawning bootstrap thread")?;
+        .context("spawning pingora thread")?;
 
-    let wired = rx
-        .recv()
-        .context("bootstrap thread exited before signalling")??;
-    // Detach the bootstrap thread. Dropping its JoinHandle does not stop the
-    // thread — the runtime inside it is parked on `pending()`, keeping the
-    // background tasks (Ledger flusher, health server, StreamConsumer) alive
-    // for the process lifetime.
-    std::mem::drop(bootstrap_handle);
-
-    // Pingora server lives on the main thread and never returns.
-    let mut server = pingora::server::Server::new(None)
-        .map_err(|e| anyhow::anyhow!("pingora Server::new failed: {e}"))?;
-    server.bootstrap();
-
-    let mut gw = LlmGateway::new(
-        wired.store,
-        wired.health,
-        wired.in_flight,
-        wired.latency_tracker,
-        wired.ratelimit,
-        wired.ip_allowlist,
-        wired.ip_ratelimit,
-        wired.adaptive_rpm,
-        wired.ip_allowlist_mode,
-        wired.ledger,
-        wired.counters,
-        wired.global_rpm,
-        wired.admin_upstream_url,
-        wired.trust_xff,
-        wired.signature_required,
-        wired.task_enabled,
-        wired.task_contract,
-        wired.task_billing_config,
-        wired.jwt_validator,
-        wired.strategies,
-        wired.affinity,
-        gw_routing::FailoverExecutor::with_total_budget_ms(3, wired.error_failover_total_budget_ms),
-        wired.capability_resolver,
-        wired.mgmt_blacklist,
-        wired.resilience,
-        #[cfg(feature = "tunnel")]
-        wired.tunnel,
-        wired.egress,
-        wired.egress_disabled,
-        wired.identity_persist,
-        wired.turn_state_cache,
-        wired.detailed_archive,
-        wired.inflight,
-        wired.response_deadline_ms,
-        wired.cancel_grace_ms,
-        wired.hard_cap_cfg,
-        wired.protection_cfg.clone(),
-        wired.classifier,
-        wired.adapter_registry,
-        wired.oauth_runtime,
-        wired.quota_state_updates,
-        wired.retryable_codes,
-        wired.error_passthrough_enabled,
-        wired.error_passthrough_rules,
-        wired.reservation_view,
-        wired.frequency_tracker,
-        wired.pg.clone(),
-    );
-    gw.body_rules = wired.body_rules;
-
-    let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
-    business.add_tcp(&format!("0.0.0.0:{}", wired.business_port));
-    server.add_service(business);
-
-    tracing::info!(
-        target: "gw_gateway",
-        port = wired.business_port,
-        "pingora business service starting"
-    );
-
-    // Flip readiness right before `run_forever()`. `add_service` above
-    // registers the service synchronously and pingora binds the listening
-    // sockets prior to entering the run loop, so by the time external probes
-    // reach `/readyz` the business port is accepting connections. Flipping
-    // earlier (e.g. inside `bootstrap()`) would create a window where
-    // `/readyz` returns 200 but the business port is still refused.
-    health::READY.store(true, std::sync::atomic::Ordering::Release);
-
-    // `run_forever` consumes the server and is `-> !`, so this call never
-    // returns. The trailing `Ok(())` below is unreachable but keeps the
-    // function signature `anyhow::Result<()>` for callers/tests.
-    server.run_forever();
+    Ok(handle)
 }
 
-async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
+/// Library entrypoint with SIGTERM/SIGINT handling (resilience-fixes T2.2).
+///
+/// Builds a multi-threaded tokio runtime that:
+///   1. Calls [`bootstrap_gateway`] to construct `Wired` + the live
+///      `ShutdownCoordinator`. All background tasks spawned in `bootstrap`
+///      (Ledger flusher, health server, stream consumer, etc.) live on
+///      this runtime.
+///   2. Spawns the Pingora server on a dedicated OS thread via
+///      [`serve_gateway`].
+///   3. Installs SIGTERM + SIGINT handlers. On the first signal it
+///      triggers `coordinator.drain(...)`; a second signal during drain
+///      forces `coordinator.emergency_abort()`.
+///   4. Returns `Ok(())` on clean drain (exit code 0) or `Err(...)`
+///      with `std::process::exit(1)` on forced drain.
+pub fn run_with_signal_handler() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("gw-main")
+        .build()
+        .context("tokio runtime build failed")?;
+
+    rt.block_on(async {
+        let (wired, coordinator, cfg) = bootstrap_gateway().await?;
+
+        // Capture shutdown timings before `cfg` is moved or borrowed
+        // elsewhere — `coordinator.drain` takes them as Duration args.
+        let phase1_ms = cfg.runtime.shutdown.phase1_accept_stop_ms;
+        let phase2_ms = cfg.runtime.shutdown.phase2_task_drain_ms;
+        let hard_deadline_ms = cfg.runtime.shutdown.hard_deadline_ms;
+
+        // Spawn Pingora on its own OS thread (run_forever is sync + `-> !`).
+        // The JoinHandle is held only for diagnostics — the thread is
+        // effectively detached; when the runtime exits after `drain`, the
+        // process exits and the thread is killed.
+        let _pingora_thread = serve_gateway(wired)?;
+
+        // SIGTERM/SIGINT install. tokio::signal::unix is Unix-only;
+        // gw-gateway targets Linux production + macOS dev, both Unix.
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())
+            .context("installing SIGTERM handler")?;
+        let mut sigint = signal(SignalKind::interrupt())
+            .context("installing SIGINT handler")?;
+
+        // Wait for the first signal.
+        tokio::select! {
+            _ = sigterm.recv() => {
+                tracing::info!(target: "gw_gateway", "SIGTERM received; initiating graceful shutdown");
+            }
+            _ = sigint.recv() => {
+                tracing::info!(target: "gw_gateway", "SIGINT received; initiating graceful shutdown");
+            }
+        }
+
+        // Race coordinator.drain against a second signal. A second
+        // SIGTERM/SIGINT during drain triggers emergency_abort.
+        let drain_fut = coordinator.drain(
+            Duration::from_millis(phase1_ms),
+            Duration::from_millis(phase2_ms),
+            Duration::from_millis(hard_deadline_ms),
+        );
+
+        // We need to be able to call emergency_abort while drain is
+        // running, but `drain` takes `self` by value. Resolution: run
+        // drain in a tokio task, and watch for a second signal in
+        // parallel; if it arrives, we can't call `emergency_abort` on the
+        // moved coordinator, so the hard_deadline acts as the upper bound
+        // and we additionally `std::process::exit(1)` immediately on the
+        // second signal.
+        let drain_handle = tokio::spawn(drain_fut);
+
+        let outcome = tokio::select! {
+            res = drain_handle => {
+                res.context("drain task joined with panic")?
+            }
+            _ = sigterm.recv() => {
+                tracing::warn!(
+                    target: "gw_gateway",
+                    "second SIGTERM during drain; emergency exit"
+                );
+                std::process::exit(1);
+            }
+            _ = sigint.recv() => {
+                tracing::warn!(
+                    target: "gw_gateway",
+                    "second SIGINT during drain; emergency exit"
+                );
+                std::process::exit(1);
+            }
+        };
+
+        match outcome {
+            gw_runtime::DrainOutcome::Clean => {
+                tracing::info!(target: "gw_gateway", "shutdown drain complete (Clean)");
+                Ok(())
+            }
+            gw_runtime::DrainOutcome::Forced => {
+                tracing::warn!(
+                    target: "gw_gateway",
+                    "shutdown drain complete (Forced); exiting with code 1"
+                );
+                std::process::exit(1);
+            }
+        }
+    })
+}
+
+async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::ShutdownCoordinator)> {
     let admin_upstream_url = url::Url::parse(&cfg.admin.upstream_url)
         .with_context(|| format!("invalid admin.upstream_url: {}", cfg.admin.upstream_url))?;
     match admin_upstream_url.scheme() {
@@ -398,22 +514,23 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         anyhow::bail!("admin.upstream_url must include a host");
     }
 
-    // 0. Shared runtime primitives (resilience-fixes T2.1).
+    // 0. Shared runtime primitives (resilience-fixes T2.1 / T2.2).
     //
     // Stand up the `gw-runtime` primitives early so subsequent bootstrap
-    // steps (and the `Wired` handoff) can reference them. T2.1 is plumbing
-    // only — the SIGTERM handler (T2.2), `/readyz` integration (T2.3), and
-    // BackpressureGate admit check (T7.1) land in later tasks. Long-running
+    // steps (and the `Wired` handoff) can reference them. T2.1 added the
+    // plumbing; T2.2 returns the `ShutdownCoordinator` so the SIGTERM
+    // handler in `run_with_signal_handler` can drive `drain()`. Long-running
     // tasks spawned below still use bare `tokio::spawn`; T3 wraps them in
-    // `Supervisor` and threads the `ShutdownToken` through.
+    // `Supervisor` and threads the `ShutdownToken` through, after which the
+    // returned coordinator drains them on shutdown.
     let (
+        shutdown,
         shutdown_token,
         phase_handle,
         spill_root,
         regex_cache,
         backpressure_gate,
         redis_oom_reporter,
-        _monitor_handle,
     ) = {
         use gw_runtime::health::{
             disk::SpillDiskFullHook, fd::FdPressureHook, memory::MemoryPressureHook,
@@ -465,23 +582,14 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         ));
         shutdown.register(monitor_handle);
 
-        // `shutdown` (the ShutdownCoordinator) is intentionally dropped here.
-        // T2.2 will refactor `bootstrap()` to return it to the caller so the
-        // signal handler can drive `drain()`. For T2.1 we only need the
-        // token + phase handle; the monitor task continues running because
-        // its JoinHandle was registered with `shutdown` before drop, and
-        // dropping a ShutdownCoordinator without calling `drain` does NOT
-        // abort registered handles — they live for the bootstrap runtime.
-        std::mem::drop(shutdown);
-
         (
+            shutdown,
             shutdown_token,
             phase_handle,
             spill_root,
             regex_cache,
             backpressure_gate,
             redis_oom_reporter,
-            (),
         )
     };
 
@@ -1122,84 +1230,87 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<Wired> {
         }
     });
 
-    Ok(Wired {
-        store,
-        health,
-        in_flight,
-        latency_tracker,
-        reservation_view,
-        frequency_tracker,
-        ratelimit,
-        ip_allowlist,
-        ip_ratelimit,
-        adaptive_rpm,
-        ip_allowlist_mode,
-        ledger,
-        counters,
-        global_rpm: cfg.ratelimit.global_rpm,
-        admin_upstream_url,
-        trust_xff: cfg.security.trust_xff,
-        signature_required: cfg.signature.required,
-        task_enabled: cfg.task.enabled,
-        task_contract,
-        task_billing_config: Some(gw_billing::TaskBillingConfig {
-            base_micro: cfg.task.billing_base_micro,
-            vendor_multiplier: cfg.task.billing_vendor_multiplier,
-            estimated_duration_secs: cfg.task.billing_estimated_duration_secs,
-        }),
-        business_port: cfg.server.business_port,
-        jwt_validator,
-        strategies: Arc::new(gw_routing::strategy::set::StrategySet::new_with_presets(
-            Duration::from_secs(cfg.routing.sticky_ttl_secs),
-            cfg.routing.preset_weights(),
-        )),
-        affinity,
-        capability_resolver,
-        #[cfg(feature = "tunnel")]
-        tunnel,
-        #[cfg(feature = "tunnel")]
-        _tunnel_bridge: tunnel_bridge,
-        mgmt_blacklist,
-        resilience,
-        detailed_archive,
-        inflight,
-        response_deadline_ms: cfg.billing.response_deadline_ms,
-        cancel_grace_ms: cfg.billing.cancel_grace_ms,
-        hard_cap_cfg: gw_auth::hard_cap::HardCapCfg {
-            max_input_tokens: cfg.auth.hard_cap_max_input_tokens,
-            max_cost_micro: cfg.auth.hard_cap_max_cost_micro,
+    Ok((
+        Wired {
+            store,
+            health,
+            in_flight,
+            latency_tracker,
+            reservation_view,
+            frequency_tracker,
+            ratelimit,
+            ip_allowlist,
+            ip_ratelimit,
+            adaptive_rpm,
+            ip_allowlist_mode,
+            ledger,
+            counters,
+            global_rpm: cfg.ratelimit.global_rpm,
+            admin_upstream_url,
+            trust_xff: cfg.security.trust_xff,
+            signature_required: cfg.signature.required,
+            task_enabled: cfg.task.enabled,
+            task_contract,
+            task_billing_config: Some(gw_billing::TaskBillingConfig {
+                base_micro: cfg.task.billing_base_micro,
+                vendor_multiplier: cfg.task.billing_vendor_multiplier,
+                estimated_duration_secs: cfg.task.billing_estimated_duration_secs,
+            }),
+            business_port: cfg.server.business_port,
+            jwt_validator,
+            strategies: Arc::new(gw_routing::strategy::set::StrategySet::new_with_presets(
+                Duration::from_secs(cfg.routing.sticky_ttl_secs),
+                cfg.routing.preset_weights(),
+            )),
+            affinity,
+            capability_resolver,
+            #[cfg(feature = "tunnel")]
+            tunnel,
+            #[cfg(feature = "tunnel")]
+            _tunnel_bridge: tunnel_bridge,
+            mgmt_blacklist,
+            resilience,
+            detailed_archive,
+            inflight,
+            response_deadline_ms: cfg.billing.response_deadline_ms,
+            cancel_grace_ms: cfg.billing.cancel_grace_ms,
+            hard_cap_cfg: gw_auth::hard_cap::HardCapCfg {
+                max_input_tokens: cfg.auth.hard_cap_max_input_tokens,
+                max_cost_micro: cfg.auth.hard_cap_max_cost_micro,
+            },
+            protection_cfg: cfg.protection.clone(),
+            classifier: Arc::new(gw_core::error::DefaultClassifier),
+            adapter_registry,
+            oauth_runtime,
+            quota_state_updates: Some(quota_state_updates),
+            retryable_codes: {
+                Arc::new(
+                    cfg.error
+                        .classification
+                        .retryable_status_codes
+                        .iter()
+                        .copied()
+                        .collect(),
+                )
+            },
+            error_failover_total_budget_ms: cfg.error.classification.failover_total_budget_ms,
+            error_passthrough_enabled: cfg.error.passthrough.enabled,
+            error_passthrough_rules: std::sync::Arc::new(cfg.error.passthrough.compiled_rules()),
+            body_rules: Arc::new(convert_body_rules(&cfg.body_rules)),
+            egress,
+            egress_disabled: cfg.egress.disabled,
+            identity_persist,
+            turn_state_cache,
+            pg,
+            regex_cache,
+            backpressure_gate,
+            shutdown_token,
+            phase_handle,
+            spill_root,
+            redis_oom_reporter,
         },
-        protection_cfg: cfg.protection.clone(),
-        classifier: Arc::new(gw_core::error::DefaultClassifier),
-        adapter_registry,
-        oauth_runtime,
-        quota_state_updates: Some(quota_state_updates),
-        retryable_codes: {
-            Arc::new(
-                cfg.error
-                    .classification
-                    .retryable_status_codes
-                    .iter()
-                    .copied()
-                    .collect(),
-            )
-        },
-        error_failover_total_budget_ms: cfg.error.classification.failover_total_budget_ms,
-        error_passthrough_enabled: cfg.error.passthrough.enabled,
-        error_passthrough_rules: std::sync::Arc::new(cfg.error.passthrough.compiled_rules()),
-        body_rules: Arc::new(convert_body_rules(&cfg.body_rules)),
-        egress,
-        egress_disabled: cfg.egress.disabled,
-        identity_persist,
-        turn_state_cache,
-        pg,
-        regex_cache,
-        backpressure_gate,
-        shutdown_token,
-        phase_handle,
-        spill_root,
-        redis_oom_reporter,
-    })
+        shutdown,
+    ))
 }
 
 fn map_ip_allowlist_mode(mode: config::IpFilterAllowlistMode) -> IpAllowlistMode {
