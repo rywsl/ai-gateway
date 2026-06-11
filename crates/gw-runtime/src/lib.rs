@@ -13,6 +13,7 @@ pub mod shutdown;
 pub mod spill_io;
 pub mod supervisor;
 
+pub use regex_cache::{CompileError, RegexCache, RegexCacheConfig};
 pub use shutdown::{DrainOutcome, PhaseHandle, ShutdownCoordinator, ShutdownPhase, ShutdownToken};
 pub use spill_io::{SpillFile, SpillRoot, SpillRootConfig};
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorError};
