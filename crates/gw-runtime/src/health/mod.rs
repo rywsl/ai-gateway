@@ -10,10 +10,12 @@ pub mod fd;
 pub mod memory;
 pub mod redis_oom;
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use futures::FutureExt;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum HealthSignal { Healthy, Critical }
@@ -67,10 +69,12 @@ impl SystemHealthMonitor {
             metrics::gauge!("gw_health_state").set(1.0);
             HealthSignal::Critical
         } else {
-            let streak = self.healthy_streak.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-            if was_critical && streak >= self.hysteresis_ticks {
+            let prev_streak = self.healthy_streak.load(Ordering::Acquire);
+            let new_streak = prev_streak.saturating_add(1).min(self.hysteresis_ticks);
+            self.healthy_streak.store(new_streak, Ordering::Release);
+            if was_critical && new_streak >= self.hysteresis_ticks {
                 tracing::info!(target: "gw_runtime::health", "system recovered to healthy");
-                metrics::counter!("gw_health_hook_transition_total", "hook" => "_aggregate", "to" => "healthy").increment(1);
+                metrics::counter!("gw_health_recovery_total").increment(1);
                 self.state.store(0, Ordering::Release);
             }
             metrics::gauge!("gw_health_state").set(self.state.load(Ordering::Acquire) as f64);
@@ -87,7 +91,14 @@ impl SystemHealthMonitor {
             let mut tick = tokio::time::interval(interval);
             loop {
                 tick.tick().await;
-                monitor.evaluate();
+                let monitor = monitor.clone();
+                let result = AssertUnwindSafe(async move { monitor.evaluate() })
+                    .catch_unwind()
+                    .await;
+                if let Err(_panic) = result {
+                    metrics::counter!("gw_health_monitor_panic_total").increment(1);
+                    tracing::error!(target: "gw_runtime::health", "monitor evaluate() panicked; will retry next tick");
+                }
             }
         })
     }
@@ -142,24 +153,29 @@ mod tests {
         assert!(matches!(gate.admit(), Admit::Reject));
     }
 
+    struct SwitchableHook {
+        crit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl HealthHook for SwitchableHook {
+        fn name(&self) -> &'static str { "switch" }
+        fn check(&self) -> HealthSignal {
+            if self.crit.load(Ordering::Acquire) { HealthSignal::Critical } else { HealthSignal::Healthy }
+        }
+    }
+
     #[test]
     fn hysteresis_requires_consecutive_healthy_ticks() {
+        let crit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut m = SystemHealthMonitor::new(3);
-        m.add_hook(AlwaysCritical);
-        m.evaluate(); // critical
+        m.add_hook(SwitchableHook { crit: crit.clone() });
+        assert_eq!(m.evaluate(), HealthSignal::Critical);
         assert_eq!(m.state_handle().load(Ordering::Acquire), 1);
-
-        // Remove the critical hook and add a healthy one.
-        let mut m2 = SystemHealthMonitor::new(3);
-        m2.add_hook(AlwaysHealthy);
-        // Force state into critical to start with.
-        m2.state_handle().store(1, Ordering::Release);
-        m2.healthy_streak.store(0, Ordering::Release);
-        assert_eq!(m2.evaluate(), HealthSignal::Healthy);
-        assert_eq!(m2.state_handle().load(Ordering::Acquire), 1, "still critical after 1 tick");
-        m2.evaluate();
-        assert_eq!(m2.state_handle().load(Ordering::Acquire), 1, "still critical after 2 ticks");
-        m2.evaluate();
-        assert_eq!(m2.state_handle().load(Ordering::Acquire), 0, "healthy after 3 ticks");
+        crit.store(false, Ordering::Release);
+        assert_eq!(m.evaluate(), HealthSignal::Healthy);
+        assert_eq!(m.state_handle().load(Ordering::Acquire), 1, "still critical after 1 healthy tick");
+        m.evaluate();
+        assert_eq!(m.state_handle().load(Ordering::Acquire), 1, "still critical after 2 healthy ticks");
+        m.evaluate();
+        assert_eq!(m.state_handle().load(Ordering::Acquire), 0, "healthy after 3 ticks");
     }
 }

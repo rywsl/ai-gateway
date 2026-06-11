@@ -63,11 +63,13 @@ impl SpillRoot {
             shard_files.push(Mutex::new(BufWriter::with_capacity(self.config.buffer_size, file)));
             shard_paths.push(path);
         }
+        let bytes_counter = metrics::counter!("gw_spill_bytes_total", "site" => key.to_string());
         Ok(SpillFile {
             base_key: key.to_string(),
             shard_paths,
             shards: shard_files,
             next_shard: AtomicUsize::new(0),
+            bytes_counter,
         })
     }
 
@@ -116,6 +118,7 @@ pub struct SpillFile {
     shard_paths: Vec<PathBuf>,
     shards: Vec<Mutex<BufWriter<File>>>,
     next_shard: AtomicUsize,
+    bytes_counter: metrics::Counter,
 }
 
 impl SpillFile {
@@ -128,8 +131,7 @@ impl SpillFile {
         let idx = self.next_shard.fetch_add(1, Ordering::Relaxed) % n;
         let mut guard = self.shards[idx].lock().await;
         guard.write_all(bytes).await?;
-        metrics::counter!("gw_spill_bytes_total", "site" => self.base_key.clone())
-            .increment(bytes.len() as u64);
+        self.bytes_counter.increment(bytes.len() as u64);
         Ok(())
     }
 
@@ -151,14 +153,13 @@ impl SpillFile {
     }
 
     pub async fn read_all(&self) -> io::Result<Vec<Vec<u8>>> {
-        // Flush before read so buffered data is visible.
-        for s in &self.shards {
+        let mut out = Vec::with_capacity(self.shards.len());
+        for (idx, s) in self.shards.iter().enumerate() {
             let mut g = s.lock().await;
             g.flush().await?;
-        }
-        let mut out = Vec::with_capacity(self.shards.len());
-        for path in &self.shard_paths {
-            let mut f = File::open(path).await?;
+            // Hold the lock across open+read so a concurrent append cannot
+            // write to the BufWriter between our flush and the read.
+            let mut f = File::open(&self.shard_paths[idx]).await?;
             let mut buf = Vec::new();
             f.read_to_end(&mut buf).await?;
             out.push(buf);
