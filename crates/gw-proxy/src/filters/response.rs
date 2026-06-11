@@ -34,7 +34,7 @@
 //! terminates the stream with `GW_RESPONSE_DEADLINE_EXCEEDED` if exceeded.
 //! The check runs *before* any body processing or cross-protocol re-render.
 
-use crate::ctx::ReqCtx;
+use crate::ctx::{ArchiveState, ReqCtx};
 use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
 use gw_codec::cross_render::{CrossRender, WireFormat};
@@ -117,7 +117,7 @@ fn unix_s() -> i64 {
         .unwrap_or(0)
 }
 
-pub fn run(
+pub async fn run(
     _session: &mut Session,
     body: &mut Option<Bytes>,
     end_of_stream: bool,
@@ -146,11 +146,21 @@ pub fn run(
     // Archive: capture raw upstream chunk before any codec rewrite. Empty
     // EOS chunks are fine; the accumulator simply doesn't grow.
     if let Some(b) = body.as_ref() {
-        ctx.archive_upstream_response_body.extend_from_slice(b);
+        if let Some(sr) = ctx.spill_root.clone() {
+            ctx.archive_upstream_response_body
+                .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "upstream")
+                .await;
+        } else {
+            // No spill root (unit-test path): extend in-memory buffer
+            // directly. Cap enforcement is bypassed in this case.
+            if let ArchiveState::InMemory(ref mut buf) = ctx.archive_upstream_response_body {
+                buf.extend_from_slice(b);
+            }
+        }
     }
 
     if ctx.client_shape.is_some_and(|shape| shape.is_cli()) {
-        run_cli_body_filter(body, end_of_stream, ctx)?;
+        run_cli_body_filter(body, end_of_stream, ctx).await?;
         return Ok(None);
     }
 
@@ -198,7 +208,15 @@ pub fn run(
         // Archive capture for non-stream path; body reflects whatever bytes
         // (substituted or upstream-verbatim) reach the client.
         if let Some(b) = body.as_ref() {
-            ctx.archive_downstream_response_body.extend_from_slice(b);
+            if let Some(sr) = ctx.spill_root.clone() {
+                ctx.archive_downstream_response_body
+                    .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "downstream")
+                    .await;
+            } else {
+                if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
+                    buf.extend_from_slice(b);
+                }
+            }
         }
         return Ok(None);
     }
@@ -253,7 +271,15 @@ pub fn run(
 
     // Archive: capture downstream-bound bytes after all in-function mutation.
     if let Some(b) = body.as_ref() {
-        ctx.archive_downstream_response_body.extend_from_slice(b);
+        if let Some(sr) = ctx.spill_root.clone() {
+            ctx.archive_downstream_response_body
+                .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "downstream")
+                .await;
+        } else {
+            if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
+                buf.extend_from_slice(b);
+            }
+        }
     }
 
     Ok(None)
@@ -330,7 +356,7 @@ mod quota_snapshot_tests {
     }
 }
 
-pub fn run_cli_body_filter(
+pub async fn run_cli_body_filter(
     body: &mut Option<Bytes>,
     end_of_stream: bool,
     ctx: &mut ReqCtx,
@@ -351,8 +377,15 @@ pub fn run_cli_body_filter(
                 .get_or_insert_with(BytesMut::new)
                 .extend_from_slice(&passthrough);
         }
-        ctx.archive_downstream_response_body
-            .extend_from_slice(&passthrough);
+        if let Some(sr) = ctx.spill_root.clone() {
+            ctx.archive_downstream_response_body
+                .append_chunk(&passthrough, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "cli_downstream")
+                .await;
+        } else {
+            if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
+                buf.extend_from_slice(&passthrough);
+            }
+        }
     }
     if end_of_stream && !ctx.is_stream {
         if let Some(buf) = ctx.upstream_body_accum.take() {

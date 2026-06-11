@@ -391,6 +391,12 @@ pub struct LlmGateway {
             std::collections::HashMap<String, Box<serde_json::value::RawValue>>,
         >,
     >,
+    /// Sharded spill root for archive disk-overflow (T5.2). Cloned into each
+    /// `ReqCtx` in `new_ctx`.
+    pub spill_root: Option<Arc<gw_runtime::SpillRoot>>,
+    /// Archive cap policy (soft/hard cap) for response-body accumulation
+    /// (T5.2). Cloned into each `ReqCtx` in `new_ctx`.
+    pub archive_caps: crate::ctx::ArchiveCaps,
 }
 
 impl LlmGateway {
@@ -500,6 +506,8 @@ impl LlmGateway {
             reservation_view,
             frequency_tracker,
             body_rules: Arc::new(std::collections::HashMap::new()),
+            spill_root: None,
+            archive_caps: crate::ctx::ArchiveCaps::default(),
         }
     }
 
@@ -715,6 +723,8 @@ impl ProxyHttp for LlmGateway {
         ctx.frequency_tracker = self.frequency_tracker.clone();
         ctx.identity_persist = Some(self.identity_persist.clone());
         ctx.turn_state_cache = Some(self.turn_state_cache.clone());
+        ctx.spill_root = self.spill_root.clone();
+        ctx.archive_caps = self.archive_caps;
         ctx
     }
 
@@ -1386,7 +1396,10 @@ impl ProxyHttp for LlmGateway {
             }
         }
 
-        let res = filters::response::run(session, body, end_of_stream, ctx);
+        let res = tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(filters::response::run(session, body, end_of_stream, ctx))
+        });
 
         if end_of_stream {
             self.classify_final_upstream_error(ctx);

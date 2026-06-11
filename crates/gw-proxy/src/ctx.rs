@@ -539,6 +539,13 @@ pub struct ReqCtx {
     pub upstream_request_body: Option<Arc<Bytes>>,
     /// Method+URL+headers snapshot for the upstream-bound request.
     pub upstream_request_meta: Option<UpstreamRequestMeta>,
+    /// Spill root for archive disk-overflow (T5.2). Wired from `Wired` via
+    /// `LlmGateway::new_ctx`; `None` in unit tests that bypass gateway::new.
+    pub spill_root: Option<Arc<SpillRoot>>,
+    /// Archive cap configuration (T5.2). Wired from `Wired` via
+    /// `LlmGateway::new_ctx`; defaults to `ArchiveCaps::default()` in unit
+    /// tests.
+    pub archive_caps: ArchiveCaps,
     /// Accumulator for raw upstream response bytes (always-on; the legacy B1
     /// `upstream_body_accum` was streaming-conditional and is now subsumed).
     pub archive_upstream_response_body: ArchiveState,
@@ -666,6 +673,8 @@ impl ReqCtx {
             downstream_request_meta: None,
             upstream_request_body: None,
             upstream_request_meta: None,
+            spill_root: None,
+            archive_caps: ArchiveCaps::default(),
             archive_upstream_response_body: ArchiveState::default(),
             archive_downstream_response_body: ArchiveState::default(),
             archive_upstream_response_meta: None,

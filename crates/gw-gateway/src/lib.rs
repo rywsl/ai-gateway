@@ -179,6 +179,9 @@ struct Wired {
     /// T5 the response archive on top of this.
     #[allow(dead_code)]
     spill_root: Arc<gw_runtime::SpillRoot>,
+    /// Archive cap policy from `[proxy.archive]`. Wired into `LlmGateway`
+    /// in `serve_gateway` so `ReqCtx::new_ctx` gets per-boot caps.
+    archive_caps: gw_proxy::ctx::ArchiveCaps,
     /// Reporter handle for the RedisOomHook. T3 will pass this into the
     /// fred wrappers in `gw-store` / `gw-ledger` so they can `record()` on
     /// `OOM command not allowed when used memory > 'maxmemory'`.
@@ -383,6 +386,8 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.pg.clone(),
             );
             gw.body_rules = wired.body_rules;
+            gw.spill_root = Some(wired.spill_root.clone());
+            gw.archive_caps = wired.archive_caps;
 
             let mut business = pingora_proxy::http_proxy_service(&server.configuration, gw);
             business.add_tcp(&format!("0.0.0.0:{business_port}"));
@@ -1581,6 +1586,10 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(
             phase_handle,
             supervisor_unhealthy,
             spill_root: spill_root.clone(),
+            archive_caps: gw_proxy::ctx::ArchiveCaps {
+                soft_cap_bytes: cfg.proxy.archive.soft_cap_bytes,
+                hard_cap_bytes: cfg.proxy.archive.hard_cap_bytes,
+            },
             redis_oom_reporter,
         },
         shutdown,
