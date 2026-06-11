@@ -1,8 +1,8 @@
 use gw_core::control_plane::{
     command_ack_hash_key, command_delivery_entity_key, default_gateway_capability,
-    CommandConsumerState, GatewayCommandAck, GatewayCommandAction, GatewayCommandDeliveryEntity,
-    GatewayCommandStatus, GatewayCommandStreamEntry, GatewayRuntimeSnapshot, RuntimeConfigSample,
-    StreamLagSnapshot, CONTROL_PLANE_SCHEMA_VERSION,
+    gateway_capability, CommandConsumerState, GatewayCommandAck, GatewayCommandAction,
+    GatewayCommandDeliveryEntity, GatewayCommandStatus, GatewayCommandStreamEntry,
+    GatewayRuntimeSnapshot, RuntimeConfigSample, StreamLagSnapshot, CONTROL_PLANE_SCHEMA_VERSION,
 };
 use serde_json::json;
 
@@ -84,12 +84,12 @@ fn capability_reports_kiro_shapes_and_disabled_commands_truthfully() {
     let capability = default_gateway_capability("gw-a", 100);
 
     let kiro_eventstream = capability
-        .api_shapes
+        .api_shape_capabilities
         .iter()
         .find(|shape| shape.api_shape == "kiro:eventstream")
         .expect("kiro:eventstream capability must be present");
     let kiro_cli = capability
-        .api_shapes
+        .api_shape_capabilities
         .iter()
         .find(|shape| shape.api_shape == "kiro:cli")
         .expect("kiro:cli capability must be present");
@@ -107,6 +107,21 @@ fn capability_reports_kiro_shapes_and_disabled_commands_truthfully() {
     assert!(kiro_eventstream.production_ready);
     assert!(!kiro_cli.production_ready);
     assert_eq!(kiro_cli.reason.as_deref(), Some("requires_real_cli_sample"));
+    assert!(capability
+        .api_shapes
+        .iter()
+        .any(|shape| shape == "kiro:cli"));
+    assert!(capability
+        .cli_variants
+        .iter()
+        .any(|shape| shape == "kiro:cli"));
+    assert!(capability.kiro_cli.advertised);
+    assert!(!capability.kiro_cli.production_enabled);
+    assert!(!capability.kiro_cli.usage_ready);
+    assert_eq!(
+        capability.kiro_cli.reason.as_deref(),
+        Some("requires_real_cli_sample")
+    );
     assert!(!set_log_level.enabled);
     assert_eq!(
         set_log_level.reason.as_deref(),
@@ -117,6 +132,48 @@ fn capability_reports_kiro_shapes_and_disabled_commands_truthfully() {
         refresh_oauth.reason.as_deref(),
         Some("oauth_force_refresh_hook_missing")
     );
+}
+
+#[test]
+fn capability_serializes_legacy_shape_names_and_readiness_details() {
+    let capability = default_gateway_capability("gw-a", 100);
+    let value = serde_json::to_value(capability).unwrap();
+
+    assert_eq!(value["instance_id"], "gw-a");
+    assert_eq!(value["started_at_ms"], 100);
+    assert_eq!(
+        value["protocols"],
+        json!(["openai", "anthropic", "gemini", "kiro"])
+    );
+    assert_eq!(value["api_shapes"][0], "openai:chat");
+    assert!(value["api_shapes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|shape| shape.is_string()));
+    assert_eq!(
+        value["api_shape_capabilities"][5],
+        json!({
+            "api_shape": "kiro:cli",
+            "readiness": "partial",
+            "production_ready": false,
+            "reason": "requires_real_cli_sample"
+        })
+    );
+    assert_eq!(value["cli_variants"][4], "kiro:cli");
+    assert_eq!(value["features"]["egress_impersonate"], true);
+    assert_eq!(value["kiro_cli"]["advertised"], true);
+    assert_eq!(value["kiro_cli"]["production_enabled"], false);
+    assert_eq!(value["readiness"]["kiro_cli"]["usage_ready"], false);
+}
+
+#[test]
+fn capability_preserves_started_at_when_refreshing_snapshot() {
+    let capability = gateway_capability("gw-a", "gw-test-version", 200, 100);
+
+    assert_eq!(capability.gateway_version, "gw-test-version");
+    assert_eq!(capability.generated_at_ms, 200);
+    assert_eq!(capability.started_at_ms, 100);
 }
 
 #[test]
@@ -153,6 +210,7 @@ fn runtime_snapshot_carries_full_control_plane_status_fields() {
             snapshot_ttl_ms: 10_000,
             command_block_ms: 5_000,
         },
+        readiness: Default::default(),
     };
 
     let value = serde_json::to_value(snapshot).unwrap();
@@ -164,4 +222,5 @@ fn runtime_snapshot_carries_full_control_plane_status_fields() {
     assert_eq!(value["impersonate_active"], json!({}));
     assert_eq!(value["stream_lag"][0]["stream"], "commands:gateway");
     assert_eq!(value["config_sample"]["runtime_push_interval_ms"], 2_000);
+    assert_eq!(value["readiness"]["runtime_snapshot"], false);
 }

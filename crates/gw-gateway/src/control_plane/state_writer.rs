@@ -2,9 +2,9 @@ use super::ControlPlaneObserved;
 use fred::interfaces::KeysInterface;
 use fred::types::Expiration;
 use gw_core::control_plane::{
-    default_gateway_capability, gateway_capability_key, gateway_runtime_key, CommandConsumerState,
-    GatewayRuntimeSnapshot, KeyHealthSummary, ProviderHealthSummary, RuntimeConfigSample,
-    StreamLagSnapshot, CONTROL_PLANE_SCHEMA_VERSION,
+    default_kiro_cli_readiness, gateway_capability, gateway_capability_key, gateway_runtime_key,
+    CommandConsumerState, GatewayReadiness, GatewayRuntimeSnapshot, KeyHealthSummary,
+    ProviderHealthSummary, RuntimeConfigSample, StreamLagSnapshot, CONTROL_PLANE_SCHEMA_VERSION,
 };
 use gw_health::KeyHealthStore;
 use gw_routing::InFlightStore;
@@ -104,9 +104,11 @@ impl StateWriter {
     }
 
     async fn write_capability(&self) -> anyhow::Result<()> {
-        let payload = serde_json::to_string(&default_gateway_capability(
+        let payload = serde_json::to_string(&gateway_capability(
             self.instance_id.clone(),
+            env!("CARGO_PKG_VERSION"),
             now_ms(),
+            self.started_at_ms,
         ))?;
         let client = self.redis.pool.next();
         let _: () = client
@@ -166,6 +168,16 @@ impl StateWriter {
                 runtime_push_interval_ms: values.interval_ms,
                 snapshot_ttl_ms: values.snapshot_ttl_ms,
                 command_block_ms: values.command_block_ms,
+            },
+            readiness: GatewayReadiness {
+                runtime_snapshot: true,
+                command_consumer: true,
+                last_command_ack_ms: Some(
+                    self.observed.last_command_ack_ms.load(Ordering::Acquire) as i64,
+                )
+                .filter(|v| *v > 0),
+                kiro_cli: default_kiro_cli_readiness(),
+                ..Default::default()
             },
         };
         let payload = serde_json::to_string(&snapshot)?;

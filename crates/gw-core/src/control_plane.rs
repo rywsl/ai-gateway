@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const CONTROL_PLANE_SCHEMA_VERSION: u32 = 1;
 
@@ -6,10 +7,20 @@ pub const CONTROL_PLANE_SCHEMA_VERSION: u32 = 1;
 pub struct GatewayCapabilitySnapshot {
     pub schema_version: u32,
     pub instance_id: String,
+    pub gateway_version: String,
     pub generated_at_ms: i64,
-    pub api_shapes: Vec<ApiShapeCapability>,
+    pub started_at_ms: i64,
+    pub protocols: Vec<String>,
+    pub api_shapes: Vec<String>,
+    pub api_shape_capabilities: Vec<ApiShapeCapability>,
+    pub cli_variants: Vec<String>,
+    pub routing_strategies: Vec<String>,
+    pub features: BTreeMap<String, bool>,
+    pub impersonate_identities: Vec<String>,
     pub commands: Vec<GatewayCommandCapability>,
     pub config_namespaces: Vec<String>,
+    pub readiness: GatewayReadiness,
+    pub kiro_cli: KiroCliReadiness,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +72,8 @@ pub struct GatewayRuntimeSnapshot {
     #[serde(default)]
     pub stream_lag: Vec<StreamLagSnapshot>,
     pub config_sample: RuntimeConfigSample,
+    #[serde(default)]
+    pub readiness: GatewayReadiness,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +120,36 @@ pub struct RuntimeConfigSample {
     pub runtime_push_interval_ms: u64,
     pub snapshot_ttl_ms: u64,
     pub command_block_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayReadiness {
+    #[serde(default)]
+    pub capability_snapshot: bool,
+    #[serde(default)]
+    pub runtime_snapshot: bool,
+    #[serde(default)]
+    pub command_consumer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_command_stream_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_command_ack_ms: Option<i64>,
+    #[serde(default)]
+    pub kiro_cli: KiroCliReadiness,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KiroCliReadiness {
+    #[serde(default)]
+    pub advertised: bool,
+    #[serde(default)]
+    pub detector_ready: bool,
+    #[serde(default)]
+    pub production_enabled: bool,
+    #[serde(default)]
+    pub usage_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -251,11 +294,63 @@ pub fn default_gateway_capability(
     instance_id: impl Into<String>,
     generated_at_ms: i64,
 ) -> GatewayCapabilitySnapshot {
+    gateway_capability(
+        instance_id,
+        env!("CARGO_PKG_VERSION"),
+        generated_at_ms,
+        generated_at_ms,
+    )
+}
+
+pub fn gateway_capability(
+    instance_id: impl Into<String>,
+    gateway_version: impl Into<String>,
+    generated_at_ms: i64,
+    started_at_ms: i64,
+) -> GatewayCapabilitySnapshot {
+    let api_shape_capabilities = default_api_shape_capabilities();
+    let api_shapes = api_shape_capabilities
+        .iter()
+        .map(|capability| capability.api_shape.clone())
+        .collect();
+    let kiro_cli = default_kiro_cli_readiness();
     GatewayCapabilitySnapshot {
         schema_version: CONTROL_PLANE_SCHEMA_VERSION,
         instance_id: instance_id.into(),
+        gateway_version: gateway_version.into(),
         generated_at_ms,
-        api_shapes: default_api_shape_capabilities(),
+        started_at_ms,
+        protocols: vec![
+            "openai".to_string(),
+            "anthropic".to_string(),
+            "gemini".to_string(),
+            "kiro".to_string(),
+        ],
+        api_shapes,
+        api_shape_capabilities,
+        cli_variants: vec![
+            "claude:cli".to_string(),
+            "openai:cli".to_string(),
+            "openai:compact".to_string(),
+            "gemini:cli".to_string(),
+            "kiro:cli".to_string(),
+        ],
+        routing_strategies: vec![
+            "FixedOrder".to_string(),
+            "RoundRobin".to_string(),
+            "LoadBalance".to_string(),
+            "WeightedRr".to_string(),
+            "CostFirst".to_string(),
+            "LatencyFirst".to_string(),
+            "CacheAffinity".to_string(),
+            "Sticky".to_string(),
+        ],
+        features: default_gateway_features(),
+        impersonate_identities: vec![
+            "claude_code_chrome131".to_string(),
+            "openai_codex".to_string(),
+            "gemini_cli".to_string(),
+        ],
         commands: default_gateway_command_capabilities(),
         config_namespaces: vec![
             "config_routing".to_string(),
@@ -265,6 +360,12 @@ pub fn default_gateway_capability(
             "config_protection".to_string(),
             "config_control_plane".to_string(),
         ],
+        readiness: GatewayReadiness {
+            capability_snapshot: true,
+            kiro_cli: kiro_cli.clone(),
+            ..Default::default()
+        },
+        kiro_cli,
     }
 }
 
@@ -331,6 +432,26 @@ fn partial_api_shape(api_shape: &str, reason: &str) -> ApiShapeCapability {
         production_ready: false,
         reason: Some(reason.to_string()),
     }
+}
+
+pub fn default_kiro_cli_readiness() -> KiroCliReadiness {
+    KiroCliReadiness {
+        advertised: true,
+        detector_ready: false,
+        production_enabled: false,
+        usage_ready: false,
+        reason: Some("requires_real_cli_sample".to_string()),
+    }
+}
+
+fn default_gateway_features() -> BTreeMap<String, bool> {
+    BTreeMap::from([
+        ("tunnel".to_string(), false),
+        ("egress_impersonate".to_string(), true),
+        ("credit_lease".to_string(), true),
+        ("detailed_log".to_string(), true),
+        ("task_worker".to_string(), false),
+    ])
 }
 
 fn enabled_command(action: GatewayCommandAction) -> GatewayCommandCapability {
