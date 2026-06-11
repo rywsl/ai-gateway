@@ -9,7 +9,6 @@
 //! Phase 2 waits for every `register`-ed JoinHandle to complete. After
 //! `hard_deadline` it `abort()`s outstanding tasks and returns `Forced`.
 
-use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -88,18 +87,15 @@ pub struct ShutdownCoordinator {
     token: ShutdownToken,
     handles: Vec<JoinHandle<()>>,
     phase: Arc<AtomicU8>,
-    // Hold an ArcSwap for additional shutdown listeners that need a clone
-    // of the handle but can also be appended after construction.
-    _phase_swap: Arc<ArcSwap<ShutdownPhase>>,
 }
 
 impl ShutdownCoordinator {
     pub fn new() -> Self {
+        metrics::gauge!("gw_shutdown_phase").set(0.0);
         Self {
             token: ShutdownToken::new(),
             handles: Vec::new(),
             phase: Arc::new(AtomicU8::new(ShutdownPhase::Running as u8)),
-            _phase_swap: Arc::new(ArcSwap::from_pointee(ShutdownPhase::Running)),
         }
     }
 
@@ -146,8 +142,9 @@ impl ShutdownCoordinator {
                 any_forced = true;
                 continue;
             }
+            let abort = h.abort_handle();
             if tokio::time::timeout(remaining, h).await.is_err() {
-                // exceeded phase2 budget
+                abort.abort();
                 any_forced = true;
             }
         }
@@ -175,6 +172,7 @@ impl ShutdownCoordinator {
         }
         self.phase
             .store(ShutdownPhase::Stopped as u8, Ordering::Release);
+        metrics::gauge!("gw_shutdown_phase").set(3.0);
         metrics::counter!("gw_shutdown_forced_total").increment(1);
     }
 }

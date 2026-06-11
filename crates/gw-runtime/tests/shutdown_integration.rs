@@ -86,7 +86,7 @@ async fn hard_deadline_aborts_hung_task() {
 }
 
 #[tokio::test]
-async fn second_drain_call_emergency_aborts() {
+async fn emergency_abort_sets_stopped_synchronously() {
     let mut coord = ShutdownCoordinator::new();
     let _token = coord.token();
 
