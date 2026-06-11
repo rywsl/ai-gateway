@@ -117,3 +117,37 @@ async fn shutdown_stops_restarts() {
         "no restart after shutdown"
     );
 }
+
+#[tokio::test]
+async fn restarts_on_panic_during_factory_construction() {
+    // If the factory closure panics before returning the future at all,
+    // the supervisor must still catch it (it's wrapped in catch_unwind)
+    // and treat it as a failed run that counts toward the restart budget.
+    let counter = Arc::new(AtomicU32::new(0));
+    let token = ShutdownToken::new();
+    let policy = RestartPolicy {
+        max_restarts: 2,
+        window: Duration::from_secs(10),
+        ..fast_policy()
+    };
+    let c = counter.clone();
+    let sup = Supervisor::new("factory_panicker", policy, token.clone());
+    let unhealthy = sup.unhealthy_flag();
+    let handle = sup.spawn(move |_| {
+        c.fetch_add(1, Ordering::SeqCst);
+        // Panic BEFORE returning the async block. Without the fix the
+        // supervisor task would itself unwind and the JoinHandle would
+        // resolve to Err(JoinError::panic), failing handle.await.unwrap().
+        panic!("factory boom");
+        #[allow(unreachable_code)]
+        async {
+            Ok(())
+        }
+    });
+
+    handle.await.unwrap();
+    assert!(unhealthy.load(Ordering::SeqCst));
+    // max_restarts + 1 = 3 attempts before giving up.
+    assert_eq!(counter.load(Ordering::SeqCst), 3);
+}
+

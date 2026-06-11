@@ -16,7 +16,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +69,7 @@ impl Supervisor {
         self.unhealthy.clone()
     }
 
+    #[must_use = "supervisor handle should be awaited or tracked"]
     pub fn spawn<F, Fut>(self, factory: F) -> JoinHandle<()>
     where
         F: Fn(ShutdownToken) -> Fut + Send + Sync + 'static,
@@ -91,8 +92,13 @@ impl Supervisor {
                 }
 
                 let child_token = token.child();
-                let fut = factory(child_token);
-                let result = AssertUnwindSafe(fut).catch_unwind().await;
+                // Build the future *inside* the catch_unwind wrapper so a
+                // panic during closure body / future construction is also
+                // caught, not just panics inside the polled future.
+                let result =
+                    AssertUnwindSafe(async { factory(child_token).await })
+                        .catch_unwind()
+                        .await;
 
                 let outcome = match result {
                     Ok(Ok(())) => {
@@ -100,7 +106,12 @@ impl Supervisor {
                         if token.is_cancelled() {
                             break;
                         }
-                        "ok"
+                        // Clean exit is not a failure: do not record it in
+                        // the failure window, reset backoff, skip the
+                        // restart metric, and re-enter the loop without
+                        // sleeping.
+                        backoff = policy.backoff_initial;
+                        continue;
                     }
                     Ok(Err(err)) => {
                         tracing::warn!(target: "gw_runtime::supervisor", task = name, error = %err, "task returned error");
@@ -162,9 +173,15 @@ fn apply_jitter(d: Duration, jitter: f64) -> Duration {
     if jitter <= 0.0 {
         return d;
     }
-    // Cheap deterministic-ish jitter: use nanoseconds of `Instant::now` as
-    // a pseudo-random source; we don't need cryptographic quality here.
-    let nanos = Instant::now().elapsed().as_nanos() as u64;
+    // Seed jitter from the wall clock sub-second nanos. `Instant::now()`
+    // is too high-resolution and varies by sub-microsecond between calls,
+    // which made every call land in nearly the same bucket; `SystemTime`'s
+    // sub-second component spreads across the full 0..1 range across
+    // restart attempts.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as u64;
     let frac = (nanos % 1_000) as f64 / 1_000.0; // 0.0..1.0
     let signed = (frac - 0.5) * 2.0 * jitter; // -jitter..+jitter
     let scaled = d.as_secs_f64() * (1.0 + signed);

@@ -35,4 +35,5 @@ impl ShutdownToken {
 }
 
 // ShutdownCoordinator stub — populated in task 1.3.
+#[doc(hidden)]
 pub struct ShutdownCoordinator;
