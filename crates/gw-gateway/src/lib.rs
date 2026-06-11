@@ -563,7 +563,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     // `Supervisor` and threads the `ShutdownToken` through, after which the
     // returned coordinator drains them on shutdown.
     let (
-        shutdown,
+        mut shutdown,
         shutdown_token,
         phase_handle,
         spill_root,
@@ -855,7 +855,14 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     );
 
     // 4a. Ledger flusher.
-    let ledger = Arc::new(Ledger::start_with_emergency_dir(
+    //
+    // `Ledger::start_with_emergency_dir` returns the JoinHandles of all
+    // three supervised workers (flusher, dlq-retry, frozen-delta). They
+    // MUST be registered with `shutdown` so the coordinator awaits their
+    // cancel-drain — otherwise revenue records emitted during phase-1 of
+    // shutdown can be lost. The drain budget caps how long each worker
+    // keeps recv-ing after the cancel signal; it MUST be < phase2 timeout.
+    let (ledger_inner, ledger_handles) = Ledger::start_with_emergency_dir(
         redis.clone(),
         instance_id.clone(),
         cfg.ledger.channel_capacity,
@@ -863,7 +870,12 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
         Duration::from_millis(cfg.ledger.flush_interval_ms),
         cfg.ledger.emergency_dlq_dir.clone(),
         shutdown_token.clone(),
-    ));
+        Duration::from_millis(cfg.runtime.shutdown.billing_drain_ms),
+    );
+    for h in ledger_handles {
+        shutdown.register(h);
+    }
+    let ledger = Arc::new(ledger_inner);
 
     // 4b. Detailed-log archive (T10). Workers is auto when configured to 0:
     // use 1/4 of available parallelism, minimum 1.
@@ -922,13 +934,14 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     // 4d. InflightLedger + background tasks (W2-T6).
     // instance_id was resolved above (before Ledger::start) and is reused here.
     gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
-    gw_ledger::inflight_reaper::spawn(
+    let reaper_handle = gw_ledger::inflight_reaper::spawn(
         (*redis.pool).clone(),
         instance_id.clone(),
         cfg.billing.reaper_interval_secs,
         cfg.billing.emit_lag_t0_secs,
         shutdown_token.clone(),
     );
+    shutdown.register(reaper_handle);
     let inflight = Arc::new(gw_ledger::inflight::InflightLedger::new(
         (*redis.pool).clone(),
         instance_id.clone(),

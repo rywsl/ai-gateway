@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
 const USAGE_STREAM: &str = "usage:records";
@@ -67,6 +68,20 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    /// Start the Ledger with all three supervised background workers
+    /// (billing flusher, frozen-delta worker, DLQ retry worker).
+    ///
+    /// Returns the `Ledger` paired with the `JoinHandle`s of all spawned
+    /// supervised tasks. The caller MUST register every handle with the
+    /// `ShutdownCoordinator` so `drain()` can await their completion —
+    /// otherwise the coordinator races the workers and may exit before
+    /// the cancel-drain finishes flushing in-flight billing records.
+    ///
+    /// `drain_budget` bounds how long the cancel-drain loop will keep
+    /// recv-ing newly-emitted records after the shutdown token fires.
+    /// It MUST be strictly less than `phase2_task_drain_ms` so the worker
+    /// returns before the coordinator's phase-2 timeout aborts it.
+    /// See `RuntimeShutdownConfig::billing_drain_ms` (default 20 s).
     pub fn start(
         redis: RedisCtx,
         instance_id: String,
@@ -74,7 +89,8 @@ impl Ledger {
         batch_size: usize,
         flush_interval: Duration,
         shutdown: ShutdownToken,
-    ) -> Self {
+        drain_budget: Duration,
+    ) -> (Self, Vec<JoinHandle<()>>) {
         Self::start_with_emergency_dir(
             redis,
             instance_id,
@@ -83,9 +99,11 @@ impl Ledger {
             flush_interval,
             PathBuf::from("data/ledger"),
             shutdown,
+            drain_budget,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with_emergency_dir(
         redis: RedisCtx,
         instance_id: String,
@@ -94,7 +112,8 @@ impl Ledger {
         flush_interval: Duration,
         emergency_dlq_dir: impl Into<PathBuf>,
         shutdown: ShutdownToken,
-    ) -> Self {
+        drain_budget: Duration,
+    ) -> (Self, Vec<JoinHandle<()>>) {
         let (tx, rx) = mpsc::channel::<LedgerItem>(channel_capacity);
         let rx = Arc::new(Mutex::new(rx));
         let (dlq_retry_tx, dlq_retry_rx) = mpsc::channel::<DlqEnvelope>(DLQ_RETRY_CAPACITY);
@@ -104,12 +123,19 @@ impl Ledger {
             writer: Arc::new(EmergencyDlqWriter::new(emergency_dlq_dir.into())),
             retry_tx: dlq_retry_tx,
         };
-        spawn_dlq_retry_worker(redis.clone(), dlq_retry_rx, dlq_fallback.writer.clone(), shutdown.clone());
-        spawn_frozen_delta_worker(redis.clone(), frozen_rx, shutdown.clone());
+        let dlq_handle = spawn_dlq_retry_worker(
+            redis.clone(),
+            dlq_retry_rx,
+            dlq_fallback.writer.clone(),
+            shutdown.clone(),
+            drain_budget,
+        );
+        let frozen_handle =
+            spawn_frozen_delta_worker(redis.clone(), frozen_rx, shutdown.clone(), drain_budget);
         let worker_redis = redis.clone();
         let worker_instance = instance_id.clone();
         let worker_dlq = dlq_fallback.clone();
-        let _flusher_handle = Supervisor::new("billing_flusher", RestartPolicy::default(), shutdown)
+        let flusher_handle = Supervisor::new("billing_flusher", RestartPolicy::default(), shutdown)
             .spawn(move |tok| {
                 let rx = rx.clone();
                 let worker_redis = worker_redis.clone();
@@ -122,17 +148,23 @@ impl Ledger {
                         tokio::select! {
                             _ = tok.cancelled() => {
                                 // Cancel-drain: must-deliver semantic.
-                                // Synchronously drain the channel then flush.
-                                let mut rx_guard = rx.lock().await;
-                                while let Ok(item) = rx_guard.try_recv() {
-                                    buf.push(item);
-                                }
-                                if !buf.is_empty() {
-                                    let mut taken = std::mem::take(&mut buf);
-                                    let _ = AssertUnwindSafe(
-                                        flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
-                                    ).catch_unwind().await;
-                                }
+                                //
+                                // Phase-1 of shutdown (default 5 s) sleeps while Pingora
+                                // continues serving in-flight requests; every Ledger::emit
+                                // during that window calls try_send Ok (channel has 65 k
+                                // capacity) and the record sits in the unread channel. A
+                                // one-shot try_recv would lose all of them — we MUST keep
+                                // recv-ing until the channel closes or the drain budget
+                                // expires.
+                                drain_billing_channel(
+                                    &rx,
+                                    &mut buf,
+                                    batch_size,
+                                    drain_budget,
+                                    &worker_redis,
+                                    &worker_instance,
+                                    &worker_dlq,
+                                ).await;
                                 tracing::info!(
                                     target: "gw_ledger",
                                     "billing_flusher: shutdown drain complete"
@@ -191,12 +223,15 @@ impl Ledger {
                     Ok(())
                 }
             });
-        Self {
-            tx,
-            redis,
-            instance_id,
-            dlq_fallback,
-        }
+        (
+            Self {
+                tx,
+                redis,
+                instance_id,
+                dlq_fallback,
+            },
+            vec![flusher_handle, dlq_handle, frozen_handle],
+        )
     }
 
     pub fn instance_id(&self) -> &str {
@@ -307,6 +342,64 @@ impl Ledger {
     }
 }
 
+/// Cancel-drain helper for the billing flusher.
+///
+/// Keeps `recv()`-ing newly-emitted `LedgerItem`s until the channel closes
+/// (all senders dropped) or the `drain_budget` deadline expires, flushing
+/// batches as they fill (or at the deadline if a partial batch remains).
+/// Must-deliver semantic: a one-shot `try_recv` at the cancel instant would
+/// lose records `emit`ted during phase-1 (default 5 s) of the
+/// `ShutdownCoordinator` drain, since Pingora keeps serving in-flight
+/// requests on its own thread during that window.
+async fn drain_billing_channel(
+    rx: &Arc<Mutex<mpsc::Receiver<LedgerItem>>>,
+    buf: &mut Vec<LedgerItem>,
+    batch_size: usize,
+    drain_budget: Duration,
+    worker_redis: &RedisCtx,
+    worker_instance: &str,
+    worker_dlq: &DlqFallback,
+) {
+    let deadline = tokio::time::Instant::now() + drain_budget;
+    let mut rx_guard = rx.lock().await;
+    loop {
+        // Drain anything already queued without awaiting.
+        while let Ok(item) = rx_guard.try_recv() {
+            buf.push(item);
+        }
+        // Flush if we have a full batch, OR if we hold a partial batch and
+        // are at/past the deadline (last chance to emit before returning).
+        let now = tokio::time::Instant::now();
+        let at_deadline = now >= deadline;
+        if buf.len() >= batch_size || (!buf.is_empty() && at_deadline) {
+            let mut taken = std::mem::take(buf);
+            let _ = AssertUnwindSafe(flush(worker_redis, worker_instance, worker_dlq, &mut taken))
+                .catch_unwind()
+                .await;
+        }
+        if at_deadline {
+            break;
+        }
+        // Wait for more records up to the deadline. Ok(None) ⇒ all senders
+        // dropped (clean exit). Err(_) ⇒ timeout elapsed (budget exhausted).
+        match tokio::time::timeout_at(deadline, rx_guard.recv()).await {
+            Ok(Some(item)) => buf.push(item),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    // One final flush for whatever's still in the buffer (covers items
+    // pushed by the `Ok(Some(item))` arm immediately before the deadline,
+    // or items try_recv'd in the next loop iteration after a budget-bounded
+    // recv returned Err.
+    if !buf.is_empty() {
+        let mut taken = std::mem::take(buf);
+        let _ = AssertUnwindSafe(flush(worker_redis, worker_instance, worker_dlq, &mut taken))
+            .catch_unwind()
+            .await;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FrozenDelta {
     pub uid: UserId,
@@ -357,9 +450,10 @@ fn spawn_frozen_delta_worker(
     redis: RedisCtx,
     rx: mpsc::Receiver<FrozenDelta>,
     shutdown: ShutdownToken,
-) {
+    drain_budget: Duration,
+) -> JoinHandle<()> {
     let rx = Arc::new(Mutex::new(rx));
-    let _handle = Supervisor::new("frozen_delta_worker", RestartPolicy::default(), shutdown)
+    Supervisor::new("frozen_delta_worker", RestartPolicy::default(), shutdown)
         .spawn(move |tok| {
             let rx = rx.clone();
             let redis = redis.clone();
@@ -367,9 +461,13 @@ fn spawn_frozen_delta_worker(
                 loop {
                     tokio::select! {
                         _ = tok.cancelled() => {
+                            // Cancel-drain: late `enqueue_frozen_delta` calls
+                            // during phase-1 land in the channel. Recv with a
+                            // deadline so we apply them before exiting.
+                            drain_frozen_delta_channel(&rx, &redis, drain_budget).await;
                             tracing::info!(
                                 target: "gw_ledger",
-                                "frozen_delta_worker: shutdown requested"
+                                "frozen_delta_worker: shutdown drain complete"
                             );
                             return Ok(());
                         }
@@ -378,26 +476,7 @@ fn spawn_frozen_delta_worker(
                             guard.recv().await
                         } => {
                             match delta {
-                                Some(delta) => {
-                                    let key = frozen_counter_key(&delta.uid);
-                                    let client = redis.pool.next();
-                                    match client.incr_by::<i64, _>(&key, delta.delta_micro).await {
-                                        Ok(_) => {
-                                            metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "ok")
-                                                .increment(1);
-                                        }
-                                        Err(err) => {
-                                            metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "error")
-                                                .increment(1);
-                                            tracing::warn!(
-                                                target: "gw_ledger",
-                                                error = %err,
-                                                key,
-                                                "frozen_micro Redis sync failed"
-                                            );
-                                        }
-                                    }
-                                }
+                                Some(delta) => apply_frozen_delta(&redis, &delta).await,
                                 None => break,
                             }
                         }
@@ -405,7 +484,45 @@ fn spawn_frozen_delta_worker(
                 }
                 Ok(())
             }
-        });
+        })
+}
+
+async fn apply_frozen_delta(redis: &RedisCtx, delta: &FrozenDelta) {
+    let key = frozen_counter_key(&delta.uid);
+    let client = redis.pool.next();
+    match client.incr_by::<i64, _>(&key, delta.delta_micro).await {
+        Ok(_) => {
+            metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "ok").increment(1);
+        }
+        Err(err) => {
+            metrics::counter!("gw_frozen_delta_redis_total", "outcome" => "error").increment(1);
+            tracing::warn!(
+                target: "gw_ledger",
+                error = %err,
+                key,
+                "frozen_micro Redis sync failed"
+            );
+        }
+    }
+}
+
+async fn drain_frozen_delta_channel(
+    rx: &Arc<Mutex<mpsc::Receiver<FrozenDelta>>>,
+    redis: &RedisCtx,
+    drain_budget: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + drain_budget;
+    let mut rx_guard = rx.lock().await;
+    loop {
+        while let Ok(delta) = rx_guard.try_recv() {
+            apply_frozen_delta(redis, &delta).await;
+        }
+        match tokio::time::timeout_at(deadline, rx_guard.recv()).await {
+            Ok(Some(delta)) => apply_frozen_delta(redis, &delta).await,
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
 }
 
 fn frozen_counter_key(uid: &UserId) -> String {
@@ -430,9 +547,10 @@ fn spawn_dlq_retry_worker(
     rx: mpsc::Receiver<DlqEnvelope>,
     writer: Arc<EmergencyDlqWriter>,
     shutdown: ShutdownToken,
-) {
+    drain_budget: Duration,
+) -> JoinHandle<()> {
     let rx = Arc::new(Mutex::new(rx));
-    let _handle = Supervisor::new("dlq_retry_worker", RestartPolicy::default(), shutdown)
+    Supervisor::new("dlq_retry_worker", RestartPolicy::default(), shutdown)
         .spawn(move |tok| {
             let rx = rx.clone();
             let redis = redis.clone();
@@ -442,9 +560,14 @@ fn spawn_dlq_retry_worker(
                 loop {
                     tokio::select! {
                         _ = tok.cancelled() => {
+                            // Cancel-drain: late route_to_dlq calls during
+                            // phase-1 land in the channel. Recv with a
+                            // deadline so we retry them (skipping the
+                            // inter-retry ticker — we're shutting down).
+                            drain_dlq_retry_channel(&rx, &redis, &writer, drain_budget).await;
                             tracing::info!(
                                 target: "gw_ledger",
-                                "dlq_retry_worker: shutdown requested"
+                                "dlq_retry_worker: shutdown drain complete"
                             );
                             return Ok(());
                         }
@@ -453,33 +576,9 @@ fn spawn_dlq_retry_worker(
                             guard.recv().await
                         } => {
                             match envelope {
-                                Some(mut envelope) => {
+                                Some(envelope) => {
                                     ticker.tick().await;
-                                    envelope.dlq_meta.retry_count_before_dlq =
-                                        envelope.dlq_meta.retry_count_before_dlq.saturating_add(1);
-                                    if dlq_xadd(&redis, &envelope).await.is_ok() {
-                                        continue;
-                                    }
-                                    let disk_envelope = envelope.with_layer(DlqLayer::Disk);
-                                    if let Err(err) = writer.append(&disk_envelope) {
-                                        metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error")
-                                            .increment(1);
-                                        tracing::error!(
-                                            target: "gw_ledger",
-                                            error = %err,
-                                            "DLQ retry failed and emergency JSONL write failed"
-                                        );
-                                        if permanent_failed_xadd(
-                                            &redis,
-                                            &disk_envelope,
-                                            &format!("retry_dlq_and_emergency_file_failed: {err}"),
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            metrics::counter!("gateway_usage_records_lost_total").increment(1);
-                                        }
-                                    }
+                                    process_dlq_envelope(&redis, &writer, envelope).await;
                                 }
                                 None => break,
                             }
@@ -488,7 +587,61 @@ fn spawn_dlq_retry_worker(
                 }
                 Ok(())
             }
-        });
+        })
+}
+
+async fn process_dlq_envelope(
+    redis: &RedisCtx,
+    writer: &Arc<EmergencyDlqWriter>,
+    mut envelope: DlqEnvelope,
+) {
+    envelope.dlq_meta.retry_count_before_dlq =
+        envelope.dlq_meta.retry_count_before_dlq.saturating_add(1);
+    if dlq_xadd(redis, &envelope).await.is_ok() {
+        return;
+    }
+    let disk_envelope = envelope.with_layer(DlqLayer::Disk);
+    if let Err(err) = writer.append(&disk_envelope) {
+        metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error").increment(1);
+        tracing::error!(
+            target: "gw_ledger",
+            error = %err,
+            "DLQ retry failed and emergency JSONL write failed"
+        );
+        if permanent_failed_xadd(
+            redis,
+            &disk_envelope,
+            &format!("retry_dlq_and_emergency_file_failed: {err}"),
+        )
+        .await
+        .is_err()
+        {
+            metrics::counter!("gateway_usage_records_lost_total").increment(1);
+        }
+    }
+}
+
+async fn drain_dlq_retry_channel(
+    rx: &Arc<Mutex<mpsc::Receiver<DlqEnvelope>>>,
+    redis: &RedisCtx,
+    writer: &Arc<EmergencyDlqWriter>,
+    drain_budget: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + drain_budget;
+    let mut rx_guard = rx.lock().await;
+    loop {
+        while let Ok(envelope) = rx_guard.try_recv() {
+            process_dlq_envelope(redis, writer, envelope).await;
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+        }
+        match tokio::time::timeout_at(deadline, rx_guard.recv()).await {
+            Ok(Some(envelope)) => process_dlq_envelope(redis, writer, envelope).await,
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
 }
 
 /// Build the Redis key for an inflight billing hash.

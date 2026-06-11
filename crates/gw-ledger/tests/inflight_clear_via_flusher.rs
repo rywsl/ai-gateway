@@ -78,13 +78,14 @@ async fn flusher_dels_inflight_key_on_xadd_success() {
     assert_eq!(exists_before, 1, "inflight key registered");
 
     // 2. Start a Ledger with very short flush interval.
-    let ledger = Ledger::start(
+    let (ledger, _handles) = Ledger::start(
         redis.clone(),
         instance.clone(),
         64,
         4,
         Duration::from_millis(50),
         ShutdownToken::new(),
+        Duration::from_secs(5),
     );
 
     // 3. Emit with clear: Some.
@@ -138,13 +139,14 @@ async fn full_bypass_sync_xadd_dels_inflight_key() {
     assert_eq!(redis.pool.exists::<u64, _>(&key).await.unwrap(), 1);
 
     // Force the channel to be Full immediately: capacity = 1, ticker disabled.
-    let ledger = Ledger::start(
+    let (ledger, _handles) = Ledger::start(
         redis.clone(),
         instance.clone(),
         1,
         1,
         Duration::from_secs(600), // ticker effectively disabled
         ShutdownToken::new(),
+        Duration::from_secs(5),
     );
     // First emit fills the channel.
     ledger

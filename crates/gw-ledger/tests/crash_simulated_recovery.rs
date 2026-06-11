@@ -88,13 +88,14 @@ async fn reconciler_emits_crashfallback_for_un_emitted_request() {
 
     // 2. Build a Ledger with a paused ticker — emit will queue into mpsc but
     //    the flusher will never fire within the test (3600 s interval).
-    let ledger = Ledger::start(
+    let (ledger, _handles) = Ledger::start(
         redis.clone(),
         instance.clone(),
         16,
         16,
         Duration::from_secs(3600), // ticker effectively disabled
         ShutdownToken::new(),
+        Duration::from_secs(5),
     );
 
     // 3. Emit a record with clear: Some — under normal flow this would clear
