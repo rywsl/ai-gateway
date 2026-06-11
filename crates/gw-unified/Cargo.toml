@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 gw-gateway = { path = "../gw-gateway" }
 gw-task-worker = { path = "../gw-task-worker" }
+gw-runtime = { path = "../gw-runtime" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true }
 anyhow.workspace = true

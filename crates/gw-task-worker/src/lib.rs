@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -12,6 +13,8 @@ use fred::interfaces::{ClientLike, HashesInterface, KeysInterface};
 use fred::types::{
     ConnectionConfig, PerformanceConfig, ReconnectPolicy, RedisConfig as FredRedisConfig,
 };
+use futures::FutureExt;
+use gw_runtime::{RestartPolicy, ShutdownToken, Supervisor};
 use gw_task::redis_contract::RedisTaskContract;
 use gw_task_runtime::cancel_loop::{
     CancelLoop, CancelLoopConfig, RedisCancelSource, RunningTaskRegistry,
@@ -362,13 +365,18 @@ impl Default for TimeoutConfig {
 ///
 /// This is the library-side entrypoint equivalent to the original `main()`.
 /// The binary `main.rs` installs jemalloc and calls this function.
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
     init_tracing()?;
     let cfg = WorkerConfig::load().context("load task worker config")?;
     cfg.validate()?;
     init_metrics(cfg.server.metrics_port)?;
 
-    let shutdown = CancellationToken::new();
+    // Internal cancellation token for loop configs (which expect
+    // CancellationToken). Cancelled alongside the ShutdownToken so that
+    // both the Supervisor child-token selects and the loop-internal selects
+    // fire on shutdown.
+    let cancel = CancellationToken::new();
+
     let pool = connect_redis(&cfg.redis.url, cfg.redis.pool_size).await?;
     let worker_id = generate_worker_id();
     let consumer_name = format!("{}-{worker_id}", cfg.worker.id);
@@ -398,7 +406,7 @@ pub async fn run() -> anyhow::Result<()> {
             per_vendor_concurrency: cfg.concurrency.per_vendor,
             per_model_concurrency: cfg.concurrency.per_model,
             per_key_concurrency: cfg.concurrency.per_key,
-            cancellation_token: shutdown.clone(),
+            cancellation_token: cancel.clone(),
             ..ExecLoopConfig::default()
         },
     );
@@ -410,7 +418,7 @@ pub async fn run() -> anyhow::Result<()> {
         CancelLoopConfig {
             consumer_name: format!("{consumer_name}-cancel"),
             block_timeout: cfg.cancel_block(),
-            cancellation_token: shutdown.clone(),
+            cancellation_token: cancel.clone(),
         },
     );
 
@@ -427,7 +435,7 @@ pub async fn run() -> anyhow::Result<()> {
             check_interval: cfg.watchdog_interval(),
             leader_ttl: WatchdogLoopConfig::default().leader_ttl,
             recover_limit: cfg.loops.recover_limit,
-            cancellation_token: shutdown.clone(),
+            cancellation_token: cancel.clone(),
         },
     );
     let heartbeat_loop = HeartbeatLoop::new(
@@ -436,7 +444,7 @@ pub async fn run() -> anyhow::Result<()> {
         HeartbeatLoopConfig {
             heartbeat_interval: cfg.heartbeat_interval(),
             lease_extension: cfg.lease_extension(),
-            cancellation_token: shutdown.clone(),
+            cancellation_token: cancel.clone(),
         },
     );
     let registration_loop = WorkerRegistrationLoop::new(
@@ -445,25 +453,75 @@ pub async fn run() -> anyhow::Result<()> {
         registration,
         WorkerRegistrationLoopConfig {
             heartbeat_interval: cfg.heartbeat_interval(),
-            cancellation_token: shutdown.clone(),
+            cancellation_token: cancel.clone(),
         },
     );
 
-    let handles: Vec<JoinHandle<anyhow::Result<()>>> = vec![
-        tokio::spawn(async move { exec_loop.run().await }),
-        tokio::spawn(async move { cancel_loop.run().await }),
-        tokio::spawn(async move { watchdog_loop.run().await }),
-        tokio::spawn(async move { heartbeat_loop.run().await }),
-        tokio::spawn(async move { registration_loop.run().await }),
-        tokio::spawn(run_health_server(cfg.server.health_port, shutdown.clone())),
+    let handles: Vec<JoinHandle<()>> = vec![
+        Supervisor::new("task_exec_loop", RestartPolicy::default(), shutdown.clone())
+            .spawn(move |tok| {
+                let inner = exec_loop.clone();
+                async move {
+                    tokio::select! {
+                        _ = tok.cancelled() => Ok(()),
+                        r = inner.run() => r,
+                    }
+                }
+            }),
+        Supervisor::new("task_cancel_loop", RestartPolicy::default(), shutdown.clone())
+            .spawn(move |tok| {
+                let inner = cancel_loop.clone();
+                async move {
+                    tokio::select! {
+                        _ = tok.cancelled() => Ok(()),
+                        r = inner.run() => r,
+                    }
+                }
+            }),
+        Supervisor::new("task_watchdog_loop", RestartPolicy::default(), shutdown.clone())
+            .spawn(move |tok| {
+                let inner = watchdog_loop.clone();
+                async move {
+                    tokio::select! {
+                        _ = tok.cancelled() => Ok(()),
+                        r = inner.run() => r,
+                    }
+                }
+            }),
+        Supervisor::new("task_heartbeat_loop", RestartPolicy::default(), shutdown.clone())
+            .spawn(move |tok| {
+                let inner = heartbeat_loop.clone();
+                async move {
+                    tokio::select! {
+                        _ = tok.cancelled() => Ok(()),
+                        r = inner.run() => r,
+                    }
+                }
+            }),
+        Supervisor::new("task_registration_loop", RestartPolicy::default(), shutdown.clone())
+            .spawn(move |tok| {
+                let inner = registration_loop.clone();
+                async move {
+                    tokio::select! {
+                        _ = tok.cancelled() => Ok(()),
+                        r = inner.run() => r,
+                    }
+                }
+            }),
+        Supervisor::new("task_health_server", RestartPolicy::default(), shutdown.clone())
+            .spawn(move |tok| {
+                let port = cfg.server.health_port;
+                async move { run_health_server(port, tok).await }
+            }),
     ];
 
     tokio::signal::ctrl_c()
         .await
         .context("listen for shutdown signal")?;
     shutdown.cancel();
+    cancel.cancel();
     for handle in handles {
-        handle.await.context("join task worker loop")??;
+        handle.await.context("join task worker loop")?;
     }
     Ok(())
 }
@@ -503,7 +561,7 @@ async fn connect_redis(url: &str, pool_size: usize) -> anyhow::Result<RedisPool>
     Ok(pool)
 }
 
-async fn run_health_server(port: u16, shutdown: CancellationToken) -> anyhow::Result<()> {
+async fn run_health_server(port: u16, shutdown: ShutdownToken) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port))
         .await
         .context("bind health listener")?;
@@ -512,10 +570,26 @@ async fn run_health_server(port: u16, shutdown: CancellationToken) -> anyhow::Re
             () = shutdown.cancelled() => return Ok(()),
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accept health connection")?;
+                // Per-connection fire-and-forget: NOT supervised (short-lived).
+                // Wrapped in catch_unwind so a panic in the HTTP handler does
+                // not propagate; metric + log on panic.
                 tokio::spawn(async move {
-                    let service = service_fn(health_response);
-                    if let Err(err) = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await {
-                        tracing::warn!(error = %err, "health connection failed");
+                    let result = AssertUnwindSafe(async {
+                        let service = service_fn(health_response);
+                        if let Err(err) = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await {
+                            tracing::warn!(error = %err, "health connection failed");
+                        }
+                    }).catch_unwind().await;
+                    if let Err(panic) = result {
+                        metrics::counter!("gw_task_worker_inflight_panic_total", "task" => "health_connection").increment(1);
+                        let msg = if let Some(s) = panic.downcast_ref::<&'static str>() {
+                            (*s).to_string()
+                        } else if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "<non-string panic>".to_string()
+                        };
+                        tracing::error!(target: "gw_task_worker", panic = %msg, "health connection handler panicked");
                     }
                 });
             }

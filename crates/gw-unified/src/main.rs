@@ -31,7 +31,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Gateway => gw_gateway::run(),
-        Command::Worker => build_tokio_runtime()?.block_on(gw_task_worker::run()),
+        Command::Worker => build_tokio_runtime()?.block_on(gw_task_worker::run(gw_runtime::ShutdownToken::new())),
         Command::All => run_all(),
     }
 }
@@ -42,7 +42,7 @@ fn run_all() -> anyhow::Result<()> {
         .spawn(gw_gateway::run)
         .context("failed to spawn gateway thread")?;
 
-    let worker_result = build_tokio_runtime()?.block_on(gw_task_worker::run());
+    let worker_result = build_tokio_runtime()?.block_on(gw_task_worker::run(gw_runtime::ShutdownToken::new()));
 
     if let Err(e) = &worker_result {
         eprintln!("[unified] worker exited with error: {e:#}");
