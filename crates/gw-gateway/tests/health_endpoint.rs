@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -38,11 +39,17 @@ async fn start_server() -> Option<(u16, tokio::task::JoinHandle<anyhow::Result<(
         #[cfg(feature = "tunnel")]
         tunnel_stack: None,
     };
+    let phase_handle = gw_runtime::PhaseHandle::default();
+    let backpressure_state = Arc::new(AtomicU8::new(0));
+    let supervisor_unhealthy = Arc::new(AtomicBool::new(false));
     let h = tokio::spawn(gw_gateway::health::run_health_server(
         port,
         state,
         store,
         mgmt_blacklist,
+        phase_handle,
+        backpressure_state,
+        supervisor_unhealthy,
     ));
     tokio::time::sleep(Duration::from_millis(50)).await;
     Some((port, h))

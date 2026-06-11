@@ -1249,10 +1249,25 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     };
     let health_store = store.clone();
     let health_blacklist = mgmt_blacklist.clone();
+    // T2.3: `/readyz` reflects shutdown phase, backpressure, and supervisor
+    // unhealthy. `backpressure_state` is derived from the BackpressureGate
+    // that wraps the SystemHealthMonitor's shared AtomicU8. The
+    // `supervisor_unhealthy` flag is always `false` for now; T3 will
+    // OR-aggregate per-supervisor unhealthy flags into it.
+    let health_backpressure_state = backpressure_gate.state_handle();
+    let health_phase_handle = phase_handle.clone();
+    let supervisor_unhealthy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     tokio::spawn(async move {
-        if let Err(e) =
-            health::run_health_server(health_port, health_state, health_store, health_blacklist)
-                .await
+        if let Err(e) = health::run_health_server(
+            health_port,
+            health_state,
+            health_store,
+            health_blacklist,
+            health_phase_handle,
+            health_backpressure_state,
+            supervisor_unhealthy,
+        )
+        .await
         {
             tracing::error!(
                 target: "gw_gateway::health",

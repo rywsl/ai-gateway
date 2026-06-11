@@ -13,14 +13,17 @@
 //! Endpoint summary:
 //!
 //! - `/livez` — unconditional liveness ping.
-//! - `/readyz` — gated on [`READY`] (init complete).
+//! - `/readyz` — gated on [`READY`] (init complete), AND the process is not
+//!   in a shutdown phase >= Phase1AcceptStop, AND `BackpressureGate` is not
+//!   active, AND no Supervisor has marked itself unhealthy. Any of these
+//!   conditions causes a 503 response so k8s stops routing new traffic.
 //! - `/healthz/circuits`, `/healthz/key/<id>`, `/healthz/resilience`,
 //!   `/healthz/tunnel`, `/healthz/strategies` —
 //!   admin-only; require `Authorization: Mgmt <token>` validated by the
 //!   management-token verify chain (S-admin-tunnel). Unverified requests
 //!   receive 401.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -61,6 +64,9 @@ pub async fn run_health_server(
     state: HealthState,
     store: Arc<gw_store::EntityStore>,
     mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
+    phase_handle: gw_runtime::PhaseHandle,
+    backpressure_state: Arc<AtomicU8>,
+    supervisor_unhealthy: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(target: "gw_gateway::health", port, "health server listening");
@@ -81,7 +87,18 @@ pub async fn run_health_server(
         let state = state.clone();
         let store = store.clone();
         let mgmt_blacklist = mgmt_blacklist.clone();
-        tokio::spawn(handle_connection(stream, state, store, mgmt_blacklist));
+        let phase_handle = phase_handle.clone();
+        let backpressure_state = backpressure_state.clone();
+        let supervisor_unhealthy = supervisor_unhealthy.clone();
+        tokio::spawn(handle_connection(
+            stream,
+            state,
+            store,
+            mgmt_blacklist,
+            phase_handle,
+            backpressure_state,
+            supervisor_unhealthy,
+        ));
     }
 }
 
@@ -90,6 +107,9 @@ async fn handle_connection(
     state: Arc<HealthState>,
     store: Arc<gw_store::EntityStore>,
     mgmt_blacklist: Arc<gw_auth::jwt_blacklist::RedisJwtBlacklist>,
+    phase_handle: gw_runtime::PhaseHandle,
+    backpressure_state: Arc<AtomicU8>,
+    supervisor_unhealthy: Arc<AtomicBool>,
 ) {
     // Read up to the first request line + (very minimal) headers. A
     // healthcheck client sends < 256 bytes; we cap the read at 1 KiB to keep
@@ -123,7 +143,11 @@ async fn handle_connection(
             let _ = write_response(&mut stream, 200, "OK", OK_BODY).await;
         }
         "/readyz" => {
-            if READY.load(Ordering::Acquire) {
+            if READY.load(Ordering::Acquire)
+                && phase_handle.current() < gw_runtime::ShutdownPhase::Phase1AcceptStop
+                && backpressure_state.load(Ordering::Acquire) == 0
+                && !supervisor_unhealthy.load(Ordering::Acquire)
+            {
                 let _ = write_response(&mut stream, 200, "OK", OK_BODY).await;
             } else {
                 let _ =

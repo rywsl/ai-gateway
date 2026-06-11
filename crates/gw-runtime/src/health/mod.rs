@@ -114,6 +114,10 @@ pub enum Admit { Pass, Reject }
 impl BackpressureGate {
     pub fn from_state(state: Arc<AtomicU8>) -> Self { Self { state } }
 
+    /// Clone the inner `Arc<AtomicU8>` so callers (e.g. `/readyz`) can read the
+    /// current gate state without going through [`admit`](Self::admit).
+    pub fn state_handle(&self) -> Arc<AtomicU8> { self.state.clone() }
+
     pub fn admit(&self) -> Admit {
         match self.state.load(Ordering::Acquire) {
             1 => {

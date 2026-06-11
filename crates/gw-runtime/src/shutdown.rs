@@ -71,6 +71,14 @@ pub struct PhaseHandle {
     state: Arc<AtomicU8>,
 }
 
+impl Default for PhaseHandle {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(ShutdownPhase::Running as u8)),
+        }
+    }
+}
+
 impl PhaseHandle {
     pub fn current(&self) -> ShutdownPhase {
         ShutdownPhase::from_u8(self.state.load(Ordering::Acquire))
