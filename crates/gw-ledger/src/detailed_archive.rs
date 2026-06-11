@@ -49,6 +49,15 @@ pub struct ResponsePayload {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body_b64: String,
+    /// True when the archive accumulator exceeded the hard cap and further
+    /// bytes were dropped. Downstream consumers should treat the body as
+    /// incomplete when `archive_truncated = true`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archive_truncated: bool,
+    /// Number of bytes dropped after the hard cap was hit. `0` when
+    /// `archive_truncated` is false.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub archive_dropped: u64,
 }
 
 /// JSON payload for `kind = summary`. Matches the surviving fields on the
@@ -312,4 +321,8 @@ impl DetailedArchive {
         });
         Self { tx }
     }
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }

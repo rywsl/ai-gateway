@@ -150,12 +150,10 @@ pub async fn run(
             ctx.archive_upstream_response_body
                 .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "upstream")
                 .await;
-        } else {
+        } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_upstream_response_body {
             // No spill root (unit-test path): extend in-memory buffer
             // directly. Cap enforcement is bypassed in this case.
-            if let ArchiveState::InMemory(ref mut buf) = ctx.archive_upstream_response_body {
-                buf.extend_from_slice(b);
-            }
+            buf.extend_from_slice(b);
         }
     }
 
@@ -212,10 +210,8 @@ pub async fn run(
                 ctx.archive_downstream_response_body
                     .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "downstream")
                     .await;
-            } else {
-                if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
-                    buf.extend_from_slice(b);
-                }
+            } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
+                buf.extend_from_slice(b);
             }
         }
         return Ok(None);
@@ -275,10 +271,8 @@ pub async fn run(
             ctx.archive_downstream_response_body
                 .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "downstream")
                 .await;
-        } else {
-            if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
-                buf.extend_from_slice(b);
-            }
+        } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
+            buf.extend_from_slice(b);
         }
     }
 
@@ -381,10 +375,8 @@ pub async fn run_cli_body_filter(
             ctx.archive_downstream_response_body
                 .append_chunk(&passthrough, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "cli_downstream")
                 .await;
-        } else {
-            if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
-                buf.extend_from_slice(&passthrough);
-            }
+        } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
+            buf.extend_from_slice(&passthrough);
         }
     }
     if end_of_stream && !ctx.is_stream {

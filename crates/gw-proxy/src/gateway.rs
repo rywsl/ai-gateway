@@ -145,7 +145,7 @@ fn reset_response_attempt_state(ctx: &mut ReqCtx, new_key: Arc<gw_core::entity::
     ctx.pending_client_body = None;
 }
 
-fn adapter_body_head(body: &bytes::BytesMut) -> &[u8] {
+fn adapter_body_head(body: &[u8]) -> &[u8] {
     let cap = body.len().min(8192);
     &body[..cap]
 }
@@ -519,7 +519,7 @@ impl LlmGateway {
         &self.resilience
     }
 
-    fn classify_final_upstream_error(&self, ctx: &mut ReqCtx) {
+    async fn classify_final_upstream_error(&self, ctx: &mut ReqCtx) {
         let Some(status) = ctx.upstream_status else {
             return;
         };
@@ -558,6 +558,23 @@ impl LlmGateway {
             }
         }
 
+        // Read archive bytes for the adapter analyzer. On read failure (e.g.
+        // SpillFile I/O error) fall back to an empty slice so classification
+        // still proceeds on the status + headers alone.
+        let upstream_bytes = match ctx.archive_upstream_response_body.read_for_emit().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    target: "gw_proxy::archive",
+                    request_id = %ctx.request_id,
+                    surface = "upstream",
+                    error = %e,
+                    "archive_emit_read_failed"
+                );
+                Vec::new()
+            }
+        };
+
         let headers = MetaHeaders(&meta.headers);
         let base = self
             .classifier
@@ -568,7 +585,7 @@ impl LlmGateway {
                     .error_analyzer_for(&key.vendor_id)
                     .analyze(
                         status,
-                        adapter_body_head(&ctx.archive_upstream_response_body),
+                        adapter_body_head(&upstream_bytes),
                         &headers,
                     )
             })
@@ -578,16 +595,29 @@ impl LlmGateway {
 
     /// Emit upstream + downstream response surfaces at end-of-stream.
     /// Called from `response_body_filter` when `end_of_stream = true`.
-    fn emit_response_surfaces(&self, ctx: &mut ReqCtx) {
-        use crate::ctx::ResponseMeta;
+    async fn emit_response_surfaces(&self, ctx: &mut ReqCtx) {
+        use crate::ctx::{ArchiveState, ResponseMeta};
         use gw_ledger::detailed_archive::{CapturedSurface, Kind, ResponsePayload, SurfacePayload};
         let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
 
         // upstream_response — paired with the headers snapshot taken in response_filter
         if let Some(meta) = ctx.archive_upstream_response_meta.take() {
-            let body = std::sync::Arc::new(bytes::Bytes::from(std::mem::take(
-                &mut ctx.archive_upstream_response_body,
-            )));
+            let body_bytes = match ctx.archive_upstream_response_body.read_for_emit().await {
+                Ok(b) => Bytes::from(b),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "gw_proxy::archive",
+                        request_id = %ctx.request_id,
+                        surface = "upstream",
+                        error = %e,
+                        "archive_emit_read_failed"
+                    );
+                    Bytes::new()
+                }
+            };
+            let truncated = ctx.archive_upstream_response_body.is_truncated();
+            let dropped = ctx.archive_upstream_response_body.dropped();
+            let body = std::sync::Arc::new(body_bytes);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -598,10 +628,14 @@ impl LlmGateway {
                         status: meta.status,
                         headers: redact_loopback_headers(meta.headers),
                         body_b64: String::new(),
+                        archive_truncated: truncated,
+                        archive_dropped: dropped,
                     },
                     body,
                 ),
             });
+            // Release spill file / reset accumulator.
+            ctx.archive_upstream_response_body = ArchiveState::default();
         }
 
         // downstream_response — v1 approximates headers from upstream snapshot
@@ -612,23 +646,42 @@ impl LlmGateway {
                 status: ctx.upstream_status.unwrap_or(0),
                 headers: Vec::new(),
             });
-        let body = std::sync::Arc::new(bytes::Bytes::from(std::mem::take(
-            &mut ctx.archive_downstream_response_body,
-        )));
-        self.detailed_archive.try_send(CapturedSurface {
-            ts_ms: now_ms,
-            request_id: ctx.request_id.clone(),
-            trace_id: ctx.trace_id.clone(),
-            kind: Kind::DownstreamResponse,
-            payload: SurfacePayload::Response(
-                ResponsePayload {
-                    status: downstream_meta.status,
-                    headers: redact_loopback_headers(downstream_meta.headers),
-                    body_b64: String::new(),
-                },
-                body,
-            ),
-        });
+        {
+            let body_bytes = match ctx.archive_downstream_response_body.read_for_emit().await {
+                Ok(b) => Bytes::from(b),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "gw_proxy::archive",
+                        request_id = %ctx.request_id,
+                        surface = "downstream",
+                        error = %e,
+                        "archive_emit_read_failed"
+                    );
+                    Bytes::new()
+                }
+            };
+            let truncated = ctx.archive_downstream_response_body.is_truncated();
+            let dropped = ctx.archive_downstream_response_body.dropped();
+            let body = std::sync::Arc::new(body_bytes);
+            self.detailed_archive.try_send(CapturedSurface {
+                ts_ms: now_ms,
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                kind: Kind::DownstreamResponse,
+                payload: SurfacePayload::Response(
+                    ResponsePayload {
+                        status: downstream_meta.status,
+                        headers: redact_loopback_headers(downstream_meta.headers),
+                        body_b64: String::new(),
+                        archive_truncated: truncated,
+                        archive_dropped: dropped,
+                    },
+                    body,
+                ),
+            });
+            // Release spill file / reset accumulator.
+            ctx.archive_downstream_response_body = ArchiveState::default();
+        }
     }
 
     fn retry_stream_probe_failure(
@@ -1402,7 +1455,12 @@ impl ProxyHttp for LlmGateway {
         });
 
         if end_of_stream {
-            self.classify_final_upstream_error(ctx);
+            // classify_final_upstream_error is async (reads archive via
+            // read_for_emit); wrap in block_in_place + block_on.
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(self.classify_final_upstream_error(ctx))
+            });
         }
 
         if end_of_stream && ctx.error_passthrough_active {
@@ -1411,7 +1469,28 @@ impl ProxyHttp for LlmGateway {
                     .client_codec
                     .as_ref()
                     .map_or(gw_core::protocol::ProtocolKind::OpenAi, |c| c.kind());
-                let accumulated = &ctx.archive_upstream_response_body;
+
+                // Read archive bytes for error-passthrough content detection.
+                // Fall back to empty on I/O error — the is_html / JSON parse
+                // will simply fail open (no passthrough body rendered).
+                let accumulated = tokio::task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(async {
+                        match ctx.archive_upstream_response_body.read_for_emit().await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "gw_proxy::archive",
+                                    request_id = %ctx.request_id,
+                                    surface = "upstream",
+                                    error = %e,
+                                    "archive_emit_read_failed"
+                                );
+                                Vec::new()
+                            }
+                        }
+                    })
+                });
                 let is_html = accumulated.get(..100).is_some_and(|s| {
                     let start = std::str::from_utf8(s).unwrap_or("");
                     let trimmed = start.trim_start();
@@ -1419,7 +1498,7 @@ impl ProxyHttp for LlmGateway {
                 });
 
                 if !is_html {
-                    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(accumulated)
+                    if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&accumulated)
                     {
                         let passthrough = gw_core::error::PassthroughBody {
                             upstream_status: status,
@@ -1447,7 +1526,12 @@ impl ProxyHttp for LlmGateway {
         }
 
         if end_of_stream {
-            self.emit_response_surfaces(ctx);
+            // emit_response_surfaces is async (reads archive via read_for_emit);
+            // wrap in block_in_place + block_on.
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(self.emit_response_surfaces(ctx))
+            });
         }
         res
     }
