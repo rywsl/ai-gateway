@@ -55,10 +55,12 @@ use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::resilience::ResilienceState;
 use gw_proxy::LlmGateway;
+use gw_runtime::{RestartPolicy, Supervisor};
 use gw_routing::in_flight::InFlightStore;
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
 use gw_store::{CounterStore, EntityStore};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// Bundle of `Arc`-shared collaborators handed off to Pingora as the
@@ -559,8 +561,7 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     // steps (and the `Wired` handoff) can reference them. T2.1 added the
     // plumbing; T2.2 returns the `ShutdownCoordinator` so the SIGTERM
     // handler in `run_with_signal_handler` can drive `drain()`. Long-running
-    // tasks spawned below still use bare `tokio::spawn`; T3 wraps them in
-    // `Supervisor` and threads the `ShutdownToken` through, after which the
+    // tasks spawned below are wrapped in `Supervisor` (T3.4) and the
     // returned coordinator drains them on shutdown.
     let (
         mut shutdown,
@@ -669,10 +670,32 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     )));
     let affinity = Arc::new(gw_routing::affinity::AffinityManager::default());
     let adapter_registry = Arc::new(gw_adapter::AdapterRegistry::new());
-    spawn_decay_loop(
-        adaptive_rpm.clone(),
-        cfg.adaptive_rpm.probe_after_min.saturating_mul(60),
-    );
+    let decay_interval_secs = cfg.adaptive_rpm.probe_after_min.saturating_mul(60);
+    let decay_unhealthy = {
+        let sv = Supervisor::new(
+            "rpm_decay",
+            RestartPolicy::default(),
+            shutdown_token.clone(),
+        );
+        let flag = sv.unhealthy_flag();
+        let manager = adaptive_rpm.clone();
+        let handle = sv.spawn(move |tok| {
+            let manager = manager.clone();
+            let mut interval = tokio::time::interval(Duration::from_secs(decay_interval_secs));
+            async move {
+                loop {
+                    tokio::select! {
+                        _ = tok.cancelled() => return Ok(()),
+                        _ = interval.tick() => {
+                            manager.tick_decay();
+                        }
+                    }
+                }
+            }
+        });
+        shutdown.register(handle);
+        flag
+    };
 
     let mut store_inner = gw_store::EntityStore::with_loader_and_timeout(
         loader,
@@ -765,7 +788,40 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
         redis: redis.clone(),
     });
 
-    spawn_ip_ratelimit_sweep(ip_ratelimit.clone(), cfg.ip_ratelimit.sweep_interval_secs);
+    let ip_sweep_unhealthy = {
+        let sv = Supervisor::new(
+            "ip_ratelimit_sweep",
+            RestartPolicy::default(),
+            shutdown_token.clone(),
+        );
+        let flag = sv.unhealthy_flag();
+        let guard = ip_ratelimit.clone();
+        let sweep_secs = cfg.ip_ratelimit.sweep_interval_secs;
+        let handle = sv.spawn(move |tok| {
+            let guard = guard.clone();
+            let mut interval = tokio::time::interval(Duration::from_secs(sweep_secs));
+            async move {
+                loop {
+                    tokio::select! {
+                        _ = tok.cancelled() => return Ok(()),
+                        _ = interval.tick() => {
+                            let removed = guard.sweep();
+                            if removed > 0 {
+                                tracing::info!(
+                                    target: "gw_gateway",
+                                    removed,
+                                    active = guard.len(),
+                                    "ip ratelimit sweep evicted idle entries"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        shutdown.register(handle);
+        flag
+    };
 
     {
         let probe_cfg = gw_health::QuotaProbeCfg {
@@ -1066,6 +1122,9 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     let mut tunnel_bridge: Option<gw_proxy::tunnel_bridge::TunnelBridgeHandle> = None;
 
     #[cfg(feature = "tunnel")]
+    let mut tunnel_refresher_unhealthy: Option<Arc<std::sync::atomic::AtomicBool>> = None;
+
+    #[cfg(feature = "tunnel")]
     let tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>> = if cfg.tunnel.enabled {
         use gw_tunnel_client::pool::PoolConfig;
         use gw_tunnel_client::resolver::ProxyNodeView;
@@ -1171,51 +1230,71 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
         );
         tunnel_bridge = Some(bridge);
 
-        // Refresh-on-invalidation: spawn a 5s polling watcher. The stream
+        // Refresh-on-invalidation: supervised 5s polling watcher. The stream
         // consumer in gw-store already invalidates the Moka cache on
         // `proxy_node` events; this watcher pushes the refreshed snapshot
         // into the ArcSwap inside TunnelStack. v1 uses polling because
         // `stream_consumer` does not yet expose a per-namespace callback.
-        let stack_clone = stack.clone();
-        let store_clone = store.clone();
-        let tunnel_kek = tunnel_kek.clone();
-        tokio::spawn(async move {
-            let mut last_signature: u64 = 0;
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if let Some(nodes) = store_clone.proxy_nodes_list_or_load().await {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    // DefaultHasher uses a randomised per-process seed (since Rust 1.36), so
-                    // the signature is intra-process only — it'll spuriously reload once on
-                    // every restart, which is harmless.
-                    let sig = nodes.iter().fold(0u64, |acc, n| {
-                        let mut h = DefaultHasher::new();
-                        n.id.hash(&mut h);
-                        n.enabled.hash(&mut h);
-                        n.latency_ms.hash(&mut h);
-                        acc ^ h.finish()
-                    });
-                    if sig != last_signature {
-                        last_signature = sig;
-                        let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> = nodes
-                            .into_iter()
-                            .filter_map(|n| match node_to_view(n, &tunnel_kek) {
-                                Ok(view) => Some(view),
-                                Err(err) => {
-                                    tracing::error!(
-                                        target: "gw_gateway::tunnel",
-                                        error = %err,
-                                        "dropping proxy_node with undecryptable auth_token_enc"
-                                    );
-                                    None
+        tunnel_refresher_unhealthy = Some({
+            let sv = Supervisor::new(
+                "tunnel_refresher",
+                RestartPolicy::default(),
+                shutdown_token.clone(),
+            );
+            let flag = sv.unhealthy_flag();
+            let stack_clone = stack.clone();
+            let store_clone = store.clone();
+            let tunnel_kek = tunnel_kek.clone();
+            let handle = sv.spawn(move |tok| {
+                let stack = stack_clone.clone();
+                let store = store_clone.clone();
+                let kek = tunnel_kek.clone();
+                let mut last_signature: u64 = 0;
+                let mut tick = tokio::time::interval(Duration::from_secs(5));
+                async move {
+                    loop {
+                        tokio::select! {
+                            _ = tok.cancelled() => return Ok(()),
+                            _ = tick.tick() => {
+                                if let Some(nodes) = store.proxy_nodes_list_or_load().await {
+                                    use std::collections::hash_map::DefaultHasher;
+                                    use std::hash::{Hash, Hasher};
+                                    // DefaultHasher uses a randomised per-process seed (since Rust 1.36), so
+                                    // the signature is intra-process only — it'll spuriously reload once on
+                                    // every restart, which is harmless.
+                                    let sig = nodes.iter().fold(0u64, |acc, n| {
+                                        let mut h = DefaultHasher::new();
+                                        n.id.hash(&mut h);
+                                        n.enabled.hash(&mut h);
+                                        n.latency_ms.hash(&mut h);
+                                        acc ^ h.finish()
+                                    });
+                                    if sig != last_signature {
+                                        last_signature = sig;
+                                        let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> = nodes
+                                            .into_iter()
+                                            .filter_map(|n| match node_to_view(n, &kek) {
+                                                Ok(view) => Some(view),
+                                                Err(err) => {
+                                                    tracing::error!(
+                                                        target: "gw_gateway::tunnel",
+                                                        error = %err,
+                                                        "dropping proxy_node with undecryptable auth_token_enc"
+                                                    );
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        stack.reload_nodes(view);
+                                    }
                                 }
-                            })
-                            .collect();
-                        stack_clone.reload_nodes(view);
+                            }
+                        }
                     }
                 }
-            }
+            });
+            shutdown.register(handle);
+            flag
         });
 
         let _probe_handle = stack.start_probe_loop(Duration::from_secs(5));
@@ -1274,31 +1353,88 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     // T2.3: `/readyz` reflects shutdown phase, backpressure, and supervisor
     // unhealthy. `backpressure_state` is derived from the BackpressureGate
     // that wraps the SystemHealthMonitor's shared AtomicU8. The
-    // `supervisor_unhealthy` flag is always `false` for now; T3 will
-    // OR-aggregate per-supervisor unhealthy flags into it.
+    // `supervisor_unhealthy` flag is OR-aggregated from per-supervisor
+    // unhealthy flags by the unhealthy_aggregator task (T3.4).
     let health_backpressure_state = backpressure_gate.state_handle();
     let health_phase_handle = phase_handle.clone();
     let supervisor_unhealthy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let health_supervisor_unhealthy = supervisor_unhealthy.clone();
-    tokio::spawn(async move {
-        if let Err(e) = health::run_health_server(
-            health_port,
-            health_state,
-            health_store,
-            health_blacklist,
-            health_phase_handle,
-            health_backpressure_state,
-            health_supervisor_unhealthy,
-        )
-        .await
-        {
-            tracing::error!(
-                target: "gw_gateway::health",
-                error = %e,
-                "health server exited unexpectedly"
-            );
+    let health_server_unhealthy = {
+        let sv = Supervisor::new(
+            "health_server",
+            RestartPolicy::default(),
+            shutdown_token.clone(),
+        );
+        let flag = sv.unhealthy_flag();
+        let handle = sv.spawn(move |tok| {
+            let state = health_state.clone();
+            let store = health_store.clone();
+            let blacklist = health_blacklist.clone();
+            let phase = health_phase_handle.clone();
+            let bp = health_backpressure_state.clone();
+            let unhealthy = health_supervisor_unhealthy.clone();
+            async move {
+                tokio::select! {
+                    _ = tok.cancelled() => Ok(()),
+                    result = health::run_health_server(
+                        health_port,
+                        state,
+                        store,
+                        blacklist,
+                        phase,
+                        bp,
+                        unhealthy,
+                    ) => result,
+                }
+            }
+        });
+        shutdown.register(handle);
+        flag
+    };
+
+    // T3.4: Unhealthy aggregator — periodically ORs per-supervisor unhealthy
+    // flags into the single `supervisor_unhealthy` Arc<AtomicBool> that the
+    // health server reads for `/readyz`. Only T3.4's four gateway-internal
+    // supervisors (health_server, tunnel_refresher, rpm_decay,
+    // ip_ratelimit_sweep) are aggregated here; earlier-wave supervisors in
+    // gw-ledger / gw-task-worker / gw-egress-impersonate do not expose their
+    // flags externally yet. T3.5+ refactor can revisit to unify all flags.
+    let unhealthy_flags: Vec<Arc<std::sync::atomic::AtomicBool>> = {
+        #[cfg_attr(not(feature = "tunnel"), allow(unused_mut))]
+        let mut v: Vec<Arc<std::sync::atomic::AtomicBool>> = vec![
+            health_server_unhealthy,
+            decay_unhealthy,
+            ip_sweep_unhealthy,
+        ];
+        #[cfg(feature = "tunnel")]
+        if let Some(f) = tunnel_refresher_unhealthy {
+            v.push(f);
+        }
+        v
+    };
+    let supervisor_unhealthy_clone = supervisor_unhealthy.clone();
+    let aggregator_handle = Supervisor::new(
+        "unhealthy_aggregator",
+        RestartPolicy::default(),
+        shutdown_token.clone(),
+    )
+    .spawn(move |tok| {
+        let flags = unhealthy_flags.clone();
+        let aggregate = supervisor_unhealthy_clone.clone();
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(500));
+            loop {
+                tokio::select! {
+                    _ = tok.cancelled() => return Ok(()),
+                    _ = tick.tick() => {
+                        let any = flags.iter().any(|f| f.load(Ordering::Acquire));
+                        aggregate.store(any, Ordering::Release);
+                    }
+                }
+            }
         }
     });
+    shutdown.register(aggregator_handle);
 
     Ok((
         Wired {
@@ -1430,32 +1566,52 @@ fn convert_body_rules(cfg: &config::BodyRulesCfg) -> gw_proxy::filters::upstream
 pub fn spawn_decay_loop(
     manager: Arc<AdaptiveRpmManager>,
     interval_secs: u64,
+    token: gw_runtime::ShutdownToken,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    Supervisor::new("rpm_decay", RestartPolicy::default(), token).spawn(move |tok| {
+        let manager = manager.clone();
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-        loop {
-            interval.tick().await;
-            manager.tick_decay();
+        async move {
+            loop {
+                tokio::select! {
+                    _ = tok.cancelled() => return Ok(()),
+                    _ = interval.tick() => {
+                        manager.tick_decay();
+                    }
+                }
+            }
         }
     })
 }
 
-fn spawn_ip_ratelimit_sweep(guard: Arc<IpRateLimitGuard>, sweep_interval_secs: u64) {
-    tokio::spawn(async move {
+#[allow(dead_code)]
+fn spawn_ip_ratelimit_sweep(
+    guard: Arc<IpRateLimitGuard>,
+    sweep_interval_secs: u64,
+    token: gw_runtime::ShutdownToken,
+) -> tokio::task::JoinHandle<()> {
+    Supervisor::new("ip_ratelimit_sweep", RestartPolicy::default(), token).spawn(move |tok| {
+        let guard = guard.clone();
         let mut interval = tokio::time::interval(Duration::from_secs(sweep_interval_secs));
-        loop {
-            interval.tick().await;
-            let removed = guard.sweep();
-            if removed > 0 {
-                tracing::info!(
-                    target: "gw_gateway",
-                    removed,
-                    active = guard.len(),
-                    "ip ratelimit sweep evicted idle entries"
-                );
+        async move {
+            loop {
+                tokio::select! {
+                    _ = tok.cancelled() => return Ok(()),
+                    _ = interval.tick() => {
+                        let removed = guard.sweep();
+                        if removed > 0 {
+                            tracing::info!(
+                                target: "gw_gateway",
+                                removed,
+                                active = guard.len(),
+                                "ip ratelimit sweep evicted idle entries"
+                            );
+                        }
+                    }
+                }
             }
         }
-    });
+    })
 }
 
 #[cfg(test)]
@@ -1487,7 +1643,7 @@ mod adaptive_rpm_tests {
             }),
         );
 
-        let handle = spawn_decay_loop(manager.clone(), 60);
+        let handle = spawn_decay_loop(manager.clone(), 60, gw_runtime::ShutdownToken::new());
         tokio::time::advance(Duration::from_secs(60)).await;
         tokio::task::yield_now().await;
         handle.abort();

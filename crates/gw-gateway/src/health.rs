@@ -50,6 +50,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// surface has its own management-token verify chain before rendering
 /// snapshots from `key_health` / `resilience` plus the `store` and
 /// `mgmt_blacklist` passed alongside.
+#[derive(Clone)]
 pub struct HealthState {
     pub key_health: Arc<gw_health::KeyHealthStore>,
     pub resilience: Arc<gw_proxy::resilience::ResilienceState>,
