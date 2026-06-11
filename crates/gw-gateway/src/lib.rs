@@ -923,6 +923,27 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(Wired, gw_runtime::S
     // (T4.4 `BacklogRecovery`) can pre-populate it from on-disk spill files
     // before the drainer task starts pulling from it.
     let billing_backlog = Arc::new(gw_ledger::backlog::BillingBacklog::new());
+
+    // T4.4 — BacklogRecovery: load any DLQ / backlog-shutdown files left
+    // from a prior process into the in-memory backlog BEFORE the drainer
+    // task starts pulling from it. Corrupt files are quarantined so they
+    // don't block subsequent boots.
+    {
+        let recovery = gw_ledger::backlog::BacklogRecovery::new(spill_root.clone());
+        match recovery.load_into(&billing_backlog).await {
+            Ok(loaded) => tracing::info!(
+                target: "gw_gateway",
+                loaded,
+                "billing backlog recovery complete"
+            ),
+            Err(e) => tracing::error!(
+                target: "gw_gateway",
+                error = %e,
+                "backlog recovery failed; continuing with empty backlog"
+            ),
+        }
+    }
+
     let (ledger_inner, ledger_handles) = Ledger::start_with_spill_root(
         redis.clone(),
         instance_id.clone(),

@@ -5,7 +5,10 @@
 
 use crate::dlq::DlqEnvelope;
 use std::collections::VecDeque;
+use std::io;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -96,6 +99,89 @@ impl BillingBacklog {
         self.pending_bytes.store(0, Ordering::Release);
         self.oldest_ns.store(0, Ordering::Release);
         out
+    }
+}
+
+/// Loads persisted DLQ / backlog-shutdown files from a `SpillRoot` into a
+/// `BillingBacklog` at bootstrap. Corrupt files are moved to `<root>/corrupt/`
+/// so they don't block subsequent boots.
+pub struct BacklogRecovery {
+    pub root: Arc<gw_runtime::SpillRoot>,
+}
+
+impl BacklogRecovery {
+    pub fn new(root: Arc<gw_runtime::SpillRoot>) -> Self {
+        Self { root }
+    }
+
+    /// Scan the spill root for DLQ files and replay them into `backlog`.
+    ///
+    /// Files whose names start with `dlq.` or `backlog_shutdown_` are
+    /// considered candidates. Each file is replayed line-by-line; on
+    /// success the file is deleted. On any deserialisation error the file
+    /// is moved to `<root>/corrupt/` and the
+    /// `gw_billing_recovery_corrupt_files_total` counter is incremented.
+    ///
+    /// Returns the total number of envelopes loaded across all valid files.
+    pub async fn load_into(&self, backlog: &BillingBacklog) -> io::Result<usize> {
+        self.root.ensure_dir().await?;
+        let mut dir = tokio::fs::read_dir(self.root.root_dir()).await?;
+        let mut loaded: usize = 0;
+        let mut corrupt: Vec<std::path::PathBuf> = Vec::new();
+        let corrupt_dir = self.root.root_dir().join("corrupt");
+        tokio::fs::create_dir_all(&corrupt_dir).await.ok();
+
+        while let Some(ent) = dir.next_entry().await? {
+            let path = ent.path();
+            let is_dlq = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.starts_with("dlq.") || s.starts_with("backlog_shutdown_"))
+                .unwrap_or(false);
+            if !is_dlq {
+                continue;
+            }
+            match self.replay_file(&path, backlog).await {
+                Ok(n) => loaded += n,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "gw_ledger::backlog",
+                        path = %path.display(),
+                        error = %e,
+                        "backlog file corrupt; quarantining"
+                    );
+                    corrupt.push(path);
+                }
+            }
+        }
+
+        for p in corrupt {
+            let dest = corrupt_dir.join(p.file_name().unwrap());
+            let _ = tokio::fs::rename(&p, &dest).await;
+            metrics::counter!("gw_billing_recovery_corrupt_files_total").increment(1);
+        }
+        metrics::counter!("gw_billing_recovery_loaded_total").increment(loaded as u64);
+        Ok(loaded)
+    }
+
+    /// Read a single JSONL file, push each line into `backlog`, then delete
+    /// the file on success.
+    async fn replay_file(&self, path: &Path, backlog: &BillingBacklog) -> io::Result<usize> {
+        let bytes = tokio::fs::read(path).await?;
+        let mut count = 0usize;
+        for line in bytes.split(|b| *b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let env: DlqEnvelope = serde_json::from_slice(line)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            backlog.push(env).await;
+            count += 1;
+        }
+        // Successful replay deletes the file (the data is now in the
+        // backlog and will be persisted again on drain if needed).
+        let _ = tokio::fs::remove_file(path).await;
+        Ok(count)
     }
 }
 
