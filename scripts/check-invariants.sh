@@ -536,6 +536,23 @@ else
     ok "no unmigrated long-loop tokio::spawn"
 fi
 
+# gw-runtime is the sole owner of `Supervisor`. Upper crates may import it
+# but must never re-export their own Supervisor type — that would mask the
+# bottom-layer primitive and let a parallel implementation drift back in.
+# ---------------------------------------------------------------------------
+# supervisor_reexport_ban — Supervisor must come from gw_runtime only
+# ---------------------------------------------------------------------------
+if grep -RInE 'pub use .*::supervisor::Supervisor' crates/ \
+    --include='*.rs' \
+    --exclude-dir=gw-runtime >/dev/null 2>&1; then
+    grep -RInE 'pub use .*::supervisor::Supervisor' crates/ \
+        --include='*.rs' \
+        --exclude-dir=gw-runtime
+    bad "Supervisor must come from gw_runtime; remove the re-export(s) above."
+else
+    ok "no rogue Supervisor re-exports"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "INVARIANT CHECK FAILED"
   exit 1
