@@ -27,7 +27,7 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=1; }
 # Execution crates MUST NOT depend on each other.
 # ---------------------------------------------------------------------------
 echo "[crate_layering] supporting-layer must not depend on business/execution crates"
-SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-auth gw-ledger"
+SUPPORTING="gw-core gw-codec gw-codec-macros gw-store gw-auth gw-ledger gw-runtime"
 FORBIDDEN_FOR_SUPPORTING="gw-adapter gw-health gw-task gw-task-runtime gw-proxy gw-billing gw-gateway gw-task-worker"
 if command -v cargo >/dev/null && command -v jq >/dev/null; then
   meta="$(cargo metadata --no-deps --format-version 1 2>/dev/null)"

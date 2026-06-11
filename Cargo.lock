@@ -2140,6 +2140,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gw-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "futures",
+ "metrics",
+ "moka",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "gw-store"
 version = "0.1.0"
 dependencies = [

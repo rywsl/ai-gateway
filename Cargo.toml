@@ -23,6 +23,7 @@ members = [
     "crates/e2e-fake-upstream",
     "crates/e2e-fake-web",
     "crates/gw-egress-impersonate",
+    "crates/gw-runtime",
 ]
 
 [workspace.package]

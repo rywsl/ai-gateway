@@ -1,0 +1,25 @@
+[package]
+name = "gw-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Shared runtime primitives: Supervisor, ShutdownCoordinator, SpillFile, RegexCache, health hooks."
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+metrics = { workspace = true }
+moka = { workspace = true }
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = "3"
