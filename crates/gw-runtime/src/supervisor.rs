@@ -95,10 +95,9 @@ impl Supervisor {
                 // Build the future *inside* the catch_unwind wrapper so a
                 // panic during closure body / future construction is also
                 // caught, not just panics inside the polled future.
-                let result =
-                    AssertUnwindSafe(async { factory(child_token).await })
-                        .catch_unwind()
-                        .await;
+                let result = AssertUnwindSafe(async { factory(child_token).await })
+                    .catch_unwind()
+                    .await;
 
                 let outcome = match result {
                     Ok(Ok(())) => {

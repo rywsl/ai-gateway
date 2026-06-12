@@ -11,8 +11,18 @@ pub struct SpillDiskFullHook {
 }
 
 impl SpillDiskFullHook {
-    pub fn new(path: PathBuf) -> Self { Self { path, threshold_used_ratio: 0.99 } }
-    pub fn with_threshold(path: PathBuf, ratio: f64) -> Self { Self { path, threshold_used_ratio: ratio } }
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            threshold_used_ratio: 0.99,
+        }
+    }
+    pub fn with_threshold(path: PathBuf, ratio: f64) -> Self {
+        Self {
+            path,
+            threshold_used_ratio: ratio,
+        }
+    }
 
     fn statvfs(&self) -> Option<(u64, u64)> {
         let c = CString::new(self.path.as_os_str().as_bytes()).ok()?;
@@ -20,20 +30,33 @@ impl SpillDiskFullHook {
         let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
         // SAFETY: c is a valid C string for the duration of the call.
         let rc = unsafe { libc::statvfs(c.as_ptr(), &mut buf) };
-        if rc != 0 { return None; }
+        if rc != 0 {
+            return None;
+        }
         let total = (buf.f_blocks as u64) * buf.f_frsize;
-        let free  = (buf.f_bavail as u64) * buf.f_frsize;
+        let free = (buf.f_bavail as u64) * buf.f_frsize;
         Some((total, free))
     }
 }
 
 impl HealthHook for SpillDiskFullHook {
-    fn name(&self) -> &'static str { "spill_disk" }
+    fn name(&self) -> &'static str {
+        "spill_disk"
+    }
     fn check(&self) -> HealthSignal {
-        let (total, free) = match self.statvfs() { Some(v) => v, None => return HealthSignal::Healthy };
-        if total == 0 { return HealthSignal::Healthy; }
+        let (total, free) = match self.statvfs() {
+            Some(v) => v,
+            None => return HealthSignal::Healthy,
+        };
+        if total == 0 {
+            return HealthSignal::Healthy;
+        }
         let used_ratio = 1.0 - (free as f64 / total as f64);
         metrics::gauge!("gw_spill_disk_free_bytes").set(free as f64);
-        if used_ratio >= self.threshold_used_ratio { HealthSignal::Critical } else { HealthSignal::Healthy }
+        if used_ratio >= self.threshold_used_ratio {
+            HealthSignal::Critical
+        } else {
+            HealthSignal::Healthy
+        }
     }
 }

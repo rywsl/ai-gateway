@@ -404,7 +404,6 @@ pub struct LlmGateway {
     /// Force-majeure backpressure gate (T7.1). Wired from Wired at bootstrap;
     /// cloned into each `ReqCtx` in `new_ctx`.
     pub backpressure_gate: Arc<gw_runtime::BackpressureGate>,
-
 }
 
 impl LlmGateway {
@@ -595,11 +594,7 @@ impl LlmGateway {
             .map(|key| {
                 self.adapter_registry
                     .error_analyzer_for(&key.vendor_id)
-                    .analyze(
-                        status,
-                        adapter_body_head(&upstream_bytes),
-                        &headers,
-                    )
+                    .analyze(status, adapter_body_head(&upstream_bytes), &headers)
             })
             .unwrap_or_default();
         ctx.error_outcome = Some(merge_adapter_error_outcome(base, adapter_outcome));
@@ -783,7 +778,12 @@ impl ProxyHttp for LlmGateway {
         let id = trace_id_hex();
         let trace = TraceId::from(id.clone());
         let req = RequestId::from(id);
-        let mut ctx = ReqCtx::new(trace, req, self.regex_cache.clone(), self.backpressure_gate.clone());
+        let mut ctx = ReqCtx::new(
+            trace,
+            req,
+            self.regex_cache.clone(),
+            self.backpressure_gate.clone(),
+        );
         ctx.reservation_view = self.reservation_view.clone();
         ctx.frequency_tracker = self.frequency_tracker.clone();
         ctx.identity_persist = Some(self.identity_persist.clone());

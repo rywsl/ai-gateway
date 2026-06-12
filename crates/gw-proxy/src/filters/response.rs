@@ -148,7 +148,13 @@ pub async fn run(
     if let Some(b) = body.as_ref() {
         if let Some(sr) = ctx.spill_root.clone() {
             ctx.archive_upstream_response_body
-                .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "upstream")
+                .append_chunk(
+                    b,
+                    &ctx.archive_caps,
+                    &sr,
+                    ctx.request_id.as_ref(),
+                    "upstream",
+                )
                 .await;
         } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_upstream_response_body {
             // No spill root (unit-test path): extend in-memory buffer
@@ -208,9 +214,16 @@ pub async fn run(
         if let Some(b) = body.as_ref() {
             if let Some(sr) = ctx.spill_root.clone() {
                 ctx.archive_downstream_response_body
-                    .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "downstream")
+                    .append_chunk(
+                        b,
+                        &ctx.archive_caps,
+                        &sr,
+                        ctx.request_id.as_ref(),
+                        "downstream",
+                    )
                     .await;
-            } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
+            } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body
+            {
                 buf.extend_from_slice(b);
             }
         }
@@ -269,7 +282,13 @@ pub async fn run(
     if let Some(b) = body.as_ref() {
         if let Some(sr) = ctx.spill_root.clone() {
             ctx.archive_downstream_response_body
-                .append_chunk(b, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "downstream")
+                .append_chunk(
+                    b,
+                    &ctx.archive_caps,
+                    &sr,
+                    ctx.request_id.as_ref(),
+                    "downstream",
+                )
                 .await;
         } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
             buf.extend_from_slice(b);
@@ -373,7 +392,13 @@ pub async fn run_cli_body_filter(
         }
         if let Some(sr) = ctx.spill_root.clone() {
             ctx.archive_downstream_response_body
-                .append_chunk(&passthrough, &ctx.archive_caps, &sr, ctx.request_id.as_ref(), "cli_downstream")
+                .append_chunk(
+                    &passthrough,
+                    &ctx.archive_caps,
+                    &sr,
+                    ctx.request_id.as_ref(),
+                    "cli_downstream",
+                )
                 .await;
         } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
             buf.extend_from_slice(&passthrough);

@@ -10,7 +10,9 @@ pub struct MemoryPressureHook {
 }
 
 impl Default for MemoryPressureHook {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MemoryPressureHook {
@@ -23,26 +25,46 @@ impl MemoryPressureHook {
     }
 
     pub fn with_paths(current: PathBuf, max: PathBuf, threshold_ratio: f64) -> Self {
-        Self { cgroup_current: current, cgroup_max: max, threshold_ratio }
+        Self {
+            cgroup_current: current,
+            cgroup_max: max,
+            threshold_ratio,
+        }
     }
 
     fn read_u64(path: &PathBuf) -> Option<u64> {
         let s = std::fs::read_to_string(path).ok()?;
         let trimmed = s.trim();
-        if trimmed == "max" { return Some(u64::MAX); }
+        if trimmed == "max" {
+            return Some(u64::MAX);
+        }
         trimmed.parse::<u64>().ok()
     }
 }
 
 impl HealthHook for MemoryPressureHook {
-    fn name(&self) -> &'static str { "memory" }
+    fn name(&self) -> &'static str {
+        "memory"
+    }
     fn check(&self) -> HealthSignal {
-        let current = match Self::read_u64(&self.cgroup_current) { Some(v) => v, None => return HealthSignal::Healthy };
-        let max = match Self::read_u64(&self.cgroup_max) { Some(v) => v, None => return HealthSignal::Healthy };
-        if max == u64::MAX || max == 0 { return HealthSignal::Healthy; }
+        let current = match Self::read_u64(&self.cgroup_current) {
+            Some(v) => v,
+            None => return HealthSignal::Healthy,
+        };
+        let max = match Self::read_u64(&self.cgroup_max) {
+            Some(v) => v,
+            None => return HealthSignal::Healthy,
+        };
+        if max == u64::MAX || max == 0 {
+            return HealthSignal::Healthy;
+        }
         let ratio = current as f64 / max as f64;
         metrics::gauge!("gw_memory_usage_ratio").set(ratio);
-        if ratio >= self.threshold_ratio { HealthSignal::Critical } else { HealthSignal::Healthy }
+        if ratio >= self.threshold_ratio {
+            HealthSignal::Critical
+        } else {
+            HealthSignal::Healthy
+        }
     }
 }
 
@@ -60,7 +82,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cur = tmp.path().join("current");
         let max = tmp.path().join("max");
-        write(&cur, "100"); write(&max, "1000");
+        write(&cur, "100");
+        write(&max, "1000");
         let hook = MemoryPressureHook::with_paths(cur, max, 0.99);
         assert_eq!(hook.check(), HealthSignal::Healthy);
     }
@@ -70,7 +93,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cur = tmp.path().join("current");
         let max = tmp.path().join("max");
-        write(&cur, "995"); write(&max, "1000");
+        write(&cur, "995");
+        write(&max, "1000");
         let hook = MemoryPressureHook::with_paths(cur, max, 0.99);
         assert_eq!(hook.check(), HealthSignal::Critical);
     }

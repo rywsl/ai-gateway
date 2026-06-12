@@ -39,9 +39,13 @@ pub struct SpillRoot {
 }
 
 impl SpillRoot {
-    pub fn new(config: SpillRootConfig) -> Self { Self { config } }
+    pub fn new(config: SpillRootConfig) -> Self {
+        Self { config }
+    }
 
-    pub fn root_dir(&self) -> &Path { &self.config.root_dir }
+    pub fn root_dir(&self) -> &Path {
+        &self.config.root_dir
+    }
 
     pub async fn ensure_dir(&self) -> io::Result<()> {
         tokio::fs::create_dir_all(&self.config.root_dir).await
@@ -60,7 +64,10 @@ impl SpillRoot {
                 .read(true)
                 .open(&path)
                 .await?;
-            shard_files.push(Mutex::new(BufWriter::with_capacity(self.config.buffer_size, file)));
+            shard_files.push(Mutex::new(BufWriter::with_capacity(
+                self.config.buffer_size,
+                file,
+            )));
             shard_paths.push(path);
         }
         let bytes_counter = metrics::counter!("gw_spill_bytes_total", "site" => key.to_string());
@@ -94,17 +101,26 @@ impl SpillRoot {
         let mut dir = tokio::fs::read_dir(&self.config.root_dir).await?;
         let mut total: u64 = 0;
         while let Some(ent) = dir.next_entry().await? {
-            let meta = match ent.metadata().await { Ok(m) => m, Err(_) => continue };
-            if !meta.is_file() { continue; }
+            let meta = match ent.metadata().await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !meta.is_file() {
+                continue;
+            }
             total += meta.len();
             let mtime = meta.modified().ok();
             entries.push((mtime, ent.path(), meta.len()));
         }
-        if total <= self.config.max_total_bytes { return Ok(()); }
+        if total <= self.config.max_total_bytes {
+            return Ok(());
+        }
         entries.sort_by_key(|(t, _, _)| *t);
         let mut removed: u64 = 0;
         for (_, p, len) in entries {
-            if total - removed <= self.config.max_total_bytes { break; }
+            if total - removed <= self.config.max_total_bytes {
+                break;
+            }
             if tokio::fs::remove_file(&p).await.is_ok() {
                 removed += len;
             }
@@ -122,9 +138,15 @@ pub struct SpillFile {
 }
 
 impl SpillFile {
-    pub fn key(&self) -> &str { &self.base_key }
-    pub fn shard_count(&self) -> usize { self.shards.len() }
-    pub fn shard_paths(&self) -> &[PathBuf] { &self.shard_paths }
+    pub fn key(&self) -> &str {
+        &self.base_key
+    }
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+    pub fn shard_paths(&self) -> &[PathBuf] {
+        &self.shard_paths
+    }
 
     pub async fn append(&self, bytes: &[u8]) -> io::Result<()> {
         let n = self.shards.len();

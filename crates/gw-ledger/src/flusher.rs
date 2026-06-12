@@ -487,38 +487,37 @@ fn spawn_frozen_delta_worker(
     drain_budget: Duration,
 ) -> JoinHandle<()> {
     let rx = Arc::new(Mutex::new(rx));
-    Supervisor::new("frozen_delta_worker", RestartPolicy::default(), shutdown)
-        .spawn(move |tok| {
-            let rx = rx.clone();
-            let redis = redis.clone();
-            async move {
-                loop {
-                    tokio::select! {
-                        _ = tok.cancelled() => {
-                            // Cancel-drain: late `enqueue_frozen_delta` calls
-                            // during phase-1 land in the channel. Recv with a
-                            // deadline so we apply them before exiting.
-                            drain_frozen_delta_channel(&rx, &redis, drain_budget).await;
-                            tracing::info!(
-                                target: "gw_ledger",
-                                "frozen_delta_worker: shutdown drain complete"
-                            );
-                            return Ok(());
-                        }
-                        delta = async {
-                            let mut guard = rx.lock().await;
-                            guard.recv().await
-                        } => {
-                            match delta {
-                                Some(delta) => apply_frozen_delta(&redis, &delta).await,
-                                None => break,
-                            }
+    Supervisor::new("frozen_delta_worker", RestartPolicy::default(), shutdown).spawn(move |tok| {
+        let rx = rx.clone();
+        let redis = redis.clone();
+        async move {
+            loop {
+                tokio::select! {
+                    _ = tok.cancelled() => {
+                        // Cancel-drain: late `enqueue_frozen_delta` calls
+                        // during phase-1 land in the channel. Recv with a
+                        // deadline so we apply them before exiting.
+                        drain_frozen_delta_channel(&rx, &redis, drain_budget).await;
+                        tracing::info!(
+                            target: "gw_ledger",
+                            "frozen_delta_worker: shutdown drain complete"
+                        );
+                        return Ok(());
+                    }
+                    delta = async {
+                        let mut guard = rx.lock().await;
+                        guard.recv().await
+                    } => {
+                        match delta {
+                            Some(delta) => apply_frozen_delta(&redis, &delta).await,
+                            None => break,
                         }
                     }
                 }
-                Ok(())
             }
-        })
+            Ok(())
+        }
+    })
 }
 
 async fn apply_frozen_delta(redis: &RedisCtx, delta: &FrozenDelta) {
@@ -602,62 +601,65 @@ pub fn spawn_backlog_drainer(
     backlog: Arc<BillingBacklog>,
     shutdown: ShutdownToken,
 ) -> JoinHandle<()> {
-    Supervisor::new("billing_backlog_drainer", RestartPolicy::default(), shutdown).spawn(
-        move |tok| {
-            let redis = redis.clone();
-            let writer = writer.clone();
-            let backlog = backlog.clone();
-            async move {
-                let mut tick = interval(Duration::from_millis(500));
-                loop {
-                    tokio::select! {
-                        _ = tok.cancelled() => {
-                            tracing::info!(
-                                target: "gw_ledger",
-                                pending = backlog.pending_count(),
-                                "billing_backlog_drainer: shutdown — backlog persistence is T4.5",
-                            );
-                            return Ok(());
-                        }
-                        _ = tick.tick() => {
-                            while let Some(env) = backlog.pop().await {
-                                match dlq_xadd(&redis, &env).await {
-                                    Ok(()) => {
+    Supervisor::new(
+        "billing_backlog_drainer",
+        RestartPolicy::default(),
+        shutdown,
+    )
+    .spawn(move |tok| {
+        let redis = redis.clone();
+        let writer = writer.clone();
+        let backlog = backlog.clone();
+        async move {
+            let mut tick = interval(Duration::from_millis(500));
+            loop {
+                tokio::select! {
+                    _ = tok.cancelled() => {
+                        tracing::info!(
+                            target: "gw_ledger",
+                            pending = backlog.pending_count(),
+                            "billing_backlog_drainer: shutdown — backlog persistence is T4.5",
+                        );
+                        return Ok(());
+                    }
+                    _ = tick.tick() => {
+                        while let Some(env) = backlog.pop().await {
+                            match dlq_xadd(&redis, &env).await {
+                                Ok(()) => {
+                                    metrics::counter!(
+                                        "gw_billing_backlog_drained_total",
+                                        "outcome" => "redis"
+                                    )
+                                    .increment(1);
+                                    continue;
+                                }
+                                Err(_) => {
+                                    let disk = env.with_layer(DlqLayer::Disk);
+                                    if writer.append(&disk).await.is_ok() {
                                         metrics::counter!(
                                             "gw_billing_backlog_drained_total",
-                                            "outcome" => "redis"
+                                            "outcome" => "disk"
                                         )
                                         .increment(1);
                                         continue;
                                     }
-                                    Err(_) => {
-                                        let disk = env.with_layer(DlqLayer::Disk);
-                                        if writer.append(&disk).await.is_ok() {
-                                            metrics::counter!(
-                                                "gw_billing_backlog_drained_total",
-                                                "outcome" => "disk"
-                                            )
-                                            .increment(1);
-                                            continue;
-                                        }
-                                        // Re-push to tail (slight reordering quirk; see
-                                        // doc comment above). Never drops.
-                                        metrics::counter!(
-                                            "gw_billing_backlog_drained_total",
-                                            "outcome" => "re_pushed"
-                                        )
-                                        .increment(1);
-                                        backlog.push(disk).await;
-                                        break; // back off until next tick
-                                    }
+                                    // Re-push to tail (slight reordering quirk; see
+                                    // doc comment above). Never drops.
+                                    metrics::counter!(
+                                        "gw_billing_backlog_drained_total",
+                                        "outcome" => "re_pushed"
+                                    )
+                                    .increment(1);
+                                    backlog.push(disk).await;
+                                    break; // back off until next tick
                                 }
                             }
                         }
                     }
                 }
             }
-        },
-    )
+        }
+    })
 }
 
 fn spawn_dlq_retry_worker(
@@ -668,44 +670,43 @@ fn spawn_dlq_retry_worker(
     drain_budget: Duration,
 ) -> JoinHandle<()> {
     let rx = Arc::new(Mutex::new(rx));
-    Supervisor::new("dlq_retry_worker", RestartPolicy::default(), shutdown)
-        .spawn(move |tok| {
-            let rx = rx.clone();
-            let redis = redis.clone();
-            let writer = writer.clone();
-            async move {
-                let mut ticker = interval(Duration::from_secs(30));
-                loop {
-                    tokio::select! {
-                        _ = tok.cancelled() => {
-                            // Cancel-drain: late route_to_dlq calls during
-                            // phase-1 land in the channel. Recv with a
-                            // deadline so we retry them (skipping the
-                            // inter-retry ticker — we're shutting down).
-                            drain_dlq_retry_channel(&rx, &redis, &writer, drain_budget).await;
-                            tracing::info!(
-                                target: "gw_ledger",
-                                "dlq_retry_worker: shutdown drain complete"
-                            );
-                            return Ok(());
-                        }
-                        envelope = async {
-                            let mut guard = rx.lock().await;
-                            guard.recv().await
-                        } => {
-                            match envelope {
-                                Some(envelope) => {
-                                    ticker.tick().await;
-                                    process_dlq_envelope(&redis, &writer, envelope).await;
-                                }
-                                None => break,
+    Supervisor::new("dlq_retry_worker", RestartPolicy::default(), shutdown).spawn(move |tok| {
+        let rx = rx.clone();
+        let redis = redis.clone();
+        let writer = writer.clone();
+        async move {
+            let mut ticker = interval(Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = tok.cancelled() => {
+                        // Cancel-drain: late route_to_dlq calls during
+                        // phase-1 land in the channel. Recv with a
+                        // deadline so we retry them (skipping the
+                        // inter-retry ticker — we're shutting down).
+                        drain_dlq_retry_channel(&rx, &redis, &writer, drain_budget).await;
+                        tracing::info!(
+                            target: "gw_ledger",
+                            "dlq_retry_worker: shutdown drain complete"
+                        );
+                        return Ok(());
+                    }
+                    envelope = async {
+                        let mut guard = rx.lock().await;
+                        guard.recv().await
+                    } => {
+                        match envelope {
+                            Some(envelope) => {
+                                ticker.tick().await;
+                                process_dlq_envelope(&redis, &writer, envelope).await;
                             }
+                            None => break,
                         }
                     }
                 }
-                Ok(())
             }
-        })
+            Ok(())
+        }
+    })
 }
 
 async fn process_dlq_envelope(

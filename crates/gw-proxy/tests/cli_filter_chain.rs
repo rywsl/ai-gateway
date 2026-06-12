@@ -92,7 +92,9 @@ async fn test_cli_request_billing_recorded() {
     let mut body = Some(Bytes::from_static(
         br#"{"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}"#,
     ));
-    response::run_cli_body_filter(&mut body, true, &mut ctx).await.unwrap();
+    response::run_cli_body_filter(&mut body, true, &mut ctx)
+        .await
+        .unwrap();
 
     assert_eq!(ctx.client_shape, Some(ApiShape::ClaudeCli));
     assert_eq!(ctx.upstream_shape, Some(ApiShape::ClaudeCli));

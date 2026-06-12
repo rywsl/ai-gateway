@@ -82,7 +82,10 @@ async fn hard_deadline_aborts_hung_task() {
         )
         .await;
 
-    assert!(matches!(outcome, gw_runtime::shutdown::DrainOutcome::Forced));
+    assert!(matches!(
+        outcome,
+        gw_runtime::shutdown::DrainOutcome::Forced
+    ));
 }
 
 #[tokio::test]

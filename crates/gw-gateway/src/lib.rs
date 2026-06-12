@@ -55,12 +55,12 @@ use gw_health::KeyHealthStore;
 use gw_ledger::Ledger;
 use gw_proxy::resilience::ResilienceState;
 use gw_proxy::LlmGateway;
-use gw_runtime::{RestartPolicy, Supervisor};
 use gw_routing::in_flight::InFlightStore;
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
+use gw_runtime::{RestartPolicy, Supervisor};
 use gw_store::{CounterStore, EntityStore};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Bundle of `Arc`-shared collaborators handed off to Pingora as the
@@ -261,8 +261,7 @@ pub fn run() -> anyhow::Result<()> {
 /// `bootstrap()` spawns long-running background tasks (Ledger flusher,
 /// health server, stream consumer, etc.) that live for the life of that
 /// runtime.
-pub(crate) async fn bootstrap_gateway(
-) -> anyhow::Result<(
+pub(crate) async fn bootstrap_gateway() -> anyhow::Result<(
     Wired,
     gw_runtime::ShutdownCoordinator,
     config::Config,
@@ -582,7 +581,9 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
     })
 }
 
-async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(
+async fn bootstrap(
+    cfg: &config::Config,
+) -> anyhow::Result<(
     Wired,
     gw_runtime::ShutdownCoordinator,
     Arc<gw_ledger::backlog::BillingBacklog>,
@@ -633,15 +634,12 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(
             max_total_bytes: cfg.runtime.spill_io.max_total_bytes,
             buffer_size: cfg.runtime.spill_io.buffer_size,
         }));
-        spill_root
-            .ensure_dir()
-            .await
-            .with_context(|| {
-                format!(
-                    "ensuring spill root {:?} exists",
-                    cfg.runtime.spill_io.root_dir
-                )
-            })?;
+        spill_root.ensure_dir().await.with_context(|| {
+            format!(
+                "ensuring spill root {:?} exists",
+                cfg.runtime.spill_io.root_dir
+            )
+        })?;
 
         let regex_cache = Arc::new(RegexCache::new(RuntimeRegexCacheConfig {
             capacity: cfg.runtime.regex_cache.capacity,
@@ -1472,11 +1470,8 @@ async fn bootstrap(cfg: &config::Config) -> anyhow::Result<(
     // flags externally yet. T3.5+ refactor can revisit to unify all flags.
     let unhealthy_flags: Vec<Arc<std::sync::atomic::AtomicBool>> = {
         #[cfg_attr(not(feature = "tunnel"), allow(unused_mut))]
-        let mut v: Vec<Arc<std::sync::atomic::AtomicBool>> = vec![
-            health_server_unhealthy,
-            decay_unhealthy,
-            ip_sweep_unhealthy,
-        ];
+        let mut v: Vec<Arc<std::sync::atomic::AtomicBool>> =
+            vec![health_server_unhealthy, decay_unhealthy, ip_sweep_unhealthy];
         #[cfg(feature = "tunnel")]
         if let Some(f) = tunnel_refresher_unhealthy {
             v.push(f);

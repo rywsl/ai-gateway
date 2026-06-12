@@ -48,7 +48,9 @@ impl BillingBacklog {
     }
 
     pub async fn push(&self, env: DlqEnvelope) {
-        let bytes = serde_json::to_vec(&env).map(|b| b.len() as u64).unwrap_or(0);
+        let bytes = serde_json::to_vec(&env)
+            .map(|b| b.len() as u64)
+            .unwrap_or(0);
         let mut q = self.queue.lock().await;
         let now = Instant::now();
         if q.is_empty() {
@@ -78,17 +80,17 @@ impl BillingBacklog {
         let (_, env) = q.pop_front()?;
         let new_oldest = q.front().map(|(t, _)| elapsed_ns(*t)).unwrap_or(0);
         self.oldest_ns.store(new_oldest, Ordering::Release);
-        let bytes = serde_json::to_vec(&env).map(|b| b.len() as u64).unwrap_or(0);
+        let bytes = serde_json::to_vec(&env)
+            .map(|b| b.len() as u64)
+            .unwrap_or(0);
         self.pending_count.fetch_sub(1, Ordering::AcqRel);
         self.pending_bytes.fetch_sub(bytes, Ordering::AcqRel);
         metrics::gauge!("gw_billing_backlog_pending_count").set(self.pending_count() as f64);
-        metrics::gauge!("gw_billing_backlog_oldest_age_seconds").set(
-            if new_oldest == 0 {
-                0.0
-            } else {
-                (elapsed_ns(Instant::now()) - new_oldest) as f64 / 1e9
-            },
-        );
+        metrics::gauge!("gw_billing_backlog_oldest_age_seconds").set(if new_oldest == 0 {
+            0.0
+        } else {
+            (elapsed_ns(Instant::now()) - new_oldest) as f64 / 1e9
+        });
         Some(env)
     }
 

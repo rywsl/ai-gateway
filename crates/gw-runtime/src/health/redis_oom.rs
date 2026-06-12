@@ -15,15 +15,23 @@ pub struct RedisOomHook {
 }
 
 impl Default for RedisOomHook {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RedisOomHook {
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(VecDeque::new())), window: Duration::from_secs(5) }
+        Self {
+            inner: Arc::new(Mutex::new(VecDeque::new())),
+            window: Duration::from_secs(5),
+        }
     }
     pub fn handle(&self) -> RedisOomReporter {
-        RedisOomReporter { inner: self.inner.clone(), window: self.window }
+        RedisOomReporter {
+            inner: self.inner.clone(),
+            window: self.window,
+        }
     }
 }
 
@@ -40,21 +48,35 @@ impl RedisOomReporter {
         g.push_back(now);
         // Trim while we hold the lock.
         while let Some(front) = g.front() {
-            if now.duration_since(*front) > self.window { g.pop_front(); } else { break; }
+            if now.duration_since(*front) > self.window {
+                g.pop_front();
+            } else {
+                break;
+            }
         }
         metrics::counter!("gw_redis_oom_errors_total").increment(1);
     }
 }
 
 impl HealthHook for RedisOomHook {
-    fn name(&self) -> &'static str { "redis_oom" }
+    fn name(&self) -> &'static str {
+        "redis_oom"
+    }
     fn check(&self) -> HealthSignal {
         let now = Instant::now();
         let mut g = self.inner.lock();
         while let Some(front) = g.front() {
-            if now.duration_since(*front) > self.window { g.pop_front(); } else { break; }
+            if now.duration_since(*front) > self.window {
+                g.pop_front();
+            } else {
+                break;
+            }
         }
-        if g.is_empty() { HealthSignal::Healthy } else { HealthSignal::Critical }
+        if g.is_empty() {
+            HealthSignal::Healthy
+        } else {
+            HealthSignal::Critical
+        }
     }
 }
 
@@ -70,7 +92,10 @@ mod tests {
 
     #[test]
     fn record_triggers_critical_then_self_clears() {
-        let h = RedisOomHook { inner: Arc::new(Mutex::new(VecDeque::new())), window: Duration::from_millis(50) };
+        let h = RedisOomHook {
+            inner: Arc::new(Mutex::new(VecDeque::new())),
+            window: Duration::from_millis(50),
+        };
         let r = h.handle();
         r.record();
         assert_eq!(h.check(), HealthSignal::Critical);

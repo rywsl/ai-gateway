@@ -2138,7 +2138,9 @@ mod regression_baseline_tests {
         // --- ReqCtx with a FIXED trace_id (32 hex chars = 16 bytes = W3C trace-id) ---
         let trace_id = TraceId::from("0000000000000000aaaaaaaaaaaaaaaa");
         let request_id = RequestId::from("req-baseline-0001");
-        let cache = Arc::new(gw_runtime::RegexCache::new(gw_runtime::RegexCacheConfig::default()));
+        let cache = Arc::new(gw_runtime::RegexCache::new(
+            gw_runtime::RegexCacheConfig::default(),
+        ));
         let gate = Arc::new(gw_runtime::BackpressureGate::from_state(
             std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
         ));

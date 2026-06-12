@@ -69,14 +69,8 @@ impl Default for ArchiveCaps {
 /// `bytes_dropped`, and accounted via the `gw_archive_*_total` counters.
 pub enum ArchiveState {
     InMemory(BytesMut),
-    Spilled {
-        file: Box<SpillFile>,
-        written: u64,
-    },
-    Truncated {
-        written: u64,
-        dropped: u64,
-    },
+    Spilled { file: Box<SpillFile>, written: u64 },
+    Truncated { written: u64, dropped: u64 },
 }
 
 impl Default for ArchiveState {
@@ -582,9 +576,9 @@ impl Default for ReqCtx {
     /// cache from `LlmGateway`.
     fn default() -> Self {
         let cache = Arc::new(RegexCache::new(RegexCacheConfig::default()));
-        let gate = Arc::new(BackpressureGate::from_state(
-            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
-        ));
+        let gate = Arc::new(BackpressureGate::from_state(std::sync::Arc::new(
+            std::sync::atomic::AtomicU8::new(0),
+        )));
         Self::new(
             TraceId::from(String::new()),
             RequestId::from(String::new()),

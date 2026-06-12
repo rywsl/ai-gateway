@@ -1,11 +1,9 @@
-use gw_ledger::backlog::{BacklogRecovery, BillingBacklog};
-use gw_ledger::dlq::{DlqEnvelope, DlqLayer};
-use gw_ledger::usage::{
-    UsageProvenance, UsageRecord, UsageStatus, VendorExposureState,
-};
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
+use gw_ledger::backlog::{BacklogRecovery, BillingBacklog};
+use gw_ledger::dlq::{DlqEnvelope, DlqLayer};
+use gw_ledger::usage::{UsageProvenance, UsageRecord, UsageStatus, VendorExposureState};
 use gw_runtime::spill_io::{SpillRoot, SpillRootConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -102,13 +100,7 @@ async fn dump_then_recover_round_trip() {
     let backlog1 = BillingBacklog::new();
     for _ in 0..5 {
         backlog1
-            .push(DlqEnvelope::new(
-                make_record(),
-                "x",
-                0,
-                DlqLayer::Disk,
-                0,
-            ))
+            .push(DlqEnvelope::new(make_record(), "x", 0, DlqLayer::Disk, 0))
             .await;
     }
     let dumped = backlog1.dump_to_shutdown_file(&root).await.unwrap();

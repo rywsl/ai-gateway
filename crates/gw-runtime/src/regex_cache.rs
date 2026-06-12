@@ -19,7 +19,10 @@ pub struct RegexCacheConfig {
 
 impl Default for RegexCacheConfig {
     fn default() -> Self {
-        Self { capacity: 4096, tti: Duration::from_secs(3600) }
+        Self {
+            capacity: 4096,
+            tti: Duration::from_secs(3600),
+        }
     }
 }
 
@@ -57,9 +60,13 @@ impl RegexCache {
         }
     }
 
-    pub fn len(&self) -> u64 { self.inner.entry_count() }
+    pub fn len(&self) -> u64 {
+        self.inner.entry_count()
+    }
 
-    pub fn is_empty(&self) -> bool { self.inner.entry_count() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.inner.entry_count() == 0
+    }
 }
 
 #[cfg(test)]

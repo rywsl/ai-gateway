@@ -10,15 +10,18 @@ pub mod fd;
 pub mod memory;
 pub mod redis_oom;
 
+use futures::FutureExt;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use futures::FutureExt;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum HealthSignal { Healthy, Critical }
+pub enum HealthSignal {
+    Healthy,
+    Critical,
+}
 
 pub trait HealthHook: Send + Sync + 'static {
     fn name(&self) -> &'static str;
@@ -27,8 +30,8 @@ pub trait HealthHook: Send + Sync + 'static {
 
 pub struct SystemHealthMonitor {
     hooks: Vec<Arc<dyn HealthHook>>,
-    state: Arc<AtomicU8>,           // 0 healthy / 1 critical
-    healthy_streak: Arc<AtomicU8>,  // consecutive healthy ticks
+    state: Arc<AtomicU8>,          // 0 healthy / 1 critical
+    healthy_streak: Arc<AtomicU8>, // consecutive healthy ticks
     hysteresis_ticks: u8,
 }
 
@@ -43,10 +46,13 @@ impl SystemHealthMonitor {
     }
 
     pub fn add_hook<H: HealthHook>(&mut self, h: H) -> &mut Self {
-        self.hooks.push(Arc::new(h)); self
+        self.hooks.push(Arc::new(h));
+        self
     }
 
-    pub fn state_handle(&self) -> Arc<AtomicU8> { self.state.clone() }
+    pub fn state_handle(&self) -> Arc<AtomicU8> {
+        self.state.clone()
+    }
 
     pub fn evaluate(&self) -> HealthSignal {
         let mut any_crit = None;
@@ -109,14 +115,21 @@ pub struct BackpressureGate {
     state: Arc<AtomicU8>,
 }
 
-pub enum Admit { Pass, Reject }
+pub enum Admit {
+    Pass,
+    Reject,
+}
 
 impl BackpressureGate {
-    pub fn from_state(state: Arc<AtomicU8>) -> Self { Self { state } }
+    pub fn from_state(state: Arc<AtomicU8>) -> Self {
+        Self { state }
+    }
 
     /// Clone the inner `Arc<AtomicU8>` so callers (e.g. `/readyz`) can read the
     /// current gate state without going through [`admit`](Self::admit).
-    pub fn state_handle(&self) -> Arc<AtomicU8> { self.state.clone() }
+    pub fn state_handle(&self) -> Arc<AtomicU8> {
+        self.state.clone()
+    }
 
     pub fn admit(&self) -> Admit {
         match self.state.load(Ordering::Acquire) {
@@ -139,13 +152,21 @@ mod tests {
 
     struct AlwaysCritical;
     impl HealthHook for AlwaysCritical {
-        fn name(&self) -> &'static str { "always_crit" }
-        fn check(&self) -> HealthSignal { HealthSignal::Critical }
+        fn name(&self) -> &'static str {
+            "always_crit"
+        }
+        fn check(&self) -> HealthSignal {
+            HealthSignal::Critical
+        }
     }
     struct AlwaysHealthy;
     impl HealthHook for AlwaysHealthy {
-        fn name(&self) -> &'static str { "always_ok" }
-        fn check(&self) -> HealthSignal { HealthSignal::Healthy }
+        fn name(&self) -> &'static str {
+            "always_ok"
+        }
+        fn check(&self) -> HealthSignal {
+            HealthSignal::Healthy
+        }
     }
 
     #[test]
@@ -161,9 +182,15 @@ mod tests {
         crit: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
     impl HealthHook for SwitchableHook {
-        fn name(&self) -> &'static str { "switch" }
+        fn name(&self) -> &'static str {
+            "switch"
+        }
         fn check(&self) -> HealthSignal {
-            if self.crit.load(Ordering::Acquire) { HealthSignal::Critical } else { HealthSignal::Healthy }
+            if self.crit.load(Ordering::Acquire) {
+                HealthSignal::Critical
+            } else {
+                HealthSignal::Healthy
+            }
         }
     }
 
@@ -176,10 +203,22 @@ mod tests {
         assert_eq!(m.state_handle().load(Ordering::Acquire), 1);
         crit.store(false, Ordering::Release);
         assert_eq!(m.evaluate(), HealthSignal::Healthy);
-        assert_eq!(m.state_handle().load(Ordering::Acquire), 1, "still critical after 1 healthy tick");
+        assert_eq!(
+            m.state_handle().load(Ordering::Acquire),
+            1,
+            "still critical after 1 healthy tick"
+        );
         m.evaluate();
-        assert_eq!(m.state_handle().load(Ordering::Acquire), 1, "still critical after 2 healthy ticks");
+        assert_eq!(
+            m.state_handle().load(Ordering::Acquire),
+            1,
+            "still critical after 2 healthy ticks"
+        );
         m.evaluate();
-        assert_eq!(m.state_handle().load(Ordering::Acquire), 0, "healthy after 3 ticks");
+        assert_eq!(
+            m.state_handle().load(Ordering::Acquire),
+            0,
+            "healthy after 3 ticks"
+        );
     }
 }

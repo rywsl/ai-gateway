@@ -99,14 +99,9 @@ async fn run_impl(
         let mut resp = ResponseHeader::build(503, None)?;
         let _ = resp.insert_header("retry-after", "2");
         let _ = resp.insert_header("content-type", "application/json");
+        session.write_response_header(Box::new(resp), false).await?;
         session
-            .write_response_header(Box::new(resp), false)
-            .await?;
-        session
-            .write_response_body(
-                Some(Bytes::from(body.to_string().into_bytes())),
-                true,
-            )
+            .write_response_body(Some(Bytes::from(body.to_string().into_bytes())), true)
             .await?;
         tracing::warn!(
             target: "gw_proxy::backpressure",

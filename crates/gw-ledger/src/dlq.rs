@@ -196,10 +196,7 @@ mod tests {
     async fn emergency_writer_appends_json_lines() {
         let tmp = TempDir::new().unwrap();
         let root = spill_root(&tmp);
-        let writer = EmergencyDlqWriter::new(
-            root,
-            NonZeroUsize::new(1).unwrap(),
-        );
+        let writer = EmergencyDlqWriter::new(root, NonZeroUsize::new(1).unwrap());
 
         writer
             .append(&DlqEnvelope::new(
@@ -240,18 +237,9 @@ mod tests {
     async fn dlq_writer_round_trip() {
         let tmp = TempDir::new().unwrap();
         let root = spill_root(&tmp);
-        let writer = EmergencyDlqWriter::new(
-            root,
-            NonZeroUsize::new(4).unwrap(),
-        );
+        let writer = EmergencyDlqWriter::new(root, NonZeroUsize::new(4).unwrap());
 
-        let env1 = DlqEnvelope::new(
-            record(),
-            "redis OOM",
-            1,
-            DlqLayer::Mem,
-            1000,
-        );
+        let env1 = DlqEnvelope::new(record(), "redis OOM", 1, DlqLayer::Mem, 1000);
         let env2 = DlqEnvelope::new(
             UsageRecord {
                 request_id: "req-dlq-2".into(),

@@ -15,7 +15,10 @@ fn root(tmp: &TempDir) -> Arc<SpillRoot> {
 async fn single_shard_append_and_read_back() {
     let tmp = TempDir::new().unwrap();
     let root = root(&tmp);
-    let file = root.create("test", NonZeroUsize::new(1).unwrap()).await.unwrap();
+    let file = root
+        .create("test", NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
     file.append(b"hello\n").await.unwrap();
     file.append(b"world\n").await.unwrap();
     file.flush().await.unwrap();
@@ -28,7 +31,10 @@ async fn single_shard_append_and_read_back() {
 async fn sharded_round_robin_distributes_writes() {
     let tmp = TempDir::new().unwrap();
     let root = root(&tmp);
-    let file = root.create("test", NonZeroUsize::new(4).unwrap()).await.unwrap();
+    let file = root
+        .create("test", NonZeroUsize::new(4).unwrap())
+        .await
+        .unwrap();
     for i in 0..40u32 {
         file.append(format!("{i}\n").as_bytes()).await.unwrap();
     }
@@ -46,7 +52,11 @@ async fn sharded_round_robin_distributes_writes() {
 async fn concurrent_appends_no_data_loss() {
     let tmp = TempDir::new().unwrap();
     let root = root(&tmp);
-    let file = Arc::new(root.create("concurrent", NonZeroUsize::new(4).unwrap()).await.unwrap());
+    let file = Arc::new(
+        root.create("concurrent", NonZeroUsize::new(4).unwrap())
+            .await
+            .unwrap(),
+    );
 
     let mut joins = Vec::new();
     for w in 0..16 {
@@ -57,10 +67,15 @@ async fn concurrent_appends_no_data_loss() {
             }
         }));
     }
-    for j in joins { j.await.unwrap(); }
+    for j in joins {
+        j.await.unwrap();
+    }
     file.flush().await.unwrap();
 
-    let total_lines: usize = file.read_all().await.unwrap()
+    let total_lines: usize = file
+        .read_all()
+        .await
+        .unwrap()
         .iter()
         .map(|s| String::from_utf8_lossy(s).lines().count())
         .sum();

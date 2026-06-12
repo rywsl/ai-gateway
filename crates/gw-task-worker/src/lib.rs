@@ -458,8 +458,8 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
     );
 
     let handles: Vec<JoinHandle<()>> = vec![
-        Supervisor::new("task_exec_loop", RestartPolicy::default(), shutdown.clone())
-            .spawn(move |tok| {
+        Supervisor::new("task_exec_loop", RestartPolicy::default(), shutdown.clone()).spawn(
+            move |tok| {
                 let inner = exec_loop.clone();
                 async move {
                     tokio::select! {
@@ -467,52 +467,73 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
                         r = inner.run() => r,
                     }
                 }
-            }),
-        Supervisor::new("task_cancel_loop", RestartPolicy::default(), shutdown.clone())
-            .spawn(move |tok| {
-                let inner = cancel_loop.clone();
-                async move {
-                    tokio::select! {
-                        _ = tok.cancelled() => Ok(()),
-                        r = inner.run() => r,
-                    }
+            },
+        ),
+        Supervisor::new(
+            "task_cancel_loop",
+            RestartPolicy::default(),
+            shutdown.clone(),
+        )
+        .spawn(move |tok| {
+            let inner = cancel_loop.clone();
+            async move {
+                tokio::select! {
+                    _ = tok.cancelled() => Ok(()),
+                    r = inner.run() => r,
                 }
-            }),
-        Supervisor::new("task_watchdog_loop", RestartPolicy::default(), shutdown.clone())
-            .spawn(move |tok| {
-                let inner = watchdog_loop.clone();
-                async move {
-                    tokio::select! {
-                        _ = tok.cancelled() => Ok(()),
-                        r = inner.run() => r,
-                    }
+            }
+        }),
+        Supervisor::new(
+            "task_watchdog_loop",
+            RestartPolicy::default(),
+            shutdown.clone(),
+        )
+        .spawn(move |tok| {
+            let inner = watchdog_loop.clone();
+            async move {
+                tokio::select! {
+                    _ = tok.cancelled() => Ok(()),
+                    r = inner.run() => r,
                 }
-            }),
-        Supervisor::new("task_heartbeat_loop", RestartPolicy::default(), shutdown.clone())
-            .spawn(move |tok| {
-                let inner = heartbeat_loop.clone();
-                async move {
-                    tokio::select! {
-                        _ = tok.cancelled() => Ok(()),
-                        r = inner.run() => r,
-                    }
+            }
+        }),
+        Supervisor::new(
+            "task_heartbeat_loop",
+            RestartPolicy::default(),
+            shutdown.clone(),
+        )
+        .spawn(move |tok| {
+            let inner = heartbeat_loop.clone();
+            async move {
+                tokio::select! {
+                    _ = tok.cancelled() => Ok(()),
+                    r = inner.run() => r,
                 }
-            }),
-        Supervisor::new("task_registration_loop", RestartPolicy::default(), shutdown.clone())
-            .spawn(move |tok| {
-                let inner = registration_loop.clone();
-                async move {
-                    tokio::select! {
-                        _ = tok.cancelled() => Ok(()),
-                        r = inner.run() => r,
-                    }
+            }
+        }),
+        Supervisor::new(
+            "task_registration_loop",
+            RestartPolicy::default(),
+            shutdown.clone(),
+        )
+        .spawn(move |tok| {
+            let inner = registration_loop.clone();
+            async move {
+                tokio::select! {
+                    _ = tok.cancelled() => Ok(()),
+                    r = inner.run() => r,
                 }
-            }),
-        Supervisor::new("task_health_server", RestartPolicy::default(), shutdown.clone())
-            .spawn(move |tok| {
-                let port = cfg.server.health_port;
-                async move { run_health_server(port, tok).await }
-            }),
+            }
+        }),
+        Supervisor::new(
+            "task_health_server",
+            RestartPolicy::default(),
+            shutdown.clone(),
+        )
+        .spawn(move |tok| {
+            let port = cfg.server.health_port;
+            async move { run_health_server(port, tok).await }
+        }),
     ];
 
     tokio::signal::ctrl_c()

@@ -20,20 +20,19 @@ async fn restarts_on_returned_error() {
     let counter = Arc::new(AtomicU32::new(0));
     let token = ShutdownToken::new();
     let c = counter.clone();
-    let handle = Supervisor::new("test", fast_policy(), token.clone())
-        .spawn(move |tok| {
-            let c = c.clone();
-            async move {
-                let n = c.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(anyhow::anyhow!("boom"))
-                } else {
-                    // Stay alive until shutdown.
-                    tok.cancelled().await;
-                    Ok(())
-                }
+    let handle = Supervisor::new("test", fast_policy(), token.clone()).spawn(move |tok| {
+        let c = c.clone();
+        async move {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err(anyhow::anyhow!("boom"))
+            } else {
+                // Stay alive until shutdown.
+                tok.cancelled().await;
+                Ok(())
             }
-        });
+        }
+    });
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     token.cancel();
@@ -46,18 +45,17 @@ async fn restarts_on_panic() {
     let counter = Arc::new(AtomicU32::new(0));
     let token = ShutdownToken::new();
     let c = counter.clone();
-    let handle = Supervisor::new("panicker", fast_policy(), token.clone())
-        .spawn(move |tok| {
-            let c = c.clone();
-            async move {
-                let n = c.fetch_add(1, Ordering::SeqCst);
-                if n < 1 {
-                    panic!("crash");
-                }
-                tok.cancelled().await;
-                Ok(())
+    let handle = Supervisor::new("panicker", fast_policy(), token.clone()).spawn(move |tok| {
+        let c = c.clone();
+        async move {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n < 1 {
+                panic!("crash");
             }
-        });
+            tok.cancelled().await;
+            Ok(())
+        }
+    });
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     token.cancel();
@@ -97,14 +95,13 @@ async fn shutdown_stops_restarts() {
     let counter = Arc::new(AtomicU32::new(0));
     let token = ShutdownToken::new();
     let c = counter.clone();
-    let handle = Supervisor::new("test", fast_policy(), token.clone())
-        .spawn(move |_| {
-            let c = c.clone();
-            async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Err(anyhow::anyhow!("err"))
-            }
-        });
+    let handle = Supervisor::new("test", fast_policy(), token.clone()).spawn(move |_| {
+        let c = c.clone();
+        async move {
+            c.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("err"))
+        }
+    });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     token.cancel();
@@ -150,4 +147,3 @@ async fn restarts_on_panic_during_factory_construction() {
     // max_restarts + 1 = 3 attempts before giving up.
     assert_eq!(counter.load(Ordering::SeqCst), 3);
 }
-
