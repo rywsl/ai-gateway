@@ -23,6 +23,7 @@ pub mod latency;
 pub mod pipeline;
 pub mod reservation;
 pub mod reservation_gate;
+pub mod routing_sweep;
 pub mod strategy;
 
 pub use affinity::{AffinityDimension, AffinityManager, AffinityRecord};
