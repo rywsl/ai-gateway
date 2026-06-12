@@ -54,7 +54,7 @@ Execution order is **dependency bottom-up**: lower-DAG crates first, so callers 
 |---|-------|-------|---------|-------|--------------|
 | 1 | gw-runtime (+ gw-proxy callers) | 2 | RAII `Drop` + caller reset | sonnet | — |
 | 2 | gw-store | 3 | `AbortOnDropJoinHandle` + GC self-restart + TTL sweep | sonnet | — |
-| 3 | gw-ledger | 4 | `Drop` rollback + sweep + observability gauge | **opus** | **design-only gate + Go-side companion change** |
+| 3 | gw-ledger | 3 | Supervisor-wrapped sweep loop + observability gauges | sonnet | — |
 | 4 | gw-auth | 4 | Moka cache + single sweep loop | sonnet (design phase may upgrade to opus) | RPM TTI-boundary semantic change documented as deliberate behavior |
 | 5 | gw-routing | 5 | Single sweep loop + semantic adjustment (`InFlightStore.count`) | sonnet | — |
 | 6 | gw-capability | 1 | `&'static str` → `Arc<str>` + Moka | sonnet | Public enum boundary, requires full-workspace grep |
@@ -108,48 +108,43 @@ Execution order is **dependency bottom-up**: lower-DAG crates first, so callers 
 
 **Docs**: `docs/spec/06-billing-ledger.md` (DEDUCT / USER_CIRCUIT lifecycle), `docs/architecture.md` §Deliberate behaviours (GC self-restart).
 
-### Crate 3 — gw-ledger (opus + design-only gate + Go companion)
+### Crate 3 — gw-ledger (sonnet)
+
+> **Scope-correction record (2026-06-12)**: Pre-implementation reading of `lease.rs`, `coef.rs`, `backlog.rs`, and `AILinkMax-Go/modules/billing/business/outstanding.go` revised the original assumptions documented in `docs/superpowers/specs/2026-06-12-gw-ledger-design.md`:
+> - `LeaseGuard` already has a `Drop` impl; the real concern was "Drop does not refund". Per user decision, this work was **dropped from Crate 3** — Go's event-driven `upsert_protected` push frequency makes the bounded false-rejection window acceptable. No Drop refund, no metric. If operational data later suggests the window is a real problem, a follow-up PR adds it.
+> - `BillingBacklog` already emits `pending_bytes` + `pending_count` gauges; the audit's "size-bytes gauge" item is functionally already there. Scope reduces to exposing the existing `high_watermark_count` and adding an over-threshold counter.
+> - Go-side `OutstandingLedger` already handles orphan / TTL — **no Go code change and no contract-change doc** in this work (the user rejected "doc-only" as a cop-out; the right rule is "if Go code changes, both contract and code change; otherwise neither").
 
 **Items**:
-- `LeaseGuard` has no `Drop` impl → on panic between `try_acquire` and `logging`, credits are permanently removed from the in-memory lease pool (`crates/gw-ledger/src/lease.rs:78-84`)
-- `LEASE_POOL: DashMap<UserId, Arc<LeaseState>>` no eviction (`crates/gw-ledger/src/lease.rs:69`)
-- `COEF_STAGING: DashMap<u64, StagingState>` accumulates orphan entries from incomplete commits (`crates/gw-ledger/src/coef.rs:85`)
-- `BillingBacklog` has no size-bytes gauge or upper-bound alarm metric (`crates/gw-ledger/src/backlog.rs:16`) — **observation only, must-deliver semantics preserved**
+- `LEASE_POOL: DashMap<UserId, Arc<LeaseState>>` no eviction (`crates/gw-ledger/src/lease.rs:69`) — sweep Unprotected entries past idle TTL
+- `COEF_STAGING: DashMap<u64, StagingState>` accumulates orphan entries from incomplete commits (`crates/gw-ledger/src/coef.rs:85`) — sweep `version < active_version - SAFETY_MARGIN`
+- `BillingBacklog` `high_watermark_count` field exists but is not exposed as a gauge; no over-threshold alarm (`crates/gw-ledger/src/backlog.rs:19`)
 
-**Mandatory design-only gate** — before any implementer dispatch, produce `docs/superpowers/specs/2026-06-XX-gw-ledger-design.md` (`XX` is filled in with the gate's actual draft date) enumerating:
-
-1. `LeaseGuard::Drop` rollback policy choice (one of):
-   - (a) Refund all reserved credits;
-   - (b) Refund only the unsettled portion (when `settle_actual` was partially applied);
-   - (c) No refund — emit a `gw_lease_panic_leak_total` metric only and let the Go-side lease pool consistency scan repair from authoritative state.
-2. Companion Go-side change in `/Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go/` — three styles to consider:
-   - Active scan reconciler;
-   - Passive metric consumption / alerting;
-   - Schema extension (new `panic_recovered` field on lease record).
-3. Whether `COEF_STAGING` orphan eviction uses `version < active_version - safety_margin` (preserves recently committed) or `wall-clock TTL` (simpler).
-
-**User must approve the gate's design doc before implementer dispatch.**
+**Pattern**:
+- New `gw-ledger::ledger_sweep` spawn function wraps a per-tick body in `gw_runtime::Supervisor::new("ledger_sweep", ...)` and registers with `ShutdownCoordinator` (mirrors Crate 2 `DeductGc::spawn`).
+- Per-tick body calls `lease::sweep_unprotected()` + `coef::sweep_orphans()`.
+- `LeaseState` gains `last_seen_at_ms: AtomicU64`, written by `upsert_unprotected` (timestamp at transition). `Protected` entries are NOT touched.
+- `BillingBacklog::push` exposes `high_watermark_count` as `gw_billing_backlog_high_watermark_count` gauge; a new `gw_billing_backlog_over_threshold_total` counter increments when `pending_count` crosses a configurable threshold (default 10_000).
 
 **Subtle correctness**:
-- `LeaseGuard::Drop` and `release` / `settle_actual` interlock via `AtomicBool` flip — at-most-once rollback; idempotent.
-- `COEF_STAGING` eviction MUST NOT remove a `version` that has been committed but not yet propagated to all instances — the safety margin parameter must reflect this.
-- `BillingBacklog` size gauge uses `AtomicUsize` maintained at push/pop sites; never call `VecDeque::len()` from the gauge read path (locks the drainer hot path).
+- LEASE_POOL sweep: ONLY evict `mode == Unprotected` AND `last_seen_at_ms` older than `LEASE_POOL_IDLE_TTL` (default 30 min). In-flight `LeaseGuard` holds `Arc<LeaseState>` — eviction does not affect already-acquired guards (refcount keeps the state alive).
+- COEF_STAGING orphan sweep: `version < active_version.saturating_sub(SAFETY_MARGIN)` (default 100). The grep-verified single caller of `coef::lookup` is `credit_estimator::estimate_request_credits`, called only at request admission time; no settle-path or post-admission caller reads historical staging versions, so eviction is safe.
+- `BillingBacklog` gauges use `AtomicUsize` / `AtomicU64` — never call `VecDeque::len()` from gauge read path (locks the drainer hot path).
 
-**Required tests**:
-1. `LeaseGuard::Drop` rolls back on panic path (chosen policy).
-2. After `release` / `settle_actual` → drop is a no-op (idempotent).
-3. `LEASE_POOL` sweep removes already-transitioned protected users.
-4. `COEF_STAGING` orphan-version sweep (mock clock + version progression).
-5. `BillingBacklog` size gauge tracks queue bytes accurately.
-6. **Go-side integration**: round-trip test that Rust emits new metric / field and Go consumes it.
+**Required tests** (TDD, fail before fix):
+1. `LEASE_POOL` sweep removes Unprotected entries past idle TTL; leaves Protected entries and recent-transition Unprotected entries alone.
+2. `LEASE_POOL` sweep does not evict an entry whose `Arc<LeaseState>` is currently held by a `LeaseGuard` (use refcount as the in-flight indicator? — or just verify that eviction doesn't observably break in-flight guards).
+3. `COEF_STAGING` orphan sweep removes versions < `active - SAFETY_MARGIN`; preserves versions within the safety window.
+4. `BillingBacklog::high_watermark_count` is correctly exposed as a gauge.
+5. `BillingBacklog` over-threshold counter increments when `pending_count` crosses the configured threshold (once per crossing, not per push).
+6. `ledger_sweep` task respects `ShutdownToken` cancellation (mirrors Crate 2's `spawn_respects_shutdown_token`).
 
-**Docs** (4 files — more than other crates):
-- `docs/spec/06-billing-ledger.md` (lease state machine, backlog observability)
-- `docs/architecture.md` §Deliberate behaviours (`LeaseGuard::Drop` semantics)
-- `docs/go-contracts/contract-change/2026-06-XX-leaseguard-drop.md` (**new file** — Go contract change; the `XX` is filled in with the Crate 3 PR open date)
+**Docs**:
+- `docs/spec/06-billing-ledger.md` (LEASE_POOL eviction policy, COEF_STAGING orphan policy, BillingBacklog new metrics)
+- `docs/architecture.md` §Deliberate behaviours (sweep semantics; what "Unprotected idle" means)
 - `docs/ROADMAP.md`
 
-**Go-side changes**: in the same PR, modify `/Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go/` lease pool consistency scan code per the chosen design-gate option. Follow the Go project's own `CLAUDE.md` / `.claude/` rules.
+(`docs/go-contracts/contract-change/...` is **NOT** in scope per the decision recorded above.)
 
 ### Crate 4 — gw-auth (sonnet; design phase may upgrade to opus)
 
