@@ -63,3 +63,62 @@ async fn truncates_past_hard_cap() {
     assert!(a.is_truncated());
     assert!(a.dropped() > 0);
 }
+
+#[tokio::test]
+async fn reset_response_attempt_clears_archive_accumulators() {
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 1 << 30,
+        buffer_size: 4096,
+    }));
+    root.ensure_dir().await.unwrap();
+
+    // Simulate attempt-1 archive: write into both archive_*_response_body
+    // until they spill, capture their shard paths.
+    let mut upstream = ArchiveState::default();
+    let mut downstream = ArchiveState::default();
+    let chunk = vec![1u8; 4096];
+    upstream
+        .append_chunk(&chunk, &caps(2048, 8192), &root, "req-test", "upstream")
+        .await;
+    downstream
+        .append_chunk(&chunk, &caps(2048, 8192), &root, "req-test", "downstream")
+        .await;
+    assert!(matches!(upstream, ArchiveState::Spilled { .. }));
+    assert!(matches!(downstream, ArchiveState::Spilled { .. }));
+
+    // Assert each accumulator is non-empty before reset.
+    assert!(upstream.len() > 0);
+    assert!(downstream.len() > 0);
+
+    // The actual reset call: assign default. This is exactly what the
+    // production code change in gateway.rs will do.
+    upstream = ArchiveState::default();
+    downstream = ArchiveState::default();
+
+    // Post-reset: both are InMemory and empty.
+    assert!(matches!(upstream, ArchiveState::InMemory(_)));
+    assert!(matches!(downstream, ArchiveState::InMemory(_)));
+    assert_eq!(upstream.len(), 0);
+    assert_eq!(downstream.len(), 0);
+
+    // Give SpillFile::Drop time to async-unlink the old shards. Then read
+    // tmp directory and assert no spill shard files remain — this proves the
+    // reset semantics + Drop work together to release disk.
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let count = std::fs::read_dir(tmp.path()).unwrap().count();
+        if count == 0 {
+            break;
+        }
+    }
+    let remaining: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "expected all archive shards to be unlinked after reset, found: {remaining:?}"
+    );
+}
