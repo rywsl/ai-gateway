@@ -1,11 +1,17 @@
 use gw_auth::model_permissions::{
     check_with_budget, ModelPermission, PermissionEffect, RedosTracker, BUDGET_MS,
 };
+use gw_runtime::{RegexCache, RegexCacheConfig};
+
+fn make_cache() -> RegexCache {
+    RegexCache::new(RegexCacheConfig::default())
+}
 
 #[test]
 fn match_within_budget_returns_normal() {
     let tracker = RedosTracker::new();
-    let p = vec![ModelPermission::new("^claude.*$", PermissionEffect::Allow).unwrap()];
+    let cache = make_cache();
+    let p = vec![ModelPermission::new(&cache, "^claude.*$", PermissionEffect::Allow).unwrap()];
     let r = check_with_budget("claude-3-opus", &p, "ak1", &tracker);
     assert_eq!(r, Some(true));
     assert_eq!(tracker.timeout_count("ak1"), 0);
@@ -14,7 +20,8 @@ fn match_within_budget_returns_normal() {
 #[test]
 fn deny_within_budget_returns_false() {
     let tracker = RedosTracker::new();
-    let p = vec![ModelPermission::new("^gpt.*$", PermissionEffect::Allow).unwrap()];
+    let cache = make_cache();
+    let p = vec![ModelPermission::new(&cache, "^gpt.*$", PermissionEffect::Allow).unwrap()];
     let r = check_with_budget("claude-3-opus", &p, "ak1", &tracker);
     assert_eq!(r, Some(false));
 }

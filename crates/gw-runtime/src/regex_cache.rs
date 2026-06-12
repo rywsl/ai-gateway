@@ -88,4 +88,24 @@ mod tests {
         let b = cache.get_or_compile("^bar$").unwrap();
         assert!(!Arc::ptr_eq(&a, &b));
     }
+
+    #[test]
+    fn concurrent_first_compile_only_once() {
+        use std::thread;
+        let cache = Arc::new(RegexCache::new(RegexCacheConfig::default()));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let c = cache.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    c.get_or_compile("^foo-(bar|baz)-\\d+$").unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Moka doesn't expose internal compile-count, but cache size must be 1.
+        assert_eq!(cache.len(), 1);
+    }
 }

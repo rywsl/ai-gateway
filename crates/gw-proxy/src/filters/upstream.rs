@@ -2138,7 +2138,8 @@ mod regression_baseline_tests {
         // --- ReqCtx with a FIXED trace_id (32 hex chars = 16 bytes = W3C trace-id) ---
         let trace_id = TraceId::from("0000000000000000aaaaaaaaaaaaaaaa");
         let request_id = RequestId::from("req-baseline-0001");
-        let mut ctx = ReqCtx::new(trace_id, request_id);
+        let cache = Arc::new(gw_runtime::RegexCache::new(gw_runtime::RegexCacheConfig::default()));
+        let mut ctx = ReqCtx::new(trace_id, request_id, cache);
         ctx.client_codec = Some(gw_codec::AnyCodec::OpenAi(gw_codec::openai::OpenAi));
 
         // --- RequestHeader: POST /v1/chat/completions with realistic inbound headers ---

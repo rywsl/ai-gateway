@@ -806,6 +806,7 @@ pub async fn run(
         merged.model_whitelist_regex.as_deref(),
         api_key_id.as_ref().map(ApiKeyId::as_ref),
         model_regex_redos_tracker(),
+        &ctx.regex_cache,
     ) {
         bail!(session, ctx, &err, &request_id)
     }
@@ -1644,11 +1645,12 @@ fn check_model_whitelist_regex(
     pattern: Option<&str>,
     api_key_id: Option<&str>,
     redos_tracker: &RedosTracker,
+    regex_cache: &gw_runtime::RegexCache,
 ) -> std::result::Result<(), ErrorIR<'static>> {
     let Some(pattern) = pattern else {
         return Ok(());
     };
-    let permission = match ModelPermission::new(pattern, PermissionEffect::Allow) {
+    let permission = match ModelPermission::new(regex_cache, pattern, PermissionEffect::Allow) {
         Ok(permission) => permission,
         Err(err) => {
             tracing::warn!(
@@ -1884,6 +1886,7 @@ mod model_whitelist_regex_tests {
             Some("^gpt-4.*"),
             Some("ak_regex_allow"),
             &tracker,
+            &gw_runtime::RegexCache::new(gw_runtime::RegexCacheConfig::default()),
         );
 
         assert!(result.is_ok());
@@ -1897,6 +1900,7 @@ mod model_whitelist_regex_tests {
             Some("^gpt-4.*"),
             Some("ak_regex_deny"),
             &tracker,
+            &gw_runtime::RegexCache::new(gw_runtime::RegexCacheConfig::default()),
         )
         .expect_err("non-matching model must be denied");
 
@@ -1917,6 +1921,7 @@ mod model_whitelist_regex_tests {
             Some("^gpt-4.*"),
             Some(api_key_id),
             &tracker,
+            &gw_runtime::RegexCache::new(gw_runtime::RegexCacheConfig::default()),
         )
         .expect_err("disabled api key must fail closed");
 
@@ -1937,6 +1942,7 @@ mod model_whitelist_regex_tests {
             None,
             Some(api_key_id),
             &tracker,
+            &gw_runtime::RegexCache::new(gw_runtime::RegexCacheConfig::default()),
         );
 
         assert!(result.is_ok());

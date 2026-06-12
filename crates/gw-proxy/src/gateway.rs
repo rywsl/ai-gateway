@@ -397,6 +397,11 @@ pub struct LlmGateway {
     /// Archive cap policy (soft/hard cap) for response-body accumulation
     /// (T5.2). Cloned into each `ReqCtx` in `new_ctx`.
     pub archive_caps: crate::ctx::ArchiveCaps,
+    /// Compiled-regex cache (T6.1). Wired from Wired at bootstrap; cloned
+    /// into each `ReqCtx` in `new_ctx` so ModelPermission::new can call
+    /// `cache.get_or_compile` on the hot path without per-request compilation.
+    pub regex_cache: Arc<gw_runtime::RegexCache>,
+
 }
 
 impl LlmGateway {
@@ -448,6 +453,7 @@ impl LlmGateway {
         reservation_view: Option<Arc<ReservationGlobalView>>,
         frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
         pg: sqlx::PgPool,
+        regex_cache: Arc<gw_runtime::RegexCache>,
     ) -> Self {
         let files_gateway = Arc::new(crate::filters::gemini_files::HttpGeminiFilesGateway::new(
             pg,
@@ -508,6 +514,7 @@ impl LlmGateway {
             body_rules: Arc::new(std::collections::HashMap::new()),
             spill_root: None,
             archive_caps: crate::ctx::ArchiveCaps::default(),
+            regex_cache,
         }
     }
 
@@ -771,7 +778,7 @@ impl ProxyHttp for LlmGateway {
         let id = trace_id_hex();
         let trace = TraceId::from(id.clone());
         let req = RequestId::from(id);
-        let mut ctx = ReqCtx::new(trace, req);
+        let mut ctx = ReqCtx::new(trace, req, self.regex_cache.clone());
         ctx.reservation_view = self.reservation_view.clone();
         ctx.frequency_tracker = self.frequency_tracker.clone();
         ctx.identity_persist = Some(self.identity_persist.clone());

@@ -150,10 +150,7 @@ struct Wired {
     turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
     pg: sqlx::PgPool,
     // --- Resilience-fixes T2.1 runtime primitives ---
-    /// Compiled-regex cache shared with future ModelPermission / passthrough
-    /// rule consumers (T6). Held in `Wired` so filter wiring in later tasks
-    /// can pick it up without re-plumbing bootstrap.
-    #[allow(dead_code)]
+    /// Compiled-regex cache wired into `LlmGateway` (T6.1).
     regex_cache: Arc<gw_runtime::RegexCache>,
     /// Force-majeure backpressure gate. T7.1 will consult this in early.rs;
     /// for now it just rides along so the wiring exists.
@@ -384,6 +381,7 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.reservation_view,
                 wired.frequency_tracker,
                 wired.pg.clone(),
+                wired.regex_cache.clone(),
             );
             gw.body_rules = wired.body_rules;
             gw.spill_root = Some(wired.spill_root.clone());

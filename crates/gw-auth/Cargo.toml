@@ -28,6 +28,7 @@ hex.workspace = true
 fred.workspace = true
 smallvec.workspace = true
 regex = { workspace = true }
+gw-runtime = { path = "../gw-runtime" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -25,7 +25,7 @@ use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
 use gw_routing::in_flight::InFlightGuard;
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
-use gw_runtime::{SpillFile, SpillRoot};
+use gw_runtime::{RegexCache, RegexCacheConfig, SpillFile, SpillRoot};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -308,6 +308,11 @@ pub struct ReqCtx {
     pub api_key_id: Option<ApiKeyId>,
     pub merged_perm: Option<MergedPermissions>,
 
+    // --- Shared caches ---
+    /// Compiled-regex cache wired from Wired (T6.1). Always present — bootstrap
+    /// constructs it once in Wired and threads it through LlmGateway -> new_ctx.
+    pub regex_cache: Arc<RegexCache>,
+
     // --- Request shape ---
     pub model: Option<ModelName>,
     pub is_stream: bool,
@@ -565,16 +570,18 @@ pub struct ReqCtx {
 }
 
 impl Default for ReqCtx {
-    /// Builds a `ReqCtx` with empty IDs. Only intended for tests and
-    /// scaffolding assertions; the proxy hot path always uses
-    /// [`ReqCtx::new`] with a freshly generated trace/request id.
+    /// Builds a `ReqCtx` with empty IDs and a fresh `RegexCache`. Only intended
+    /// for tests and scaffolding assertions; the proxy hot path always uses
+    /// [`ReqCtx::new`] with a freshly generated trace/request id and the shared
+    /// cache from `LlmGateway`.
     fn default() -> Self {
-        Self::new(TraceId::from(String::new()), RequestId::from(String::new()))
+        let cache = Arc::new(RegexCache::new(RegexCacheConfig::default()));
+        Self::new(TraceId::from(String::new()), RequestId::from(String::new()), cache)
     }
 }
 
 impl ReqCtx {
-    pub fn new(trace_id: TraceId, request_id: RequestId) -> Self {
+    pub fn new(trace_id: TraceId, request_id: RequestId, regex_cache: Arc<RegexCache>) -> Self {
         Self {
             trace_id,
             request_id,
@@ -585,6 +592,7 @@ impl ReqCtx {
             user: None,
             api_key_id: None,
             merged_perm: None,
+            regex_cache,
             model: None,
             is_stream: false,
             is_task: false,

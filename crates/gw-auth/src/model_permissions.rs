@@ -3,8 +3,14 @@
 //! v1 implements **compile-time** guardrails only (max pattern length + DFA
 //! size limit). Runtime per-call budget enforcement (100ms) and per-ApiKey
 //! disable-after-N-timeouts tracker land in T5-B as `RedosTracker`.
+//!
+//! The compile path is cached: `ModelPermission::new` takes a `&RegexCache`
+//! and calls `cache.get_or_compile(pattern)`, so repeated calls with the same
+//! pattern reuse the same `Arc<Regex>` instead of compiling from scratch.
 
-use regex::{Regex, RegexBuilder};
+use gw_runtime::RegexCache;
+use regex::Regex;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionEffect {
@@ -14,19 +20,45 @@ pub enum PermissionEffect {
 
 #[derive(Debug, Clone)]
 pub struct ModelPermission {
-    pub regex: Regex,
-    pub raw_pattern: String,
+    regex: Arc<Regex>,
+    pattern: Arc<str>,
     pub effect: PermissionEffect,
 }
 
 impl ModelPermission {
-    pub fn new(pattern: &str, effect: PermissionEffect) -> Result<Self, RegexError> {
-        let regex = compile_pattern(pattern)?;
+    /// Create a new `ModelPermission` using the shared `RegexCache`.
+    ///
+    /// The cache avoids per-request regex compilation: repeated calls with the
+    /// same `pattern` string return the same `Arc<Regex>`. Compile errors are
+    /// **not** cached (per `RegexCache` contract).
+    pub fn new(
+        cache: &RegexCache,
+        pattern: &str,
+        effect: PermissionEffect,
+    ) -> Result<Self, RegexError> {
+        // Pre-check: reject overlong patterns before hitting the cache so we
+        // don't pollute it with near-limit patterns that differ by padding.
+        if pattern.len() > MAX_PATTERN_LEN {
+            return Err(RegexError::TooLarge(MAX_PATTERN_LEN));
+        }
+        let regex = cache
+            .get_or_compile(pattern)
+            .map_err(|e| RegexError::Compile(e.to_string()))?;
         Ok(Self {
             regex,
-            raw_pattern: pattern.to_string(),
+            pattern: Arc::from(pattern),
             effect,
         })
+    }
+
+    /// Access the compiled regex.
+    pub fn regex(&self) -> &Regex {
+        &self.regex
+    }
+
+    /// Access the raw pattern string.
+    pub fn pattern(&self) -> &str {
+        &self.pattern
     }
 }
 
@@ -42,11 +74,16 @@ pub const MAX_PATTERN_LEN: usize = 1024;
 pub const NFA_SIZE_LIMIT: usize = 256 * 1024;
 pub const DFA_SIZE_LIMIT: usize = 8 * 1024 * 1024;
 
+/// Compile a regex pattern with size guardrails.
+///
+/// **Note:** Production code should prefer `ModelPermission::new` which uses
+/// the shared `RegexCache`. This function remains public for the benchmark and
+/// for callers that intentionally bypass the cache (e.g. one-off validation).
 pub fn compile_pattern(pattern: &str) -> Result<Regex, RegexError> {
     if pattern.len() > MAX_PATTERN_LEN {
         return Err(RegexError::TooLarge(MAX_PATTERN_LEN));
     }
-    RegexBuilder::new(pattern)
+    regex::RegexBuilder::new(pattern)
         .size_limit(NFA_SIZE_LIMIT)
         .dfa_size_limit(DFA_SIZE_LIMIT)
         .build()
