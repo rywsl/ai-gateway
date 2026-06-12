@@ -182,7 +182,11 @@ async fn drop_coexists_with_lru_enforcer() {
 
     // Whether files exist or not is OS-dependent (BufWriter may have flushed
     // before LRU ran). The invariant we assert is "no panic and no error
-    // counter increment from double-remove".
+    // counter increment from double-remove". This is a panic-smoke-test,
+    // not a behavioral-correctness test — a completely broken Drop (e.g. one
+    // that does nothing) would also reach this line. The behavioral contract
+    // is verified by `drop_unlinks_shard_files` and
+    // `drop_tolerates_missing_shards` above.
     // metrics counter check would require a metrics recorder hook; instead we
     // confirm the assertion that we reached this line without panic.
 }
