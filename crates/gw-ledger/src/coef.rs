@@ -84,6 +84,47 @@ pub static COEF_CACHE: Lazy<ArcSwap<CoefSnapshot>> =
 
 pub static COEF_STAGING: Lazy<DashMap<u64, StagingState>> = Lazy::new(DashMap::new);
 
+/// Safety margin between the active version and the orphan-eviction
+/// threshold. `sweep_orphans` removes staging entries whose version is
+/// strictly less than `active_version.saturating_sub(SAFETY_MARGIN)`.
+/// Must exceed the maximum number of versions Go may have in flight
+/// between `coef_table` entries and `coef_table_commit`. 100 is safe for
+/// the expected push pattern; reduce only with operational evidence.
+pub const COEF_STAGING_SAFETY_MARGIN: u64 = 100;
+
+/// Evict orphan staging versions: entries where the `version` key is
+/// strictly less than `active_version - SAFETY_MARGIN`. `apply_coef_commit`
+/// already handles the `Stale` (version <= active) and `Incomplete`
+/// (staged < expected) branches — the orphan case here is versions that
+/// were `apply_coef_entry`'d but never received any commit at all.
+///
+/// `coef::lookup` is called only from `credit_estimator::estimate_request_credits`
+/// at request admission time; settle path does not re-read staging.
+/// `version >= active - SAFETY_MARGIN` is preserved to cover Go's in-flight
+/// push depth and any recently-active LeaseGuard's captured `coef_version`.
+///
+/// Returns the count of evicted entries. Called per tick by `ledger_sweep`.
+pub fn sweep_orphans() -> u64 {
+    let active_version = COEF_CACHE.load().version;
+    let threshold = active_version.saturating_sub(COEF_STAGING_SAFETY_MARGIN);
+    if threshold == 0 {
+        return 0;
+    }
+    let mut removed: u64 = 0;
+    COEF_STAGING.retain(|version, _| {
+        if *version < threshold {
+            removed += 1;
+            false
+        } else {
+            true
+        }
+    });
+    if removed > 0 {
+        metrics::counter!("gw_coef_staging_sweep_orphans_removed_total").increment(removed);
+    }
+    removed
+}
+
 /// Test-only mutex that serializes any test mutating the process-global
 /// `COEF_CACHE` / `COEF_STAGING`. Exposed `pub(crate)` so cross-module tests
 /// (e.g. `counter_handler::tests::coef_table_event_then_commit_swaps_snapshot`)
@@ -277,5 +318,59 @@ mod tests {
         apply_coef_entry(30, "m", Dim::Input, 99);
         apply_coef_commit(30, 1);
         assert_eq!(lookup(30, "m").unwrap().input, 99);
+    }
+
+    #[test]
+    fn sweep_orphans_evicts_versions_below_active_minus_margin() {
+        let _g = reset();
+        // active_version = 200
+        COEF_CACHE.store(Arc::new(CoefSnapshot {
+            version: 200,
+            by_model: HashMap::new(),
+        }));
+        // Seed staging with versions far behind active.
+        apply_coef_entry(50, "m", Dim::Input, 1);
+        apply_coef_entry(80, "m", Dim::Input, 1);
+        // And one inside the safety window.
+        apply_coef_entry(150, "m", Dim::Input, 1);
+
+        let removed = sweep_orphans();
+
+        // active(200) - SAFETY_MARGIN(100) = 100; versions < 100 evicted.
+        assert!(removed >= 2);
+        assert!(COEF_STAGING.get(&50).is_none());
+        assert!(COEF_STAGING.get(&80).is_none());
+        assert!(
+            COEF_STAGING.get(&150).is_some(),
+            "version within safety margin must be preserved"
+        );
+    }
+
+    #[test]
+    fn sweep_orphans_noop_when_active_below_margin() {
+        let _g = reset();
+        // active = 5, margin = 100; saturating_sub goes to 0 → no orphan
+        COEF_CACHE.store(Arc::new(CoefSnapshot {
+            version: 5,
+            by_model: HashMap::new(),
+        }));
+        apply_coef_entry(1, "m", Dim::Input, 1);
+        apply_coef_entry(3, "m", Dim::Input, 1);
+
+        let removed = sweep_orphans();
+
+        assert_eq!(removed, 0);
+        assert!(COEF_STAGING.get(&1).is_some());
+        assert!(COEF_STAGING.get(&3).is_some());
+    }
+
+    #[test]
+    fn sweep_orphans_noop_on_empty_staging() {
+        let _g = reset();
+        COEF_CACHE.store(Arc::new(CoefSnapshot {
+            version: 500,
+            by_model: HashMap::new(),
+        }));
+        assert_eq!(sweep_orphans(), 0);
     }
 }
