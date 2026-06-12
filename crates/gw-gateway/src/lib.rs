@@ -1058,6 +1058,12 @@ async fn bootstrap(
     let deduct_gc_handle = gw_ledger::DeductGc::spawn(shutdown_token.clone());
     shutdown.register(deduct_gc_handle);
 
+    // ledger_sweep: periodic sweep of LEASE_POOL (Unprotected/idle) +
+    // COEF_STAGING (orphan versions). Supervisor-wrapped; registered with
+    // the ShutdownCoordinator like the other ledger-side background tasks.
+    let ledger_sweep_handle = gw_ledger::ledger_sweep::spawn(shutdown_token.clone());
+    shutdown.register(ledger_sweep_handle);
+
     // 4d. InflightLedger + background tasks (W2-T6).
     // instance_id was resolved above (before Ledger::start) and is reused here.
     gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());

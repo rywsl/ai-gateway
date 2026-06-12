@@ -13,6 +13,7 @@ pub mod inflight;
 pub mod inflight_reaper;
 pub mod inflight_reconciler;
 pub mod instance_id;
+pub mod ledger_sweep;
 pub mod usage;
 
 pub use deduct_gc::DeductGc;
