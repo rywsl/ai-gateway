@@ -101,15 +101,7 @@ async fn drop_unlinks_shard_files() {
     }
 
     drop(file);
-    // Give the spawned cleanup task time to execute. The cleanup spawns
-    // `tokio::fs::remove_file` per shard; on a multi-thread runtime with no
-    // other load this completes within a few ms.
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        if paths.iter().all(|p| !p.exists()) {
-            break;
-        }
-    }
+    // Sync Drop completes the unlink before returning — no sleep needed.
     for p in &paths {
         assert!(
             !p.exists(),
@@ -137,13 +129,8 @@ async fn drop_tolerates_missing_shards() {
 
     drop(file);
 
-    // Drop must not panic; shard 1 must be cleaned; shard 0 stays gone.
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        if !paths[1].exists() {
-            break;
-        }
-    }
+    // Sync Drop completes both NotFound (shard 0, already removed) and
+    // successful unlink (shard 1) before returning.
     assert!(!paths[0].exists());
     assert!(!paths[1].exists(), "shard 1 should be cleaned by Drop");
 }
@@ -189,4 +176,33 @@ async fn drop_coexists_with_lru_enforcer() {
     // `drop_tolerates_missing_shards` above.
     // metrics counter check would require a metrics recorder hook; instead we
     // confirm the assertion that we reached this line without panic.
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_blocks_until_unlink_completes() {
+    let tmp = TempDir::new().unwrap();
+    let root = root(&tmp);
+    let file1 = root
+        .create("same_key", NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    file1.append(b"aaaa").await.unwrap();
+    file1.flush().await.unwrap();
+    let path = file1.shard_paths()[0].clone();
+    assert!(path.exists());
+
+    drop(file1);
+    // Sync Drop guarantee: by the time drop() returns, the file is gone.
+    assert!(!path.exists(), "Drop must unlink synchronously before returning");
+
+    // Now create a new SpillFile at the same path — it must start fresh.
+    let file2 = root
+        .create("same_key", NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    file2.append(b"bbbb").await.unwrap();
+    file2.flush().await.unwrap();
+    let data = file2.read_all().await.unwrap();
+    let concat: Vec<u8> = data.into_iter().flatten().collect();
+    assert_eq!(concat, b"bbbb", "second SpillFile must not contain first's bytes");
 }

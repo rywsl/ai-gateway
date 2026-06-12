@@ -130,10 +130,12 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
     // attempt-2 write must contain ONLY attempt-2 bytes — no contamination from
     // attempt-1 data. This is the data-isolation guarantee the audit identified.
     //
-    // Each attempt uses a distinct request_id ("req-iso-a1" / "req-iso-a2") so
-    // the attempt-1 SpillFile::Drop unlinking a stale shard path cannot race
-    // attempt-2's reads. The behavioral property under test is state isolation
-    // across `ArchiveState::default()` reassignment, not file-path reuse.
+    // Both attempts use the SAME request_id, reflecting the real production
+    // scenario: a response-side failover retry reuses the request's id, so
+    // attempt-2's spill file path collides with attempt-1's. The sync Drop
+    // contract guarantees attempt-1's shard is unlinked before attempt-2's
+    // `SpillRoot::create` opens its `O_CREAT | O_APPEND` handle, preventing
+    // on-disk byte contamination across retries.
     let tmp = TempDir::new().unwrap();
     let root = Arc::new(SpillRoot::new(SpillRootConfig {
         root_dir: tmp.path().to_path_buf(),
@@ -148,10 +150,10 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
     // Attempt 1: write a distinctive 0xAA pattern, forcing spill.
     let attempt_1 = vec![0xAAu8; 4096];
     upstream
-        .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso-a1", "upstream")
+        .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso", "upstream")
         .await;
     downstream
-        .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso-a1", "downstream")
+        .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso", "downstream")
         .await;
     assert!(matches!(upstream, ArchiveState::Spilled { .. }));
     assert!(matches!(downstream, ArchiveState::Spilled { .. }));
@@ -164,10 +166,10 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
     // Attempt 2: write a different distinctive 0xBB pattern.
     let attempt_2 = vec![0xBBu8; 4096];
     upstream
-        .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso-a2", "upstream")
+        .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso", "upstream")
         .await;
     downstream
-        .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso-a2", "downstream")
+        .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso", "downstream")
         .await;
 
     // Read back attempt-2 archives and assert NO 0xAA bytes leaked in.

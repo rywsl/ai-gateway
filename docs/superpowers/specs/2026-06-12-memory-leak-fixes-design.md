@@ -67,12 +67,13 @@ Execution order is **dependency bottom-up**: lower-DAG crates first, so callers 
 - `reset_response_attempt_state` does not reset `archive_upstream_response_body` / `archive_downstream_response_body` → archive data contamination across retries + file leak (`crates/gw-proxy/src/gateway.rs:131-145`)
 
 **Pattern**: RAII Drop + caller-side reset
-- `SpillFile::Drop` issues `tokio::spawn(tokio::fs::remove_file(...))` per shard (sync drop context cannot block).
-- `reset_response_attempt_state` adds `ctx.archive_*_response_body = ArchiveState::default()`; the default variant assignment drops the live `Spilled` variant, triggering the new `Drop`.
+- `SpillFile::Drop` runs `std::fs::remove_file` per shard synchronously. `unlink(2)` is a single metadata syscall (microseconds on local disk); blocking briefly in Drop is acceptable and eliminates a TOCTOU race that an async cleanup would have with same-`request_id` retries (the next attempt's `O_CREAT | O_APPEND` would otherwise open the prior attempt's file before a spawned unlink ran).
+- `reset_response_attempt_state` adds `ctx.archive_*_response_body = ArchiveState::default()`; the default variant assignment drops the live `Spilled` variant, triggering the new sync `Drop` immediately.
 
 **Subtle correctness**:
-- Spawned cleanup errors (file-not-found, permission) emit a metric and silently return; they never panic (would abort drop path).
-- Coexists with existing `spawn_quota_enforcer` LRU sweep — the new `Drop` is **timely** cleanup, the LRU is **fallback** cleanup. Both paths must be idempotent.
+- `Drop` is synchronous and runs `unlink(2)` directly. For local-disk spill (`/data/cnexus/spill` default), this is microseconds per shard. If admin configures network-backed storage with slow `unlink`, Drop time scales accordingly — acceptable trade-off; the alternative (async spawn) introduces a race that violates the spec's "no data contamination across retries" guarantee.
+- `NotFound` is silent (LRU may have already cleaned). Other errors emit `gw_spill_drop_cleanup_fail_total` + `tracing::warn!`.
+- Coexists with existing `spawn_quota_enforcer` LRU sweep — new `Drop` is **timely** cleanup, LRU is **fallback** cleanup. Both paths idempotent on `NotFound`.
 
 **Required tests** (TDD, fail before fix):
 1. Write 1 MB across multiple shards → drop → assert shard files removed.
