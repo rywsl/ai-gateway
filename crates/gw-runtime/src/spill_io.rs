@@ -211,8 +211,7 @@ impl Drop for SpillFile {
                     // Already cleaned (LRU or external).
                 }
                 Err(e) => {
-                    metrics::counter!("gw_spill_drop_cleanup_fail_total")
-                        .increment(1);
+                    metrics::counter!("gw_spill_drop_cleanup_fail_total").increment(1);
                     tracing::warn!(
                         target: "gw_runtime::spill_io",
                         path = %path.display(),

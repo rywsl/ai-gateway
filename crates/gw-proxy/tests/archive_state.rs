@@ -145,7 +145,13 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
         .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso", "upstream")
         .await;
     downstream
-        .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso", "downstream")
+        .append_chunk(
+            &attempt_1,
+            &caps(2048, 8192),
+            &root,
+            "req-iso",
+            "downstream",
+        )
         .await;
     assert!(matches!(upstream, ArchiveState::Spilled { .. }));
     assert!(matches!(downstream, ArchiveState::Spilled { .. }));
@@ -161,7 +167,13 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
         .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso", "upstream")
         .await;
     downstream
-        .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso", "downstream")
+        .append_chunk(
+            &attempt_2,
+            &caps(2048, 8192),
+            &root,
+            "req-iso",
+            "downstream",
+        )
         .await;
 
     // Read back attempt-2 archives and assert NO 0xAA bytes leaked in.

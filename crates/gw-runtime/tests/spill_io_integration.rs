@@ -97,7 +97,11 @@ async fn drop_unlinks_shard_files() {
 
     let paths: Vec<_> = file.shard_paths().to_vec();
     for p in &paths {
-        assert!(p.exists(), "shard {} should exist after writes", p.display());
+        assert!(
+            p.exists(),
+            "shard {} should exist after writes",
+            p.display()
+        );
     }
 
     drop(file);
@@ -193,7 +197,10 @@ async fn drop_blocks_until_unlink_completes() {
 
     drop(file1);
     // Sync Drop guarantee: by the time drop() returns, the file is gone.
-    assert!(!path.exists(), "Drop must unlink synchronously before returning");
+    assert!(
+        !path.exists(),
+        "Drop must unlink synchronously before returning"
+    );
 
     // Now create a new SpillFile at the same path — it must start fresh.
     let file2 = root
@@ -204,5 +211,8 @@ async fn drop_blocks_until_unlink_completes() {
     file2.flush().await.unwrap();
     let data = file2.read_all().await.unwrap();
     let concat: Vec<u8> = data.into_iter().flatten().collect();
-    assert_eq!(concat, b"bbbb", "second SpillFile must not contain first's bytes");
+    assert_eq!(
+        concat, b"bbbb",
+        "second SpillFile must not contain first's bytes"
+    );
 }
