@@ -102,9 +102,9 @@ pub fn check_model_against_permissions(model: &str, perms: &[ModelPermission]) -
     allow
 }
 
-use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::time::Instant;
+use moka::sync::Cache;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 /// Per-call regex match budget. Matches over `BUDGET_MS` are recorded as
 /// timeouts via [`RedosTracker::record_timeout`]; once an ApiKey accumulates
@@ -115,51 +115,86 @@ pub const BUDGET_MS: u128 = 100;
 /// Number of regex-match timeouts per ApiKey before that key is auto-disabled.
 const TIMEOUT_THRESHOLD: u32 = 10;
 
-/// Per-ApiKey timeout counter + disable flag. Cheap interior mutability
-/// (parking_lot::Mutex over a small HashMap) so production code can hold a
-/// shared `&'static RedosTracker` (or an Arc) on the hot path.
-#[derive(Default)]
+/// Default cache capacity (api-key cardinality). 100_000 covers typical
+/// production loads; an LRU-evicted attacker key only loses its "disabled"
+/// state after sustained idle exceeding TTI, which is acceptable for a
+/// defense-in-depth tracker.
+const DEFAULT_REDOS_CAPACITY: usize = 100_000;
+
+/// Idle TTI for tracker entries. A disabled key that has not been seen for
+/// this long is reset on re-entry (re-tested against the threshold). 1h is
+/// long enough that legitimate keys are not punished; short enough that an
+/// attacker pattern is not permanent.
+const DEFAULT_REDOS_TTI: Duration = Duration::from_secs(3600);
+
+/// Per-ApiKey timeout counter + disable flag. Backed by a bounded `moka::sync::Cache`
+/// so the entry set is bounded by capacity (LRU) and idle TTI.
 pub struct RedosTracker {
-    inner: Mutex<HashMap<String, TrackerEntry>>,
+    inner: Cache<String, Arc<TrackerEntry>>,
 }
 
 #[derive(Default)]
 struct TrackerEntry {
-    timeout_count: u32,
-    disabled: bool,
+    timeout_count: AtomicU32,
+    disabled: AtomicBool,
+}
+
+impl Default for RedosTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RedosTracker {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_capacity(DEFAULT_REDOS_CAPACITY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Cache::builder()
+                .max_capacity(capacity as u64)
+                .time_to_idle(DEFAULT_REDOS_TTI)
+                .build(),
+        }
     }
 
     pub fn timeout_count(&self, ak: &str) -> u32 {
         self.inner
-            .lock()
-            .get(ak)
-            .map(|e| e.timeout_count)
+            .get(&ak.to_string())
+            .map(|e| e.timeout_count.load(Ordering::Acquire))
             .unwrap_or(0)
     }
 
     pub fn is_disabled(&self, ak: &str) -> bool {
         self.inner
-            .lock()
-            .get(ak)
-            .map(|e| e.disabled)
+            .get(&ak.to_string())
+            .map(|e| e.disabled.load(Ordering::Acquire))
             .unwrap_or(false)
     }
 
     pub fn record_timeout(&self, ak: &str) {
-        let mut m = self.inner.lock();
-        let e = m.entry(ak.to_string()).or_default();
-        e.timeout_count += 1;
-        if e.timeout_count >= TIMEOUT_THRESHOLD {
-            e.disabled = true;
+        let entry = self
+            .inner
+            .get_with(ak.to_string(), || Arc::new(TrackerEntry::default()));
+        let new_count = entry.timeout_count.fetch_add(1, Ordering::AcqRel) + 1;
+        if new_count >= TIMEOUT_THRESHOLD {
+            entry.disabled.store(true, Ordering::Release);
         }
         metrics::counter!("gw_redos_timeout_total",
             "api_key_id" => ak.to_string())
         .increment(1);
+    }
+
+    #[cfg(test)]
+    pub fn sync_for_test(&self) {
+        self.inner.run_pending_tasks();
+    }
+
+    #[cfg(test)]
+    pub fn len_for_test(&self) -> usize {
+        self.inner.run_pending_tasks();
+        self.inner.entry_count() as usize
     }
 }
 
@@ -195,4 +230,23 @@ pub fn check_with_budget(
         tracker.record_timeout(api_key_id);
     }
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redos_tracker_evicts_via_lru_at_capacity() {
+        let tracker = RedosTracker::with_capacity(4);
+        // Push past capacity — earliest entries should LRU-evict.
+        for i in 0..10 {
+            let key = format!("ak-{i}");
+            tracker.record_timeout(&key);
+        }
+        // Confirm at most `capacity` entries are retained.
+        // Moka may sync lazily; force pending tasks to settle before assertion.
+        tracker.sync_for_test();
+        assert!(tracker.len_for_test() <= 4);
+    }
 }

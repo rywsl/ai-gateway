@@ -1,4 +1,3 @@
-use dashmap::DashMap;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use gw_core::ids::KeyId;
 use gw_core::ratelimit::RateLimitKind;
@@ -11,22 +10,62 @@ fn set_adaptive_state_metrics(state: &KeyAdaptiveState) {
     metrics::gauge!("gw_adaptive_rpm_learned_value").set(state.learned_rpm.unwrap_or(0) as f64);
 }
 
+const DEFAULT_ADAPTIVE_CAPACITY: u64 = 10_000;
+const DEFAULT_ADAPTIVE_TTI: std::time::Duration = std::time::Duration::from_secs(3600);
+
 pub struct AdaptiveRpmManager {
-    pub state: DashMap<KeyId, Arc<KeyAdaptiveState>>,
+    pub state: moka::sync::Cache<KeyId, Arc<KeyAdaptiveState>>,
     /// Per-vendor-key GCRA limiter enforcing the learned ceiling. Cached and
     /// rebuilt only when the enforced limit changes (audit 2026-05-30 §1.8).
     /// The `u32` is the per-minute limit the cached limiter was built for.
-    limiters: DashMap<KeyId, (u32, Arc<DefaultDirectRateLimiter>)>,
+    limiters: moka::sync::Cache<KeyId, (u32, Arc<DefaultDirectRateLimiter>)>,
     pub cfg: AdaptiveCfg,
 }
 
 impl AdaptiveRpmManager {
     pub fn new(cfg: AdaptiveCfg) -> Self {
+        Self::with_capacity_and_tti(cfg, DEFAULT_ADAPTIVE_CAPACITY, DEFAULT_ADAPTIVE_TTI)
+    }
+
+    pub fn with_capacity_and_tti(
+        cfg: AdaptiveCfg,
+        capacity: u64,
+        tti: std::time::Duration,
+    ) -> Self {
         Self {
-            state: DashMap::new(),
-            limiters: DashMap::new(),
+            state: moka::sync::Cache::builder()
+                .max_capacity(capacity)
+                .time_to_idle(tti)
+                .build(),
+            limiters: moka::sync::Cache::builder()
+                .max_capacity(capacity)
+                .time_to_idle(tti)
+                .build(),
             cfg,
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_capacity_for_test(capacity: u64) -> Self {
+        Self::with_capacity_and_tti(AdaptiveCfg::default(), capacity, DEFAULT_ADAPTIVE_TTI)
+    }
+
+    #[cfg(test)]
+    pub fn sync_for_test(&self) {
+        self.state.run_pending_tasks();
+        self.limiters.run_pending_tasks();
+    }
+
+    #[cfg(test)]
+    pub fn state_len_for_test(&self) -> usize {
+        self.state.run_pending_tasks();
+        self.state.entry_count() as usize
+    }
+
+    #[cfg(test)]
+    pub fn limiters_len_for_test(&self) -> usize {
+        self.limiters.run_pending_tasks();
+        self.limiters.entry_count() as usize
     }
 
     /// Called when a 429 response is received from upstream vendor.
@@ -79,23 +118,25 @@ impl AdaptiveRpmManager {
             self.cfg.min_no_header_observations
         };
 
-        self.state
-            .entry(key_id.clone())
-            .and_modify(|state| {
-                let state = Arc::make_mut(state);
+        let new_state = match self.state.get(key_id) {
+            Some(existing) => {
+                let mut state = Arc::unwrap_or_clone(existing);
                 state.last_429_at_ms = now;
                 state.record_observation(observed_limit);
                 state.learn_if_ready(observed_limit, required_observations, now);
-                set_adaptive_state_metrics(state);
-            })
-            .or_insert_with(|| {
+                set_adaptive_state_metrics(&state);
+                Arc::new(state)
+            }
+            None => {
                 let mut state = KeyAdaptiveState::new(configured_rpm);
                 state.last_429_at_ms = now;
                 state.record_observation(observed_limit);
                 state.learn_if_ready(observed_limit, required_observations, now);
                 set_adaptive_state_metrics(&state);
                 Arc::new(state)
-            });
+            }
+        };
+        self.state.insert(key_id.clone(), new_state);
     }
 
     /// Returns the enforced RPM ceiling if confidence is above threshold.
@@ -129,26 +170,16 @@ impl AdaptiveRpmManager {
             // Nothing learned with enough confidence — admit unconditionally.
             return true;
         };
-        // Fetch-or-build the cached limiter under a SINGLE DashMap `entry` lock,
-        // rebuilding in place if the enforced limit moved. Audit 2026-05-30: the
-        // prior insert-then-separate-get split the read-modify-write across two
-        // non-atomic ops, so a concurrent `evict(key_id)` between them made the
-        // re-`get()` return None and panic the worker (TOCTOU at the former
-        // `expect("limiter inserted above")`). Holding the entry lock across the
-        // rebuild decision closes that gap. The RefMut is dropped at the end of
-        // this block so the shard lock is not held across `limiter.check()`.
-        let limiter = {
-            let mut entry = self.limiters.entry(key_id.clone()).or_insert_with(|| {
+        // Check if the cached limiter matches the current limit; rebuild if not.
+        let limiter = match self.limiters.get(key_id) {
+            Some((cached_limit, lim)) if cached_limit == limit => lim,
+            _ => {
                 // `limit` is clamped >= 1 by should_enforce, so NonZeroU32 is safe.
                 let quota = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
-                (limit, Arc::new(RateLimiter::direct(quota)))
-            });
-            if entry.0 != limit {
-                // Enforced limit moved — rebuild in place under the same lock.
-                let quota = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
-                *entry = (limit, Arc::new(RateLimiter::direct(quota)));
+                let lim = Arc::new(RateLimiter::direct(quota));
+                self.limiters.insert(key_id.clone(), (limit, lim.clone()));
+                lim
             }
-            entry.1.clone()
         };
         match limiter.check() {
             Ok(()) => true,
@@ -164,48 +195,60 @@ impl AdaptiveRpmManager {
         let now = now_ms();
         let probe_after_ms = self.cfg.probe_after_min.saturating_mul(60_000);
 
-        for mut entry in self.state.iter_mut() {
-            let state = Arc::make_mut(entry.value_mut());
-            let elapsed_ms = now.saturating_sub(state.confidence.last_decay_at_ms);
-            if elapsed_ms < 60_000 {
-                continue;
-            }
-
-            let elapsed_min = elapsed_ms as f32 / 60_000.0;
-            let new_confidence = (state.confidence.value
-                - (self.cfg.confidence_decay_per_min * elapsed_min))
-                .max(0.0);
-            let was_enforced = state.confidence.value >= self.cfg.enforcement_threshold
-                && state.learned_rpm.is_some();
-            state.confidence = Confidence::new(new_confidence, now);
-
-            if new_confidence < self.cfg.enforcement_threshold
-                && now.saturating_sub(state.last_429_at_ms) >= probe_after_ms
-            {
-                if let Some(learned_rpm) = state.learned_rpm {
-                    state.learned_rpm = Some(
-                        learned_rpm
-                            .saturating_add(self.cfg.probe_increment)
-                            .min(self.cfg.max_rpm),
-                    );
-                    metrics::counter!("gw_adaptive_rpm_probe_total").increment(1);
+        // Collect keys that need updating, then re-insert modified states.
+        let updates: Vec<(KeyId, Arc<KeyAdaptiveState>)> = self
+            .state
+            .iter()
+            .filter_map(|(key, state)| {
+                let elapsed_ms = now.saturating_sub(state.confidence.last_decay_at_ms);
+                if elapsed_ms < 60_000 {
+                    return None;
                 }
-            }
 
-            let is_enforced = state.confidence.value >= self.cfg.enforcement_threshold
-                && state.learned_rpm.is_some();
-            if was_enforced && !is_enforced {
-                metrics::counter!("gw_adaptive_rpm_released_total").increment(1);
-            }
-            set_adaptive_state_metrics(state);
+                let elapsed_min = elapsed_ms as f32 / 60_000.0;
+                let new_confidence = (state.confidence.value
+                    - (self.cfg.confidence_decay_per_min * elapsed_min))
+                    .max(0.0);
+                let was_enforced = state.confidence.value >= self.cfg.enforcement_threshold
+                    && state.learned_rpm.is_some();
+
+                let mut new_state = Arc::unwrap_or_clone(Arc::clone(&state));
+                new_state.confidence = Confidence::new(new_confidence, now);
+
+                if new_confidence < self.cfg.enforcement_threshold
+                    && now.saturating_sub(new_state.last_429_at_ms) >= probe_after_ms
+                {
+                    if let Some(learned_rpm) = new_state.learned_rpm {
+                        new_state.learned_rpm = Some(
+                            learned_rpm
+                                .saturating_add(self.cfg.probe_increment)
+                                .min(self.cfg.max_rpm),
+                        );
+                        metrics::counter!("gw_adaptive_rpm_probe_total").increment(1);
+                    }
+                }
+
+                let is_enforced = new_state.confidence.value >= self.cfg.enforcement_threshold
+                    && new_state.learned_rpm.is_some();
+                if was_enforced && !is_enforced {
+                    metrics::counter!("gw_adaptive_rpm_released_total").increment(1);
+                }
+                set_adaptive_state_metrics(&new_state);
+
+                Some(((*key).clone(), Arc::new(new_state)))
+            })
+            .collect();
+
+        for (key, state) in updates {
+            self.state.insert(key, state);
         }
     }
 
     pub fn evict(&self, key_id: &KeyId) {
-        self.state.remove(key_id);
+        self.state.invalidate(key_id);
         // Also drop the cached limiter so an evicted key doesn't leave a stale
         // RateLimiter in the cache forever (audit 2026-05-30 §1.8 mem-leak fix).
-        self.limiters.remove(key_id);
+        self.limiters.invalidate(key_id);
     }
 }
 
@@ -309,4 +352,23 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_state_evicts_via_lru_at_capacity() {
+        let manager = AdaptiveRpmManager::with_capacity_for_test(8);
+        // Insert past capacity.
+        for i in 0..20 {
+            let key = KeyId::from(format!("k-{i}"));
+            manager.observe_429_with_kind(&key, RateLimitKind::Rpm, 100, None, 50, None);
+        }
+        manager.sync_for_test();
+        // Confirm bounded.
+        assert!(manager.state_len_for_test() <= 8);
+        assert!(manager.limiters_len_for_test() <= 8);
+    }
 }

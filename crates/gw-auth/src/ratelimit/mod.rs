@@ -17,6 +17,7 @@ use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::*;
 use gw_core::permissions::MergedPermissions;
+use moka::sync::Cache;
 use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,11 +25,30 @@ use std::sync::Arc;
 
 pub mod adaptive;
 
+const DEFAULT_RATE_LIMIT_TTI: std::time::Duration = std::time::Duration::from_secs(3600);
+const DEFAULT_RATE_LIMIT_CAPACITY_USERS: u64 = 100_000;
+const DEFAULT_RATE_LIMIT_CAPACITY_KEYS: u64 = 10_000;
+
 pub struct RateLimitGuard {
-    pub per_user: DashMap<UserId, Arc<DefaultDirectRateLimiter>>,
-    pub per_user_tpm: DashMap<UserId, Arc<DefaultDirectRateLimiter>>,
-    pub per_user_streams: DashMap<UserId, Arc<AtomicUsize>>,
-    pub per_key: DashMap<KeyId, (u32, Arc<DefaultDirectRateLimiter>)>,
+    pub per_user: Cache<UserId, Arc<DefaultDirectRateLimiter>>,
+    pub per_user_tpm: Cache<UserId, Arc<DefaultDirectRateLimiter>>,
+    /// Live per-user concurrent-stream counter. NOT a Moka cache: TTI eviction
+    /// while StreamSlots are alive would hand the next caller a fresh counter
+    /// starting at 0, bypassing the concurrency cap. Bounded via RAII —
+    /// `StreamSlot::Drop` removes the entry when the count returns to 0.
+    /// Wrapped in `Arc` so `StreamSlot` can hold a back-reference for cleanup.
+    pub per_user_streams: Arc<DashMap<UserId, Arc<AtomicUsize>>>,
+    /// Per-(vendor key, enforced rpm) GCRA limiter. Tuple-keyed so that a limit
+    /// change creates a fresh `(key, new_limit)` entry atomically via
+    /// `get_with`; the old `(key, old_limit)` entry ages out via TTI. This
+    /// removes the rebuild-race window of the prior `Cache<KeyId, (u32, _)>`
+    /// shape, where two concurrent callers could each build a new limiter on
+    /// limit change.
+    pub per_key: Cache<(KeyId, u32), Arc<DefaultDirectRateLimiter>>,
+    /// Admin-set per-vendor-key RPM override. NOT a Moka cache: TTI eviction
+    /// would silently un-override keys after 1h idle. Bounded by the
+    /// configured key count (small) and persists until explicit
+    /// `reset_key_rpm`.
     pub per_key_overrides: DashMap<KeyId, u32>,
     pub total_streams: Arc<AtomicUsize>,
 }
@@ -41,26 +61,47 @@ impl Default for RateLimitGuard {
 
 impl RateLimitGuard {
     pub fn new() -> Self {
+        Self::with_tti(DEFAULT_RATE_LIMIT_TTI)
+    }
+
+    pub fn with_tti(tti: std::time::Duration) -> Self {
         Self {
-            per_user: DashMap::new(),
-            per_user_tpm: DashMap::new(),
-            per_user_streams: DashMap::new(),
-            per_key: DashMap::new(),
+            per_user: Cache::builder()
+                .max_capacity(DEFAULT_RATE_LIMIT_CAPACITY_USERS)
+                .time_to_idle(tti)
+                .build(),
+            per_user_tpm: Cache::builder()
+                .max_capacity(DEFAULT_RATE_LIMIT_CAPACITY_USERS)
+                .time_to_idle(tti)
+                .build(),
+            per_user_streams: Arc::new(DashMap::new()),
+            per_key: Cache::builder()
+                .max_capacity(DEFAULT_RATE_LIMIT_CAPACITY_KEYS)
+                .time_to_idle(tti)
+                .build(),
             per_key_overrides: DashMap::new(),
             total_streams: Arc::new(AtomicUsize::new(0)),
         }
     }
 
+    #[cfg(test)]
+    pub fn with_tti_for_test(tti: std::time::Duration) -> Self {
+        Self::with_tti(tti)
+    }
+
+    #[cfg(test)]
+    pub fn sync_for_test(&self) {
+        self.per_user.run_pending_tasks();
+        self.per_user_tpm.run_pending_tasks();
+        self.per_key.run_pending_tasks();
+    }
+
     pub fn check(&self, perm: &MergedPermissions) -> Result<RateLimitTicket, ErrorIR<'static>> {
         if perm.rpm_limit > 0 {
-            let lim = self
-                .per_user
-                .entry(perm.effective_user_id.clone())
-                .or_insert_with(|| {
-                    let q = Quota::per_minute(NonZeroU32::new(perm.rpm_limit).unwrap());
-                    Arc::new(RateLimiter::direct(q))
-                })
-                .clone();
+            let lim = self.per_user.get_with(perm.effective_user_id.clone(), || {
+                let q = Quota::per_minute(NonZeroU32::new(perm.rpm_limit).unwrap());
+                Arc::new(RateLimiter::direct(q))
+            });
             if lim.check().is_err() {
                 return Err(rpm_err());
             }
@@ -82,17 +123,13 @@ impl RateLimitGuard {
             return Ok(RateLimitTicket);
         }
 
-        let limiter = {
-            let mut entry = self.per_key.entry(key_id.clone()).or_insert_with(|| {
-                let q = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
-                (limit, Arc::new(RateLimiter::direct(q)))
-            });
-            if entry.0 != limit {
-                let q = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
-                *entry = (limit, Arc::new(RateLimiter::direct(q)));
-            }
-            entry.1.clone()
-        };
+        // Tuple-keyed atomic fetch-or-build. When the limit changes, a new
+        // (key_id, new_limit) entry is created exactly once via get_with;
+        // the prior (key_id, old_limit) entry ages out via TTI.
+        let limiter = self.per_key.get_with((key_id.clone(), limit), || {
+            let q = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
+            Arc::new(RateLimiter::direct(q))
+        });
 
         if limiter.check().is_err() {
             return Err(key_rpm_err());
@@ -102,12 +139,14 @@ impl RateLimitGuard {
 
     pub fn override_key_rpm(&self, key_id: &KeyId, rpm: u32) {
         self.per_key_overrides.insert(key_id.clone(), rpm);
-        self.per_key.remove(key_id);
+        // No need to invalidate per_key — the next check_key will get_with on
+        // the new (key_id, rpm) tuple, building a fresh limiter atomically.
+        // The stale (key_id, old_rpm) entry ages out via TTI.
     }
 
     pub fn reset_key_rpm(&self, key_id: &KeyId) {
         self.per_key_overrides.remove(key_id);
-        self.per_key.remove(key_id);
+        // Stale per_key tuple entries age out via TTI.
     }
 
     pub fn check_stream_slot(
@@ -115,14 +154,31 @@ impl RateLimitGuard {
         uid: &UserId,
         max: u32,
     ) -> Result<StreamSlot, ErrorIR<'static>> {
-        let counter = self
-            .per_user_streams
-            .entry(uid.clone())
-            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
-            .clone();
-        let n = counter.fetch_add(1, Ordering::AcqRel);
+        // Increment the counter while still holding the shard lock so a
+        // concurrent `StreamSlot::Drop` whose `remove_if` predicate re-checks
+        // under the SAME shard lock cannot observe 0 between
+        // `or_insert_with`'s return and our `fetch_add`. Without this
+        // serialisation a TOCTOU race could orphan the Arc we hold and leak
+        // an uncounted in-flight slot, bypassing the cap indefinitely.
+        let counter = {
+            let entry = self
+                .per_user_streams
+                .entry(uid.clone())
+                .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
+            entry.fetch_add(1, Ordering::AcqRel);
+            entry.clone()
+        };
+        // `n` is the pre-increment count, matching the prior `fetch_add`
+        // return-value semantics consumed by the cap check below.
+        let n = counter.load(Ordering::Acquire) - 1;
         if max > 0 && n + 1 > max as usize {
-            counter.fetch_sub(1, Ordering::AcqRel);
+            let prev = counter.fetch_sub(1, Ordering::AcqRel);
+            // If count is back to 0, try to remove the entry to keep the map
+            // bounded by live concurrency only.
+            if prev == 1 {
+                self.per_user_streams
+                    .remove_if(uid, |_, c| c.load(Ordering::Acquire) == 0);
+            }
             return Err(concurrent_err());
         }
         self.total_streams.fetch_add(1, Ordering::Relaxed);
@@ -130,6 +186,7 @@ impl RateLimitGuard {
             uid: uid.clone(),
             counter,
             total: Arc::clone(&self.total_streams),
+            per_user_streams: Arc::clone(&self.per_user_streams),
         })
     }
 
@@ -151,14 +208,10 @@ impl RateLimitGuard {
         let Some(tokens_nz) = NonZeroU32::new(tokens) else {
             return Ok(());
         };
-        let lim = self
-            .per_user_tpm
-            .entry(uid.clone())
-            .or_insert_with(|| {
-                let q = Quota::per_minute(NonZeroU32::new(perm.tpm_limit).unwrap());
-                Arc::new(RateLimiter::direct(q))
-            })
-            .clone();
+        let lim = self.per_user_tpm.get_with(uid.clone(), || {
+            let q = Quota::per_minute(NonZeroU32::new(perm.tpm_limit).unwrap());
+            Arc::new(RateLimiter::direct(q))
+        });
         if lim.check_n(tokens_nz).is_err() {
             return Err(tpm_err());
         }
@@ -173,12 +226,23 @@ pub struct StreamSlot {
     pub uid: UserId,
     counter: Arc<AtomicUsize>,
     total: Arc<AtomicUsize>,
+    /// Back-reference to the parent `RateLimitGuard::per_user_streams` so the
+    /// drop can RAII-remove the entry when concurrency returns to 0.
+    per_user_streams: Arc<DashMap<UserId, Arc<AtomicUsize>>>,
 }
 
 impl Drop for StreamSlot {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
+        let prev = self.counter.fetch_sub(1, Ordering::AcqRel);
         self.total.fetch_sub(1, Ordering::Relaxed);
+        // If the count just returned to 0, try to remove the entry to keep
+        // the map bounded by live concurrency only. `remove_if` re-checks the
+        // count under the shard lock so a concurrent `check_stream_slot` that
+        // raced past us doesn't lose its entry.
+        if prev == 1 {
+            self.per_user_streams
+                .remove_if(&self.uid, |_, c| c.load(Ordering::Acquire) == 0);
+        }
     }
 }
 
@@ -235,5 +299,62 @@ fn tpm_err() -> ErrorIR<'static> {
         upstream_raw: None,
         request_id: "",
         retry_after_secs: Some(60),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gw_core::permissions::MarkupChainSnapshot;
+    use std::collections::HashSet;
+
+    /// Build a `MergedPermissions` with the given `uid` and `rpm_limit`.
+    fn test_merged_with_rpm(uid: UserId, rpm: u32) -> MergedPermissions {
+        MergedPermissions {
+            user_id: uid.clone(),
+            effective_user_id: uid,
+            client_ip: "127.0.0.1".parse().unwrap(),
+            allowed_models: HashSet::new(),
+            allowed_channels: HashSet::new(),
+            allowed_groups: HashSet::new(),
+            forced_model_group: None,
+            rpm_limit: rpm,
+            tpm_limit: 0,
+            max_concurrent_streams: 0,
+            markup_chain: MarkupChainSnapshot::identity(),
+            model_whitelist_regex: None,
+        }
+    }
+
+    #[test]
+    fn rpm_user_limiter_resets_after_tti_eviction() {
+        // Build a guard with a TINY TTI so the test runs fast without sleeps.
+        // Production TTI is 1h; test uses 50ms via the `with_tti_for_test` constructor.
+        let guard = RateLimitGuard::with_tti_for_test(std::time::Duration::from_millis(50));
+        let uid = UserId::from("u-rpm-tti");
+
+        // Exhaust RPM.
+        let mut allowed = 0u32;
+        for _ in 0..200 {
+            let merged = test_merged_with_rpm(uid.clone(), 5);
+            if guard.check(&merged).is_ok() {
+                allowed += 1;
+            }
+        }
+        assert!(
+            allowed > 0 && allowed <= 60,
+            "should exhaust at small RPM, got {allowed}"
+        );
+
+        // Wait past TTI + small buffer.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        guard.sync_for_test();
+
+        // The post-TTI request must see a FRESH limiter (deliberate semantic).
+        let merged = test_merged_with_rpm(uid.clone(), 5);
+        assert!(
+            guard.check(&merged).is_ok(),
+            "after TTI eviction, a returning user must get a fresh window"
+        );
     }
 }

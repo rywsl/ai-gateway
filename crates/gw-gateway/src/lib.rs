@@ -864,6 +864,18 @@ async fn bootstrap(
         flag
     };
 
+    let auth_failure_ip_limiter = Arc::new(gw_auth::auth_ip_ratelimit::AuthFailureIpLimiter::new(
+        5, 100_000, true,
+    ));
+    {
+        let handle = spawn_auth_failure_ip_sweep(
+            auth_failure_ip_limiter.clone(),
+            300, // 5 min sweep interval; TODO: expose as config knob
+            shutdown_token.clone(),
+        );
+        shutdown.register(handle);
+    }
+
     {
         let probe_cfg = gw_health::QuotaProbeCfg {
             enabled: cfg.health.quota_probe.enabled,
@@ -1664,13 +1676,12 @@ pub fn spawn_decay_loop(
     })
 }
 
-#[allow(dead_code)]
-fn spawn_ip_ratelimit_sweep(
-    guard: Arc<IpRateLimitGuard>,
+fn spawn_auth_failure_ip_sweep(
+    guard: Arc<gw_auth::auth_ip_ratelimit::AuthFailureIpLimiter>,
     sweep_interval_secs: u64,
     token: gw_runtime::ShutdownToken,
 ) -> tokio::task::JoinHandle<()> {
-    Supervisor::new("ip_ratelimit_sweep", RestartPolicy::default(), token).spawn(move |tok| {
+    Supervisor::new("auth_failure_ip_sweep", RestartPolicy::default(), token).spawn(move |tok| {
         let guard = guard.clone();
         let mut interval = tokio::time::interval(Duration::from_secs(sweep_interval_secs));
         async move {
@@ -1683,8 +1694,7 @@ fn spawn_ip_ratelimit_sweep(
                             tracing::info!(
                                 target: "gw_gateway",
                                 removed,
-                                active = guard.len(),
-                                "ip ratelimit sweep evicted idle entries"
+                                "auth failure IP limiter sweep evicted idle entries"
                             );
                         }
                     }
@@ -1692,6 +1702,27 @@ fn spawn_ip_ratelimit_sweep(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod ip_sweep_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auth_failure_ip_sweep_respects_shutdown_token() {
+        let coord = gw_runtime::ShutdownCoordinator::default();
+        let token = coord.token();
+        let guard = Arc::new(gw_auth::auth_ip_ratelimit::AuthFailureIpLimiter::new(
+            5, 1000, true,
+        ));
+        let handle = spawn_auth_failure_ip_sweep(guard, 60, token);
+        coord.token().cancel();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        assert!(
+            exit.is_ok(),
+            "auth failure IP sweep should exit within 5s of shutdown"
+        );
+    }
 }
 
 #[cfg(test)]
