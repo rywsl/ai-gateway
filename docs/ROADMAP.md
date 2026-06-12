@@ -100,6 +100,11 @@ No open roadmap items after W4 full IR task request/response persistence.
 - **Landed:** `DeductGc` is Supervisor-wrapped (panic-tolerant with exponential-backoff restart) and registered with `ShutdownCoordinator`; defensive `sweep_user_circuit()` evicts expired `Open` entries from `USER_CIRCUIT` per GC tick.
 - **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 2.
 
+### Ledger sweeps + BillingBacklog observability — `closed in memory-leak-fixes`
+- **Landed:** New `ledger_sweep` Supervisor-wrapped task ticks every 60s: `lease::sweep_unprotected` evicts `LEASE_POOL` entries whose `mode == Unprotected` and `last_seen_at_ms` exceeds 30 min; `coef::sweep_orphans` evicts staging versions strictly below `active_version - 100`. `BillingBacklog::push` now also emits `gw_billing_backlog_high_watermark_count` gauge + `gw_billing_backlog_over_threshold_total` counter (upward-crossing).
+- **Deferred:** `LeaseGuard::Drop` credit refund on panic — Go's event-driven `protected_lease` push bounds the false-rejection window; add only on operational evidence. See `docs/architecture.md` §Deliberate behaviours.
+- **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 3.
+
 ### Out-of-scope (deliberate) — still deferred
 - `LatencyTracker::Mutex<VecDeque>` lock contention — flagged as a hotspot, but not in resilience-fixes ROI window. `capability-gap`.
 - `EntityStore` per-(user, api-key) merged-permission cache — CPU win, orthogonal to resilience. `capability-gap`.
