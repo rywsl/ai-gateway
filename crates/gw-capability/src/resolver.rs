@@ -2,18 +2,46 @@
 //! retry upgrade) into a `RequiredCapabilities` set with origin provenance.
 //!
 //! Header strings parse via a fixed name → Capability table. Unknown header
-//! strings collapse to `Capability::Tagged(&'static str)` via a leak — this is
-//! deliberately bounded (callers must validate header allowlist before reaching
-//! us in production paths). For unit-test purposes this is fine.
+//! strings collapse to `Capability::Tagged(Arc<str>)` via a bounded intern
+//! table — distinct strings share a single `Arc`, and the table capacity
+//! (10_000) bounds the worst-case memory for unknown capability strings.
 
 use crate::types::{Capability, CapabilityOrigin, MatchMode, RequiredCapabilities};
 use async_trait::async_trait;
 use gw_core::error::ErrorClass;
 use gw_core::protocol::{ApiShape, ProtocolKind};
+use moka::sync::Cache;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::LazyLock;
+
+/// Bounded intern table for `Capability::Tagged` strings. Maps a tag
+/// string to a shared `Arc<str>` so distinct requests with the same
+/// tag share storage. Capacity-bounded (10_000); does NOT use TTI
+/// because the resulting `Arc<str>` is embedded in `Capability::Tagged`
+/// values held by callers — TTI eviction would not free those, only
+/// orphan the intern slot. Max-capacity LRU eviction is acceptable:
+/// in steady state an evicted tag is re-interned to a new (but
+/// semantically equivalent) `Arc`. Equality / hash on `Capability`
+/// uses `Arc<str>`'s `str` comparison, so re-interned Arcs match.
+const CAPABILITY_INTERN_CAPACITY: u64 = 10_000;
+
+static CAPABILITY_INTERN: LazyLock<Cache<Box<str>, Arc<str>>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(CAPABILITY_INTERN_CAPACITY)
+        .build()
+});
+
+/// Intern a tag string. Returns a shared `Arc<str>` if the cache had
+/// it; otherwise creates a fresh `Arc<str>` and stores it. Even when
+/// evicted (capacity overflow) and re-interned, two `Capability::Tagged`
+/// values with the same str content compare equal via `Arc<str>` deref.
+fn intern_tag(s: &str) -> Arc<str> {
+    let key: Box<str> = s.into();
+    CAPABILITY_INTERN.get_with(key, || Arc::<str>::from(s))
+}
 
 pub struct CapabilityResolver {
     backend: Arc<dyn ResolveBackend>,
@@ -60,7 +88,7 @@ impl CapabilityResolver {
         }
         if let Some(hint) = req.retry_upgrade {
             for c in &hint.upgrade_path {
-                r.add(*c, CapabilityOrigin::RetryUpgrade);
+                r.add(c.clone(), CapabilityOrigin::RetryUpgrade);
             }
         }
         r.mode = if self.backend.match_mode_exclusive(req.api_key_id).await {
@@ -116,7 +144,7 @@ pub(crate) fn parse_capability(s: &str) -> Capability {
         "streaming_only" => Capability::StreamingOnly,
         "openai_responses_shape" => Capability::OpenAiResponsesShape,
         "vertex_ai_service_account" => Capability::VertexAiServiceAccount,
-        other => Capability::Tagged(Box::leak(other.to_string().into_boxed_str())),
+        other => Capability::Tagged(intern_tag(other)),
     }
 }
 

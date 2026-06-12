@@ -160,7 +160,7 @@ async fn store_with(keys: Vec<VendorKey>) -> Arc<EntityStore> {
 fn req_caps(set: &[Capability], mode: MatchMode) -> gw_capability::types::RequiredCapabilities {
     let mut r = gw_capability::types::RequiredCapabilities::default();
     for c in set {
-        r.add(*c, gw_capability::types::CapabilityOrigin::Model);
+        r.add(c.clone(), gw_capability::types::CapabilityOrigin::Model);
     }
     r.mode = mode;
     r

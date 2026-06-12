@@ -31,7 +31,7 @@ impl CapabilityFilter {
         let mut missing: SmallVec<[Capability; 4]> = SmallVec::new();
         for c in &required.set {
             if !candidate.detected_capabilities.contains(c) {
-                missing.push(*c);
+                missing.push(c.clone());
             }
         }
         if !missing.is_empty() {
