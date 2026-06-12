@@ -12,6 +12,7 @@
 //!   [`StreamSlot`] is dropped (RAII). A `total_streams` counter tracks
 //!   global concurrency for observability.
 
+use dashmap::DashMap;
 use moka::sync::Cache;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
@@ -31,9 +32,24 @@ const DEFAULT_RATE_LIMIT_CAPACITY_KEYS: u64 = 10_000;
 pub struct RateLimitGuard {
     pub per_user: Cache<UserId, Arc<DefaultDirectRateLimiter>>,
     pub per_user_tpm: Cache<UserId, Arc<DefaultDirectRateLimiter>>,
-    pub per_user_streams: Cache<UserId, Arc<AtomicUsize>>,
-    pub per_key: Cache<KeyId, (u32, Arc<DefaultDirectRateLimiter>)>,
-    pub per_key_overrides: Cache<KeyId, u32>,
+    /// Live per-user concurrent-stream counter. NOT a Moka cache: TTI eviction
+    /// while StreamSlots are alive would hand the next caller a fresh counter
+    /// starting at 0, bypassing the concurrency cap. Bounded via RAII —
+    /// `StreamSlot::Drop` removes the entry when the count returns to 0.
+    /// Wrapped in `Arc` so `StreamSlot` can hold a back-reference for cleanup.
+    pub per_user_streams: Arc<DashMap<UserId, Arc<AtomicUsize>>>,
+    /// Per-(vendor key, enforced rpm) GCRA limiter. Tuple-keyed so that a limit
+    /// change creates a fresh `(key, new_limit)` entry atomically via
+    /// `get_with`; the old `(key, old_limit)` entry ages out via TTI. This
+    /// removes the rebuild-race window of the prior `Cache<KeyId, (u32, _)>`
+    /// shape, where two concurrent callers could each build a new limiter on
+    /// limit change.
+    pub per_key: Cache<(KeyId, u32), Arc<DefaultDirectRateLimiter>>,
+    /// Admin-set per-vendor-key RPM override. NOT a Moka cache: TTI eviction
+    /// would silently un-override keys after 1h idle. Bounded by the
+    /// configured key count (small) and persists until explicit
+    /// `reset_key_rpm`.
+    pub per_key_overrides: DashMap<KeyId, u32>,
     pub total_streams: Arc<AtomicUsize>,
 }
 
@@ -58,18 +74,12 @@ impl RateLimitGuard {
                 .max_capacity(DEFAULT_RATE_LIMIT_CAPACITY_USERS)
                 .time_to_idle(tti)
                 .build(),
-            per_user_streams: Cache::builder()
-                .max_capacity(DEFAULT_RATE_LIMIT_CAPACITY_USERS)
-                .time_to_idle(tti)
-                .build(),
+            per_user_streams: Arc::new(DashMap::new()),
             per_key: Cache::builder()
                 .max_capacity(DEFAULT_RATE_LIMIT_CAPACITY_KEYS)
                 .time_to_idle(tti)
                 .build(),
-            per_key_overrides: Cache::builder()
-                .max_capacity(DEFAULT_RATE_LIMIT_CAPACITY_KEYS)
-                .time_to_idle(tti)
-                .build(),
+            per_key_overrides: DashMap::new(),
             total_streams: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -83,9 +93,7 @@ impl RateLimitGuard {
     pub fn sync_for_test(&self) {
         self.per_user.run_pending_tasks();
         self.per_user_tpm.run_pending_tasks();
-        self.per_user_streams.run_pending_tasks();
         self.per_key.run_pending_tasks();
-        self.per_key_overrides.run_pending_tasks();
     }
 
     pub fn check(&self, perm: &MergedPermissions) -> Result<RateLimitTicket, ErrorIR<'static>> {
@@ -111,21 +119,19 @@ impl RateLimitGuard {
         let limit = self
             .per_key_overrides
             .get(key_id)
+            .map(|v| *v)
             .unwrap_or(configured_rpm);
         if limit == 0 {
             return Ok(RateLimitTicket);
         }
 
-        // Check if the cached limiter matches the current limit; rebuild if not.
-        let limiter = match self.per_key.get(key_id) {
-            Some((cached_limit, lim)) if cached_limit == limit => lim,
-            _ => {
-                let q = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
-                let lim = Arc::new(RateLimiter::direct(q));
-                self.per_key.insert(key_id.clone(), (limit, lim.clone()));
-                lim
-            }
-        };
+        // Tuple-keyed atomic fetch-or-build. When the limit changes, a new
+        // (key_id, new_limit) entry is created exactly once via get_with;
+        // the prior (key_id, old_limit) entry ages out via TTI.
+        let limiter = self.per_key.get_with((key_id.clone(), limit), || {
+            let q = Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::MIN));
+            Arc::new(RateLimiter::direct(q))
+        });
 
         if limiter.check().is_err() {
             return Err(key_rpm_err());
@@ -135,12 +141,14 @@ impl RateLimitGuard {
 
     pub fn override_key_rpm(&self, key_id: &KeyId, rpm: u32) {
         self.per_key_overrides.insert(key_id.clone(), rpm);
-        self.per_key.invalidate(key_id);
+        // No need to invalidate per_key — the next check_key will get_with on
+        // the new (key_id, rpm) tuple, building a fresh limiter atomically.
+        // The stale (key_id, old_rpm) entry ages out via TTI.
     }
 
     pub fn reset_key_rpm(&self, key_id: &KeyId) {
-        self.per_key_overrides.invalidate(key_id);
-        self.per_key.invalidate(key_id);
+        self.per_key_overrides.remove(key_id);
+        // Stale per_key tuple entries age out via TTI.
     }
 
     pub fn check_stream_slot(
@@ -150,10 +158,18 @@ impl RateLimitGuard {
     ) -> Result<StreamSlot, ErrorIR<'static>> {
         let counter = self
             .per_user_streams
-            .get_with(uid.clone(), || Arc::new(AtomicUsize::new(0)));
+            .entry(uid.clone())
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
         let n = counter.fetch_add(1, Ordering::AcqRel);
         if max > 0 && n + 1 > max as usize {
-            counter.fetch_sub(1, Ordering::AcqRel);
+            let prev = counter.fetch_sub(1, Ordering::AcqRel);
+            // If count is back to 0, try to remove the entry to keep the map
+            // bounded by live concurrency only.
+            if prev == 1 {
+                self.per_user_streams
+                    .remove_if(uid, |_, c| c.load(Ordering::Acquire) == 0);
+            }
             return Err(concurrent_err());
         }
         self.total_streams.fetch_add(1, Ordering::Relaxed);
@@ -161,6 +177,7 @@ impl RateLimitGuard {
             uid: uid.clone(),
             counter,
             total: Arc::clone(&self.total_streams),
+            per_user_streams: Arc::clone(&self.per_user_streams),
         })
     }
 
@@ -202,12 +219,23 @@ pub struct StreamSlot {
     pub uid: UserId,
     counter: Arc<AtomicUsize>,
     total: Arc<AtomicUsize>,
+    /// Back-reference to the parent `RateLimitGuard::per_user_streams` so the
+    /// drop can RAII-remove the entry when concurrency returns to 0.
+    per_user_streams: Arc<DashMap<UserId, Arc<AtomicUsize>>>,
 }
 
 impl Drop for StreamSlot {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
+        let prev = self.counter.fetch_sub(1, Ordering::AcqRel);
         self.total.fetch_sub(1, Ordering::Relaxed);
+        // If the count just returned to 0, try to remove the entry to keep
+        // the map bounded by live concurrency only. `remove_if` re-checks the
+        // count under the shard lock so a concurrent `check_stream_slot` that
+        // raced past us doesn't lose its entry.
+        if prev == 1 {
+            self.per_user_streams
+                .remove_if(&self.uid, |_, c| c.load(Ordering::Acquire) == 0);
+        }
     }
 }
 
