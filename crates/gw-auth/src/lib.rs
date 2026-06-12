@@ -2,6 +2,7 @@
 //! IP block check, HMAC signature, governor-based rate limiting, ADR-024 hard caps.
 
 pub mod apikey;
+pub mod auth_ip_ratelimit;
 pub mod hard_cap;
 pub mod ip_allowlist;
 pub mod ip_filter;

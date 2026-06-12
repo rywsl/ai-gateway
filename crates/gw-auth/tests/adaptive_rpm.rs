@@ -58,8 +58,7 @@ fn test_manager_new_empty() {
     let cfg = AdaptiveCfg::default();
     let manager = AdaptiveRpmManager::new(cfg);
 
-    assert!(manager.state.is_empty());
-    assert_eq!(manager.state.len(), 0);
+    assert_eq!(manager.state.entry_count(), 0);
     assert_eq!(manager.cfg.min_rpm, 5);
     assert!(manager.state.get(&KeyId::from("missing-key")).is_none());
 }
