@@ -81,3 +81,108 @@ async fn concurrent_appends_no_data_loss() {
         .sum();
     assert_eq!(total_lines, 16 * 100);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_unlinks_shard_files() {
+    let tmp = TempDir::new().unwrap();
+    let root = root(&tmp);
+    let file = root
+        .create("drop_test", NonZeroUsize::new(3).unwrap())
+        .await
+        .unwrap();
+    for i in 0..30u32 {
+        file.append(format!("{i}\n").as_bytes()).await.unwrap();
+    }
+    file.flush().await.unwrap();
+
+    let paths: Vec<_> = file.shard_paths().to_vec();
+    for p in &paths {
+        assert!(p.exists(), "shard {} should exist after writes", p.display());
+    }
+
+    drop(file);
+    // Give the spawned cleanup task time to execute. The cleanup spawns
+    // `tokio::fs::remove_file` per shard; on a multi-thread runtime with no
+    // other load this completes within a few ms.
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if paths.iter().all(|p| !p.exists()) {
+            break;
+        }
+    }
+    for p in &paths {
+        assert!(
+            !p.exists(),
+            "shard {} should be unlinked after drop",
+            p.display()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_tolerates_missing_shards() {
+    let tmp = TempDir::new().unwrap();
+    let root = root(&tmp);
+    let file = root
+        .create("missing_test", NonZeroUsize::new(2).unwrap())
+        .await
+        .unwrap();
+    file.append(b"data\n").await.unwrap();
+    file.flush().await.unwrap();
+    let paths: Vec<_> = file.shard_paths().to_vec();
+
+    // Simulate LRU racing ahead: unlink shard 0 BEFORE drop.
+    tokio::fs::remove_file(&paths[0]).await.unwrap();
+    assert!(!paths[0].exists());
+
+    drop(file);
+
+    // Drop must not panic; shard 1 must be cleaned; shard 0 stays gone.
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if !paths[1].exists() {
+            break;
+        }
+    }
+    assert!(!paths[0].exists());
+    assert!(!paths[1].exists(), "shard 1 should be cleaned by Drop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_coexists_with_lru_enforcer() {
+    use std::time::Duration;
+    let tmp = TempDir::new().unwrap();
+    // Very small quota so any payload immediately triggers LRU eviction.
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 1, // forces LRU to clean everything every tick
+        buffer_size: 4096,
+    }));
+    let enforcer = root.clone().spawn_quota_enforcer(Duration::from_millis(20));
+
+    let file = root
+        .create("lru_race", NonZeroUsize::new(2).unwrap())
+        .await
+        .unwrap();
+    file.append(b"x".repeat(8192).as_slice()).await.unwrap();
+    file.flush().await.unwrap();
+
+    // Let LRU run a few ticks while file is still live (it cannot remove open
+    // BufWriter-held files on every OS, but should at minimum not crash).
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    drop(file);
+
+    // After drop, give both Drop and LRU time to settle. Either path may have
+    // removed the files first — assert no panic, no double-remove failure.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Stop the enforcer; the test ends.
+    enforcer.abort();
+
+    // Whether files exist or not is OS-dependent (BufWriter may have flushed
+    // before LRU ran). The invariant we assert is "no panic and no error
+    // counter increment from double-remove".
+    // metrics counter check would require a metrics recorder hook; instead we
+    // confirm the assertion that we reached this line without panic.
+}

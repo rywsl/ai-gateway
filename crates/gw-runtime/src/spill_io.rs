@@ -189,3 +189,47 @@ impl SpillFile {
         Ok(out)
     }
 }
+
+impl Drop for SpillFile {
+    fn drop(&mut self) {
+        // Best-effort cleanup of shard files. Coexists with the LRU enforcer
+        // in `SpillRoot::spawn_quota_enforcer`: this Drop is timely, the LRU
+        // is fallback. Both paths tolerate `NotFound` errors silently.
+        let paths = std::mem::take(&mut self.shard_paths);
+        if paths.is_empty() {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    for path in paths {
+                        match tokio::fs::remove_file(&path).await {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                // Already cleaned (LRU or external).
+                            }
+                            Err(e) => {
+                                metrics::counter!("gw_spill_drop_cleanup_fail_total")
+                                    .increment(1);
+                                tracing::warn!(
+                                    target: "gw_runtime::spill_io",
+                                    path = %path.display(),
+                                    error = %e,
+                                    "spill_file_drop_cleanup_failed"
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+            Err(_) => {
+                // No tokio runtime (atexit, test teardown). Fall back to sync.
+                // Errors are silently dropped — this is the cleanup-of-last-resort
+                // and the LRU enforcer will catch anything we miss on next start.
+                for path in paths {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+}
