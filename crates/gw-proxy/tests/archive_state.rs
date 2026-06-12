@@ -89,8 +89,8 @@ async fn reset_response_attempt_clears_archive_accumulators() {
     assert!(matches!(downstream, ArchiveState::Spilled { .. }));
 
     // Assert each accumulator is non-empty before reset.
-    assert!(upstream.len() > 0);
-    assert!(downstream.len() > 0);
+    assert!(!upstream.is_empty());
+    assert!(!downstream.is_empty());
 
     // The actual reset call: assign default. This is exactly what the
     // production code change in gateway.rs will do.
@@ -181,7 +181,7 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
     let downstream_bytes = downstream.read_for_emit().await.unwrap();
 
     assert!(
-        !upstream_bytes.iter().any(|&b| b == 0xAA),
+        !upstream_bytes.contains(&0xAA),
         "upstream attempt-2 archive contains 0xAA bytes from attempt-1 (contamination)"
     );
     assert!(
@@ -189,7 +189,7 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
         "upstream attempt-2 archive must contain only 0xBB bytes"
     );
     assert!(
-        !downstream_bytes.iter().any(|&b| b == 0xAA),
+        !downstream_bytes.contains(&0xAA),
         "downstream attempt-2 archive contains 0xAA bytes from attempt-1 (contamination)"
     );
     assert!(

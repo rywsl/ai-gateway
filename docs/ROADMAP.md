@@ -96,6 +96,10 @@ No open roadmap items after W4 full IR task request/response persistence.
 - **Landed:** `SpillFile::Drop` for timely shard cleanup (synchronous `std::fs::remove_file`); `reset_response_attempt_state` resets archive accumulators on response-side failover. Both prevent disk and memory leaks under churn.
 - **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 1.
 
+### DeductGc Supervisor wrap + USER_CIRCUIT defensive sweep — `closed in memory-leak-fixes`
+- **Landed:** `DeductGc` is Supervisor-wrapped (panic-tolerant with exponential-backoff restart) and registered with `ShutdownCoordinator`; defensive `sweep_user_circuit()` evicts expired `Open` entries from `USER_CIRCUIT` per GC tick.
+- **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 2.
+
 ### Out-of-scope (deliberate) — still deferred
 - `LatencyTracker::Mutex<VecDeque>` lock contention — flagged as a hotspot, but not in resilience-fixes ROI window. `capability-gap`.
 - `EntityStore` per-(user, api-key) merged-permission cache — CPU win, orthogonal to resilience. `capability-gap`.
