@@ -122,3 +122,72 @@ async fn reset_response_attempt_clears_archive_accumulators() {
         "expected all archive shards to be unlinked after reset, found: {remaining:?}"
     );
 }
+
+#[tokio::test]
+async fn attempt_2_archive_contains_no_attempt_1_bytes() {
+    // Verifies the core behavioral property: after `reset_response_attempt_state`
+    // reassigns the archive accumulators to `ArchiveState::default()`, a fresh
+    // attempt-2 write must contain ONLY attempt-2 bytes — no contamination from
+    // attempt-1 data. This is the data-isolation guarantee the audit identified.
+    //
+    // Each attempt uses a distinct request_id ("req-iso-a1" / "req-iso-a2") so
+    // the attempt-1 SpillFile::Drop unlinking a stale shard path cannot race
+    // attempt-2's reads. The behavioral property under test is state isolation
+    // across `ArchiveState::default()` reassignment, not file-path reuse.
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 1 << 30,
+        buffer_size: 4096,
+    }));
+    root.ensure_dir().await.unwrap();
+
+    let mut upstream = ArchiveState::default();
+    let mut downstream = ArchiveState::default();
+
+    // Attempt 1: write a distinctive 0xAA pattern, forcing spill.
+    let attempt_1 = vec![0xAAu8; 4096];
+    upstream
+        .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso-a1", "upstream")
+        .await;
+    downstream
+        .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso-a1", "downstream")
+        .await;
+    assert!(matches!(upstream, ArchiveState::Spilled { .. }));
+    assert!(matches!(downstream, ArchiveState::Spilled { .. }));
+
+    // Reset: this is exactly what `reset_response_attempt_state` does in
+    // production on response-side failover.
+    upstream = ArchiveState::default();
+    downstream = ArchiveState::default();
+
+    // Attempt 2: write a different distinctive 0xBB pattern.
+    let attempt_2 = vec![0xBBu8; 4096];
+    upstream
+        .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso-a2", "upstream")
+        .await;
+    downstream
+        .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso-a2", "downstream")
+        .await;
+
+    // Read back attempt-2 archives and assert NO 0xAA bytes leaked in.
+    let upstream_bytes = upstream.read_for_emit().await.unwrap();
+    let downstream_bytes = downstream.read_for_emit().await.unwrap();
+
+    assert!(
+        !upstream_bytes.iter().any(|&b| b == 0xAA),
+        "upstream attempt-2 archive contains 0xAA bytes from attempt-1 (contamination)"
+    );
+    assert!(
+        upstream_bytes.iter().all(|&b| b == 0xBB),
+        "upstream attempt-2 archive must contain only 0xBB bytes"
+    );
+    assert!(
+        !downstream_bytes.iter().any(|&b| b == 0xAA),
+        "downstream attempt-2 archive contains 0xAA bytes from attempt-1 (contamination)"
+    );
+    assert!(
+        downstream_bytes.iter().all(|&b| b == 0xBB),
+        "downstream attempt-2 archive must contain only 0xBB bytes"
+    );
+}
