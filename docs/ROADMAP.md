@@ -106,6 +106,8 @@ No open roadmap items after W4 full IR task request/response persistence.
 - **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 3.
 
 ### Out-of-scope (deliberate) — still deferred
+- 2026-06-12 — Closed: bound `RedosTracker`, `RateLimitGuard` (5 maps), `AdaptiveRpmManager` (2 maps) with Moka caches; wire `spawn_ip_ratelimit_sweep` and new `spawn_auth_failure_ip_sweep` into bootstrap. See `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §Crate 4. Deliberate TTI-boundary semantic change recorded in §spec/04-rate-limiting.md + §architecture.md.
+
 - `LatencyTracker::Mutex<VecDeque>` lock contention — flagged as a hotspot, but not in resilience-fixes ROI window. `capability-gap`.
 - `EntityStore` per-(user, api-key) merged-permission cache — CPU win, orthogonal to resilience. `capability-gap`.
 - `GLOBAL_STREAM_CAP` / `PER_KEY_INFLIGHT_CAP` hardcoded — revisit once load profile is real. `capability-gap`.
