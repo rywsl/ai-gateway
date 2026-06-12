@@ -1844,6 +1844,7 @@ dependencies = [
  "ipnet",
  "jsonwebtoken",
  "metrics",
+ "moka",
  "parking_lot",
  "regex",
  "serde",
