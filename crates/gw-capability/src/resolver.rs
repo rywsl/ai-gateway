@@ -189,3 +189,48 @@ impl ResolveBackend for FakeResolveBackend {
         *self.exclusive_keys.lock().get(ak).unwrap_or(&false)
     }
 }
+
+#[cfg(test)]
+mod intern_tests {
+    use super::*;
+
+    #[test]
+    fn parse_capability_returns_known_variant_for_known_string() {
+        assert_eq!(parse_capability("vision"), Capability::Vision);
+        assert_eq!(parse_capability("thinking"), Capability::Thinking);
+    }
+
+    #[test]
+    fn parse_capability_interns_unknown_string() {
+        let a = parse_capability("custom-foo");
+        let b = parse_capability("custom-foo");
+        // Both should equal each other and contain the same string.
+        assert_eq!(a, b);
+        match (&a, &b) {
+            (Capability::Tagged(arc_a), Capability::Tagged(arc_b)) => {
+                // Critical: the SAME Arc is returned (pointer equality on
+                // the underlying str), proving the intern table is shared.
+                assert!(
+                    Arc::ptr_eq(arc_a, arc_b),
+                    "Tagged Arcs for identical strings must be the same Arc"
+                );
+            }
+            _ => panic!("expected Tagged variants"),
+        }
+    }
+
+    #[test]
+    fn intern_table_capacity_bounded_under_attack() {
+        // Push past capacity. Equality still holds via Arc<str> content
+        // comparison even after LRU eviction re-interns.
+        for i in 0..(CAPABILITY_INTERN_CAPACITY as usize + 100) {
+            let _ = parse_capability(&format!("attack-tag-{i}"));
+        }
+        CAPABILITY_INTERN.run_pending_tasks();
+        assert!(
+            CAPABILITY_INTERN.entry_count() <= CAPABILITY_INTERN_CAPACITY,
+            "intern table must cap at CAPABILITY_INTERN_CAPACITY, got {}",
+            CAPABILITY_INTERN.entry_count()
+        );
+    }
+}
