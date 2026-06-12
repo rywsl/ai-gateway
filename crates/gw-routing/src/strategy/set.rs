@@ -38,15 +38,22 @@ use crate::strategy::sticky::{Sticky, DEFAULT_STICKY_CAP, DEFAULT_STICKY_TTL_SEC
 use crate::strategy::weighted_rr::WeightedRr;
 use crate::strategy::StrategyAny;
 use gw_core::entity::StrategyKind;
+use moka::sync::Cache;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+const UNKNOWN_PRESETS_WARNED_CAPACITY: u64 = 1000;
+
 /// Presets whose name has already been logged as unknown, so the warn fires
 /// once per distinct bad preset rather than once per request (audit 2026-05-30
-/// §2.1 / panic→fail-operational).
-static UNKNOWN_PRESETS_WARNED: LazyLock<dashmap::DashSet<String>> =
-    LazyLock::new(dashmap::DashSet::new);
+/// §2.1 / panic→fail-operational). Bounded by `UNKNOWN_PRESETS_WARNED_CAPACITY`
+/// via moka::sync::Cache to prevent unbounded growth from misconfigured clients.
+static UNKNOWN_PRESETS_WARNED: LazyLock<Cache<String, ()>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(UNKNOWN_PRESETS_WARNED_CAPACITY)
+        .build()
+});
 
 /// One instance of each of the 8 strategy variants, owned for the lifetime of
 /// the process and shared across all requests via `Arc<StrategySet>`.
@@ -142,7 +149,8 @@ impl StrategySet {
                 // request task. Fail-operational instead: fall back to the always-
                 // present FixedOrder strategy so the request still routes, and
                 // surface the misconfig via a warn-once + metric.
-                if UNKNOWN_PRESETS_WARNED.insert(preset.clone()) {
+                if UNKNOWN_PRESETS_WARNED.get(preset).is_none() {
+                    UNKNOWN_PRESETS_WARNED.insert(preset.clone(), ());
                     tracing::warn!(
                         code = gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
                         preset = %preset,
@@ -158,5 +166,25 @@ impl StrategySet {
                 &self.fixed_order
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_presets_warned_caps_at_capacity() {
+        for i in 0..2000 {
+            UNKNOWN_PRESETS_WARNED.insert(format!("unknown-preset-{i}"), ());
+        }
+        // run_pending_tasks() so moka's eviction settles.
+        UNKNOWN_PRESETS_WARNED.run_pending_tasks();
+        assert!(
+            UNKNOWN_PRESETS_WARNED.entry_count() <= UNKNOWN_PRESETS_WARNED_CAPACITY,
+            "UNKNOWN_PRESETS_WARNED should cap at {}, got {}",
+            UNKNOWN_PRESETS_WARNED_CAPACITY,
+            UNKNOWN_PRESETS_WARNED.entry_count()
+        );
     }
 }
