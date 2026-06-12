@@ -364,14 +364,7 @@ mod tests {
         // Insert past capacity.
         for i in 0..20 {
             let key = KeyId::from(format!("k-{i}"));
-            manager.observe_429_with_kind(
-                &key,
-                RateLimitKind::Rpm,
-                100,
-                None,
-                50,
-                None,
-            );
+            manager.observe_429_with_kind(&key, RateLimitKind::Rpm, 100, None, 50, None);
         }
         manager.sync_for_test();
         // Confirm bounded.

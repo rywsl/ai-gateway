@@ -13,11 +13,11 @@
 //!   global concurrency for observability.
 
 use dashmap::DashMap;
-use moka::sync::Cache;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::*;
 use gw_core::permissions::MergedPermissions;
+use moka::sync::Cache;
 use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -98,12 +98,10 @@ impl RateLimitGuard {
 
     pub fn check(&self, perm: &MergedPermissions) -> Result<RateLimitTicket, ErrorIR<'static>> {
         if perm.rpm_limit > 0 {
-            let lim = self
-                .per_user
-                .get_with(perm.effective_user_id.clone(), || {
-                    let q = Quota::per_minute(NonZeroU32::new(perm.rpm_limit).unwrap());
-                    Arc::new(RateLimiter::direct(q))
-                });
+            let lim = self.per_user.get_with(perm.effective_user_id.clone(), || {
+                let q = Quota::per_minute(NonZeroU32::new(perm.rpm_limit).unwrap());
+                Arc::new(RateLimiter::direct(q))
+            });
             if lim.check().is_err() {
                 return Err(rpm_err());
             }
@@ -210,12 +208,10 @@ impl RateLimitGuard {
         let Some(tokens_nz) = NonZeroU32::new(tokens) else {
             return Ok(());
         };
-        let lim = self
-            .per_user_tpm
-            .get_with(uid.clone(), || {
-                let q = Quota::per_minute(NonZeroU32::new(perm.tpm_limit).unwrap());
-                Arc::new(RateLimiter::direct(q))
-            });
+        let lim = self.per_user_tpm.get_with(uid.clone(), || {
+            let q = Quota::per_minute(NonZeroU32::new(perm.tpm_limit).unwrap());
+            Arc::new(RateLimiter::direct(q))
+        });
         if lim.check_n(tokens_nz).is_err() {
             return Err(tpm_err());
         }
@@ -345,7 +341,10 @@ mod tests {
                 allowed += 1;
             }
         }
-        assert!(allowed > 0 && allowed <= 60, "should exhaust at small RPM, got {allowed}");
+        assert!(
+            allowed > 0 && allowed <= 60,
+            "should exhaust at small RPM, got {allowed}"
+        );
 
         // Wait past TTI + small buffer.
         std::thread::sleep(std::time::Duration::from_millis(80));

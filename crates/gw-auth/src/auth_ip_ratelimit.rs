@@ -46,7 +46,8 @@ impl AuthFailureIpLimiter {
         };
         if flag.load(Ordering::Relaxed) {
             if lim.check().is_err() {
-                metrics::counter!("gw_auth_ip_limit_total", "reason" => "auth_failure").increment(1);
+                metrics::counter!("gw_auth_ip_limit_total", "reason" => "auth_failure")
+                    .increment(1);
                 return Err(auth_failure_ip_err(ip));
             }
             flag.store(false, Ordering::Relaxed);
@@ -59,17 +60,14 @@ impl AuthFailureIpLimiter {
             return;
         }
         let (lim, flag) = {
-            let entry = self
-                .per_ip
-                .entry(ip)
-                .or_insert_with(|| {
-                    let q = Quota::per_minute(self.rpm);
-                    Entry {
-                        limiter: Arc::new(RateLimiter::direct(q)),
-                        exhausted: Arc::new(AtomicBool::new(false)),
-                        sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
-                    }
-                });
+            let entry = self.per_ip.entry(ip).or_insert_with(|| {
+                let q = Quota::per_minute(self.rpm);
+                Entry {
+                    limiter: Arc::new(RateLimiter::direct(q)),
+                    exhausted: Arc::new(AtomicBool::new(false)),
+                    sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+                }
+            });
             (entry.limiter.clone(), entry.exhausted.clone())
         };
 
@@ -88,11 +86,8 @@ impl AuthFailureIpLimiter {
         }
 
         let remove_count = len - self.max_entries;
-        let mut entries: Vec<(IpAddr, u64)> = self
-            .per_ip
-            .iter()
-            .map(|e| (*e.key(), e.sequence))
-            .collect();
+        let mut entries: Vec<(IpAddr, u64)> =
+            self.per_ip.iter().map(|e| (*e.key(), e.sequence)).collect();
         entries.sort_unstable_by_key(|(_, seq)| *seq);
 
         let mut removed = 0;
