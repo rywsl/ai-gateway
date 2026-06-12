@@ -121,6 +121,7 @@ Figment layers, low → high precedence: `config/default.toml` → `config/local
 - **Debugging a 401 / 402 / 429** — `crates/gw-core/src/error/codes.rs` for the code, [`docs/workflow.md`](docs/workflow.md) §request_filter for where it's emitted.
 - **A "this looks like a bug" moment** — check [`docs/architecture.md`](docs/architecture.md) §Deliberate behaviours first. Many fail-closed behaviours are intentional.
 - **CI invariant failure** — `scripts/check-invariants.sh` output names the rule; the meaning is in [`docs/architecture.md`](docs/architecture.md) §Invariants.
+- **Debugging a 503 with no reason** — check `gw_backpressure_active` and the four hook gauges (`gw_health_memory_*`, `gw_health_fd_*`, `gw_health_disk_*`, `gw_health_redis_oom_*`); the BackpressureGate deliberately hides which hook tripped. See [`docs/architecture.md`](docs/architecture.md) §Deliberate behaviours.
 - **Operational incident** — look under `docs/issues/`. The `fred` 9.4 + Redis 7 XREADGROUP parse warning is captured there and is benign.
 
 ## What this file is not

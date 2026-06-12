@@ -39,6 +39,23 @@ server.run_forever()   // -> !
 
 Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tasks (Ledger flusher, StreamConsumer, health HTTP) need a runtime that outlives that call, so they run on the bootstrap runtime. `Ledger::try_send` is synchronous (`tokio mpsc::Sender::try_send`) — Pingora worker threads enqueue records without holding a runtime handle.
 
+### 1.1 Shutdown sequence
+
+`crates/gw-runtime/src/shutdown.rs::ShutdownCoordinator` drives a two-phase drain on SIGTERM / SIGINT. Phases:
+
+| Phase | Name | Duration | Behaviour |
+|-------|------|----------|-----------|
+| 0 | Running | indefinite | Normal operation. `/readyz` → 200, `/livez` → 200. |
+| 1 | AcceptStop | `phase1_accept_stop_ms` (default 5 s) | New connections are no longer accepted. Pingora's listener is stopped. Existing in-flight requests continue. `/readyz` → 503, `/livez` → 200. |
+| 2 | TaskDrain | `phase2_task_drain_ms` (default 25 s) | Supervisor tasks receive `ShutdownToken::cancel()`. The billing flusher and DLQ drainer flush remaining records. `BillingBacklog` is serialized to `backlog_shutdown_<ts>.jsonl` in `spill_io.root_dir`. `/readyz` → 503, `/livez` → 200. |
+| — | Stopped | hard_deadline_ms (default 35 s) | Process exits. If `BillingBacklog` dump fails, exit code is 2 (data-at-risk). If dump succeeds, exit code is 0. |
+
+Key design decisions:
+
+- **`/livez` stays 200 during drain** so k8s does not restart the Pod and discard the in-memory `BillingBacklog`. Only `/readyz` signals unready.
+- **Double SIGTERM** triggers `abort_all` — immediate process termination without graceful drain (emergency path).
+- **BacklogRecovery on bootstrap**: on the next start, `BacklogRecovery` reads `backlog_shutdown_*.jsonl` files from `spill_io.root_dir` and re-enqueues records into `usage:records`. Corrupt files are quarantined to `<spill_root>/corrupt/`.
+
 ## 2. Pingora filter chain
 
 `crates/gw-proxy/src/gateway.rs::LlmGateway` is the `ProxyHttp` impl. Each phase delegates to a module under `crates/gw-proxy/src/filters/`. Short-circuits return `Err(short_circuit(status))` whose root cause is `Custom("gw_short_circuit")` so `suppress_error_log` can mute Pingora's own ERROR line.
@@ -46,7 +63,7 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 | # | Phase | Module | Role |
 |---|-------|--------|------|
 | 0 | `new_ctx` | `gateway.rs` | Initialise `ReqCtx` (request_id, trace_id, start time, atomic counters). |
-| 1 | `early_request_filter` | `filters::early` | Global IP filter, global stream cap, protocol detect, debug trigger. |
+| 1 | `early_request_filter` | `filters::early` | BackpressureGate admit check, global IP filter, global stream cap, protocol detect, debug trigger. |
 | 2 | `request_filter` | `filters::request` | Auth, IR parse, 5-tier permission merge, balance/circuit, RPM, hard caps, freeze. |
 | 3 | `upstream_peer` | `filters::upstream` | Candidate filter → strategy pick → `HttpPeer`. |
 | 4 | `upstream_request_filter` | `filters::upstream` | Codec rewrite → `ctx.body.set_outbound(...)`; vendor auth header injection. |
@@ -61,6 +78,7 @@ Rationale: `run_forever` consumes the `Server` and never returns. Long-lived tas
 
 `crates/gw-proxy/src/filters/early.rs`:
 
+0. **BackpressureGate admit check** — before any other work, `BackpressureGate::admit()` is consulted. If the `SystemHealthMonitor` reports any force-majeure hook at unhealthy (memory / FD / disk / Redis-OOM at 99% threshold, with hysteresis), `admit()` returns `Admit::Reject` and the filter short-circuits with 503 + `Retry-After: 2` + `GW_BACKPRESSURE_REJECTED`. The 503 body is deliberately opaque (no hint of which hook tripped). `Admit::Degraded` lets the request through with a `gw_backpressure_degraded_total` tick; `Admit::Ok` is the normal path.
 1. **Unified IP filter (Global scope)** — `client_ip_from_session()` reads either L4 peer or first XFF entry depending on `[security].trust_xff`, then `check_ip(ip, None, None, ...)` applies deny-only blocklist → allowlist (when `[ip_filter].allowlist_mode = "enforce"`) → per-IP RPM. This is the first reject gate in the filter chain: global-scope deny / allowlist / IP-RPM failures short-circuit before auth, while User / ApiKey scope is intentionally checked later once auth resolves. Metrics emitted from this path include `gw_ip_blocklist_hit_total`, `gw_ip_allowlist_check_total`, `gw_ip_ratelimit_check_total`, and the snapshot gauges `gw_ip_blocklist_entries` / `gw_ip_allowlist_entries`.
 2. **Global concurrent-stream cap** (`GLOBAL_STREAM_CAP = 100_000`). Reads `ratelimit.total_streams` atomic. Over → `GW_QUOTA_CONCURRENT_EXCEEDED` 429.
 3. **Protocol detection** first checks `detect_cli(path, headers)` for CLI variants, stashing the fine-grained `ApiShape` on `ctx.client_shape` while keeping `ctx.client_codec` on the base protocol codec for error envelopes. Non-CLI requests fall back to `AnyCodec::detect(path, headers, [])` and store the standard shape. No match → `GW_REQUEST_PROTOCOL_UNKNOWN` 400.
@@ -262,8 +280,8 @@ Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 ke
 | `usage:records` Redis stream | `gw-ledger::flusher` (XADD batched, configurable batch / interval) | `filters::logging` builds `UsageRecord`, calls `ledger.try_send` |
 | `usage:detailed` Redis stream | `gw-ledger::detailed_archive::DetailedArchive` (workers XADD per-surface encoding) | `filters::*` and `filters::logging` call `archive.try_send(CapturedSurface)` |
 | Prometheus `/metrics` | `metrics-exporter-prometheus` | `gw-gateway::metrics_catalog` defines metric families across codec, freeze, auth, adaptive/IP rate-limit, capability, resilience, detailed-log, billing, routing, tunnel, quota, CLI, and task surfaces (e.g. `gw_adaptive_rpm_observe_total`, `gw_adaptive_rpm_confidence`, `gw_ip_ratelimit_check_total`, `gw_ip_blocklist_hit_total`, `gw_codec_cross_render_total`, `gw_billing_emit_total`, `gw_cli_cross_protocol_denied_total`, `gw_cli_usage_extract_total`). The catalog is the single source of truth for metric names and help text. |
-| Health `/livez` | always 200 | — |
-| Health `/readyz` | 200 once `READY=true` (flipped after `Wired` handoff) | `gw-gateway::health` |
+| Health `/livez` | always 200 (even during drain — k8s must not restart the Pod) | — |
+| Health `/readyz` | 200 once `READY=true` **and** no shutdown phase active **and** no BackpressureGate rejection **and** no Supervisor-unhealthy component; otherwise 503 | `gw-gateway::health` |
 | Health `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience`, `/healthz/strategies` | Mgmt-verified (`Authorization: Mgmt mt_<id>.<secret>`, scope ≥ `AdminRead`, FailClosed blacklist). 200 returns the `snapshot_json` body; verify failures map to `GW_AUTH_MGMT_TOKEN_*`. `/healthz/strategies` returns per-(key, format) p50 TTFT for `LatencyFirst` debugging. | `gw-gateway::health` |
 
 For synchronous requests, `FreezeGuard::release` (in logging) is the point where Rust mutates `frozen_micro` downward. Go (the billing service) writes request-path `deducted_micro` / `balance_micro` based on `usage:records`. The async task path is separate: `RedisTaskContract::settle` releases `task_frozen_micro`, increments scalar `deducted_micro` by task-domain `actual_micro`, and emits `task_usage_v1` on `usage:records`.

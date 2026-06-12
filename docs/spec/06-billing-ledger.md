@@ -25,6 +25,42 @@ Rust accounts request resource consumption and protects against overdraft, but n
 ### Flusher — `crates/gw-ledger/src/flusher.rs`
 `Ledger::start` / `Ledger::start_with_spill_root` spawn one background task that batches `LedgerItem`s from an mpsc channel and writes them to `usage:records` (`USAGE_STREAM`) via a pipelined `XADD`. Balance decrement is **not** performed here. `emit` is the must-deliver path: on a full channel it falls back to a synchronous direct `XADD` (`sync_xadd`); on `Closed` it likewise bypasses. Primary stream failure routes through `DlqEnvelope { dlq_meta, usage_record }` (`crates/gw-ledger/src/dlq.rs`): first to `usage:records:dlq` (`DLQ_STREAM`, `DLQ_MAXLEN = 100_000`), then to an in-memory retry queue drained every 30 s, then to a sharded `SpillFile` under `${runtime.spill_io.root_dir}/gw-ledger-emergency-dlq-<uuid>.<shard>.jsonl` (shard ∈ `0..runtime.spill_io.dlq_shards-1`, async append via `gw_runtime::spill_io`); if the emergency file write also fails, Rust attempts `usage:records:dlq:permanent_failed` before incrementing `gateway_usage_records_lost_total`. The DEL rule: an inflight key is deleted (`inflight_key`) only after the matching record's `XADD` is confirmed; DLQ / serialize-fail / queue-fail paths leave the key for the reconciler.
 
+### DLQ cascade — `crates/gw-ledger/src/{flusher.rs,dlq.rs,backlog.rs}`
+
+The full failure cascade for a `UsageRecord` is:
+
+```
+XADD usage:records
+  │ failure
+  ▼
+XADD usage:records:dlq (DLQ stream, MAXLEN 100_000)
+  │ failure
+  ▼
+SpillFile async write (sharded, under runtime.spill_io.root_dir)
+  │ failure
+  ▼
+BillingBacklog::push (unbounded VecDeque, in-process)
+  │ flush-on-drain or periodic-backlog-drainer
+  ▼
+XADD usage:records (retry from backlog)
+  │ failure
+  ▼
+XADD usage:records:dlq:permanent_failed
+  │ failure
+  ▼
+gateway_usage_records_lost_total++
+```
+
+**Must-deliver boundary**: drop is acceptable only if `BackpressureGate` already rejected the request *before* a `UsageRecord` existed (i.e. the 503 at `early_request_filter` step 0). Once a `UsageRecord` is constructed (in `logging` or `on_retry`), the cascade guarantees delivery through at least `BillingBacklog` — which is unbounded by construction. The metric `gw_billing_backlog_pending_count` rising signals pressure; it never signals data loss.
+
+### BillingBacklog — `crates/gw-ledger/src/backlog.rs`
+
+`BillingBacklog` is an unbounded `VecDeque<DlqEnvelope>` guarded by a `Mutex`. It is the final in-memory safety net: any record that fails all Redis and disk paths lands here. A periodic backlog drainer task (`BacklogDrainer`) re-attempts XADD to `usage:records` for each entry, removing it on success. On process shutdown (phase 2 of `ShutdownCoordinator`), the backlog is serialized to `backlog_shutdown_<unix_ts>.jsonl` in `spill_io.root_dir`.
+
+### BacklogRecovery — `crates/gw-ledger/src/backlog.rs`
+
+On bootstrap, `BacklogRecovery::recover` scans `spill_io.root_dir` for `backlog_shutdown_*.jsonl` files, deserializes each `DlqEnvelope` line-by-line, and re-enqueues them into the `BillingBacklog` for eventual `usage:records` XADD. Corrupt files (malformed JSON, truncated lines) are moved to `<spill_root>/corrupt/` and counted by `gw_billing_backlog_corrupt_total`. This ensures that billing records survive a full process restart.
+
 ### Freeze (soft defense) — `crates/gw-ledger/src/freeze.rs` + `crates/gw-ledger/src/deduct_gc.rs`
 `RequestFreeze::new` reserves `amount` micro-units against the per-user in-process `DeductionState.frozen_micro` (`AtomicI64` in the global `DEDUCT` DashMap) and enqueues `FrozenDelta { uid, +amount }` to the ledger frozen-delta worker. Release is idempotent via a CAS on `released`; it decrements local `frozen_micro` and enqueues `-amount`. `Drop` rolls back any un-released freeze, enqueues the matching negative delta, and increments `gateway_freeze_leak_recovered_total`. The worker asynchronously `INCRBY counter:user:<uid>:frozen_micro <delta>` as a scalar Redis counter; enqueue/Redis outcomes are counted by `gw_frozen_delta_enqueue_total` and `gw_frozen_delta_redis_total`. This module never writes `deducted_micro` (Go is the exclusive writer). `TaskFreeze` is the task-path analogue, delegating release to an injected `TaskFreezeRelease`. `DeductGc` (`deduct_gc.rs`) periodically (default 60 s) `retain`-sweeps `DEDUCT`, removing all-zero entries and bumping `gw_deduct_gc_removed_total`.
 
@@ -35,7 +71,7 @@ Rust accounts request resource consumption and protects against overdraft, but n
 `InflightLedger` keeps a per-request/attempt Redis HASH at `billing:inflight:<instance>:<request_id>:<attempt>` (`test_key`), with `register` (state `sent`), `mark_settled` (`Settled`/`Terminated`), `clear` (DEL), and a 24 h `EXPIRE` safety net. `inflight_reaper::spawn` runs the T0 emit-lag watchdog: it `scan`s own-instance keys, and for any key whose `ts_settled_ms` lag exceeds `emit_lag_t0_secs` it fires `gw_billing_emit_lag_t0_total{request_id,attempt_index}` — it does **not** delete the key and does **not** emit a fallback record. `inflight_reconciler::run` is the startup crash-recovery path and the **only** place that emits fallback records: it builds a `CrashFallback` `UsageRecord` (`input = prompt_estimate_tokens`, `output = 0`, all provenance `CrashFallback`, status `Error`, `error_code = "crash_fallback"`) via `build_fallback_record`, emits it, then DELs the key and bumps `gw_billing_inflight_recovered_total{exposure_state="crash_fallback"}`.
 
 ### Boot wiring — `crates/gw-gateway/src/lib.rs`
-Bootstrap resolves a stable `instance_id` (`instance_id::resolve`) before `Ledger::start`, then starts `DetailedArchive::start`, `DeductGc::start_default`, `instance_id::spawn_heartbeat_task`, `inflight_reaper::spawn` (using `cfg.billing.reaper_interval_secs` / `cfg.billing.emit_lag_t0_secs`), constructs `InflightLedger`, runs `inflight_reconciler::run` before traffic starts, and calls `gw_ledger::install_counter_handler()` (`crates/gw-gateway/src/lib.rs`).
+Bootstrap resolves a stable `instance_id` (`instance_id::resolve`) before `Ledger::start`, then starts `DetailedArchive::start`, `DeductGc::start_default`, `instance_id::spawn_heartbeat_task`, `inflight_reaper::spawn` (using `cfg.billing.reaper_interval_secs` / `cfg.billing.emit_lag_t0_secs`), constructs `InflightLedger`, runs `inflight_reconciler::run` before traffic starts, and calls `gw_ledger::install_counter_handler()` (`crates/gw-gateway/src/lib.rs`). Resilience-fixes additions: `SpillRoot::open(cfg.runtime.spill_io)` for DLQ and archive overflow, `RegexCache::new(cfg.runtime.regex_cache)` for shared model-permission regex, `ShutdownCoordinator::new(cfg.runtime.shutdown)` for SIGTERM-driven drain, `SystemHealthMonitor::new(cfg.runtime.health)` with 4 force-majeure hooks (memory, FD, disk, Redis-OOM), `BackpressureGate::new(monitor)` wired into `early_request_filter`, and `BacklogRecovery::recover(spill_root)` to re-enqueue any records surviving a previous process crash/shutdown.
 
 ### Credit-lease (hard overdraft protection) — `crates/gw-ledger/src/{lease.rs,coef.rs,credit_estimator.rs,counter_handler.rs,protection_config.rs}`
 - `lease.rs`: `LEASE_POOL` (global `DashMap<UserId, Arc<LeaseState>>`). `LeaseGuard::try_acquire(uid, requested, now_ms_val, grace_ms)` returns `LeaseError::NoLease` (no entry or `mode != Protected`), `LeaseError::Expired` (`now_ms_val > expires_at.saturating_add(grace_ms)`), or `LeaseError::Insufficient` (pool `< requested`); on success CAS-decrements `credits`. `settle_actual(actual)` refunds `reserved - actual` only when `actual ≤ reserved` (no double-charge on over-spend; over-spend is reconciled by Go via `credits_consumed`). `now_ms()` returns `0` on a pre-1970 clock (fail-closed: a 0 timestamp makes any lease read as expired). `upsert_protected` / `upsert_unprotected` flip a user's mode.
@@ -48,6 +84,9 @@ Bootstrap resolves a stable `instance_id` (`instance_id::resolve`) before `Ledge
 ### Detailed-log archive — `crates/gw-ledger/src/detailed_archive.rs`
 `DetailedArchive` captures up to 5 per-surface `CapturedSurface`s per request (`Kind::{DownstreamRequest, UpstreamRequest, UpstreamResponse, DownstreamResponse, Summary}`), each `XADD`-ed to `usage:detailed` by a worker pool. Bodies are base64-encoded, then encoded via tiered compression `raw`/`lz4`/`zstd` (`encode` + `CompressionCfg` from `crates/gw-ledger/src/encoding.rs`). It is **drop-on-outage**: a full channel, oversize payload, compress failure, or `XADD` failure increments `gw_detailed_log_drop_total{reason,kind}` and discards the surface — there is no DLQ and no redaction.
 
+### Archive buffer cap + spill — `crates/gw-proxy/src/ctx.rs` (ArchiveState)
+Per-request archive accumulation is capped by `[proxy.archive]` configuration. `ArchiveState` has three states: `InMemory` (below `soft_cap_bytes`), `Spilling` (between soft and hard cap — excess bytes written to `spill_dir`), and `Dropped` (above `hard_cap_bytes` — further appends are discarded). `append_chunk` returns the current state; `emit_response_surfaces` (in the logging filter) reads from whichever storage the state indicates. This prevents unbounded per-request memory consumption on large upstream responses.
+
 ### gw-billing (task-level formula crate) — `crates/gw-billing/src/{formulas.rs,lib.rs}`
 `gw-billing` legitimately exists as the **task-level formula crate** — it computes freeze/settle **multipliers** for the long-running task path, not per-token request cost. `calculate_freeze_amount` / `calculate_settle_amount` (`crates/gw-billing/src/formulas.rs`) scale a `base_micro` by `kind_multiplier` (`Image`=3, `Video`=6, `Audio`=3, `Batch`=2, `LroResponses`/`Generic`=1), a vendor multiplier, and a `duration_multiplier` (step function on `estimated_duration_secs`). It contains no `cost_per_token` / `price_per_token` — enforced by the `no_billing_cost_per_token` lint — and is allowed only as a workspace/business dependency, never a dependency of supporting crates (`no_billing_crate` lint). This resolves the historical "gw-billing forbidden" contradiction: the crate is permitted **because** it is a task-formula crate, not a request cost engine.
 
@@ -55,7 +94,8 @@ Bootstrap resolves a stable `instance_id` (`instance_id::resolve`) before `Ledge
 
 - **No Rust cost math.** Rust never computes monetary cost. `UsageRecord` carries no `cost_micro`; the freeze uses either Go-pushed conservative `EstimatePricing` or the legacy flat fallback. Go owns actual cost from `usage:records`. Enforced by `no_cost_micro` (`scripts/check-invariants.sh`).
 - **Per-attempt records.** Each attempt emits its own `UsageRecord`; a failed attempt is settled (`Terminated`) and emitted before the retry register clobbers the next `attempt_index` (`crates/gw-proxy/src/billing_lifecycle.rs`).
-- **Three-tier usage DLQ.** `usage:records` failure goes to Redis DLQ, then memory retry queue, then emergency JSONL, and only after all fallbacks fail does `gateway_usage_records_lost_total` increment (`crates/gw-ledger/src/{flusher.rs,dlq.rs}`).
+- **Three-tier usage DLQ → cascade.** `usage:records` failure goes to Redis DLQ, then memory retry queue, then sharded `SpillFile`, then unbounded `BillingBacklog`; only after all fallbacks including backlog drainer retry fail does `gateway_usage_records_lost_total` increment (`crates/gw-ledger/src/{flusher.rs,dlq.rs,backlog.rs}`). Drop is acceptable only if `BackpressureGate` already rejected the request before any `UsageRecord` existed.
+- **BillingBacklog is unbounded.** `BillingBacklog` uses an unbounded `VecDeque`; pressure shows as `gw_billing_backlog_pending_count` rising, never as dropped envelopes. On shutdown, the backlog is serialized to `backlog_shutdown_<ts>.jsonl`; on next bootstrap, `BacklogRecovery` re-enqueues. Corrupt recovery files are quarantined to `<spill_root>/corrupt/`.
 - **Detailed-log drops on outage.** Forensic archive is best-effort; it never blocks the request and never retries (`crates/gw-ledger/src/detailed_archive.rs`).
 - **Freeze leak recovery.** A `RequestFreeze` dropped without `release()` rolls back its reservation and counts it (`gateway_freeze_leak_recovered_total`) rather than leaking frozen credits (`crates/gw-ledger/src/freeze.rs`).
 - **Credit-lease fail-closed.** Protected mode without coefficient data hard-rejects rather than admitting; lease expiry includes `lease_grace_ms` for small clock skew; a pre-1970 clock reads every lease as expired; only `LeaseError::NoLease` (a benign race) falls through to soft defense (`crates/gw-ledger/src/lease.rs`, `crates/gw-proxy/src/filters/request.rs`).

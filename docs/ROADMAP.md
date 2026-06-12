@@ -85,3 +85,16 @@ No open roadmap items after W4 full IR task request/response persistence.
 - **Decision:** keep the split artifact policy. Default `latest` remains the non-tunnel image built with Cargo defaults (`default = []`), and `latest-tunnel` remains the opt-in image built with `--features tunnel`. Do not promote tunnel into default `latest`.
 - **Design points:** `docs/spec/09-tunnel.md` documents this as the as-built operator model: runtime tunnel use still requires both the tunnel-enabled artifact and `[tunnel].enabled = true`, while non-tunnel operators continue pulling `latest`.
 - **Source:** master program F3 resolved input; W8 implementation evidence; `docs/design/2026-06-10-tunnel-artifact-release-decision.md`.
+
+## 10 Resilience
+
+### SIGTERM handler, Supervisor, DLQ async, archive cap, regex cache — `closed in resilience-fixes`
+- **Landed:** `gw-runtime` crate with `Supervisor`, `ShutdownCoordinator`, `SpillFile`, `RegexCache`, `BackpressureGate`; SIGTERM/SIGINT handler in `gw-gateway`; `EmergencyDlqWriter` async over sharded `SpillFile`; `BillingBacklog` + `BacklogRecovery`; `ArchiveState` cap-aware append; `ModelPermission` via shared `RegexCache`; `BackpressureGate` in `early_request_filter`.
+- **Source:** `docs/superpowers/plans/2026-06-11-resilience-fixes.md`, commits `cd0d45d..9655ec3`.
+
+### Out-of-scope (deliberate) — still deferred
+- `LatencyTracker::Mutex<VecDeque>` lock contention — flagged as a hotspot, but not in resilience-fixes ROI window. `capability-gap`.
+- `EntityStore` per-(user, api-key) merged-permission cache — CPU win, orthogonal to resilience. `capability-gap`.
+- `GLOBAL_STREAM_CAP` / `PER_KEY_INFLIGHT_CAP` hardcoded — revisit once load profile is real. `capability-gap`.
+- Egress impersonate UDS `max_sessions=64` and `ClientPool::Mutex<HashMap>` — same reason. `capability-gap`.
+- New cross-protocol streaming event mappings (Anthropic/Gemini → OpenAI Chat losing `ThinkingDelta` / `ToolCallStart`) — separate codec design effort. `capability-gap`.

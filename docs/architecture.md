@@ -19,7 +19,8 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 │   may depend on ↓             │  gw-capability, gw-tunnel-client, gw-billing,
 │                               │  gw-task-runtime, gw-egress-impersonate
 ├────────── Supporting ─────────┤  gw-core, gw-codec, gw-codec-macros,
-│   type / mechanism only        │  gw-store, gw-auth, gw-ledger, gw-task
+│   type / mechanism only        │  gw-store, gw-auth, gw-ledger, gw-task,
+│                               │  gw-runtime
 └───────────────────────────────┘
 ```
 
@@ -35,7 +36,8 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 | `gw-store` | Supporting | Redis + Postgres clients, `EntityStore` (Moka caches with cold-load chain), vendor-key invalidation hooks, `KekCache` state machine, `CounterStore`, deduction state, `StreamConsumer`. |
 | `gw-auth` | Supporting | `JwtValidator` (iss/aud/nbf/leeway), API-key verify, ADR-023 5-tier permission merge, governor per-user RPM/TPM/concurrency plus per-vendor-key RPM and `ratelimit::adaptive::AdaptiveRpmManager`, ADR-024 hard caps, HMAC signature verify, `ip_filter` / allowlist / blocklist / per-IP RPM, model-permission regex w/ ReDoS budget, management-path detect. |
 | `gw-task` | Supporting | Task contract crate: shared task DTOs, lifecycle/status enums, Redis task freeze/settle Lua, and Redis/Lua protocol shapes for background work without pulling in store/runtime I/O. |
-| `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process request `frozen_micro`; task freezes delegate to its `TaskFreezeRelease` trait), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction; `lease`/`coef`/`credit_estimator`/`counter_handler` modules (2026-05-29 credit lease). |
+| `gw-ledger` | Supporting | `FreezeGuard` RAII (in-process request `frozen_micro`; task freezes delegate to its `TaskFreezeRelease` trait), mpsc-backed billing flusher, `DetailedLogSink` (Redis Streams w/ MAXLEN), three-level redaction; `lease`/`coef`/`credit_estimator`/`counter_handler` modules (2026-05-29 credit lease). `EmergencyDlqWriter` async over `SpillFile`, `BillingBacklog` (unbounded VecDeque), `BacklogRecovery` on bootstrap. |
+| `gw-runtime` | Supporting | Shared runtime primitives: `Supervisor` (bounded-restart policy with exponential backoff + jitter), `ShutdownCoordinator` (two-phase drain: AcceptStop → TaskDrain → Stopped), `SpillRoot`/`SpillFile` (sharded async append-only files with quota enforcement), `RegexCache` (Moka-backed compiled-regex cache), `SystemHealthMonitor` + `BackpressureGate` (4 force-majeure hooks: memory/FD/disk/Redis-OOM at 99%). Workspace bottom — may not depend on any other workspace crate. |
 | `gw-task-runtime` | Business | Task runtime coordination used by the worker path: `RedisTaskFreezeRelease`, execution/cancel/watchdog/heartbeat loops, generic JSON LRO polling, and task-level settlement helpers. Must not depend on `gw-proxy`. |
 | `gw-adapter` | Business | `UpstreamAdapter` trait (vendor-specific outbound rewrite hooks, not wired for outbound yet), live `UpstreamErrorAnalyzer` trait, `ErrorOutcome`. |
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
@@ -53,6 +55,7 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 
 ```
 gw-core ◄── everything
+gw-runtime ◄── everything (workspace bottom)
 
 Supporting:
   gw-codec-macros  ◄── gw-codec
@@ -62,6 +65,8 @@ Supporting:
   gw-auth          ◄── gw-capability, gw-proxy, gw-gateway
   gw-task          ◄── gw-task-runtime, gw-gateway
   gw-ledger        ◄── gw-proxy, gw-gateway
+  gw-runtime       ◄── gw-ledger, gw-egress-impersonate, gw-task-worker,
+                       gw-proxy, gw-gateway
 
 Business:
   gw-health        ◄── gw-adapter, gw-routing, gw-proxy, gw-gateway
@@ -146,6 +151,12 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 | `[body_rules]` | Per-endpoint flat key-value defaults. Sub-table key = endpoint path, value = `{ key = value, … }`. Set-if-absent: existing client fields are never overridden. | Boot-time only. Values injected into `ir.passthrough_overrides` in `upstream_request_filter`. |
 | `[health.quota_probe]` | `enabled` (false), `interval_secs` (30), `probe_endpoint` (`/v1/models`) | Optional background probe for keys in cooldown without Retry-After. Sends low-cost GET to upstream; 2xx clears cooldown, non-2xx keeps it. No `usage:records` emitted. Boot-time only. |
 | `[quota_state_probe]` | `enabled` (false), `interval_secs` (300), `probe_endpoint` (`/v1/models`), `max_pending` (1000) | Optional quota-remaining probe for cached vendor keys whose persisted quota state is exhausted and reset-eligible. Writes `vendor_keys.quota_*` through Rust's `QuotaStateUpdateQueue`. Boot-time only. |
+| `[runtime.supervisor]` | `default_max_restarts` (5), `window_ms` (60000), `backoff_initial_ms` (100), `backoff_max_ms` (30000), `backoff_multiplier` (2.0), `backoff_jitter` (0.2) | Bounded-restart policy for supervised long-running tasks. All spawns through `Supervisor::spawn` inherit these defaults unless overridden per-task. |
+| `[runtime.shutdown]` | `phase1_accept_stop_ms` (5000), `phase2_task_drain_ms` (25000), `hard_deadline_ms` (35000), `billing_drain_ms` (20000) | Two-phase shutdown: phase 1 stops accepting new connections; phase 2 drains in-flight billing tasks; hard deadline aborts remaining work. |
+| `[runtime.spill_io]` | `root_dir` (`/data/cnexus/spill`), `max_total_bytes` (10737418240), `buffer_size` (65536), `dlq_shards` (4) | SpillFile root and quota for DLQ / archive overflow. `dlq_shards` sets shard count for emergency DLQ writes. |
+| `[runtime.regex_cache]` | `capacity` (4096), `tti_secs` (3600) | Moka-backed compiled-regex cache. `tti_secs` controls time-to-idle eviction. Shared across all model-permission regex evaluations. |
+| `[runtime.health]` | `evaluate_interval_ms` (1000), `hysteresis_healthy_ticks` (3) | System health monitor cadence and hysteresis. A hook must report unhealthy for `hysteresis_healthy_ticks` consecutive evaluations before the `BackpressureGate` activates. |
+| `[proxy.archive]` | `soft_cap_bytes` (4194304), `hard_cap_bytes` (8388608), `spill_dir` (`/data/cnexus/spill/archive`) | Archive buffer caps. Between soft and hard cap, `append_chunk` returns `ArchiveState::Spilling` and excess bytes are written to `spill_dir`. Above hard cap, further appends are dropped. |
 
 Secrets must come from env, never the TOML.
 
@@ -361,6 +372,9 @@ Active lints (all green at HEAD):
 | `no_cached_body` | `ctx.cached_body` was removed; use `ctx.body` (`RequestBodyView`). Phase B of 2026-05-28-systemic-fixes. |
 | `managed_loop_advisory` (warn) | Long-loop `tokio::spawn` in gw-store/gw-ledger should use `ManagedLoop` + `Supervisor::spawn` (see `crates/gw-store/src/managed_loop.rs`). Warn-only during migration. |
 | `no_currency_in_lease` | Credit lease modules (`gw-ledger::lease`, `::coef`, `::credit_estimator`, `::counter_handler`) must hold only opaque credits; no currency / pricing references. See `2026-05-29-credit-lease-design.md` §2/§16. |
+| `supervisor_universal` | Every long-running tokio task runs under `gw_runtime::Supervisor`. The `managed_loop_advisory` lint is subsumed; new spawns must use `Supervisor::spawn` from the start. |
+| `backpressure_opaque_503` | The 503 returned by `BackpressureGate` must never reveal which hook tripped. The response body is the generic `GW_BACKPRESSURE_REJECTED` envelope; no hook-specific error code or header. |
+| `backlog_unbounded_by_construction` | `BillingBacklog` is an unbounded `VecDeque` — pressure shows as `gw_billing_backlog_pending_count` rising, not as dropped envelopes. The BackpressureGate at `early_request_filter` is the only shed point; once a `UsageRecord` exists, it must be delivered. |
 
 Pending lints (uncomment when target phase lands):
 
@@ -410,6 +424,8 @@ Pending lints (uncomment when target phase lands):
 | **Direct (Rustls) per-key HTTP proxy is fail-closed, not silently bypassed.** A Direct vendor key with `proxy`/`default_proxy` set returns `GW_UPSTREAM_PROXY_UNSUPPORTED` (502); proxied egress must use `egress_mode = Impersonate` (whose loopback honors `X-Egress-Proxy`). | pingora 0.8's `Proxy.next_hop` is UDS-only and cannot route an HTTP proxy URL; silently connecting direct would leak the gateway's egress IP and violate the operator's routing policy. Audit 2026-05-30 §3.4. | `crates/gw-proxy/src/filters/upstream.rs::pick_peer` |
 | **Adaptive per-vendor-key RPM is enforced at `pick_peer`, not `request_filter`.** The learned ceiling is applied via `AdaptiveRpmManager::try_admit` when the key is picked; an over-ceiling key is diverted to another candidate, degrading to the pick only if all candidates are hot. The per-user RPM bucket stays in `request_filter`. | The vendor key is unknown during `request_filter`, so the former clamp there was dead code. Enforcing back-pressure where the key is known makes the learned limit real; degrading (not hard-rejecting) keeps the user-RPM + cooldown as the binding limits. Audit 2026-05-30 §1.8. | `crates/gw-auth/src/ratelimit/adaptive.rs`, `crates/gw-proxy/src/filters/upstream.rs` |
 | **Cross-protocol re-render uses one health/codec format resolver.** `gw_core::protocol::resolve_upstream_format` is the single source of truth used by the routing health gate (read) and the codec/health record path (write), so a protocol-conversion key's circuit/cooldown is keyed to the bucket selection consults. | Deriving the upstream format independently in two places let cross-protocol keys be selected under the client bucket while cooldown/circuit landed in the upstream bucket — making the safety net inert. Audit 2026-05-30 §1.5/§3.10. | `crates/gw-core/src/protocol.rs`, `crates/gw-routing/src/pipeline/mod.rs`, `crates/gw-proxy/src/filters/{upstream,logging}.rs` |
+| **`/livez` remains 200 during drain.** When `ShutdownCoordinator` enters the AcceptStop or TaskDrain phase, `/livez` still returns 200 while `/readyz` returns 503. This is deliberate so that k8s does not restart the Pod and lose the in-memory `BillingBacklog`. `/readyz` is the only endpoint k8s should consult for traffic routing. | A Pod restart during drain would discard unflushed `BillingBacklog` entries. Keeping `/livez` at 200 prevents the kubelet from killing the process before billing data is fully drained. | `crates/gw-runtime/src/shutdown.rs`, `crates/gw-gateway/src/health.rs` |
+| **503 under backpressure carries `Retry-After: 2`.** When `BackpressureGate` rejects a request (memory / FD / disk / Redis-OOM at 99%), the response includes `Retry-After: 2`. The 2-second window is deliberately short: the gateway wants clients to retry quickly so existing in-flight work can drain the resource pressure. | Longer retry delays would hold pressure longer; short delays give the system the best chance to self-heal once the force-majeure condition clears. | `crates/gw-runtime/src/health/mod.rs`, `crates/gw-proxy/src/filters/early.rs` |
 
 ## 9. Known gaps (closed by `feature/known-gaps-closure`)
 
@@ -435,7 +451,7 @@ The 13 gaps G1-G13 catalogued in [`docs/ROADMAP.md`](ROADMAP.md) all landed acro
 
 - **G7**: workspace-global `signature_required` toggle (ADR-G7-2). *(The compressed-body parse gap — decompressed bytes not reused by codec — was closed in Phase B of 2026-05-28-systemic-fixes via `RequestBodyView::prefill_decoded`.)*
 - **G8**: direct wire-to-wire codegen (codec-s3 N²) replacing the IR round-trip; multi-event SSE buffering across Pingora chunk boundaries. *(Cross-protocol non-streaming response body re-render landed in S-codec v2, 2026-05-24; entry trimmed accordingly.)*
-- **G11**: three-layer fallback (in-memory + on-disk file + periodic drainer + startup recovery) → billing-c-delta.
+- **G11**: ~~three-layer fallback (in-memory + on-disk file + periodic drainer + startup recovery) → billing-c-delta.~~ **Closed by resilience-fixes (T4.1–T4.5):** `EmergencyDlqWriter` async over sharded `SpillFile`, `BillingBacklog` (unbounded `VecDeque`), cascade Redis → SpillFile → BillingBacklog + drainer, `BacklogRecovery` on bootstrap, shutdown dump + exit code 2.
 - **G3**: per-tenant timezone for the daily-quota day window (currently UTC-only).
 - **G13**: reconcile `ApiKeyEntry.force_capabilities` (SmallVec, singular `force_`) vs `VendorKey.forced_capabilities` (Vec, plural) into one breaking rename.
 - **Credit lease crash-recovery gap**: crash-recovery `UsageRecord`s (`inflight_reconciler`) currently emit `credits_consumed: None`, so Go skips the outstanding-ledger decrement on crash-recovered protected-mode requests. Persistence of `credits_consumed` + `coef_table_version` in the inflight hash would close this. Future PR.
