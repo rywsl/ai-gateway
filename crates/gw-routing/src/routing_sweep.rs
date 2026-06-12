@@ -81,6 +81,9 @@ mod tests {
         );
         coord.token().cancel();
         let exit = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        assert!(exit.is_ok(), "routing_sweep did not exit within 5s of shutdown");
+        assert!(
+            exit.is_ok(),
+            "routing_sweep did not exit within 5s of shutdown"
+        );
     }
 }
