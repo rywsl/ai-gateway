@@ -15,6 +15,7 @@ async-trait.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
+moka = { workspace = true }
 jsonwebtoken.workspace = true
 governor.workspace = true
 hmac.workspace = true
