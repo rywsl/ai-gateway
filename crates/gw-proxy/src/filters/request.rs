@@ -467,6 +467,14 @@ pub async fn run(
     // ---------------------------------------------------------------------
     const BODY_CAP: usize = 16 * 1024 * 1024;
     let mut body_buf: Vec<u8> = Vec::new();
+    // `request_filter` consumes the whole downstream body here, before Pingora's
+    // proxy loop forwards the request upstream. Without retry buffering Pingora
+    // retains no copy, so it sends the upstream headers (incl. Content-Length)
+    // with an empty body and the upstream blocks waiting for bytes that never
+    // arrive (observed as a ~30s upstream ReadTimedout). Enabling retry buffering
+    // before the first read makes Pingora keep the body and replay it upstream,
+    // where `request_body_filter` swaps in the rewritten body at end-of-stream.
+    session.as_mut().enable_retry_buffering();
     while let Some(chunk) = session.read_request_body().await? {
         if body_buf.len() + chunk.len() > BODY_CAP {
             let err = ErrorIR {
