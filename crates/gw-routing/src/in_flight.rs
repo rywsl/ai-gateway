@@ -15,10 +15,10 @@
 //! Health concerns (circuit / cooldown / sliding window) live in
 //! `gw-health::KeyHealthStore`. The two stores are independent.
 //!
-//! Memory note: `InFlightStore::count` calls `get_or_create`, so a query
-//! for a key that has never had any in-flight requests still allocates an
-//! entry (count=0). Key space is bounded by the number of configured
-//! vendor keys, so this is acceptable; no eviction sweep is needed in v1.
+//! `InFlightStore::count(k)` returns 0 for an unknown key without creating
+//! an entry. Entries are created only by `acquire`/`get_or_create` (the
+//! actual in-flight tracking path). This avoids the failure mode where a
+//! read-only `count` query for an arbitrary key would otherwise allocate.
 
 use dashmap::DashMap;
 use gw_core::ids::KeyId;
@@ -57,7 +57,7 @@ impl InFlightStore {
     }
 
     pub fn count(&self, k: &KeyId) -> u32 {
-        self.get_or_create(k).count.load(Ordering::Relaxed)
+        self.count_if_present(k)
     }
 
     pub fn count_if_present(&self, k: &KeyId) -> u32 {
@@ -116,5 +116,23 @@ impl InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.counter.count.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_returns_zero_without_creating_entry() {
+        let store = InFlightStore::default();
+        let key = KeyId::from("k-never-acquired");
+        // Read-only count of an unknown key.
+        assert_eq!(store.count(&key), 0);
+        // Critical: no entry was inserted.
+        assert!(
+            !store.by_key.contains_key(&key),
+            "count() on unknown key must NOT create an entry"
+        );
     }
 }

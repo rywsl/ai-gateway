@@ -1427,6 +1427,18 @@ async fn bootstrap(
         (None, None)
     };
 
+    // routing_sweep: periodic sweep of ModelFrequencyTracker,
+    // ReservationGlobalView, LatencyTracker, AffinityManager.
+    // Supervisor-wrapped; registered with the ShutdownCoordinator.
+    let routing_sweep_handle = gw_routing::routing_sweep::spawn(
+        frequency_tracker.clone(),
+        reservation_view.clone(),
+        latency_tracker.clone(),
+        affinity.clone(),
+        shutdown_token.clone(),
+    );
+    shutdown.register(routing_sweep_handle);
+
     // 7. Health server (positioned after TunnelStack so `tunnel` is in scope).
     let health_port = cfg.server.health_port;
     let health_state = health::HealthState {

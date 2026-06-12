@@ -105,6 +105,10 @@ No open roadmap items after W4 full IR task request/response persistence.
 - **Deferred:** `LeaseGuard::Drop` credit refund on panic — Go's event-driven `protected_lease` push bounds the false-rejection window; add only on operational evidence. See `docs/architecture.md` §Deliberate behaviours.
 - **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 3.
 
+### Routing sweep + InFlightStore count + UNKNOWN_PRESETS_WARNED cap — `closed in memory-leak-fixes`
+- **Landed:** New `routing_sweep` Supervisor-wrapped task ticks every 60s: `ModelFrequencyTracker::sweep_stale` evicts counters whose `last_used_at_ms` exceeds 1h; `ReservationGlobalView::sweep_stale_instances` evicts instances whose `ts_ms` exceeds 1h and recomputes `by_model`; `LatencyTracker::evict_stale` and `AffinityManager::sweep_expired` (pre-existing, now finally called). `InFlightStore::count(k)` delegates to `count_if_present(k)` — returns 0 for unknown keys without allocating. `UNKNOWN_PRESETS_WARNED` replaced from unbounded `DashSet` to `moka::sync::Cache<String, ()>` capped at 1000.
+- **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 5.
+
 ### Out-of-scope (deliberate) — still deferred
 - 2026-06-12 — Closed: bound `RedosTracker`, `RateLimitGuard` (5 maps), `AdaptiveRpmManager` (2 maps) with Moka caches; wire `spawn_ip_ratelimit_sweep` and new `spawn_auth_failure_ip_sweep` into bootstrap. See `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §Crate 4. Deliberate TTI-boundary semantic change recorded in §spec/04-rate-limiting.md + §architecture.md.
 
