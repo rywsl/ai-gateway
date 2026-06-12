@@ -93,7 +93,7 @@ No open roadmap items after W4 full IR task request/response persistence.
 - **Source:** `docs/superpowers/plans/2026-06-11-resilience-fixes.md`, commits `cd0d45d..9655ec3`.
 
 ### SpillFile Drop + archive reset on failover — `closed in memory-leak-fixes`
-- **Landed:** `SpillFile::Drop` for timely shard cleanup (async unlink via `tokio::spawn`, sync fallback); `reset_response_attempt_state` resets archive accumulators on response-side failover. Both prevent disk and memory leaks under churn.
+- **Landed:** `SpillFile::Drop` for timely shard cleanup (synchronous `std::fs::remove_file`); `reset_response_attempt_state` resets archive accumulators on response-side failover. Both prevent disk and memory leaks under churn.
 - **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 1.
 
 ### Out-of-scope (deliberate) — still deferred

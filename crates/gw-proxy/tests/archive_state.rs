@@ -103,16 +103,8 @@ async fn reset_response_attempt_clears_archive_accumulators() {
     assert_eq!(upstream.len(), 0);
     assert_eq!(downstream.len(), 0);
 
-    // Give SpillFile::Drop time to async-unlink the old shards. Then read
-    // tmp directory and assert no spill shard files remain — this proves the
-    // reset semantics + Drop work together to release disk.
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let count = std::fs::read_dir(tmp.path()).unwrap().count();
-        if count == 0 {
-            break;
-        }
-    }
+    // Sync Drop completes the unlink before the default-assignment returns —
+    // no sleep needed. Assert no spill shard files remain.
     let remaining: Vec<_> = std::fs::read_dir(tmp.path())
         .unwrap()
         .map(|e| e.unwrap().path())
