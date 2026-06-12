@@ -1381,6 +1381,11 @@ pub fn check_api_key_status(entry: &ApiKeyEntry) -> std::result::Result<(), ()> 
     }
 }
 
+/// Resolved API-key auth scope: `(user id, api-key id, per-key IP allowlist)`.
+/// Aliased so [`resolve_api_key_entry`]'s return type stays under clippy's
+/// `type_complexity` threshold.
+type ApiKeyAuthScope = (UserId, Option<ApiKeyId>, Option<Vec<String>>);
+
 /// Shared post-auth gate for a resolved API-key entry, used by both the
 /// single-secret shapes (`x-api-key` without id, `Authorization: Bearer ak_…`)
 /// and the legacy `x-api-key` + `x-api-key-id` pair. Runs the disabled/expired
@@ -1393,7 +1398,7 @@ fn resolve_api_key_entry(
     entry: &Arc<Versioned<ApiKeyEntry>>,
     akid: ApiKeyId,
     signature_required: bool,
-) -> std::result::Result<(UserId, Option<ApiKeyId>, Option<Vec<String>>), ErrorIR<'static>> {
+) -> std::result::Result<ApiKeyAuthScope, ErrorIR<'static>> {
     if check_api_key_status(&entry.value).is_err() {
         return Err(ErrorIR {
             category: ErrorCategory::ClientAuth,
