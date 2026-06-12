@@ -397,6 +397,9 @@ mod tests {
         let handle = stack.start_probe_loop(std::time::Duration::from_secs(60), token);
         coord.token().cancel();
         let exit = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
-        assert!(exit.is_ok(), "probe loop did not exit within 5s of shutdown");
+        assert!(
+            exit.is_ok(),
+            "probe loop did not exit within 5s of shutdown"
+        );
     }
 }
