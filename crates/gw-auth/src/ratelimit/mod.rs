@@ -156,12 +156,23 @@ impl RateLimitGuard {
         uid: &UserId,
         max: u32,
     ) -> Result<StreamSlot, ErrorIR<'static>> {
-        let counter = self
-            .per_user_streams
-            .entry(uid.clone())
-            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
-            .clone();
-        let n = counter.fetch_add(1, Ordering::AcqRel);
+        // Increment the counter while still holding the shard lock so a
+        // concurrent `StreamSlot::Drop` whose `remove_if` predicate re-checks
+        // under the SAME shard lock cannot observe 0 between
+        // `or_insert_with`'s return and our `fetch_add`. Without this
+        // serialisation a TOCTOU race could orphan the Arc we hold and leak
+        // an uncounted in-flight slot, bypassing the cap indefinitely.
+        let counter = {
+            let entry = self
+                .per_user_streams
+                .entry(uid.clone())
+                .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
+            entry.fetch_add(1, Ordering::AcqRel);
+            entry.clone()
+        };
+        // `n` is the pre-increment count, matching the prior `fetch_add`
+        // return-value semantics consumed by the cap check below.
+        let n = counter.load(Ordering::Acquire) - 1;
         if max > 0 && n + 1 > max as usize {
             let prev = counter.fetch_sub(1, Ordering::AcqRel);
             // If count is back to 0, try to remove the entry to keep the map

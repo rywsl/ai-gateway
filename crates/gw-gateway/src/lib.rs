@@ -1676,35 +1676,6 @@ pub fn spawn_decay_loop(
     })
 }
 
-fn spawn_ip_ratelimit_sweep(
-    guard: Arc<IpRateLimitGuard>,
-    sweep_interval_secs: u64,
-    token: gw_runtime::ShutdownToken,
-) -> tokio::task::JoinHandle<()> {
-    Supervisor::new("ip_ratelimit_sweep", RestartPolicy::default(), token).spawn(move |tok| {
-        let guard = guard.clone();
-        let mut interval = tokio::time::interval(Duration::from_secs(sweep_interval_secs));
-        async move {
-            loop {
-                tokio::select! {
-                    _ = tok.cancelled() => return Ok(()),
-                    _ = interval.tick() => {
-                        let removed = guard.sweep();
-                        if removed > 0 {
-                            tracing::info!(
-                                target: "gw_gateway",
-                                removed,
-                                active = guard.len(),
-                                "ip ratelimit sweep evicted idle entries"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    })
-}
-
 fn spawn_auth_failure_ip_sweep(
     guard: Arc<gw_auth::auth_ip_ratelimit::AuthFailureIpLimiter>,
     sweep_interval_secs: u64,
@@ -1736,17 +1707,6 @@ fn spawn_auth_failure_ip_sweep(
 #[cfg(test)]
 mod ip_sweep_tests {
     use super::*;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ip_ratelimit_sweep_respects_shutdown_token() {
-        let coord = gw_runtime::ShutdownCoordinator::default();
-        let token = coord.token();
-        let guard = Arc::new(IpRateLimitGuard::default());
-        let handle = spawn_ip_ratelimit_sweep(guard, 60, token);
-        coord.token().cancel();
-        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
-        assert!(exit.is_ok(), "ip ratelimit sweep should exit within 5s of shutdown");
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auth_failure_ip_sweep_respects_shutdown_token() {

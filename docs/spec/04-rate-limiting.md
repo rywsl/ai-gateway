@@ -16,9 +16,19 @@ Token *cost* is never computed here (the Go billing service owns cost); rate lim
 
 ### Per-user guard — `RateLimitGuard`
 
-`RateLimitGuard` (`crates/gw-auth/src/ratelimit/mod.rs`) holds per-user maps/counters (`per_user`, `per_user_tpm`, `per_user_streams`, `total_streams`) plus a synchronous per-vendor-key RPM gate (`per_key`, `per_key_overrides`). All five maps are **bounded `moka::sync::Cache`** with `max_capacity` (100_000 for user-keyed, 10_000 for key-keyed) and `time_to_idle` (1 hour default).
+`RateLimitGuard` (`crates/gw-auth/src/ratelimit/mod.rs`) holds per-user maps/counters (`per_user`, `per_user_tpm`, `per_user_streams`, `total_streams`) plus a synchronous per-vendor-key RPM gate (`per_key`, `per_key_overrides`).
 
-> **Deliberate semantic at the TTI boundary**: a user (or key) that exhausts RPM, idles longer than TTI, then returns is given a FRESH `DefaultDirectRateLimiter` instance. The sliding-window state of the prior limiter is discarded. This is the trade-off for a bounded keyspace: a key that disappears forever is not punished forever. Operators concerned about this boundary can raise TTI in configuration (TODO: expose as a config knob; current default is hard-coded at 1 hour).
+**Storage: tiered by purpose.** Three of the five `RateLimitGuard` maps use `moka::sync::Cache` with `max_capacity` (100_000 for user-keyed, 10_000 for key-keyed) and `time_to_idle` (1 hour default):
+- `per_user`, `per_user_tpm` — RPM/TPM sliding-window state; a user idle longer than TTI gets a fresh limiter on return (the "fresh window at TTI boundary" semantic).
+- `per_key` — keyed by `(KeyId, configured_rpm)` tuple; atomic `get_with` rebuild when rpm changes, old tuples age out via TTI.
+
+The remaining two maps use `DashMap`:
+- `per_user_streams: Arc<DashMap<UserId, Arc<AtomicUsize>>>` — LIVE concurrency counters. TTI eviction would bypass the per-user concurrent-stream cap (StreamSlot Drop would `fetch_sub` on an orphan Arc). Bounded via RAII: `StreamSlot::Drop` removes the entry when the count returns to 0, with `remove_if` predicate re-checking under the shard lock. To prevent a TOCTOU between acquire's `or_insert_with` exit and a concurrent Drop's `remove_if`, `check_stream_slot` performs the `fetch_add` while still holding the shard lock returned by `entry()`.
+- `per_key_overrides: DashMap<KeyId, u32>` — admin-set RPM overrides; persistent until explicit `reset_key_rpm`. Cardinality bounded by configured vendor keys.
+
+`AdaptiveRpmManager.state` and `limiters` use the same Moka pattern as `per_user`/`per_user_tpm`.
+
+> **Deliberate semantic at the TTI boundary**: only applies to the three Moka-backed maps. A user (or key) that exhausts RPM/TPM, idles past TTI, then returns is given a FRESH `DefaultDirectRateLimiter` instance. The sliding-window state of the prior limiter is discarded. `per_user_streams` (RAII) and `per_key_overrides` (admin policy) are not subject to this semantic. Operators concerned about the Moka-backed boundary can raise TTI in configuration (TODO: expose as a config knob; current default is hard-coded at 1 hour).
 
 - `check(&self, perm: &MergedPermissions)` (`ratelimit/mod.rs:50`) — when `perm.rpm_limit > 0`, lazily builds a `governor` direct limiter at `Quota::per_minute(rpm_limit)` keyed on `perm.effective_user_id`, and calls `lim.check()`. A failure returns `rpm_err()` → `GW_QUOTA_RPM_EXCEEDED` (429, `retryable: true`, `retry_after_secs: Some(60)`, `ratelimit/mod.rs:138`). It is invoked once per request in `request_filter` step 8 (`crates/gw-proxy/src/filters/request.rs:1208`); the returned `RateLimitTicket` is dropped immediately, so RPM is debited exactly once per request.
 - `check_key(&self, key_id, configured_rpm)` — after routing selects the final vendor key, lazily builds a `governor` direct limiter keyed on `VendorKey.key_id` and the key's configured `rpm_limit` (or an override from `override_key_rpm`). A failure returns `GW_QUOTA_RPM_KEY_EXCEEDED` (429, `retry_after_secs: Some(60)`). `reset_key_rpm` removes the override and cached limiter so the next check rebuilds from the configured value. It is invoked in `pick_peer` after strategy/failover selection, because `request_filter` does not yet know the vendor key.
