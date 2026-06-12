@@ -67,9 +67,11 @@ EXPOSE 8000 9090 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8080/readyz || exit 1
 
-# Use non-root user
+# Use non-root user. Runtime spill/backlog defaults live under /data/cnexus;
+# create and own them in-image so the default container can boot.
 RUN useradd --system --create-home --shell /bin/false gateway \
- && chown -R gateway:gateway /app
+ && mkdir -p /data/cnexus/spill/archive \
+ && chown -R gateway:gateway /app /data/cnexus
 USER gateway
 
 ENV RUST_LOG=info,gw=debug

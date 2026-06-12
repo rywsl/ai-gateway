@@ -279,6 +279,7 @@ const USER_GROUP_SQL: &str =
 // auth). Build the byte array with get_byte over the byte length; NULL -> null
 // (None), present -> array (matches Go's alm_bytea_to_jsonb_bytes in 00037).
 const API_KEY_SQL: &str = "SELECT jsonb_set(payload, '{signature_secret}', CASE WHEN signature_secret IS NULL THEN 'null'::jsonb ELSE COALESCE((SELECT jsonb_agg(get_byte(signature_secret, i) ORDER BY i) FROM generate_series(0, length(signature_secret) - 1) AS g(i)), '[]'::jsonb) END, true) AS payload, version FROM api_keys WHERE id = $1 AND deleted_at IS NULL";
+const API_KEY_BY_HASH_SQL: &str = "SELECT jsonb_set(payload, '{signature_secret}', CASE WHEN signature_secret IS NULL THEN 'null'::jsonb ELSE COALESCE((SELECT jsonb_agg(get_byte(signature_secret, i) ORDER BY i) FROM generate_series(0, length(signature_secret) - 1) AS g(i)), '[]'::jsonb) END, true) AS payload, version FROM api_keys WHERE key_hash = $1 AND deleted_at IS NULL";
 const IP_BLOCK_SQL: &str =
     "SELECT payload, version FROM ip_blocks WHERE id = $1 AND deleted_at IS NULL";
 const VENDOR_SQL: &str =
@@ -332,6 +333,22 @@ pub async fn load_apikey(ctx: &LoaderCtx, id: &ApiKeyId) -> anyhow::Result<Versi
         serde_json::from_value::<ApiKeyEntry>(v.clone()).map_err(Into::into)
     })
     .await
+}
+
+pub async fn load_apikey_by_hash(
+    ctx: &LoaderCtx,
+    key_hash: &str,
+) -> anyhow::Result<Versioned<ApiKeyEntry>> {
+    let row: Option<(serde_json::Value, i64)> = sqlx::query_as(API_KEY_BY_HASH_SQL)
+        .bind(key_hash)
+        .fetch_optional(&ctx.pg)
+        .await?;
+    let (payload, version) = row.ok_or_else(|| anyhow::anyhow!("not found in pg: apikey hash"))?;
+    let value = serde_json::from_value::<ApiKeyEntry>(payload)?;
+    Ok(Versioned {
+        version: version as u64,
+        value: Arc::new(value),
+    })
 }
 
 pub async fn load_ipblock(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versioned<IpBlockEntry>> {
