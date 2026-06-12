@@ -25,6 +25,7 @@ pub struct BillingBacklog {
     high_watermark_count: AtomicUsize,
     oldest_ns: AtomicU64,
     crossed_threshold: AtomicBool,
+    over_threshold: usize,
 }
 
 impl Default for BillingBacklog {
@@ -35,6 +36,14 @@ impl Default for BillingBacklog {
 
 impl BillingBacklog {
     pub fn new() -> Self {
+        Self::with_threshold(BILLING_BACKLOG_OVER_THRESHOLD)
+    }
+
+    /// Construct a backlog with a custom upward-crossing threshold. Production
+    /// code uses [`BillingBacklog::new`] (which delegates here with
+    /// `BILLING_BACKLOG_OVER_THRESHOLD`). Tests use a small threshold to
+    /// exercise crossing behaviour without pushing 10_000 envelopes.
+    pub fn with_threshold(t: usize) -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
             pending_count: AtomicUsize::new(0),
@@ -42,6 +51,7 @@ impl BillingBacklog {
             high_watermark_count: AtomicUsize::new(0),
             oldest_ns: AtomicU64::new(0),
             crossed_threshold: AtomicBool::new(false),
+            over_threshold: t,
         }
     }
 
@@ -95,11 +105,8 @@ impl BillingBacklog {
             .set(self.high_watermark() as f64);
 
         // Upward-crossing detection: increment once per crossing, not per push.
-        if count >= BILLING_BACKLOG_OVER_THRESHOLD {
-            use std::sync::atomic::Ordering as O;
-            if !self.crossed_threshold.swap(true, O::AcqRel) {
-                metrics::counter!("gw_billing_backlog_over_threshold_total").increment(1);
-            }
+        if count >= self.over_threshold && !self.crossed_threshold.swap(true, Ordering::AcqRel) {
+            metrics::counter!("gw_billing_backlog_over_threshold_total").increment(1);
         }
     }
 
@@ -113,9 +120,8 @@ impl BillingBacklog {
             .unwrap_or(0);
         self.pending_count.fetch_sub(1, Ordering::AcqRel);
         self.pending_bytes.fetch_sub(bytes, Ordering::AcqRel);
-        use std::sync::atomic::Ordering as O;
-        if self.pending_count() < BILLING_BACKLOG_OVER_THRESHOLD {
-            self.crossed_threshold.store(false, O::Release);
+        if self.pending_count() < self.over_threshold {
+            self.crossed_threshold.store(false, Ordering::Release);
         }
         metrics::gauge!("gw_billing_backlog_pending_count").set(self.pending_count() as f64);
         metrics::gauge!("gw_billing_backlog_oldest_age_seconds").set(if new_oldest == 0 {
@@ -132,6 +138,7 @@ impl BillingBacklog {
         self.pending_count.store(0, Ordering::Release);
         self.pending_bytes.store(0, Ordering::Release);
         self.oldest_ns.store(0, Ordering::Release);
+        self.crossed_threshold.store(false, Ordering::Release);
         out
     }
 
@@ -344,12 +351,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crossed_threshold_resets_when_pending_drops_below() {
-        // Use a synthetic threshold via the constant. We can't override it,
-        // so we verify the flag is exposed via a public reader and that it
-        // tracks state correctly with respect to the real constant.
-        let b = BillingBacklog::new();
-        // At construction, the flag is unset.
+    async fn crossed_threshold_fires_once_per_upward_crossing() {
+        let b = BillingBacklog::with_threshold(3);
         assert!(!b.crossed_threshold_flag());
+        b.push(env()).await; // 1
+        b.push(env()).await; // 2
+        assert!(!b.crossed_threshold_flag());
+        b.push(env()).await; // 3 — crosses upward
+        assert!(b.crossed_threshold_flag());
+        b.push(env()).await; // 4 — still over, flag stays true (no double-count)
+        assert!(b.crossed_threshold_flag());
+        b.pop().await; // 3 — still at threshold
+        assert!(b.crossed_threshold_flag());
+        b.pop().await; // 2 — drops below, flag resets
+        assert!(!b.crossed_threshold_flag());
+        b.push(env()).await; // 3 — second upward crossing
+        assert!(b.crossed_threshold_flag());
     }
 }

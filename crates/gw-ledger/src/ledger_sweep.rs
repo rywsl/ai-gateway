@@ -21,29 +21,32 @@ const LEDGER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// panicking does not silently disable the loop. Returns the JoinHandle
 /// so the caller can register it with the ShutdownCoordinator.
 pub fn spawn(shutdown: ShutdownToken) -> JoinHandle<()> {
-    Supervisor::new("ledger_sweep", RestartPolicy::default(), shutdown).spawn(move |tok| async move {
-        let mut tick = tokio::time::interval(LEDGER_SWEEP_INTERVAL);
-        tick.tick().await; // skip immediate first tick (match DeductGc convention)
-        loop {
-            tokio::select! {
-                _ = tok.cancelled() => {
-                    tracing::info!(target: "gw_ledger::ledger_sweep", "shutdown requested");
-                    return Ok(());
-                }
-                _ = tick.tick() => {
-                    let lease_removed = lease::sweep_unprotected();
-                    let coef_removed = coef::sweep_orphans();
-                    if lease_removed > 0 || coef_removed > 0 {
-                        debug!(
-                            lease_removed,
-                            coef_removed,
-                            "ledger sweep tick"
-                        );
+    Supervisor::new("ledger_sweep", RestartPolicy::default(), shutdown).spawn(
+        move |tok| async move {
+            let mut tick = tokio::time::interval(LEDGER_SWEEP_INTERVAL);
+            tick.tick().await; // skip immediate first tick (match DeductGc convention)
+            loop {
+                tokio::select! {
+                    _ = tok.cancelled() => {
+                        tracing::info!(target: "gw_ledger::ledger_sweep", "shutdown requested");
+                        return Ok(());
+                    }
+                    _ = tick.tick() => {
+                        let lease_removed = lease::sweep_unprotected();
+                        let coef_removed = coef::sweep_orphans();
+                        if lease_removed > 0 || coef_removed > 0 {
+                            debug!(
+                                target: "gw_ledger::ledger_sweep",
+                                lease_removed,
+                                coef_removed,
+                                "ledger sweep tick"
+                            );
+                        }
                     }
                 }
             }
-        }
-    })
+        },
+    )
 }
 
 #[cfg(test)]

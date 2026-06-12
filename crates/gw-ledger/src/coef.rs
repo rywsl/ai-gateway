@@ -98,16 +98,20 @@ pub const COEF_STAGING_SAFETY_MARGIN: u64 = 100;
 /// (staged < expected) branches — the orphan case here is versions that
 /// were `apply_coef_entry`'d but never received any commit at all.
 ///
-/// `coef::lookup` is called only from `credit_estimator::estimate_request_credits`
-/// at request admission time; settle path does not re-read staging.
-/// `version >= active - SAFETY_MARGIN` is preserved to cover Go's in-flight
-/// push depth and any recently-active LeaseGuard's captured `coef_version`.
+/// `coef::lookup` is called at both request admission (via
+/// `credit_estimator::estimate_request_credits`) and settle (via
+/// `credit_estimator::actual_usage_credits`, which uses the
+/// `LeaseGuard`'s captured `coef_version`). The SAFETY_MARGIN of 100
+/// versions far exceeds the number of coef commits expected during a
+/// single request's settle window, so an in-flight lease's
+/// `coef_version` is preserved against eviction.
 ///
 /// Returns the count of evicted entries. Called per tick by `ledger_sweep`.
 pub fn sweep_orphans() -> u64 {
     let active_version = COEF_CACHE.load().version;
     let threshold = active_version.saturating_sub(COEF_STAGING_SAFETY_MARGIN);
     if threshold == 0 {
+        // active <= SAFETY_MARGIN means saturating_sub clamped to 0; never evict version 0 (the empty-snapshot sentinel).
         return 0;
     }
     let mut removed: u64 = 0;
