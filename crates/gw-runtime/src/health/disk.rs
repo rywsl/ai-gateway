@@ -33,8 +33,14 @@ impl SpillDiskFullHook {
         if rc != 0 {
             return None;
         }
-        let total = (buf.f_blocks as u64) * buf.f_frsize;
-        let free = (buf.f_bavail as u64) * buf.f_frsize;
+        #[cfg(target_os = "linux")]
+        let (blocks, block_size, available) = (buf.f_blocks, buf.f_frsize, buf.f_bavail);
+        #[cfg(not(target_os = "linux"))]
+        let (blocks, block_size, available) =
+            (buf.f_blocks as u64, buf.f_frsize, buf.f_bavail as u64);
+
+        let total = blocks * block_size;
+        let free = available * block_size;
         Some((total, free))
     }
 }
