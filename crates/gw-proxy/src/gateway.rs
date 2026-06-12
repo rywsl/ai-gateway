@@ -6,7 +6,7 @@
 //! gateway itself is `Sync`-clean so Pingora can hand it to the service
 //! framework.
 
-use crate::ctx::ReqCtx;
+use crate::ctx::{ArchiveState, ReqCtx};
 use crate::filters;
 use crate::resilience::ResilienceState;
 use async_trait::async_trait;
@@ -143,6 +143,13 @@ fn reset_response_attempt_state(ctx: &mut ReqCtx, new_key: Arc<gw_core::entity::
     ctx.stream_probe_retry_pending = false;
     ctx.sse_leftover.clear();
     ctx.pending_client_body = None;
+    // Reset archive accumulators. Without this, bytes from the failed attempt
+    // bleed into the retry attempt's detailed-log surfaces, and any Spilled
+    // shard files from the prior attempt would only be reclaimed by the LRU
+    // enforcer. Assignment of the default variant drops the previous state,
+    // which triggers `SpillFile::Drop` for Spilled variants.
+    ctx.archive_upstream_response_body = ArchiveState::default();
+    ctx.archive_downstream_response_body = ArchiveState::default();
 }
 
 fn adapter_body_head(body: &[u8]) -> &[u8] {

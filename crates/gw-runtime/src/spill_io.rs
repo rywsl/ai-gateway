@@ -189,3 +189,37 @@ impl SpillFile {
         Ok(out)
     }
 }
+
+impl Drop for SpillFile {
+    fn drop(&mut self) {
+        // Synchronous best-effort cleanup. `unlink(2)` is a single-syscall
+        // metadata op (microseconds on local disk), so blocking briefly in
+        // Drop is acceptable and avoids the TOCTOU race that an async-spawn
+        // cleanup would have with same-`request_id` retries: the next
+        // attempt's `SpillRoot::create` (which uses `O_CREAT | O_APPEND`)
+        // would otherwise open the prior attempt's file before our spawned
+        // unlink ran, causing on-disk byte contamination across retries.
+        //
+        // Coexists with `SpillRoot::spawn_quota_enforcer`: this Drop is
+        // timely, the LRU is fallback. Both paths tolerate `NotFound`
+        // silently.
+        let paths = std::mem::take(&mut self.shard_paths);
+        for path in paths {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Already cleaned (LRU or external).
+                }
+                Err(e) => {
+                    metrics::counter!("gw_spill_drop_cleanup_fail_total").increment(1);
+                    tracing::warn!(
+                        target: "gw_runtime::spill_io",
+                        path = %path.display(),
+                        error = %e,
+                        "spill_file_drop_cleanup_failed"
+                    );
+                }
+            }
+        }
+    }
+}

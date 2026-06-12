@@ -28,6 +28,8 @@
 
 **No new files.**
 
+> **Note (post-hoc):** During code-quality review, the original async-spawn `Drop` design was found to have a TOCTOU race with same-`request_id` retries. The design + this plan were revised to use synchronous `std::fs::remove_file` before merge; see the §Crate 1 Pattern in the spec for rationale. Code blocks below reflect the final design.
+
 ---
 
 ## Task 1: Branch Setup
@@ -94,15 +96,7 @@ async fn drop_unlinks_shard_files() {
     }
 
     drop(file);
-    // Give the spawned cleanup task time to execute. The cleanup spawns
-    // `tokio::fs::remove_file` per shard; on a multi-thread runtime with no
-    // other load this completes within a few ms.
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        if paths.iter().all(|p| !p.exists()) {
-            break;
-        }
-    }
+    // Sync Drop completes the unlink before returning — no sleep needed.
     for p in &paths {
         assert!(
             !p.exists(),
@@ -137,42 +131,33 @@ Append after the `impl SpillFile { ... }` block:
 ```rust
 impl Drop for SpillFile {
     fn drop(&mut self) {
-        // Best-effort cleanup of shard files. Coexists with the LRU enforcer
-        // in `SpillRoot::spawn_quota_enforcer`: this Drop is timely, the LRU
-        // is fallback. Both paths tolerate `NotFound` errors silently.
+        // Synchronous best-effort cleanup. `unlink(2)` is a single-syscall
+        // metadata op (microseconds on local disk), so blocking briefly in
+        // Drop is acceptable and avoids the TOCTOU race that an async-spawn
+        // cleanup would have with same-`request_id` retries: the next
+        // attempt's `SpillRoot::create` (which uses `O_CREAT | O_APPEND`)
+        // would otherwise open the prior attempt's file before our spawned
+        // unlink ran, causing on-disk byte contamination across retries.
+        //
+        // Coexists with `SpillRoot::spawn_quota_enforcer`: this Drop is
+        // timely, the LRU is fallback. Both paths tolerate `NotFound`
+        // silently.
         let paths = std::mem::take(&mut self.shard_paths);
-        if paths.is_empty() {
-            return;
-        }
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    for path in paths {
-                        match tokio::fs::remove_file(&path).await {
-                            Ok(()) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                // Already cleaned (LRU or external).
-                            }
-                            Err(e) => {
-                                metrics::counter!("gw_spill_drop_cleanup_fail_total")
-                                    .increment(1);
-                                tracing::warn!(
-                                    target: "gw_runtime::spill_io",
-                                    path = %path.display(),
-                                    error = %e,
-                                    "spill_file_drop_cleanup_failed"
-                                );
-                            }
-                        }
-                    }
-                });
-            }
-            Err(_) => {
-                // No tokio runtime (atexit, test teardown). Fall back to sync.
-                // Errors are silently dropped — this is the cleanup-of-last-resort
-                // and the LRU enforcer will catch anything we miss on next start.
-                for path in paths {
-                    let _ = std::fs::remove_file(path);
+        for path in paths {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Already cleaned (LRU or external).
+                }
+                Err(e) => {
+                    metrics::counter!("gw_spill_drop_cleanup_fail_total")
+                        .increment(1);
+                    tracing::warn!(
+                        target: "gw_runtime::spill_io",
+                        path = %path.display(),
+                        error = %e,
+                        "spill_file_drop_cleanup_failed"
+                    );
                 }
             }
         }
@@ -230,13 +215,8 @@ async fn drop_tolerates_missing_shards() {
 
     drop(file);
 
-    // Drop must not panic; shard 1 must be cleaned; shard 0 stays gone.
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        if !paths[1].exists() {
-            break;
-        }
-    }
+    // Sync Drop completes both NotFound (shard 0, already removed) and
+    // successful unlink (shard 1) before returning.
     assert!(!paths[0].exists());
     assert!(!paths[1].exists(), "shard 1 should be cleaned by Drop");
 }
