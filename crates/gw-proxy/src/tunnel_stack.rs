@@ -13,6 +13,7 @@
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use gw_core::entity::TunnelPreference;
+use gw_runtime::ShutdownToken;
 use gw_tunnel_client::pool::{PoolConfig, ReconnectingTransport};
 use gw_tunnel_client::resolver::{
     resolve_tunnel, ProxyNodeView, TunnelResolution, TunnelResolveCtx,
@@ -91,28 +92,45 @@ impl TunnelStack {
         self.nodes.store(Arc::new(nodes));
     }
 
-    /// Periodically sample transport state per node and emit gauge metrics.
-    pub fn start_probe_loop(self: &Arc<Self>, interval: Duration) -> JoinHandle<()> {
+    /// Periodically sample transport state per node and emit gauge
+    /// metrics. The returned `JoinHandle` exits cleanly when the
+    /// `ShutdownToken` is cancelled — register the handle with
+    /// `ShutdownCoordinator` so drain awaits its exit.
+    pub fn start_probe_loop(
+        self: &Arc<Self>,
+        interval: Duration,
+        shutdown: ShutdownToken,
+    ) -> JoinHandle<()> {
         let stack = Arc::clone(self);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
-                ticker.tick().await;
-                let nodes = stack.nodes.load_full();
-                for node in nodes.iter() {
-                    let current = stack.transports.get(&node.id).and_then(|t| t.current());
-                    let present = current.as_ref().is_some_and(|t| t.is_alive());
-                    metrics::gauge!(
-                        "gw_tunnel_transport_present",
-                        "node_id" => node.id.clone()
-                    )
-                    .set(if present { 1.0 } else { 0.0 });
-                    if let Some(age) = current.as_ref().map(|t| t.last_pong_age().as_secs_f64()) {
-                        metrics::gauge!(
-                            "gw_tunnel_last_pong_age_seconds",
-                            "node_id" => node.id.clone()
-                        )
-                        .set(age);
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        tracing::info!(
+                            target: "gw_proxy::tunnel_stack",
+                            "probe loop shutdown requested"
+                        );
+                        return;
+                    }
+                    _ = ticker.tick() => {
+                        let nodes = stack.nodes.load_full();
+                        for node in nodes.iter() {
+                            let current = stack.transports.get(&node.id).and_then(|t| t.current());
+                            let present = current.as_ref().is_some_and(|t| t.is_alive());
+                            metrics::gauge!(
+                                "gw_tunnel_transport_present",
+                                "node_id" => node.id.clone()
+                            )
+                            .set(if present { 1.0 } else { 0.0 });
+                            if let Some(age) = current.as_ref().map(|t| t.last_pong_age().as_secs_f64()) {
+                                metrics::gauge!(
+                                    "gw_tunnel_last_pong_age_seconds",
+                                    "node_id" => node.id.clone()
+                                )
+                                .set(age);
+                            }
+                        }
                     }
                 }
             }
@@ -368,6 +386,20 @@ mod tests {
         assert!(
             !prod_src.contains("last_pong_age_secs: None,"),
             "health_snapshot must not hard-code null pong age"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_loop_respects_shutdown_token() {
+        let stack = Arc::new(empty_stack(vec![]));
+        let coord = gw_runtime::ShutdownCoordinator::default();
+        let token = coord.token();
+        let handle = stack.start_probe_loop(std::time::Duration::from_secs(60), token);
+        coord.token().cancel();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        assert!(
+            exit.is_ok(),
+            "probe loop did not exit within 5s of shutdown"
         );
     }
 }

@@ -114,6 +114,8 @@ No open roadmap items after W4 full IR task request/response persistence.
 - **Source:** `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §2 Crate 6.
 
 ### Out-of-scope (deliberate) — still deferred
+- 2026-06-12 — Closed: Tunnel probe loop shutdown-aware; Redis pool drain-time `quit()`. Pingora upstream pool item from the original audit was a scope error — pool config is already explicit via `HttpPeer.options` in `crates/gw-proxy/src/timeouts.rs`. See `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §Crate 7.
+
 - 2026-06-12 — Closed: bound `RedosTracker`, `RateLimitGuard` (5 maps), `AdaptiveRpmManager` (2 maps) with Moka caches; wire `spawn_ip_ratelimit_sweep` and new `spawn_auth_failure_ip_sweep` into bootstrap. See `docs/superpowers/specs/2026-06-12-memory-leak-fixes-design.md` §Crate 4. Deliberate TTI-boundary semantic change recorded in §spec/04-rate-limiting.md + §architecture.md.
 
 - `LatencyTracker::Mutex<VecDeque>` lock contention — flagged as a hotspot, but not in resilience-fixes ROI window. `capability-gap`.

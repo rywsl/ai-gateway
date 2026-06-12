@@ -46,6 +46,7 @@ pub mod quota_probe_transport;
 pub use gw_tunnel_client;
 
 use anyhow::Context;
+use fred::interfaces::ClientLike;
 use gw_auth::ip_allowlist::{IpAllowlistGuard, IpAllowlistMode};
 use gw_auth::ip_ratelimit::IpRateLimitGuard;
 use gw_auth::jwt_blacklist::RedisJwtBlacklist;
@@ -1386,7 +1387,8 @@ async fn bootstrap(
             flag
         });
 
-        let _probe_handle = stack.start_probe_loop(Duration::from_secs(5));
+        let probe_handle = stack.start_probe_loop(Duration::from_secs(5), shutdown_token.clone());
+        shutdown.register(probe_handle);
 
         tracing::info!(target: "gw_gateway", "TunnelStack constructed (tunnel.enabled=true)");
         Some(stack)
@@ -1533,6 +1535,22 @@ async fn bootstrap(
         }
     });
     shutdown.register(aggregator_handle);
+
+    // Redis pool drain — await shutdown cancellation and call quit() on the
+    // fred pool so connections close gracefully instead of relying on process
+    // exit. The JoinHandle is registered with ShutdownCoordinator so drain
+    // awaits the quit completion.
+    {
+        let redis_for_quit = (*redis.pool).clone();
+        let token_for_quit = shutdown_token.clone();
+        let quit_handle = tokio::spawn(async move {
+            token_for_quit.cancelled().await;
+            if let Err(e) = redis_for_quit.quit().await {
+                tracing::warn!(target: "gw_gateway", error = %e, "redis pool quit failed");
+            }
+        });
+        shutdown.register(quit_handle);
+    }
 
     Ok((
         Wired {
