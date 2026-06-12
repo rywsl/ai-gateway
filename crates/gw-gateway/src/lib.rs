@@ -1052,9 +1052,11 @@ async fn bootstrap(
 
     // 4c. DEDUCT DashMap GC (S-ledger T3). Periodically removes zero-state
     // entries from the in-memory DEDUCT map to prevent unbounded growth.
-    // The JoinHandle is intentionally dropped: the spawned task lives for the
-    // life of the bootstrap runtime (which is parked on pending()).
-    let _deduct_gc_handle = gw_ledger::DeductGc::start_default();
+    // DeductGc is now Supervisor-wrapped (gw_runtime::Supervisor) and
+    // registered with the ShutdownCoordinator so it survives panics and
+    // exits cleanly on shutdown.
+    let deduct_gc_handle = gw_ledger::DeductGc::spawn(shutdown_token.clone());
+    shutdown.register(deduct_gc_handle);
 
     // 4d. InflightLedger + background tasks (W2-T6).
     // instance_id was resolved above (before Ledger::start) and is reused here.
