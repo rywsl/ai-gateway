@@ -382,6 +382,7 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.frequency_tracker,
                 wired.pg.clone(),
                 wired.regex_cache.clone(),
+                wired.backpressure_gate.clone(),
             );
             gw.body_rules = wired.body_rules;
             gw.spill_root = Some(wired.spill_root.clone());

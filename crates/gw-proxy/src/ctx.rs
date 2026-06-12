@@ -25,7 +25,7 @@ use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
 use gw_routing::in_flight::InFlightGuard;
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
-use gw_runtime::{RegexCache, RegexCacheConfig, SpillFile, SpillRoot};
+use gw_runtime::{BackpressureGate, RegexCache, RegexCacheConfig, SpillFile, SpillRoot};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -313,6 +313,12 @@ pub struct ReqCtx {
     /// constructs it once in Wired and threads it through LlmGateway -> new_ctx.
     pub regex_cache: Arc<RegexCache>,
 
+    // --- Resilience ---
+    /// Force-majeure backpressure gate (T7.1). Wired from Wired at bootstrap;
+    /// cloned into each ReqCtx in new_ctx. Consulted by early_request_filter
+    /// before any expensive check to shed load when the system is critical.
+    pub backpressure_gate: Arc<BackpressureGate>,
+
     // --- Request shape ---
     pub model: Option<ModelName>,
     pub is_stream: bool,
@@ -576,12 +582,25 @@ impl Default for ReqCtx {
     /// cache from `LlmGateway`.
     fn default() -> Self {
         let cache = Arc::new(RegexCache::new(RegexCacheConfig::default()));
-        Self::new(TraceId::from(String::new()), RequestId::from(String::new()), cache)
+        let gate = Arc::new(BackpressureGate::from_state(
+            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        ));
+        Self::new(
+            TraceId::from(String::new()),
+            RequestId::from(String::new()),
+            cache,
+            gate,
+        )
     }
 }
 
 impl ReqCtx {
-    pub fn new(trace_id: TraceId, request_id: RequestId, regex_cache: Arc<RegexCache>) -> Self {
+    pub fn new(
+        trace_id: TraceId,
+        request_id: RequestId,
+        regex_cache: Arc<RegexCache>,
+        backpressure_gate: Arc<BackpressureGate>,
+    ) -> Self {
         Self {
             trace_id,
             request_id,
@@ -593,6 +612,7 @@ impl ReqCtx {
             api_key_id: None,
             merged_perm: None,
             regex_cache,
+            backpressure_gate,
             model: None,
             is_stream: false,
             is_task: false,

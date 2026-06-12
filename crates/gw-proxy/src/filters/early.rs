@@ -18,6 +18,7 @@
 
 use crate::ctx::ReqCtx;
 use crate::error_emit;
+use bytes::Bytes;
 use gw_auth::ip_allowlist::{IpAllowlistGuard, IpAllowlistMode};
 use gw_auth::ip_filter::check_ip;
 use gw_auth::ip_ratelimit::IpRateLimitGuard;
@@ -26,7 +27,9 @@ use gw_codec::trait_def::Headers;
 use gw_codec::AnyCodec;
 use gw_core::debug::DebugTrigger;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
+use gw_runtime::Admit;
 use gw_store::EntityStore;
+use pingora::http::ResponseHeader;
 use pingora::{Error, ErrorType, Result};
 use pingora_proxy::Session;
 use std::borrow::Cow;
@@ -79,6 +82,40 @@ async fn run_impl(
         .map(|(n, v)| (n.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
         .collect();
     let request_id = ctx.request_id.0.clone();
+
+    // -----------------------------------------------------------------
+    // 0. Backpressure gate (T7.1) — first check, before we spend any
+    //    auth / parse / routing cycles. Force-majeure only; healthy
+    //    systems never hit this path. The 503 body is deliberately
+    //    generic and must NOT leak which hook tripped.
+    // -----------------------------------------------------------------
+    if matches!(ctx.backpressure_gate.admit(), Admit::Reject) {
+        let body = serde_json::json!({
+            "error": {
+                "type": "service_unavailable",
+                "message": "Service temporarily unavailable. Please retry later."
+            }
+        });
+        let mut resp = ResponseHeader::build(503, None)?;
+        let _ = resp.insert_header("retry-after", "2");
+        let _ = resp.insert_header("content-type", "application/json");
+        session
+            .write_response_header(Box::new(resp), false)
+            .await?;
+        session
+            .write_response_body(
+                Some(Bytes::from(body.to_string().into_bytes())),
+                true,
+            )
+            .await?;
+        tracing::warn!(
+            target: "gw_proxy::backpressure",
+            request_id,
+            "request rejected due to backpressure"
+        );
+        ctx.phase_end();
+        return Err(short_circuit(503));
+    }
 
     if let Some(ip) = client_ip_from_session(session, deps.trust_xff) {
         if let Err(err) = check_ip(
