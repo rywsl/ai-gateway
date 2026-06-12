@@ -10,7 +10,7 @@ impl AdapterCapabilityHook for StaticHook {
     fn detect(&self, ctx: &DetectCtx<'_>) -> CapabilityDetectResult {
         for cap in ctx.required.set.iter() {
             if !ctx.vendor_key.detected_capabilities.contains(cap) {
-                return CapabilityDetectResult::Missing(smallvec![*cap]);
+                return CapabilityDetectResult::Missing(smallvec![cap.clone()]);
             }
         }
         CapabilityDetectResult::Match

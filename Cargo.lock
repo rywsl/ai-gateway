@@ -1877,6 +1877,7 @@ dependencies = [
  "gw-core",
  "gw-store",
  "metrics",
+ "moka",
  "parking_lot",
  "serde",
  "smallvec",
