@@ -44,6 +44,7 @@ pub struct LeaseState {
     pub lease_id: ArcSwap<String>,
     pub mode: AtomicU8,
     pub coef_table_version: AtomicU64,
+    pub last_seen_at_ms: AtomicU64,
 }
 
 impl LeaseState {
@@ -54,6 +55,7 @@ impl LeaseState {
             lease_id: ArcSwap::new(Arc::new(String::new())),
             mode: AtomicU8::new(Mode::Unprotected as u8),
             coef_table_version: AtomicU64::new(0),
+            last_seen_at_ms: AtomicU64::new(0),
         }
     }
 
@@ -67,6 +69,43 @@ impl LeaseState {
 }
 
 pub static LEASE_POOL: Lazy<DashMap<UserId, Arc<LeaseState>>> = Lazy::new(DashMap::new);
+
+/// Idle TTL for `Unprotected` entries in `LEASE_POOL`. After transitioning to
+/// `Unprotected` (via `upsert_unprotected`), an entry becomes eligible for
+/// eviction once `now_ms() - last_seen_at_ms` exceeds this value. `Protected`
+/// entries are never touched by the sweep.
+pub const LEASE_POOL_IDLE_TTL_MS: u64 = 30 * 60 * 1000; // 30 minutes
+
+/// Evict `LEASE_POOL` entries whose `mode == Unprotected` AND whose
+/// `last_seen_at_ms` is older than `LEASE_POOL_IDLE_TTL_MS`. `Protected`
+/// entries are NEVER evicted (in-flight `LeaseGuard` holds the `Arc` so
+/// eviction would not corrupt active requests, but Protected entries are
+/// actively used and have no idle indicator).
+///
+/// Returns the count of evicted entries. Called per tick by `ledger_sweep`.
+pub fn sweep_unprotected() -> u64 {
+    let now = now_ms();
+    let mut removed: u64 = 0;
+    LEASE_POOL.retain(|_uid, state| {
+        if state.mode() != Mode::Unprotected {
+            return true;
+        }
+        let last = state.last_seen_at_ms.load(Ordering::Acquire);
+        if last == 0 {
+            // Never recorded a transition timestamp — keep, conservative.
+            return true;
+        }
+        if now.saturating_sub(last) > LEASE_POOL_IDLE_TTL_MS {
+            removed += 1;
+            return false;
+        }
+        true
+    });
+    if removed > 0 {
+        metrics::counter!("gw_lease_pool_sweep_removed_total").increment(removed);
+    }
+    removed
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeaseError {
@@ -226,11 +265,17 @@ pub fn upsert_unprotected(uid: &UserId) {
     entry.expires_at_ms.store(0, Ordering::Release);
     entry.lease_id.store(Arc::new(String::new()));
     entry.mode.store(Mode::Unprotected as u8, Ordering::Release);
+    entry.last_seen_at_ms.store(now_ms(), Ordering::Release);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // sweep_unprotected() touches all keys in the global LEASE_POOL, so
+    // tests that assert sweep counts or entry presence must not race each
+    // other.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fresh_uid(tag: &str) -> UserId {
         UserId::from(format!("u_test_{tag}").as_str())
@@ -356,5 +401,71 @@ mod tests {
         assert_eq!(Mode::parse_str("protected"), Some(Mode::Protected));
         assert_eq!(Mode::parse_str("unprotected"), Some(Mode::Unprotected));
         assert!(Mode::parse_str("garbage").is_none());
+    }
+
+    #[test]
+    fn upsert_unprotected_records_last_seen_at_ms() {
+        let uid = fresh_uid("last_seen_unprotected");
+        // First put into protected to create the entry.
+        upsert_protected(&uid, 1000, "lease-ls".into(), 9, now_ms() + 60_000);
+        // Then transition to unprotected.
+        let before = now_ms();
+        upsert_unprotected(&uid);
+        let after = now_ms();
+        let s = LEASE_POOL.get(&uid).unwrap();
+        let ts = s.last_seen_at_ms.load(Ordering::Acquire);
+        assert!(
+            ts >= before && ts <= after + 1,
+            "last_seen_at_ms ({ts}) should be in [{before}, {after}]"
+        );
+    }
+
+    #[test]
+    fn sweep_unprotected_evicts_idle_unprotected_entries() {
+        let _lock = SERIAL.lock().unwrap();
+        let uid = fresh_uid("sweep_idle");
+        // Create the entry as protected, then transition to unprotected.
+        upsert_protected(&uid, 1000, "lease-sw-idle".into(), 9, now_ms() + 60_000);
+        upsert_unprotected(&uid);
+        // Backdate last_seen by (idle_ttl + 1ms).
+        let s = LEASE_POOL.get(&uid).unwrap();
+        let old_ts = now_ms().saturating_sub(LEASE_POOL_IDLE_TTL_MS + 1);
+        s.last_seen_at_ms.store(old_ts, Ordering::Release);
+        drop(s);
+
+        let removed = sweep_unprotected();
+        assert!(removed >= 1);
+        assert!(!LEASE_POOL.contains_key(&uid));
+    }
+
+    #[test]
+    fn sweep_unprotected_keeps_recent_unprotected_entries() {
+        let _lock = SERIAL.lock().unwrap();
+        let uid = fresh_uid("sweep_recent");
+        upsert_protected(&uid, 1000, "lease-sw-recent".into(), 9, now_ms() + 60_000);
+        upsert_unprotected(&uid);
+        // last_seen is current (just now).
+        let _removed = sweep_unprotected();
+        assert!(LEASE_POOL.contains_key(&uid));
+        LEASE_POOL.remove(&uid);
+    }
+
+    #[test]
+    fn sweep_unprotected_keeps_protected_entries() {
+        let _lock = SERIAL.lock().unwrap();
+        let uid = fresh_uid("sweep_protected");
+        upsert_protected(&uid, 1000, "lease-sw-prot".into(), 9, now_ms() + 60_000);
+        // Backdate last_seen heavily — but mode is still Protected.
+        let s = LEASE_POOL.get(&uid).unwrap();
+        let old_ts = now_ms().saturating_sub(LEASE_POOL_IDLE_TTL_MS + 60_000);
+        s.last_seen_at_ms.store(old_ts, Ordering::Release);
+        drop(s);
+
+        let _removed = sweep_unprotected();
+        assert!(
+            LEASE_POOL.contains_key(&uid),
+            "Protected entries must never be swept regardless of last_seen_at_ms"
+        );
+        LEASE_POOL.remove(&uid);
     }
 }
