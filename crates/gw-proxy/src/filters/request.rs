@@ -13,7 +13,7 @@ use crate::error_emit;
 use crate::filters::early::{
     client_ip_from_session, pick_emit_codec, short_circuit, with_request_id,
 };
-use gw_auth::apikey::verify_apikey;
+use gw_auth::apikey::{resolve_apikey_by_secret, verify_apikey};
 use gw_auth::ip_allowlist::{IpAllowlistGuard, IpAllowlistMode};
 use gw_auth::ip_filter::check_ip;
 use gw_auth::ip_ratelimit::IpRateLimitGuard;
@@ -32,6 +32,7 @@ use gw_core::entity::{ApiKeyEntry, EstimatePricing};
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{ApiKeyId, ModelName, UserId};
 use gw_core::protocol::ApiShape;
+use gw_core::versioned::Versioned;
 use gw_store::counter_store::daily_tokens_key;
 use gw_store::deduction::{DeductionState, UserCircuit, DEDUCT, USER_CIRCUIT};
 use gw_store::{CounterStore, EntityStore};
@@ -221,11 +222,31 @@ pub async fn run(
         }};
     }
 
-    let user_id_res: Result<(UserId, Option<ApiKeyId>, Option<Vec<String>>)> = if let Some(bearer) =
-        auth_header
-            .as_deref()
-            .and_then(|h| h.strip_prefix("Bearer "))
+    let bearer_token = auth_header
+        .as_deref()
+        .and_then(|h| h.strip_prefix("Bearer "));
+    let single_api_key = single_api_key_secret(
+        bearer_token,
+        api_key_hdr.as_deref(),
+        api_key_id_hdr.as_deref(),
+    );
+
+    let user_id_res: Result<(UserId, Option<ApiKeyId>, Option<Vec<String>>)> = if let Some(akey) =
+        single_api_key
     {
+        match resolve_apikey_by_secret(akey, store).await {
+            Ok(entry) => {
+                let akid = entry.value.key_id.clone();
+                match resolve_api_key_entry(session, ctx, &entry, akid, signature_required) {
+                    Ok(scope) => Ok(scope),
+                    Err(err) => bail!(session, ctx, &err, &request_id),
+                }
+            }
+            Err(err) => {
+                bail!(session, ctx, &err, &request_id)
+            }
+        }
+    } else if let Some(bearer) = bearer_token {
         // G6 (T1-E): if AuthConfig.global is wired into the gateway, use the
         // hybrid validator (JWKS resolver + iss/aud/nbf/leeway enforcement
         // with HS256 / static_pem_rs256 fallbacks). Otherwise fall through to
@@ -301,76 +322,16 @@ pub async fn run(
         let akid = ApiKeyId::from(akid_str.as_str());
         match verify_apikey(akey, &akid, store).await {
             Ok(()) => {
-                // Resolve the user_id via the api-key entry.
+                // Resolve the user_id via the api-key entry, then run the same
+                // disabled/expired/signature gates as the single-secret shapes
+                // through `resolve_api_key_entry` so the two paths cannot drift.
                 match store.apikey_or_load(&akid).await {
                     Some(entry) => {
-                        // Admit-time status gate (audit 2026-05-30): a key whose
-                        // status was flipped to Disabled via op=status_change (row
-                        // retained, deleted_at still NULL) must be rejected here —
-                        // the loader only filters deleted_at, so a disabled row
-                        // loads and would otherwise authenticate. Checked before
-                        // expiry so a disabled key reports as disabled, not expired.
-                        if check_api_key_status(&entry.value).is_err() {
-                            let err = ErrorIR {
-                                category: ErrorCategory::ClientAuth,
-                                status: 401,
-                                upstream_status: None,
-                                code: Cow::Borrowed(codes::GW_AUTH_KEY_DISABLED),
-                                message: Cow::Borrowed("api key disabled"),
-                                retryable: false,
-                                upstream_raw: None,
-                                request_id: "",
-                                retry_after_secs: None,
-                            };
-                            bail!(session, ctx, &err, &request_id)
+                        match resolve_api_key_entry(session, ctx, &entry, akid, signature_required)
+                        {
+                            Ok(scope) => Ok(scope),
+                            Err(err) => bail!(session, ctx, &err, &request_id),
                         }
-                        // G1 — reject expired keys before any IR parse or
-                        // permission merge. Closed interval: a request issued
-                        // exactly at `expires_at` rejects (spec ADR-G1-1).
-                        if check_api_key_expiry(&entry.value, OffsetDateTime::now_utc()).is_err() {
-                            let err = ErrorIR {
-                                category: ErrorCategory::ClientAuth,
-                                status: 401,
-                                upstream_status: None,
-                                code: Cow::Borrowed(codes::GW_AUTH_KEY_EXPIRED),
-                                message: Cow::Borrowed("api key expired"),
-                                retryable: false,
-                                upstream_raw: None,
-                                request_id: "",
-                                retry_after_secs: None,
-                            };
-                            bail!(session, ctx, &err, &request_id)
-                        }
-                        // T6-C: stash signature requirement state so the
-                        // request_body_filter (or `body_verify::verify_body`)
-                        // can run body-after HMAC verification.
-                        if signature_required || entry.value.signature_required {
-                            ctx.signature_required = true;
-                            ctx.signature_algo = entry.value.signature_algo;
-                            ctx.signature_received = session
-                                .req_header()
-                                .headers
-                                .get("x-signature")
-                                .and_then(|v| v.to_str().ok())
-                                .map(|s| s.as_bytes().to_vec());
-                            ctx.signature_timestamp = session
-                                .req_header()
-                                .headers
-                                .get("x-timestamp")
-                                .and_then(|v| v.to_str().ok())
-                                .map(String::from);
-                            ctx.signature_secret =
-                                entry.value.signature_secret.clone().unwrap_or_default();
-                        }
-                        // G2 — capture the per-key IP allowlist so the
-                        // post-blocklist gate (below) can consult it after
-                        // `entry` itself goes out of scope.
-                        let ip_allowlist_for_request = entry.value.ip_allowlist.clone();
-                        Ok((
-                            entry.value.user_id.clone(),
-                            Some(akid),
-                            ip_allowlist_for_request,
-                        ))
                     }
                     None => {
                         let err = ErrorIR {
@@ -506,6 +467,14 @@ pub async fn run(
     // ---------------------------------------------------------------------
     const BODY_CAP: usize = 16 * 1024 * 1024;
     let mut body_buf: Vec<u8> = Vec::new();
+    // `request_filter` consumes the whole downstream body here, before Pingora's
+    // proxy loop forwards the request upstream. Without retry buffering Pingora
+    // retains no copy, so it sends the upstream headers (incl. Content-Length)
+    // with an empty body and the upstream blocks waiting for bytes that never
+    // arrive (observed as a ~30s upstream ReadTimedout). Enabling retry buffering
+    // before the first read makes Pingora keep the body and replay it upstream,
+    // where `request_body_filter` swaps in the rewritten body at end-of-stream.
+    session.as_mut().enable_retry_buffering();
     while let Some(chunk) = session.read_request_body().await? {
         if body_buf.len() + chunk.len() > BODY_CAP {
             let err = ErrorIR {
@@ -1420,6 +1389,74 @@ pub fn check_api_key_status(entry: &ApiKeyEntry) -> std::result::Result<(), ()> 
     }
 }
 
+/// Resolved API-key auth scope: `(user id, api-key id, per-key IP allowlist)`.
+/// Aliased so [`resolve_api_key_entry`]'s return type stays under clippy's
+/// `type_complexity` threshold.
+type ApiKeyAuthScope = (UserId, Option<ApiKeyId>, Option<Vec<String>>);
+
+/// Shared post-auth gate for a resolved API-key entry, used by both the
+/// single-secret shapes (`x-api-key` without id, `Authorization: Bearer ak_…`)
+/// and the legacy `x-api-key` + `x-api-key-id` pair. Runs the disabled/expired
+/// gates, stashes the HMAC signature requirement, and returns the scope tuple.
+/// Pure (no `.await`): all DB resolution happens before this is called, so a
+/// single helper keeps the two call sites byte-for-byte identical.
+fn resolve_api_key_entry(
+    session: &Session,
+    ctx: &mut ReqCtx,
+    entry: &Arc<Versioned<ApiKeyEntry>>,
+    akid: ApiKeyId,
+    signature_required: bool,
+) -> std::result::Result<ApiKeyAuthScope, ErrorIR<'static>> {
+    if check_api_key_status(&entry.value).is_err() {
+        return Err(ErrorIR {
+            category: ErrorCategory::ClientAuth,
+            status: 401,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_AUTH_KEY_DISABLED),
+            message: Cow::Borrowed("api key disabled"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        });
+    }
+    if check_api_key_expiry(&entry.value, OffsetDateTime::now_utc()).is_err() {
+        return Err(ErrorIR {
+            category: ErrorCategory::ClientAuth,
+            status: 401,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_AUTH_KEY_EXPIRED),
+            message: Cow::Borrowed("api key expired"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        });
+    }
+    if signature_required || entry.value.signature_required {
+        ctx.signature_required = true;
+        ctx.signature_algo = entry.value.signature_algo;
+        ctx.signature_received = session
+            .req_header()
+            .headers
+            .get("x-signature")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.as_bytes().to_vec());
+        ctx.signature_timestamp = session
+            .req_header()
+            .headers
+            .get("x-timestamp")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        ctx.signature_secret = entry.value.signature_secret.clone().unwrap_or_default();
+    }
+    Ok((
+        entry.value.user_id.clone(),
+        Some(akid),
+        entry.value.ip_allowlist.clone(),
+    ))
+}
+
 /// Admit-time status gate for users (audit 2026-05-30). Pure so a test can pin
 /// it. Same rationale as [`check_api_key_status`]: a `Banned` row loads normally.
 #[allow(clippy::result_unit_err)]
@@ -1695,6 +1732,16 @@ fn model_whitelist_regex_denied_error(message: &'static str) -> ErrorIR<'static>
     }
 }
 
+fn single_api_key_secret<'a>(
+    bearer_token: Option<&'a str>,
+    api_key_hdr: Option<&'a str>,
+    api_key_id_hdr: Option<&str>,
+) -> Option<&'a str> {
+    api_key_hdr
+        .filter(|_| api_key_id_hdr.is_none())
+        .or_else(|| bearer_token.filter(|token| token.starts_with("ak_")))
+}
+
 fn lease_expired_error() -> ErrorIR<'static> {
     ErrorIR {
         category: ErrorCategory::UpstreamError,
@@ -1723,6 +1770,43 @@ async fn emit_and_bail(
     error_emit::send_error(session, &codec, &scoped).await;
     ctx.phase_end();
     Err(short_circuit(err.status))
+}
+
+#[cfg(test)]
+mod api_key_auth_shape_tests {
+    use super::*;
+
+    #[test]
+    fn single_x_api_key_is_accepted_without_key_id() {
+        assert_eq!(
+            single_api_key_secret(None, Some("ak_plain"), None),
+            Some("ak_plain")
+        );
+    }
+
+    #[test]
+    fn paired_x_api_key_keeps_legacy_pair_path() {
+        assert_eq!(
+            single_api_key_secret(None, Some("ak_plain"), Some("ak_id")),
+            None
+        );
+    }
+
+    #[test]
+    fn bearer_ak_token_is_treated_as_api_key() {
+        assert_eq!(
+            single_api_key_secret(Some("ak_plain"), None, None),
+            Some("ak_plain")
+        );
+    }
+
+    #[test]
+    fn bearer_jwt_is_not_treated_as_api_key() {
+        assert_eq!(
+            single_api_key_secret(Some("eyJhbGciOiJIUzI1NiJ9.payload.sig"), None, None),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

@@ -10,9 +10,9 @@
 //! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
 use crate::loader::{
-    load_apikey, load_auth_config, load_estimate_pricing, load_ipblock, load_jwks, load_mgmt_token,
-    load_model, load_model_group, load_pricing, load_proxy_node, load_proxy_nodes_list, load_user,
-    load_user_group, load_vendor, load_vendor_key, LoaderCtx,
+    load_apikey, load_apikey_by_hash, load_auth_config, load_estimate_pricing, load_ipblock,
+    load_jwks, load_mgmt_token, load_model, load_model_group, load_pricing, load_proxy_node,
+    load_proxy_nodes_list, load_user, load_user_group, load_vendor, load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -349,6 +349,23 @@ impl EntityStore {
             })
             .await
             .ok()
+    }
+
+    pub async fn apikey_by_hash_or_load(
+        &self,
+        key_hash: &str,
+    ) -> Option<Arc<Versioned<ApiKeyEntry>>> {
+        let key_hash = key_hash.to_owned();
+        let loader = self.loader.as_ref()?.clone();
+        let deadline = self.cold_load_timeout;
+        let loaded = with_cold_load_timeout("apikey", deadline, async move {
+            load_apikey_by_hash(&loader, &key_hash).await
+        })
+        .await?;
+        let key_id = loaded.value.key_id.clone();
+        let entry = Arc::new(loaded);
+        self.apikey.insert(key_id, entry.clone()).await;
+        Some(entry)
     }
 
     pub async fn vendor_or_load(&self, id: &VendorId) -> Option<Arc<Versioned<Vendor>>> {
