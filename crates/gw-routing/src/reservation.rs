@@ -21,6 +21,7 @@ pub struct ModelFrequencyCounter {
     pub count: AtomicU64,
     pub window_start_ms: AtomicU64,
     last_snapshot_count: AtomicU64,
+    pub last_used_at_ms: AtomicU64,
 }
 
 impl ModelFrequencyCounter {
@@ -29,6 +30,7 @@ impl ModelFrequencyCounter {
             count: AtomicU64::new(0),
             window_start_ms: AtomicU64::new(now_ms),
             last_snapshot_count: AtomicU64::new(0),
+            last_used_at_ms: AtomicU64::new(0),
         }
     }
 }
@@ -57,6 +59,7 @@ impl ModelFrequencyTracker {
             .entry(key)
             .or_insert_with(|| Arc::new(ModelFrequencyCounter::new(now_ms())));
         counter.count.fetch_add(1, Ordering::Relaxed);
+        counter.last_used_at_ms.store(now_ms(), Ordering::Release);
     }
 
     pub fn snapshot_rates(&self) -> Vec<ModelRateSnapshot> {
@@ -83,6 +86,29 @@ impl ModelFrequencyTracker {
                 })
             })
             .collect()
+    }
+
+    /// Evict counters whose `last_used_at_ms` is older than now - threshold_ms.
+    /// Returns the count of evicted entries.
+    pub fn sweep_stale(&self, threshold_ms: u64) -> u64 {
+        let now = now_ms();
+        let mut removed: u64 = 0;
+        self.counters.retain(|_model, counter| {
+            let last = counter.last_used_at_ms.load(Ordering::Acquire);
+            if last == 0 {
+                // Never recorded — keep conservative (e.g. created but never recorded yet).
+                return true;
+            }
+            if now.saturating_sub(last) > threshold_ms {
+                removed += 1;
+                return false;
+            }
+            true
+        });
+        if removed > 0 {
+            metrics::counter!("gw_routing_model_frequency_sweep_removed_total").increment(removed);
+        }
+        removed
     }
 }
 
@@ -236,6 +262,31 @@ impl ReservationGlobalView {
             },
         );
     }
+
+    /// Evict `by_model_instance` entries whose `ts_ms` is older than
+    /// `now - threshold_ms`. Returns the count of evicted entries.
+    /// `by_model` is recomputed from the remaining instances per affected
+    /// model.
+    pub fn sweep_stale_instances(&self, threshold_ms: u64) -> u64 {
+        let now = now_ms();
+        let mut removed: u64 = 0;
+        let mut affected_models: std::collections::HashSet<ModelName> = Default::default();
+        self.by_model_instance.retain(|(model, _instance), rate| {
+            if now.saturating_sub(rate.ts_ms) > threshold_ms {
+                removed += 1;
+                affected_models.insert(model.clone());
+                return false;
+            }
+            true
+        });
+        for model in affected_models {
+            self.recompute_model(&model);
+        }
+        if removed > 0 {
+            metrics::counter!("gw_routing_reservation_sweep_removed_total").increment(removed);
+        }
+        removed
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -347,5 +398,55 @@ mod tests {
         assert_eq!(snapshot.instance_count, 2);
         assert_eq!(snapshot.total_rate, 20.0);
         assert_eq!(snapshot.last_updated_ms, 200);
+    }
+
+    #[test]
+    fn model_frequency_tracker_sweeps_stale_counters() {
+        let tracker = ModelFrequencyTracker::default();
+        let model_old = ModelName::from("model-old");
+        let model_new = ModelName::from("model-new");
+        tracker.record_pick("model-old");
+        tracker.record_pick("model-new");
+
+        // Backdate `model_old`'s last_used_at_ms.
+        if let Some(counter) = tracker.counters.get(&model_old) {
+            counter.last_used_at_ms.store(
+                now_ms().saturating_sub(60_000),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+
+        let removed = tracker.sweep_stale(30_000);
+        assert_eq!(removed, 1);
+        assert!(!tracker.counters.contains_key(&model_old));
+        assert!(tracker.counters.contains_key(&model_new));
+    }
+
+    #[test]
+    fn reservation_global_view_sweeps_stale_instances() {
+        let view = ReservationGlobalView::new();
+        let model = ModelName::from("m1");
+        let now = now_ms();
+        view.apply_event(ReservationEvent {
+            instance_id: "alive".into(),
+            model: model.clone(),
+            rate: 1.0,
+            ts_ms: now,
+        });
+        view.apply_event(ReservationEvent {
+            instance_id: "dead".into(),
+            model: model.clone(),
+            rate: 1.0,
+            ts_ms: now.saturating_sub(60_000),
+        });
+
+        let removed = view.sweep_stale_instances(30_000);
+        assert_eq!(removed, 1);
+        assert!(view
+            .by_model_instance
+            .contains_key(&(model.clone(), "alive".into())));
+        assert!(!view
+            .by_model_instance
+            .contains_key(&(model.clone(), "dead".into())));
     }
 }
