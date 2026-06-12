@@ -183,6 +183,9 @@ mod tests {
         let handle = DeductGc::spawn(token);
 
         // Cancel immediately; the task should exit promptly.
+        // Uses coord.token().cancel() because ShutdownCoordinator does not
+        // expose a synchronous shutdown() method — cancel() is the test
+        // equivalent of a SIGTERM-driven cancellation.
         coord.token().cancel();
 
         // The Supervisor wraps the loop; on cancellation it should return
