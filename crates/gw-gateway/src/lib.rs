@@ -1386,7 +1386,8 @@ async fn bootstrap(
             flag
         });
 
-        let _probe_handle = stack.start_probe_loop(Duration::from_secs(5));
+        let probe_handle = stack.start_probe_loop(Duration::from_secs(5), shutdown_token.clone());
+        shutdown.register(probe_handle);
 
         tracing::info!(target: "gw_gateway", "TunnelStack constructed (tunnel.enabled=true)");
         Some(stack)
