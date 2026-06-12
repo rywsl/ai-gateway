@@ -89,5 +89,17 @@ Proxy wiring passes authenticated `ReqCtx.api_key_id` into `AffinityDimension::A
 - In-flight counter uses `Relaxed` ordering by design (best-effort concurrency hint; documented in `in_flight.rs`).
 - Routing error codes that exist today: `GW_ROUTING_NO_AVAILABLE_CHANNEL`, `GW_ROUTING_NO_CAPABILITY_MATCH`, `GW_ROUTING_NO_FALLBACK_LEFT`, `GW_ROUTING_FAILOVER_TIMEOUT`, `GW_ROUTING_STREAM_NOT_RETRIABLE`, `GW_ROUTING_UNKNOWN_PRESET`, `GW_REQUEST_CLI_NO_SAME_PROTOCOL_CHANNEL`, `GW_TUNNEL_NO_NODE` (`crates/gw-core/src/error/codes.rs`).
 
+## Background sweep
+
+**Routing sweep cadence.** A `routing_sweep` background task (Supervisor-wrapped, 60s tick, ShutdownCoordinator-registered) periodically evicts:
+- `ModelFrequencyTracker.counters` entries whose `last_used_at_ms` is older than `now - 1h` (default).
+- `ReservationGlobalView.by_model_instance` entries whose `ts_ms` (set by `apply_event` from the Redis events:reservation stream) is older than `now - 1h`. `by_model` is recomputed for affected models.
+- `LatencyTracker` stale per-key state (existing `evict_stale` method, now finally called).
+- `AffinityManager` expired bindings (existing `sweep_expired` method, now finally called).
+
+**`InFlightStore::count` semantic.** `count(k)` returns 0 for an unknown key WITHOUT creating an entry. Entries are created only on the acquire path (`get_or_create`). This change is observable: a read-only `count` query no longer allocates.
+
+**`UNKNOWN_PRESETS_WARNED` cap.** The warn-once set for unknown MultiDim preset names is bounded by a Moka cache (capacity 1000). Previously an unbounded `DashSet`; now evicts oldest entries when at capacity.
+
 ## Not built
 No open routing ROADMAP entries remain in this spec.

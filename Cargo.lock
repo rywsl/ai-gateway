@@ -2135,6 +2135,7 @@ dependencies = [
  "gw-capability",
  "gw-core",
  "gw-health",
+ "gw-runtime",
  "gw-store",
  "metrics",
  "moka",
