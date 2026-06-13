@@ -115,6 +115,20 @@ impl CircuitState {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
+
+    /// Authoritative snake_case wire label for this circuit state. This is the
+    /// single source of truth for the `circuit` field in both the admin
+    /// `/healthz/*` JSON and the runtime control-plane snapshot. Debug
+    /// formatting must NOT be used — `{:?}` renders `HalfOpen` as `halfopen`,
+    /// which breaks the Go `rustpact` consumer + frontend that expect
+    /// `half_open`.
+    pub fn wire_label(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::Open => "open",
+            Self::HalfOpen => "half_open",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +161,13 @@ mod tests {
         ] {
             assert_eq!(CircuitState::from_u8(c.as_u8()), c);
         }
+    }
+
+    #[test]
+    fn circuit_state_wire_labels_are_snake_case() {
+        assert_eq!(CircuitState::Closed.wire_label(), "closed");
+        assert_eq!(CircuitState::Open.wire_label(), "open");
+        // Regression lock: must be `half_open`, never Debug-derived `halfopen`.
+        assert_eq!(CircuitState::HalfOpen.wire_label(), "half_open");
     }
 }
