@@ -47,6 +47,15 @@ use pingora_proxy::Session;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+/// Cap on the decompressed cross-protocol response body. A response that
+/// inflates past this size is dropped (the metric `gw_codec_content_decode_failure_total`
+/// is bumped with `reason="too_large"`) and the un-decompressed bytes are
+/// forwarded verbatim. 64 MiB matches twice the per-request decoded cap on the
+/// request path (`max_decoded_bytes = 32 MiB` in `filters/request.rs`) — large
+/// JSON responses (tool calls, embeddings, vision) routinely run 8–16 MiB so
+/// the cap leaves comfortable headroom while still blocking bombs.
+const MAX_CROSS_PROTOCOL_DECODED_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct QuotaSnapshot {
     pub state: gw_core::entity::QuotaState,
@@ -251,14 +260,16 @@ pub async fn run(
         ctx.sse_leftover.extend_from_slice(chunk);
     }
 
-    // Drain complete `\n\n`-terminated events.
+    // Drain complete `\n\n`- OR `\r\n\r\n`-terminated events. `find_event_boundary`
+    // returns the separator length so we drain the right number of trailing
+    // bytes for each form.
     loop {
-        let Some(idx) = find_event_boundary(&ctx.sse_leftover) else {
+        let Some((idx, sep_len)) = find_event_boundary(&ctx.sse_leftover) else {
             break;
         };
         let event_bytes: Vec<u8> = ctx.sse_leftover.drain(..idx).collect();
-        // Skip the framing `\n\n` itself.
-        ctx.sse_leftover.drain(..2);
+        // Skip the framing separator itself.
+        ctx.sse_leftover.drain(..sep_len);
         let codec = codec_for(upstream_kind);
         handle_event(&codec, &event_bytes, ctx, cross_protocol, client_kind);
     }
@@ -433,11 +444,11 @@ fn cli_passthrough_response_chunk(shape: ApiShape, chunk: &[u8]) -> std::borrow:
 fn scan_cli_stream_chunk(shape: ApiShape, chunk: &[u8], ctx: &mut ReqCtx) {
     ctx.sse_leftover.extend_from_slice(chunk);
     loop {
-        let Some(idx) = find_event_boundary(&ctx.sse_leftover) else {
+        let Some((idx, sep_len)) = find_event_boundary(&ctx.sse_leftover) else {
             break;
         };
         let event_bytes: Vec<u8> = ctx.sse_leftover.drain(..idx).collect();
-        ctx.sse_leftover.drain(..2);
+        ctx.sse_leftover.drain(..sep_len);
         handle_cli_event(shape, &event_bytes, ctx);
     }
 }
@@ -612,8 +623,72 @@ fn enc_label(enc: gw_codec::compression::Encoding) -> &'static str {
     }
 }
 
-fn find_event_boundary(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == b"\n\n")
+/// SSE event-boundary detector. Returns `Some((event_end_offset, separator_len))`
+/// where `event_end_offset` is the index of the first separator byte and
+/// `separator_len` is 2 (LF-LF) or 4 (CRLF-CRLF). Both forms are valid per
+/// SSE spec; Gemini's `streamGenerateContent?alt=sse` documents `\r?\n\r?\n`
+/// and some Anthropic-compatible proxies emit CRLF. If both forms appear in
+/// the buffer, the earlier-positioned one wins (a CRLF event followed by an
+/// LF event is still framed in order). The detector never falsely matches
+/// LF-LF inside CRLF-CRLF: the four bytes `\r\n\r\n` contain no two adjacent
+/// `\n`.
+fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+    let lf = buf.windows(2).position(|w| w == b"\n\n");
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(a), Some(b)) if a <= b => Some((a, 2)),
+        (Some(_), Some(b)) => Some((b, 4)),
+        (Some(a), None) => Some((a, 2)),
+        (None, Some(b)) => Some((b, 4)),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod sse_boundary_tests {
+    use super::find_event_boundary;
+
+    #[test]
+    fn lf_lf_event() {
+        let buf = b"data: {\"a\":1}\n\n";
+        assert_eq!(find_event_boundary(buf), Some((13, 2)));
+    }
+
+    #[test]
+    fn crlf_crlf_event() {
+        let buf = b"data: {\"a\":1}\r\n\r\n";
+        assert_eq!(find_event_boundary(buf), Some((13, 4)));
+    }
+
+    #[test]
+    fn mixed_lf_then_crlf_picks_lf_first() {
+        let buf = b"data: a\n\ndata: b\r\n\r\n";
+        let (idx, sep) = find_event_boundary(buf).unwrap();
+        assert_eq!((idx, sep), (7, 2));
+    }
+
+    #[test]
+    fn mixed_crlf_then_lf_picks_crlf_first() {
+        let buf = b"data: a\r\n\r\ndata: b\n\n";
+        let (idx, sep) = find_event_boundary(buf).unwrap();
+        assert_eq!((idx, sep), (7, 4));
+    }
+
+    #[test]
+    fn incomplete_buffer_returns_none() {
+        assert_eq!(find_event_boundary(b"data: incomplete\n"), None);
+        assert_eq!(find_event_boundary(b"data: incomplete\r\n"), None);
+    }
+
+    /// Regression: ensure LF-LF cannot accidentally match inside a CRLF-CRLF
+    /// span. `\r\n\r\n` has no two adjacent `\n` bytes, so the LF-LF arm
+    /// returns None for a CRLF-only buffer.
+    #[test]
+    fn crlf_crlf_does_not_alias_as_lf_lf() {
+        let buf = b"\r\n\r\n";
+        let (idx, sep) = find_event_boundary(buf).unwrap();
+        assert_eq!((idx, sep), (0, 4));
+    }
 }
 
 fn handle_event(
@@ -980,15 +1055,27 @@ pub(crate) fn handle_non_stream_chunk(
     let body: BytesMut = if cross_protocol
         && ctx.resp_content_encoding != gw_codec::compression::Encoding::Identity
     {
-        match gw_codec::compression::decode(ctx.resp_content_encoding, &body) {
+        match gw_codec::compression::decode(
+            ctx.resp_content_encoding,
+            &body,
+            MAX_CROSS_PROTOCOL_DECODED_BYTES,
+        ) {
             Ok(plain) => BytesMut::from(&plain[..]),
-            Err(_e) => {
-                // Corrupt/undecodable upstream body: nothing better to forward
-                // (the header is already stripped). Surface via a metric and
-                // fall through with the original bytes rather than panicking.
+            Err(e) => {
+                // Corrupt/undecodable upstream body OR a decompression bomb
+                // (TooLarge): nothing better to forward (the header is already
+                // stripped). Surface via a metric with the failure reason and
+                // fall through with the original bytes rather than panicking
+                // or OOM-ing.
+                let reason = match &e {
+                    gw_codec::compression::CompressionError::TooLarge { .. } => "too_large",
+                    gw_codec::compression::CompressionError::Io(_) => "io",
+                    gw_codec::compression::CompressionError::Brotli(_) => "brotli",
+                };
                 metrics::counter!(
                     "gw_codec_content_decode_failure_total",
                     "encoding" => enc_label(ctx.resp_content_encoding),
+                    "reason" => reason,
                 )
                 .increment(1);
                 body

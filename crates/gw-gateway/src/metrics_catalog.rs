@@ -130,7 +130,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_codec_content_decode_failure_total",
         kind: MetricKind::Counter,
-        help: "cross-protocol non-stream upstream body failed content-encoding decode; label=encoding",
+        help: "cross-protocol non-stream upstream body failed content-encoding decode; labels=encoding,reason (reason ∈ {io, brotli, too_large})",
     },
     MetricSpec {
         name: "gw_adaptive_rpm_rpm_detected_total",
