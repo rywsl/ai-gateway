@@ -49,7 +49,7 @@ fn build_kek_cache(kms: &KmsCfg) -> anyhow::Result<KekCache> {
                 anyhow::bail!("GW_KMS__PREVIOUS_KEY_ID must differ from GW_KMS__KEY_ID");
             }
             let previous = decode_kek_hex("GW_KMS__PREVIOUS_KEK_HEX", previous_hex)?;
-            let mut cache = KekCache::with_active(
+            let cache = KekCache::with_active(
                 HashMap::from([(previous_key_id.clone(), previous)]),
                 Some(previous_key_id),
             );
@@ -90,6 +90,16 @@ mod tests {
         }
     }
 
+    /// Extract the error message from a failing `build_kek_cache` call without
+    /// requiring `KekCache: Debug` (it owns sensitive KEK material and must not
+    /// gain a `Debug` impl just to satisfy `Result::unwrap_err`).
+    fn expect_err(result: anyhow::Result<KekCache>) -> String {
+        match result {
+            Ok(_) => panic!("expected build_kek_cache to fail, got Ok"),
+            Err(err) => err.to_string(),
+        }
+    }
+
     #[test]
     fn build_kek_cache_single_active_kek() {
         let cache = build_kek_cache(&cfg("primary", &"ab".repeat(32))).unwrap();
@@ -124,17 +134,11 @@ mod tests {
     fn build_kek_cache_requires_previous_pair() {
         let mut only_hex = cfg("new", &"cd".repeat(32));
         only_hex.previous_kek_hex = Some(secret(&"ab".repeat(32)));
-        assert!(build_kek_cache(&only_hex)
-            .unwrap_err()
-            .to_string()
-            .contains("PREVIOUS_KEY_ID"));
+        assert!(expect_err(build_kek_cache(&only_hex)).contains("PREVIOUS_KEY_ID"));
 
         let mut only_id = cfg("new", &"cd".repeat(32));
         only_id.previous_key_id = Some("old".to_string());
-        assert!(build_kek_cache(&only_id)
-            .unwrap_err()
-            .to_string()
-            .contains("PREVIOUS_KEK_HEX"));
+        assert!(expect_err(build_kek_cache(&only_id)).contains("PREVIOUS_KEK_HEX"));
     }
 
     #[test]
@@ -143,10 +147,7 @@ mod tests {
         kms.previous_key_id = Some("same".to_string());
         kms.previous_kek_hex = Some(secret(&"ab".repeat(32)));
 
-        assert!(build_kek_cache(&kms)
-            .unwrap_err()
-            .to_string()
-            .contains("must differ"));
+        assert!(expect_err(build_kek_cache(&kms)).contains("must differ"));
     }
 
     #[test]
