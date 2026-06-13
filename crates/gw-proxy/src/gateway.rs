@@ -214,6 +214,34 @@ fn map_egress_class(class: &str) -> (&'static str, bool, bool) {
     }
 }
 
+/// Map a pre-classified `ctx.upstream_error_code` to its observability
+/// `ErrorKind` so `fail_to_proxy` can honour the precise code without
+/// re-classifying via the generic HTTPStatus tail. The default arm picks
+/// `UpstreamProtocol` to match the legacy HTTPStatus → PROTOCOL mapping.
+fn kind_from_preset_code(code: &'static str) -> gw_core::observability::ErrorKind {
+    use gw_core::error::codes::*;
+    use gw_core::observability::ErrorKind;
+    match code {
+        // TLS / connect-layer failures: closer to a connect error than to a
+        // wire-protocol violation.
+        GW_UPSTREAM_TLS_ERROR
+        | GW_UPSTREAM_CONNECT_FAILED
+        | GW_UPSTREAM_CONNECT_TIMEOUT
+        | GW_UPSTREAM_CONNECT_REFUSED
+        | GW_UPSTREAM_READ_TIMEOUT
+        | GW_UPSTREAM_PROXY_ERROR
+        | GW_UPSTREAM_UNKNOWN
+        | GW_UPSTREAM_PANIC => ErrorKind::UpstreamConnect,
+        // Routing-layer exhaustion still surfaces as an upstream connect
+        // problem from the client's POV (nowhere to send the request).
+        GW_ROUTING_FAILOVER_TIMEOUT | GW_ROUTING_NO_FALLBACK_LEFT => ErrorKind::UpstreamConnect,
+        GW_UPSTREAM_TRUNCATED | GW_UPSTREAM_BODY_TRUNCATED => ErrorKind::UpstreamMidStream,
+        // Codec / protocol-decode failures.
+        GW_UPSTREAM_H2_PROTOCOL | GW_UPSTREAM_PROTOCOL_DECODE_ERROR => ErrorKind::UpstreamProtocol,
+        _ => ErrorKind::UpstreamProtocol,
+    }
+}
+
 /// Gateway-internal loopback control + error headers. These are injected by
 /// egress/tunnel loopbacks and must never be persisted into detailed archive.
 /// Match is case-insensitive.
@@ -1708,48 +1736,74 @@ impl ProxyHttp for LlmGateway {
         use pingora::ErrorType::*;
         use std::borrow::Cow;
 
+        // If a prior filter (response_filter for egress-impersonate TLS, the
+        // failover loop, etc.) already pinned a precise upstream error code
+        // on `ctx`, honour it — the generic HTTPStatus → GW_UPSTREAM_PROTOCOL
+        // tail below would otherwise mis-label TLS-fingerprint blocks and
+        // failover-timeout / no-fallback-left exhaustion as "protocol error",
+        // hiding actionable signal from the client envelope.
+        let preset = ctx.upstream_error_code.and_then(|code| {
+            let status = match e.etype() {
+                HTTPStatus(c) => *c,
+                _ => ctx.upstream_status.unwrap_or(502),
+            };
+            // Only short-circuit when we have a real HTTP status to surface;
+            // a 0-status (e.g. ConnectionClosed before headers) keeps the
+            // existing source-based mapping so non-envelope error reporting
+            // still picks the right `ErrorKind`.
+            if status == 0 {
+                None
+            } else {
+                Some((code, status, kind_from_preset_code(code)))
+            }
+        });
+
         let (gw_code, http_status, kind): (&'static str, u16, gw_core::observability::ErrorKind) =
-            match e.etype() {
-                HTTPStatus(code) => (
-                    codes::GW_UPSTREAM_PROTOCOL,
-                    *code,
-                    gw_core::observability::ErrorKind::UpstreamProtocol,
-                ),
-                _ => match e.esource() {
-                    ErrorSource::Upstream => {
-                        if ctx.body_started {
-                            (
-                                codes::GW_UPSTREAM_TRUNCATED,
-                                0,
-                                gw_core::observability::ErrorKind::UpstreamMidStream,
-                            )
-                        } else {
-                            (
-                                codes::GW_BACKEND_UNAVAILABLE,
-                                502,
-                                gw_core::observability::ErrorKind::UpstreamConnect,
-                            )
+            if let Some(p) = preset {
+                p
+            } else {
+                match e.etype() {
+                    HTTPStatus(code) => (
+                        codes::GW_UPSTREAM_PROTOCOL,
+                        *code,
+                        gw_core::observability::ErrorKind::UpstreamProtocol,
+                    ),
+                    _ => match e.esource() {
+                        ErrorSource::Upstream => {
+                            if ctx.body_started {
+                                (
+                                    codes::GW_UPSTREAM_TRUNCATED,
+                                    0,
+                                    gw_core::observability::ErrorKind::UpstreamMidStream,
+                                )
+                            } else {
+                                (
+                                    codes::GW_BACKEND_UNAVAILABLE,
+                                    502,
+                                    gw_core::observability::ErrorKind::UpstreamConnect,
+                                )
+                            }
                         }
-                    }
-                    ErrorSource::Downstream => match e.etype() {
-                        WriteError | ReadError | ConnectionClosed => (
-                            codes::GW_CLIENT_DISCONNECTED,
-                            0,
-                            // No DownstreamDisconnect kind; UpstreamConnect is the closest available.
-                            gw_core::observability::ErrorKind::UpstreamConnect,
-                        ),
-                        _ => (
-                            codes::GW_BAD_REQUEST,
-                            400,
+                        ErrorSource::Downstream => match e.etype() {
+                            WriteError | ReadError | ConnectionClosed => (
+                                codes::GW_CLIENT_DISCONNECTED,
+                                0,
+                                // No DownstreamDisconnect kind; UpstreamConnect is the closest available.
+                                gw_core::observability::ErrorKind::UpstreamConnect,
+                            ),
+                            _ => (
+                                codes::GW_BAD_REQUEST,
+                                400,
+                                gw_core::observability::ErrorKind::UpstreamConnect,
+                            ),
+                        },
+                        ErrorSource::Internal | ErrorSource::Unset => (
+                            codes::GW_GATEWAY_INTERNAL,
+                            500,
                             gw_core::observability::ErrorKind::UpstreamConnect,
                         ),
                     },
-                    ErrorSource::Internal | ErrorSource::Unset => (
-                        codes::GW_GATEWAY_INTERNAL,
-                        500,
-                        gw_core::observability::ErrorKind::UpstreamConnect,
-                    ),
-                },
+                }
             };
 
         let category = match gw_code {
@@ -1758,11 +1812,26 @@ impl ProxyHttp for LlmGateway {
             _ => gw_core::error::ErrorCategory::UpstreamError,
         };
 
-        let retryable = matches!(http_status, 502..=504);
+        // TLS fingerprint / OAuth-credential blocks won't be helped by a retry;
+        // failover-timeout / no-fallback-left already exhausted alternatives.
+        // Everything else keeps the legacy 5xx-only retryable heuristic.
+        let retryable = match gw_code {
+            codes::GW_UPSTREAM_TLS_ERROR
+            | codes::GW_ROUTING_FAILOVER_TIMEOUT
+            | codes::GW_ROUTING_NO_FALLBACK_LEFT
+            | codes::GW_UPSTREAM_CONNECT_FAILED => false,
+            _ => matches!(http_status, 502..=504),
+        };
 
         let message: Cow<'static, str> = match gw_code {
             codes::GW_BACKEND_UNAVAILABLE => Cow::Borrowed("upstream unavailable"),
             codes::GW_UPSTREAM_PROTOCOL => Cow::Borrowed("upstream protocol error"),
+            codes::GW_UPSTREAM_TLS_ERROR => {
+                Cow::Borrowed("upstream TLS handshake or fingerprint rejected")
+            }
+            codes::GW_UPSTREAM_CONNECT_FAILED => Cow::Borrowed("upstream connect failed"),
+            codes::GW_ROUTING_FAILOVER_TIMEOUT => Cow::Borrowed("failover timeout exhausted"),
+            codes::GW_ROUTING_NO_FALLBACK_LEFT => Cow::Borrowed("no fallback candidate left"),
             codes::GW_BAD_REQUEST => Cow::Borrowed("bad request"),
             codes::GW_GATEWAY_INTERNAL => Cow::Borrowed("gateway internal error"),
             _ => Cow::Borrowed("upstream unavailable"),
