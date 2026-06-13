@@ -203,7 +203,7 @@ fn key_health_snapshot(health: &KeyHealthStore) -> Vec<KeyHealthSummary> {
             key_id: entry.key_id.as_ref().to_string(),
             format: entry.format.as_str().to_string(),
             available: entry.available,
-            circuit: format!("{:?}", entry.health.circuit).to_lowercase(),
+            circuit: entry.health.circuit.wire_label().to_string(),
             in_cooldown: entry.health.in_cooldown,
             cooldown_until_ms: entry.health.cooldown_until_ms,
             consecutive_failures: entry.health.consecutive_failures,
@@ -221,6 +221,42 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_health_snapshot_circuit_labels_match_wire_contract() {
+        use gw_core::ids::KeyId;
+        use gw_core::protocol::ProtocolKind;
+        use gw_health::{CircuitState, FormatHealth};
+
+        // Force one entry per circuit state directly onto the store so the
+        // snapshot path renders each wire label. HalfOpen is the regression
+        // lock: the Go `rustpact` consumer + frontend expect snake_case
+        // `half_open`, not Debug-derived `halfopen`.
+        let store = KeyHealthStore::default();
+        for (id, state) in [
+            ("vk-closed", CircuitState::Closed),
+            ("vk-open", CircuitState::Open),
+            ("vk-half", CircuitState::HalfOpen),
+        ] {
+            let health = Arc::new(FormatHealth::new());
+            health.circuit.store(state.as_u8(), Ordering::Release);
+            store
+                .by_key_format
+                .insert((KeyId::from(id), ProtocolKind::OpenAi), health);
+        }
+
+        let summaries = key_health_snapshot(&store);
+        let label = |id: &str| {
+            summaries
+                .iter()
+                .find(|s| s.key_id == id)
+                .map(|s| s.circuit.as_str())
+                .unwrap_or_else(|| panic!("no summary for {id}"))
+        };
+        assert_eq!(label("vk-closed"), "closed");
+        assert_eq!(label("vk-open"), "open");
+        assert_eq!(label("vk-half"), "half_open");
+    }
 
     #[test]
     fn dynamic_runtime_cfg_rejects_invalid_values() {
