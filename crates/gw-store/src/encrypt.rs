@@ -119,13 +119,13 @@ impl KekCache {
     /// assert which KEKs survived a restart (multi-KEK / dual-read posture)
     /// without exposing the key material itself.
     pub fn contains_kid(&self, kid: &str) -> bool {
-        self.inner.keks.contains_key(kid)
+        self.inner.snapshot.load().keks.contains_key(kid)
     }
 
     /// Number of KEKs currently resident (1 in steady state, 2 during a
     /// dual-read window or after a multi-KEK bootstrap).
     pub fn resident_kid_count(&self) -> usize {
-        self.inner.keks.len()
+        self.inner.snapshot.load().keks.len()
     }
 
     pub fn active_kid(&self) -> String {
