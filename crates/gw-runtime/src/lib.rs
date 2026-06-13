@@ -16,5 +16,5 @@ pub mod supervisor;
 pub use health::{Admit, BackpressureGate, HealthHook, HealthSignal, SystemHealthMonitor};
 pub use regex_cache::{CompileError, RegexCache, RegexCacheConfig};
 pub use shutdown::{DrainOutcome, PhaseHandle, ShutdownCoordinator, ShutdownPhase, ShutdownToken};
-pub use spill_io::{SpillFile, SpillRoot, SpillRootConfig};
+pub use spill_io::{SpillFile, SpillPolicy, SpillRoot, SpillRootConfig};
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorError};
