@@ -1,5 +1,5 @@
 use crate::usage::UsageRecord;
-use gw_runtime::spill_io::{SpillFile, SpillRoot};
+use gw_runtime::spill_io::{SpillFile, SpillPolicy, SpillRoot};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::num::NonZeroUsize;
@@ -60,10 +60,21 @@ impl DlqEnvelope {
 /// async append-only file from `gw_runtime::spill_io`. The `SpillFile` is
 /// lazily initialised on the first `append` call via a `OnceCell`.
 ///
-/// Each process gets a unique key (`gw-ledger-emergency-dlq-<uuid>`) and N
-/// shard files under the shared `SpillRoot`. The quota enforcer on
-/// `SpillRoot` prunes old spill files when total disk usage exceeds the
-/// configured limit.
+/// Each process gets a unique key (`dlq.emergency.<uuid>`) and N shard files
+/// under the shared `SpillRoot`. The quota enforcer on `SpillRoot` prunes
+/// old spill files when total disk usage exceeds the configured limit.
+///
+/// ## Durability
+///
+/// The writer creates its `SpillFile` with `SpillPolicy::KeepOnDrop` so the
+/// shard files **survive process exit**. `BacklogRecovery::load_into` on the
+/// next boot scans the spill root for files matching `dlq.*` and replays
+/// each into the in-memory billing backlog — without `KeepOnDrop` the
+/// default `Drop` impl would synchronously `unlink` shards on shutdown,
+/// silently losing every record that reached emergency disk during a Redis
+/// outage. The `dlq.emergency.` prefix is what makes the file match the
+/// recovery filter; renaming it without updating
+/// `BacklogRecovery::load_into` (or vice-versa) reintroduces the loss bug.
 pub struct EmergencyDlqWriter {
     spill_root: Arc<SpillRoot>,
     key: String,
@@ -75,7 +86,9 @@ impl EmergencyDlqWriter {
     pub fn new(spill_root: Arc<SpillRoot>, shards: NonZeroUsize) -> Self {
         Self {
             spill_root,
-            key: format!("gw-ledger-emergency-dlq-{}", uuid::Uuid::new_v4()),
+            // Prefix MUST start with `dlq.` so `BacklogRecovery::load_into`
+            // picks it up on the next boot — see struct-level docs.
+            key: format!("dlq.emergency.{}", uuid::Uuid::new_v4()),
             shards,
             file: OnceCell::new(),
         }
@@ -83,12 +96,17 @@ impl EmergencyDlqWriter {
 
     /// Append a serialised `DlqEnvelope` as a JSONL line.
     ///
-    /// The `SpillFile` is lazily created on the first call. Subsequent calls
-    /// reuse the same sharded file.
+    /// The `SpillFile` is lazily created on the first call with
+    /// `SpillPolicy::KeepOnDrop`, so subsequent process restarts can recover
+    /// any envelopes written here. Subsequent calls reuse the same sharded
+    /// file.
     pub async fn append(&self, envelope: &DlqEnvelope) -> io::Result<()> {
         let file = self
             .file
-            .get_or_try_init(|| self.spill_root.create(&self.key, self.shards))
+            .get_or_try_init(|| {
+                self.spill_root
+                    .create_with_policy(&self.key, self.shards, SpillPolicy::KeepOnDrop)
+            })
             .await?;
         let bytes = serde_json::to_vec(envelope)?;
         let mut buf = bytes;
@@ -277,5 +295,101 @@ mod tests {
         assert_eq!(deserialized[1].dlq_meta.dlq_layer, DlqLayer::Redis);
         assert_eq!(deserialized[1].dlq_meta.first_failure_ts_ms, 2000);
         assert_eq!(deserialized[1].usage_record.request_id, "req-dlq-2");
+    }
+
+    /// Cross-instance recovery: write via one `EmergencyDlqWriter`, drop it,
+    /// then scan the spill root via `BacklogRecovery::load_into` and verify
+    /// the envelopes replay correctly. This pins the two preconditions that
+    /// the earlier in-process round-trip test missed:
+    ///   * `SpillFile` Drop must NOT delete the shard files (KeepOnDrop).
+    ///   * The shard filename prefix must match `starts_with("dlq.")` in
+    ///     `BacklogRecovery::load_into`.
+    /// A regression of either causes silent billing loss during Redis outage.
+    #[tokio::test]
+    async fn emergency_writer_files_survive_drop_and_match_recovery_filter() {
+        let tmp = TempDir::new().unwrap();
+        let root = spill_root(&tmp);
+
+        // Phase 1 — write, then drop the writer.
+        let shard_paths: Vec<std::path::PathBuf> = {
+            let writer = EmergencyDlqWriter::new(root.clone(), NonZeroUsize::new(2).unwrap());
+            writer
+                .append(&DlqEnvelope::new(
+                    record(),
+                    "redis down",
+                    1,
+                    DlqLayer::Disk,
+                    111,
+                ))
+                .await
+                .unwrap();
+            writer
+                .append(&DlqEnvelope::new(
+                    UsageRecord {
+                        request_id: "req-dlq-3".into(),
+                        ..record()
+                    },
+                    "redis down",
+                    2,
+                    DlqLayer::Disk,
+                    222,
+                ))
+                .await
+                .unwrap();
+            writer.flush().await.unwrap();
+            // Capture paths before drop so we can assert on them afterwards.
+            writer.file.get().unwrap().shard_paths().to_vec()
+        }; // writer dropped here — KeepOnDrop must leave files in place.
+
+        // Phase 2 — files must still exist with the `dlq.` prefix.
+        let surviving: Vec<_> = shard_paths.iter().filter(|p| p.exists()).collect();
+        assert_eq!(
+            surviving.len(),
+            shard_paths.len(),
+            "all shards must survive writer drop (KeepOnDrop policy); got {}/{}",
+            surviving.len(),
+            shard_paths.len(),
+        );
+        for p in &shard_paths {
+            let name = p.file_name().unwrap().to_str().unwrap();
+            assert!(
+                name.starts_with("dlq."),
+                "shard {name} must start with `dlq.` to be picked up by BacklogRecovery::load_into",
+            );
+        }
+
+        // Phase 3 — `BacklogRecovery::load_into` would scan the root and
+        // match these filenames. We assert the filter behaviour directly
+        // here (rather than depending on the backlog module) to avoid a test
+        // graph cycle; the integration is covered by
+        // `gw-ledger/src/backlog.rs` tests via `replay_file`.
+        let entries: Vec<_> = std::fs::read_dir(root.root_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("dlq.") || n.starts_with("backlog_shutdown_")
+            })
+            .collect();
+        assert_eq!(
+            entries.len(),
+            shard_paths.len(),
+            "load_into filter must match every emergency shard",
+        );
+
+        // Sanity: the surviving files round-trip as valid DlqEnvelope JSONL.
+        let mut total = 0usize;
+        for p in &shard_paths {
+            let bytes = std::fs::read(p).unwrap();
+            for line in bytes.split(|b| *b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                let env: DlqEnvelope = serde_json::from_slice(line).unwrap();
+                assert_eq!(env.dlq_meta.dlq_layer, DlqLayer::Disk);
+                total += 1;
+            }
+        }
+        assert_eq!(total, 2, "both appended envelopes must be recoverable");
     }
 }

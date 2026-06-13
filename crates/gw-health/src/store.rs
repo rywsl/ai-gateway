@@ -265,11 +265,9 @@ fn snapshot_to_string(v: serde_json::Value) -> String {
 }
 
 fn circuit_label(c: CircuitState) -> &'static str {
-    match c {
-        CircuitState::Closed => "closed",
-        CircuitState::Open => "open",
-        CircuitState::HalfOpen => "half_open",
-    }
+    // Delegate to the single source of truth on the type so the admin JSON
+    // and the runtime control-plane snapshot share one wire label.
+    c.wire_label()
 }
 
 #[cfg(test)]

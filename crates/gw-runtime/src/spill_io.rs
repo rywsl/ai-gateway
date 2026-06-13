@@ -5,6 +5,19 @@
 //! `AtomicUsize::fetch_add(Relaxed)` and serialise into that shard's
 //! `tokio::sync::Mutex<BufWriter<tokio::fs::File>>`. Locks are held only
 //! across the syscall, never across business `.await`.
+//!
+//! ## Drop policy
+//!
+//! Callers choose one of two on-drop behaviours:
+//!
+//! * [`SpillPolicy::DeleteOnDrop`] (default): synchronous unlink on Drop.
+//!   Appropriate for ephemeral round-trip use (e.g. `detailed_archive`
+//!   compression buffers) — the data has already been forwarded by the time
+//!   Drop fires; the file is residue.
+//! * [`SpillPolicy::KeepOnDrop`]: leave the shard files on disk. Required
+//!   for cross-restart recovery — e.g. emergency DLQ files that the next
+//!   process must replay via `BacklogRecovery`. The shared LRU enforcer
+//!   (`SpillRoot::spawn_quota_enforcer`) still bounds total disk usage.
 
 use std::io::{self};
 use std::num::NonZeroUsize;
@@ -16,6 +29,17 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+/// Whether [`SpillFile`] unlinks its shards when dropped. See module docs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpillPolicy {
+    /// Synchronous best-effort `unlink` of every shard file on Drop.
+    #[default]
+    DeleteOnDrop,
+    /// Leave shards on disk for an external consumer (e.g. cross-restart
+    /// recovery scanner) to pick up. The LRU enforcer still applies.
+    KeepOnDrop,
+}
 
 #[derive(Clone, Debug)]
 pub struct SpillRootConfig {
@@ -52,6 +76,19 @@ impl SpillRoot {
     }
 
     pub async fn create(&self, key: &str, shards: NonZeroUsize) -> io::Result<SpillFile> {
+        self.create_with_policy(key, shards, SpillPolicy::DeleteOnDrop)
+            .await
+    }
+
+    /// Create a sharded spill file with an explicit drop policy. Use
+    /// [`SpillPolicy::KeepOnDrop`] for cross-restart recovery (emergency
+    /// DLQ); callers without a recovery story should keep the default.
+    pub async fn create_with_policy(
+        &self,
+        key: &str,
+        shards: NonZeroUsize,
+        policy: SpillPolicy,
+    ) -> io::Result<SpillFile> {
         self.ensure_dir().await?;
         let shard_n = shards.get();
         let mut shard_files = Vec::with_capacity(shard_n);
@@ -77,6 +114,7 @@ impl SpillRoot {
             shards: shard_files,
             next_shard: AtomicUsize::new(0),
             bytes_counter,
+            policy,
         })
     }
 
@@ -135,6 +173,7 @@ pub struct SpillFile {
     shards: Vec<Mutex<BufWriter<File>>>,
     next_shard: AtomicUsize,
     bytes_counter: metrics::Counter,
+    policy: SpillPolicy,
 }
 
 impl SpillFile {
@@ -146,6 +185,9 @@ impl SpillFile {
     }
     pub fn shard_paths(&self) -> &[PathBuf] {
         &self.shard_paths
+    }
+    pub fn policy(&self) -> SpillPolicy {
+        self.policy
     }
 
     pub async fn append(&self, bytes: &[u8]) -> io::Result<()> {
@@ -192,13 +234,21 @@ impl SpillFile {
 
 impl Drop for SpillFile {
     fn drop(&mut self) {
-        // Synchronous best-effort cleanup. `unlink(2)` is a single-syscall
-        // metadata op (microseconds on local disk), so blocking briefly in
-        // Drop is acceptable and avoids the TOCTOU race that an async-spawn
-        // cleanup would have with same-`request_id` retries: the next
-        // attempt's `SpillRoot::create` (which uses `O_CREAT | O_APPEND`)
-        // would otherwise open the prior attempt's file before our spawned
-        // unlink ran, causing on-disk byte contamination across retries.
+        // For `KeepOnDrop` (cross-restart recovery: emergency DLQ files
+        // must survive the writer being dropped on shutdown), leave shards
+        // on disk so the next process can replay them via `BacklogRecovery`.
+        // The shared LRU enforcer still bounds total disk usage.
+        if matches!(self.policy, SpillPolicy::KeepOnDrop) {
+            return;
+        }
+        // `DeleteOnDrop`: synchronous best-effort cleanup. `unlink(2)` is a
+        // single-syscall metadata op (microseconds on local disk), so
+        // blocking briefly in Drop is acceptable and avoids the TOCTOU race
+        // that an async-spawn cleanup would have with same-`request_id`
+        // retries: the next attempt's `SpillRoot::create` (which uses
+        // `O_CREAT | O_APPEND`) would otherwise open the prior attempt's
+        // file before our spawned unlink ran, causing on-disk byte
+        // contamination across retries.
         //
         // Coexists with `SpillRoot::spawn_quota_enforcer`: this Drop is
         // timely, the LRU is fallback. Both paths tolerate `NotFound`
@@ -220,6 +270,71 @@ impl Drop for SpillFile {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn root(tmp: &TempDir) -> SpillRoot {
+        SpillRoot::new(SpillRootConfig {
+            root_dir: tmp.path().to_path_buf(),
+            max_total_bytes: 1024 * 1024,
+            buffer_size: 4096,
+        })
+    }
+
+    #[tokio::test]
+    async fn delete_on_drop_unlinks_shards() {
+        let tmp = TempDir::new().unwrap();
+        let r = root(&tmp);
+        let paths: Vec<PathBuf> = {
+            let f = r
+                .create("ephemeral", NonZeroUsize::new(2).unwrap())
+                .await
+                .unwrap();
+            f.append(b"line\n").await.unwrap();
+            f.flush().await.unwrap();
+            f.shard_paths().to_vec()
+        }; // drop here
+        for p in &paths {
+            assert!(
+                !p.exists(),
+                "DeleteOnDrop must unlink shards on drop: {p:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn keep_on_drop_leaves_shards() {
+        let tmp = TempDir::new().unwrap();
+        let r = root(&tmp);
+        let paths: Vec<PathBuf> = {
+            let f = r
+                .create_with_policy(
+                    "dlq.emergency.t1",
+                    NonZeroUsize::new(2).unwrap(),
+                    SpillPolicy::KeepOnDrop,
+                )
+                .await
+                .unwrap();
+            f.append(b"durable\n").await.unwrap();
+            f.flush().await.unwrap();
+            f.shard_paths().to_vec()
+        }; // drop here
+        for p in &paths {
+            assert!(
+                p.exists(),
+                "KeepOnDrop must NOT unlink shards on drop: {p:?}"
+            );
+            let bytes = std::fs::read(p).unwrap();
+            assert!(
+                bytes.windows(b"durable".len()).any(|w| w == b"durable") || bytes.is_empty(),
+                "shard {p:?} should contain at least the durable line or be the unwritten shard",
+            );
         }
     }
 }

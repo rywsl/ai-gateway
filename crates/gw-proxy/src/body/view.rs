@@ -2,12 +2,10 @@
 //!
 //! See `docs/architecture.md`.
 //!
-//! Note on `max_bytes`: `gw_codec::compression::decode` does not enforce a
-//! size limit internally; callers that need one should check
-//! `decoded().len()` after the call. The `max_bytes` parameter on
-//! `decoded()` is kept in the API for forward-compat and will be enforced
-//! once the codec layer adds a limit. For now, any non-zero limit is
-//! accepted and the check is a post-decode size guard.
+//! Note on `max_bytes`: the cap is enforced **inside** `gw_codec::compression::decode`
+//! via `Read::take`, so peak allocation is bounded even on a compression bomb.
+//! `decoded()` therefore propagates the codec-layer `TooLarge` directly; the
+//! identity path keeps its own size guard since no decoder runs.
 
 use bytes::Bytes;
 use gw_codec::compression::Encoding;
@@ -51,9 +49,10 @@ impl RequestBodyView {
     }
 
     /// Decoded (decompressed) plaintext bytes. Decompression runs at most
-    /// once; subsequent calls return the cached result. `max_bytes` is a
-    /// post-decode size guard: if the decompressed output exceeds it a
-    /// `DecodeErr::TooLarge` is returned on the *first* call and cached.
+    /// once; subsequent calls return the cached result. `max_bytes` is enforced
+    /// inside the codec layer via `Read::take`, so a compression bomb is
+    /// rejected before any oversized allocation occurs. `DecodeErr::TooLarge`
+    /// is returned on the *first* call and cached.
     pub fn decoded(&self, max_bytes: usize) -> Result<&Bytes, &DecodeErr> {
         self.decoded
             .get_or_init(|| decompress(&self.raw, self.req_encoding, max_bytes))
@@ -82,8 +81,9 @@ impl RequestBodyView {
 }
 
 fn decompress(raw: &Bytes, enc: Encoding, max_bytes: usize) -> Result<Bytes, DecodeErr> {
-    // gw_codec::compression::decode does not enforce a size limit itself.
-    // We apply a post-decode check so callers get TooLarge semantics.
+    // Codec-layer cap enforces max_bytes in-stream via Read::take, so a
+    // brotli/gzip bomb cannot inflate past the cap. We map its `TooLarge`
+    // to our caller-shaped `DecodeErr::TooLarge`.
     match enc {
         Encoding::Identity => {
             if raw.len() > max_bytes {
@@ -94,17 +94,16 @@ fn decompress(raw: &Bytes, enc: Encoding, max_bytes: usize) -> Result<Bytes, Dec
             }
             Ok(raw.clone())
         }
-        other => {
-            let decoded = gw_codec::compression::decode(other, raw)
-                .map_err(|e| DecodeErr::FormatError(e.to_string()))?;
-            if decoded.len() > max_bytes {
-                return Err(DecodeErr::TooLarge {
-                    limit: max_bytes,
-                    actual: decoded.len(),
-                });
-            }
-            Ok(decoded)
-        }
+        other => gw_codec::compression::decode(other, raw, max_bytes).map_err(|e| match e {
+            gw_codec::compression::CompressionError::TooLarge { limit } => DecodeErr::TooLarge {
+                limit,
+                // Exact decoded size is unknown — the decoder is cut off at
+                // limit + 1 — so report a sentinel `limit + 1` to communicate
+                // "at least one byte past the limit".
+                actual: limit.saturating_add(1),
+            },
+            other => DecodeErr::FormatError(other.to_string()),
+        }),
     }
 }
 

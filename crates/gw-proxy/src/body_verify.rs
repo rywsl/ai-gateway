@@ -40,7 +40,15 @@ pub enum BodyVerifyError {
 pub fn verify_body(
     input: BodyVerifyInput<'_>,
 ) -> Result<(SignatureCheckResult, Bytes), BodyVerifyError> {
-    let decoded = decode(input.content_encoding, &input.body)?;
+    // `compression::decode` enforces `max_bytes` in-stream via `Read::take`,
+    // so a brotli/gzip bomb cannot inflate past the cap before we have a
+    // chance to reject it. We pass `usize::MAX` when no cap was provided
+    // by the caller — the post-decode size check below is then a no-op.
+    let cap = input.max_decoded_bytes.unwrap_or(usize::MAX);
+    let decoded = decode(input.content_encoding, &input.body, cap).map_err(|e| match e {
+        CompressionError::TooLarge { limit } => BodyVerifyError::DecodedBodyTooLarge { limit },
+        other => BodyVerifyError::Decompression(other),
+    })?;
     if let Some(limit) = input.max_decoded_bytes {
         if decoded.len() > limit {
             return Err(BodyVerifyError::DecodedBodyTooLarge { limit });

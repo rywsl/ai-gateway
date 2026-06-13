@@ -17,6 +17,22 @@
 //!
 //! Constraints: at most 2 KEKs concurrent, never drop the only remaining KEK,
 //! `active_kid` must always be in the resident set.
+//!
+//! ## Sharing semantics
+//!
+//! `KekCache` is `Clone`, where every clone shares one `Arc<KekCacheInner>`
+//! that wraps a single `ArcSwap<KekSnapshot>`. Rotation methods publish a new
+//! snapshot atomically — `&self` is sufficient and every existing clone sees
+//! the update on its next read. The bootstrap path distributes clones into
+//! `LoaderCtx.kek`, the OAuth refresh worker, and the tunnel auth writer; all
+//! observe the same `keks` map / `active_kid` / `state`.
+//!
+//! Concurrent callers of `enter_dual_read` / `drop_old_kek` are not internally
+//! serialised — the load → mutate → store sequence is not CAS-protected. KEK
+//! rotation in practice is driven by a single KMS control loop, so this
+//! one-controller invariant is upheld externally. Multiple concurrent
+//! `mark_reencrypting()` callers are safe (single `store` of a fresh snapshot
+//! per call).
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -36,10 +52,21 @@ impl Default for KekCache {
     }
 }
 
+/// Internal shared state. The single `ArcSwap` lets `KekCache::clone()` share
+/// state by `Arc<KekCacheInner>` aliasing while still allowing atomic
+/// publication of new snapshots from any clone.
 struct KekCacheInner {
-    keks: HashMap<String, [u8; 32]>,
-    active_kid: ArcSwap<String>,
-    state: ArcSwap<KekState>,
+    snapshot: ArcSwap<KekSnapshot>,
+}
+
+/// Atomic-replacement bundle of the three fields that move together during a
+/// KEK rotation. Replacing all three in one `store` removes the visibility
+/// window where readers could see a fresh `active_kid` against a stale `keks`
+/// map (which would surface as `kek not found: <new_kid>`).
+struct KekSnapshot {
+    keks: Arc<HashMap<String, [u8; 32]>>,
+    active_kid: String,
+    state: KekState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,9 +94,11 @@ impl KekCache {
             .unwrap_or_default();
         Self {
             inner: Arc::new(KekCacheInner {
-                keks: map,
-                active_kid: ArcSwap::from_pointee(active),
-                state: ArcSwap::from_pointee(KekState::Healthy),
+                snapshot: ArcSwap::from_pointee(KekSnapshot {
+                    keks: Arc::new(map),
+                    active_kid: active,
+                    state: KekState::Healthy,
+                }),
             }),
         }
     }
@@ -78,8 +107,12 @@ impl KekCache {
         Self::new(HashMap::new())
     }
 
-    pub(crate) fn get(&self, kid: &str) -> Option<&[u8; 32]> {
-        self.inner.keks.get(kid)
+    /// Look up a KEK by kid. Returns an owned copy because the cache may
+    /// atomically swap the underlying map at any time (a borrow would tie the
+    /// caller's lifetime to the load guard, which is incompatible with the
+    /// `ArcSwap` snapshot pattern). 32 bytes is cheap to copy.
+    pub(crate) fn get(&self, kid: &str) -> Option<[u8; 32]> {
+        self.inner.snapshot.load().keks.get(kid).copied()
     }
 
     /// True if `kid` is in the resident set. Lets the KMS bootstrap and tests
@@ -96,54 +129,61 @@ impl KekCache {
     }
 
     pub fn active_kid(&self) -> String {
-        self.inner.active_kid.load_full().as_ref().clone()
+        self.inner.snapshot.load().active_kid.clone()
     }
 
     pub fn state(&self) -> KekState {
-        self.inner.state.load_full().as_ref().clone()
+        self.inner.snapshot.load().state.clone()
     }
 
     /// Enter dual-read: add new KEK to the resident set, switch active to new.
-    /// Refuses if already in DualRead (max 2 KEKs concurrent).
-    pub fn enter_dual_read(&mut self, new_kid: String, new_kek: [u8; 32]) -> anyhow::Result<()> {
-        if matches!(self.state(), KekState::DualRead { .. }) {
+    /// Refuses if already in DualRead (max 2 KEKs concurrent). Publishes
+    /// atomically so every `KekCache` clone sees the new snapshot on its next
+    /// `get()` / `active_kid()`.
+    pub fn enter_dual_read(&self, new_kid: String, new_kek: [u8; 32]) -> anyhow::Result<()> {
+        let cur = self.inner.snapshot.load_full();
+        if matches!(cur.state, KekState::DualRead { .. }) {
             anyhow::bail!("already in dual-read");
         }
-        if self.inner.keks.contains_key(&new_kid) {
+        if cur.keks.contains_key(&new_kid) {
             anyhow::bail!("kid {new_kid} already resident");
         }
-        let mut new_map = self.inner.keks.clone();
+        let mut new_map: HashMap<String, [u8; 32]> = (*cur.keks).clone();
         new_map.insert(new_kid.clone(), new_kek);
-        self.inner = Arc::new(KekCacheInner {
-            keks: new_map,
-            active_kid: ArcSwap::from_pointee(new_kid),
-            state: ArcSwap::from_pointee(KekState::DualRead {
+        self.inner.snapshot.store(Arc::new(KekSnapshot {
+            keks: Arc::new(new_map),
+            active_kid: new_kid,
+            state: KekState::DualRead {
                 reencrypting: false,
-            }),
-        });
+            },
+        }));
         Ok(())
     }
 
     /// Mark the dual-read state as actively re-encrypting (informational flag
     /// for observers; does not gate any internal decisions).
     pub fn mark_reencrypting(&self) {
-        self.inner
-            .state
-            .store(Arc::new(KekState::DualRead { reencrypting: true }));
+        let cur = self.inner.snapshot.load_full();
+        self.inner.snapshot.store(Arc::new(KekSnapshot {
+            keks: cur.keks.clone(),
+            active_kid: cur.active_kid.clone(),
+            state: KekState::DualRead { reencrypting: true },
+        }));
     }
 
     /// Drop an old KEK and return to Healthy. Refuses unless we're in
     /// DualRead, refuses to drop the only remaining KEK, and refuses to drop
-    /// the currently-active KEK.
-    pub fn drop_old_kek(&mut self, old_kid: &str) -> anyhow::Result<()> {
-        if !matches!(self.state(), KekState::DualRead { .. }) {
+    /// the currently-active KEK. Publishes atomically.
+    pub fn drop_old_kek(&self, old_kid: &str) -> anyhow::Result<()> {
+        let cur = self.inner.snapshot.load_full();
+        if !matches!(cur.state, KekState::DualRead { .. }) {
             anyhow::bail!("not in dual-read");
         }
-        let active = self.active_kid();
+        let active = cur.active_kid.clone();
         if old_kid == active {
             anyhow::bail!("refusing to drop active kid {old_kid}");
         }
-        let mut new_map = self.inner.keks.clone();
+        let mut new_map: HashMap<String, [u8; 32]> = (*cur.keks).clone();
         new_map.remove(old_kid);
         if new_map.is_empty() {
             anyhow::bail!("cannot drop the only kek");
@@ -151,11 +191,11 @@ impl KekCache {
         if !new_map.contains_key(&active) {
             anyhow::bail!("active_kid not in remaining set");
         }
-        self.inner = Arc::new(KekCacheInner {
-            keks: new_map,
-            active_kid: ArcSwap::from_pointee(active),
-            state: ArcSwap::from_pointee(KekState::Healthy),
-        });
+        self.inner.snapshot.store(Arc::new(KekSnapshot {
+            keks: Arc::new(new_map),
+            active_kid: active,
+            state: KekState::Healthy,
+        }));
         Ok(())
     }
 }
@@ -168,11 +208,22 @@ pub struct EncryptedKey {
     pub kek_kid: String,
 }
 
+/// AES-256-GCM nonce length. `Nonce::from_slice` panics on a mismatched slice
+/// (`assert_eq!` inside `GenericArray::from_slice`), so a corrupted DB row or
+/// an out-of-contract Go encrypt would otherwise DoS a Pingora worker.
+const AES_GCM_NONCE_LEN: usize = 12;
+
 pub fn decrypt(enc: &EncryptedKey, cache: &KekCache) -> anyhow::Result<SecretString> {
     let kek = cache
         .get(&enc.kek_kid)
         .ok_or_else(|| anyhow::anyhow!("kek not found: {}", enc.kek_kid))?;
-    let cipher = Aes256Gcm::new(kek.into());
+    if enc.nonce.len() != AES_GCM_NONCE_LEN {
+        anyhow::bail!(
+            "invalid nonce length: expected {AES_GCM_NONCE_LEN}, got {}",
+            enc.nonce.len()
+        );
+    }
+    let cipher = Aes256Gcm::new(&kek.into());
     let nonce = Nonce::from_slice(&enc.nonce);
     let mut combined = enc.ciphertext.clone();
     combined.extend_from_slice(&enc.auth_tag);
@@ -193,7 +244,7 @@ pub fn encrypt_with_active_kek(
     let kek = cache
         .get(&kid)
         .ok_or_else(|| anyhow::anyhow!("active kek not found: {kid}"))?;
-    let cipher = Aes256Gcm::new(kek.into());
+    let cipher = Aes256Gcm::new(&kek.into());
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ct = cipher
         .encrypt(&nonce, plain.expose_secret().as_bytes())
@@ -249,6 +300,65 @@ mod production_encrypt_tests {
         assert_eq!(encrypted.kek_kid, "active");
         let decrypted = decrypt(&encrypted, &cache).unwrap();
         assert_eq!(decrypted.expose_secret(), "access-token-1");
+    }
+
+    /// Wrong-length nonce must produce an `Err`, never panic — otherwise a
+    /// single corrupted DB row crashes the Pingora worker that touches it.
+    #[test]
+    fn decrypt_rejects_short_nonce_without_panic() {
+        let cache = KekCache::with_active(
+            std::collections::HashMap::from([("k".to_string(), [0u8; 32])]),
+            Some("k"),
+        );
+        let bad = EncryptedKey {
+            ciphertext: vec![1, 2, 3],
+            nonce: vec![0u8; 8], // wrong length
+            auth_tag: vec![0u8; 16],
+            kek_kid: "k".to_string(),
+        };
+        let err = decrypt(&bad, &cache).expect_err("must not panic");
+        assert!(
+            err.to_string().contains("invalid nonce length"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn decrypt_rejects_long_nonce_without_panic() {
+        let cache = KekCache::with_active(
+            std::collections::HashMap::from([("k".to_string(), [0u8; 32])]),
+            Some("k"),
+        );
+        let bad = EncryptedKey {
+            ciphertext: vec![1, 2, 3],
+            nonce: vec![0u8; 16],
+            auth_tag: vec![0u8; 16],
+            kek_kid: "k".to_string(),
+        };
+        let err = decrypt(&bad, &cache).expect_err("must not panic");
+        assert!(
+            err.to_string().contains("invalid nonce length"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn decrypt_rejects_empty_nonce_without_panic() {
+        let cache = KekCache::with_active(
+            std::collections::HashMap::from([("k".to_string(), [0u8; 32])]),
+            Some("k"),
+        );
+        let bad = EncryptedKey {
+            ciphertext: vec![1, 2, 3],
+            nonce: vec![],
+            auth_tag: vec![0u8; 16],
+            kek_kid: "k".to_string(),
+        };
+        let err = decrypt(&bad, &cache).expect_err("must not panic");
+        assert!(
+            err.to_string().contains("invalid nonce length"),
+            "unexpected error: {err}"
+        );
     }
 }
 
