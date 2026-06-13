@@ -10,6 +10,9 @@ use std::net::IpAddr;
 /// separately.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MarkupChainSnapshot {
+    /// Account/user-group tier multiplier. Until the cross-process schema grows
+    /// a separate user/account field, this carries user, parent, and user-group
+    /// markup combined so Go can still validate the four-field product.
     pub user_group_markup: f32,
     pub api_key_markup: f32,
     pub vendor_markup: f32,
