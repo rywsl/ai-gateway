@@ -193,6 +193,7 @@ impl CommandConsumer {
             GatewayCommandAction::ReloadConfig => self.reload_config(&entity.args).await,
             GatewayCommandAction::CooldownKey => self.cooldown_key(&entity.args),
             GatewayCommandAction::ClearCooldown => self.clear_cooldown(&entity.args),
+            GatewayCommandAction::ResetCost => self.reset_cost(&entity.args),
             GatewayCommandAction::ClearCache => self.clear_cache(&entity.args).await,
             GatewayCommandAction::SetLogLevel
             | GatewayCommandAction::RefreshOauth
@@ -288,6 +289,10 @@ impl CommandConsumer {
         self.health
             .clear_cooldown(&KeyId::from(args.key_id.as_str()), format);
         CommandOutcome::ok("cooldown_cleared")
+    }
+
+    fn reset_cost(&self, args: &serde_json::Value) -> CommandOutcome {
+        reset_cost_outcome(&self.health, args)
     }
 
     async fn clear_cache(&self, args: &serde_json::Value) -> CommandOutcome {
@@ -526,6 +531,19 @@ fn parse_command_format(format: &str) -> Result<ProtocolKind, String> {
     }
 }
 
+fn reset_cost_outcome(health: &KeyHealthStore, args: &serde_json::Value) -> CommandOutcome {
+    let args: ResetCostArgs = match serde_json::from_value(args.clone()) {
+        Ok(args) => args,
+        Err(err) => return CommandOutcome::failed(format!("invalid_args:{err}")),
+    };
+    let format = match parse_command_format(args.format()) {
+        Ok(format) => format,
+        Err(detail) => return CommandOutcome::failed(detail),
+    };
+    health.reset_runtime(&KeyId::from(args.key_id.as_str()), format);
+    CommandOutcome::ok("cost_runtime_reset")
+}
+
 fn xack_after_ack_result<E: std::fmt::Display>(
     ack_result: Result<(), E>,
     delivery_id: &str,
@@ -612,6 +630,19 @@ struct ClearCooldownArgs {
 }
 
 impl ClearCooldownArgs {
+    fn format(&self) -> &str {
+        self.format.as_str()
+    }
+}
+
+#[derive(Deserialize)]
+struct ResetCostArgs {
+    key_id: String,
+    #[serde(default, alias = "api_format")]
+    format: String,
+}
+
+impl ResetCostArgs {
     fn format(&self) -> &str {
         self.format.as_str()
     }
@@ -826,5 +857,74 @@ mod tests {
         .unwrap();
 
         assert_eq!(args.format(), "openai");
+    }
+
+    #[test]
+    fn reset_cost_outcome_resets_runtime_health_state() {
+        let health = KeyHealthStore::default();
+        let key = KeyId::from("vk-reset-command");
+        for _ in 0..21 {
+            health.record(
+                &key,
+                ProtocolKind::OpenAi,
+                gw_health::OutcomeKind::Failure {
+                    http_status: 500,
+                    retry_after_secs: None,
+                },
+            );
+        }
+        assert!(!health.is_available(&key, ProtocolKind::OpenAi));
+
+        let outcome = reset_cost_outcome(
+            &health,
+            &json!({
+                "key_id": "vk-reset-command",
+                "api_format": "openai"
+            }),
+        );
+
+        assert_eq!(outcome.status, GatewayCommandStatus::Ok);
+        assert_eq!(outcome.message, "cost_runtime_reset");
+        assert!(health.is_available(&key, ProtocolKind::OpenAi));
+    }
+
+    #[test]
+    fn reset_cost_outcome_rejects_bad_args() {
+        let health = KeyHealthStore::default();
+        // Missing the required `key_id` field → deserialization failure.
+        let outcome = reset_cost_outcome(&health, &json!({ "api_format": "openai" }));
+
+        assert_eq!(outcome.status, GatewayCommandStatus::Failed);
+        assert!(
+            outcome.message.starts_with("invalid_args:"),
+            "expected invalid_args prefix, got {}",
+            outcome.message
+        );
+    }
+
+    #[test]
+    fn reset_cost_args_accept_api_format_alias() {
+        let args: ResetCostArgs = serde_json::from_value(json!({
+            "key_id": "vk-1",
+            "api_format": "anthropic"
+        }))
+        .unwrap();
+
+        assert_eq!(args.format(), "anthropic");
+    }
+
+    #[test]
+    fn reset_cost_outcome_rejects_unknown_format() {
+        let health = KeyHealthStore::default();
+        let outcome = reset_cost_outcome(
+            &health,
+            &json!({
+                "key_id": "vk-1",
+                "api_format": "bogus"
+            }),
+        );
+
+        assert_eq!(outcome.status, GatewayCommandStatus::Failed);
+        assert_eq!(outcome.message, "invalid_format");
     }
 }

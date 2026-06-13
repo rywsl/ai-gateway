@@ -152,6 +152,16 @@ impl KeyHealthStore {
         self.get_or_create(key, fmt).clear_cooldown();
     }
 
+    /// Full runtime reset of the `(key, fmt)` cell — empties the failure
+    /// sliding window, zeroes consecutive failures, closes the circuit, and
+    /// clears any cooldown. See [`FormatHealth::reset_runtime`]. Backs the
+    /// admin `reset-cost` control-plane command; distinct from
+    /// [`Self::clear_cooldown`], which only lifts an explicit cooldown.
+    pub fn reset_runtime(&self, key: &KeyId, fmt: ApiFormat) {
+        self.get_or_create(key, fmt).reset_runtime();
+        metrics::counter!("gw_health_reset_runtime_total").increment(1);
+    }
+
     /// JSON snapshot of every `(key, format)` health row, intended for the
     /// admin `/healthz/circuits` endpoint (T3-C consumer). Returns a JSON
     /// object of the shape:
@@ -342,5 +352,74 @@ mod snapshot_tests {
         let snap = store.peek(&key, ProtocolKind::OpenAi);
         assert!(snap.in_cooldown);
         assert_eq!(snap.cooldown_reason, CooldownReason::StatusTransient5xx);
+    }
+
+    #[test]
+    fn reset_runtime_recovers_tripped_and_cooled_key() {
+        let store = KeyHealthStore::default();
+        let key = KeyId::from("vk-reset");
+        let fmt = ProtocolKind::OpenAi;
+        // Auto-trip the circuit: >=20 samples at >50% failure rate, each 5xx
+        // also stacking a long explicit cooldown.
+        for _ in 0..21 {
+            store.record(
+                &key,
+                fmt,
+                OutcomeKind::Failure {
+                    http_status: 500,
+                    retry_after_secs: Some(3_600),
+                },
+            );
+        }
+        store.apply_cooldown(
+            &key,
+            fmt,
+            CooldownDirective {
+                reason: CooldownReason::AdminForce,
+                ttl_secs: 3_600,
+                reset_consecutive: false,
+            },
+        );
+        assert!(
+            !store.is_available(&key, fmt),
+            "key must be sidelined after circuit trip + cooldown"
+        );
+
+        store.reset_runtime(&key, fmt);
+
+        assert!(
+            store.is_available(&key, fmt),
+            "reset_runtime must make the key routable again"
+        );
+        let snap = store.peek(&key, fmt);
+        assert!(!snap.in_cooldown);
+        assert_eq!(snap.cooldown_reason, CooldownReason::None);
+        assert_eq!(snap.consecutive_failures, 0);
+        assert_eq!(snap.circuit, CircuitState::Closed);
+        assert_eq!(snap.failure_rate_30s, 0.0);
+    }
+
+    #[test]
+    fn clear_cooldown_leaves_auto_tripped_circuit_unlike_reset() {
+        let store = KeyHealthStore::default();
+        let key = KeyId::from("vk-clear");
+        let fmt = ProtocolKind::OpenAi;
+        for _ in 0..21 {
+            store.record(
+                &key,
+                fmt,
+                OutcomeKind::Failure {
+                    http_status: 500,
+                    retry_after_secs: None,
+                },
+            );
+        }
+        // clear_cooldown lifts only the explicit cooldown; the auto-tripped
+        // circuit (and the failure window that tripped it) survive.
+        store.clear_cooldown(&key, fmt);
+        assert!(
+            !store.is_available(&key, fmt),
+            "clear_cooldown must not recover an auto-tripped circuit — reset_runtime does"
+        );
     }
 }

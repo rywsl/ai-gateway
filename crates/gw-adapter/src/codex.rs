@@ -147,6 +147,7 @@ mod tests {
             url_mut: UrlMut { inner: url },
             auth_template: "Bearer {api_key}",
             upstream_host: Some("api.openai.com"),
+            http_method: "POST",
             content_len: 0,
             body_sha256_hex: String::new(),
             trace_id: "0000000000000000aaaaaaaaaaaaaaaa",

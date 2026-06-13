@@ -43,6 +43,13 @@ impl SlidingWindow {
         }
     }
 
+    /// Forget every recorded sample, returning the window to its just-
+    /// constructed state. Used by the admin `reset-cost` full-reset path so a
+    /// key's failure-rate history no longer influences routing.
+    pub fn reset(&mut self) {
+        self.samples.clear();
+    }
+
     /// Returns `(total_samples, failure_rate_in_[0,1])`.
     pub fn failure_rate(&self) -> (usize, f32) {
         let total = self.samples.len();
@@ -90,5 +97,16 @@ mod tests {
         w.record(true);
         assert_eq!(w.samples.len(), 1);
         assert!(w.samples.front().unwrap().1, "fresh sample should remain");
+    }
+
+    #[test]
+    fn reset_forgets_all_samples() {
+        let mut w = SlidingWindow::new();
+        w.record(false);
+        w.record(false);
+        assert_eq!(w.failure_rate(), (2, 1.0));
+        w.reset();
+        assert_eq!(w.failure_rate(), (0, 0.0));
+        assert!(w.samples.is_empty());
     }
 }

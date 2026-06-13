@@ -200,6 +200,45 @@ mod intern_tests {
         assert_eq!(parse_capability("thinking"), Capability::Thinking);
     }
 
+    /// Contract lock (audit P0 #13 §4): every well-known capability name must
+    /// resolve to its typed `Capability` variant, NOT `Capability::Tagged`.
+    /// `parse_capability` is the single string→`Capability` table in the
+    /// workspace (`backend.rs`, `filter.rs::parse_capabilities`, and the
+    /// resolver header path all funnel through it), so this guards against a
+    /// second, divergent mapping appearing and against a known name silently
+    /// regressing to an interned tag (which would fail to match a typed,
+    /// hard-constructed requirement such as `OpenAiResponsesShape`). Matching
+    /// is case-insensitive.
+    #[test]
+    fn parse_capability_locks_all_known_names_to_typed_variants() {
+        let known: &[(&str, Capability)] = &[
+            ("vision", Capability::Vision),
+            ("audio", Capability::Audio),
+            ("video", Capability::Video),
+            ("thinking", Capability::Thinking),
+            ("tool_use", Capability::ToolUse),
+            ("streaming_only", Capability::StreamingOnly),
+            ("openai_responses_shape", Capability::OpenAiResponsesShape),
+            (
+                "vertex_ai_service_account",
+                Capability::VertexAiServiceAccount,
+            ),
+        ];
+        for (name, expected) in known {
+            assert_eq!(
+                &parse_capability(name),
+                expected,
+                "{name} must map to its typed variant"
+            );
+            // Case folding holds, and no known name leaks into Tagged.
+            assert_eq!(&parse_capability(&name.to_ascii_uppercase()), expected);
+            assert!(
+                !matches!(parse_capability(name), Capability::Tagged(_)),
+                "{name} must not collapse to Tagged"
+            );
+        }
+    }
+
     #[test]
     fn parse_capability_interns_unknown_string() {
         let a = parse_capability("custom-foo");

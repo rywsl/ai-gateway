@@ -217,6 +217,7 @@ mod tests {
             url_mut: UrlMut { inner: &mut url },
             auth_template: "",
             upstream_host: Some("us-central1-aiplatform.googleapis.com"),
+            http_method: "POST",
             content_len: 31,
             body_sha256_hex: "hash".to_owned(),
             trace_id: "0000000000000000aaaaaaaaaaaaaaaa",
@@ -234,6 +235,61 @@ mod tests {
             ctx.headers_mut.get("x-goog-user-project"),
             Some("billing-project")
         );
+        assert!(ctx.headers_mut.get("x-api-key").is_none());
+    }
+
+    /// Contract lock (audit P0 #13 §3): Vertex AI (`aiplatform.googleapis.com`)
+    /// authenticates with an OAuth Bearer token **only**. `x-goog-api-key` is
+    /// the Gemini *Developer* API (`generativelanguage.googleapis.com`) header
+    /// and is served generically by `NoopAdapter` + an `auth_template` of
+    /// `"x-goog-api-key: {api_key}"`. The Vertex adapter must therefore never
+    /// emit `x-goog-api-key`; doing so would send a static key to a surface
+    /// that rejects it. This test pins the OAuth-only behaviour.
+    #[tokio::test]
+    async fn vertex_rewrite_auth_is_oauth_only_no_goog_api_key() {
+        let health = Arc::new(KeyHealthStore::default());
+        let runtime = Arc::new(Runtime {
+            calls: AtomicUsize::new(0),
+        });
+        let runtime_dyn: Arc<dyn OAuthRuntime> = runtime.clone();
+        let key = vendor_key();
+        let mut headers = Headers(HashMap::from([(
+            "x-api-key".to_owned(),
+            "inbound".to_owned(),
+        )]));
+        let mut url = Url;
+        let mut ctx = AdapterCtx {
+            vendor_id: VendorId::from("google_vertex"),
+            vendor_key_id: KeyId::from("vk-vertex"),
+            vendor_key: key,
+            client_protocol: ProtocolKind::Gemini,
+            upstream_protocol: ProtocolKind::Gemini,
+            model: ModelName::from("gemini-2.5-pro"),
+            user_id: UserId::from("u-1"),
+            api_format: ProtocolKind::Gemini,
+            health_store: &health,
+            oauth_runtime: Some(&runtime_dyn),
+            headers_mut: HeadersMut {
+                inner: &mut headers,
+            },
+            url_mut: UrlMut { inner: &mut url },
+            auth_template: "",
+            upstream_host: Some("us-central1-aiplatform.googleapis.com"),
+            http_method: "POST",
+            content_len: 31,
+            body_sha256_hex: "hash".to_owned(),
+            trace_id: "0000000000000000aaaaaaaaaaaaaaaa",
+            request_id: "req-vertex",
+        };
+
+        VertexAdapter.rewrite_auth(&mut ctx).await.unwrap();
+
+        // OAuth Bearer is the sole credential; no static API-key header leaks.
+        assert!(ctx
+            .headers_mut
+            .get("authorization")
+            .is_some_and(|v| v.starts_with("Bearer ")));
+        assert!(ctx.headers_mut.get("x-goog-api-key").is_none());
         assert!(ctx.headers_mut.get("x-api-key").is_none());
     }
 }

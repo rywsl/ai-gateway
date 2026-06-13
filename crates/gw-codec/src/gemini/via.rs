@@ -48,6 +48,16 @@ impl<'a> From<GeminiRequest<'a>> for RequestIR<'a> {
             effort: tc.thinking_level.map(|l| Cow::Owned(l.into_owned())),
             budget_tokens: tc.thinking_budget,
         });
+        // Gemini-native top-level passthrough (safetySettings / toolConfig)
+        // has no typed IR slot; carry it through `extensions` so a parse→
+        // render round trip preserves it (audit P0 #13 §2).
+        let mut extensions: HashMap<Cow<'a, str>, Box<RawValue>> = HashMap::new();
+        if let Some(ss) = src.safety_settings {
+            extensions.insert(Cow::Borrowed("safetySettings"), ss);
+        }
+        if let Some(tc) = src.tool_config {
+            extensions.insert(Cow::Borrowed("toolConfig"), tc);
+        }
         RequestIR {
             model: src.model,
             messages,
@@ -64,6 +74,11 @@ impl<'a> From<GeminiRequest<'a>> for RequestIR<'a> {
                 gc.response_mime_type.as_deref(),
                 gc.response_schema,
             ),
+            extensions: if extensions.is_empty() {
+                None
+            } else {
+                Some(extensions)
+            },
             ..RequestIR::default()
         }
     }
@@ -236,11 +251,27 @@ impl<'a> TryFrom<&RequestIR<'a>> for GeminiRequest<'a> {
         } else {
             None
         };
+        // Restore Gemini-native top-level passthrough from `extensions`. Only
+        // the two Gemini-owned keys are read back, so foreign extensions (e.g.
+        // OpenAI extras from a cross-protocol parse) are not leaked into a
+        // Gemini body. See audit P0 #13 §2.
+        let safety_settings = ir
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("safetySettings"))
+            .cloned();
+        let tool_config = ir
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("toolConfig"))
+            .cloned();
         Ok(GeminiRequest {
             model: ir.model.clone(),
             contents,
             system_instruction,
             generation_config,
+            safety_settings,
+            tool_config,
         })
     }
 }

@@ -194,6 +194,29 @@ impl FormatHealth {
         self.cooldown_reason
             .store(CooldownReason::None.as_u16(), Ordering::Release);
     }
+
+    /// Full runtime reset of this `(key, fmt)` cell: empties the failure
+    /// sliding window, zeroes `consecutive_failures`, forces the circuit back
+    /// to `Closed` (clearing `open_until_ms`), and clears any explicit
+    /// cooldown deadline + reason.
+    ///
+    /// Unlike [`Self::clear_cooldown`] — which only lifts an explicit cooldown
+    /// and leaves an auto-tripped circuit / accumulated failure window intact —
+    /// this returns the cell to its just-constructed state so routing treats
+    /// the key as fresh. Backs the admin `reset-cost` control-plane command
+    /// (pool "重置" action). Rust holds no per-key cost accumulator (cost is
+    /// computed in Go), so this adaptive health/sliding-window state is the
+    /// resettable routing-runtime state the command targets.
+    pub fn reset_runtime(&self) {
+        self.failure_window.lock().reset();
+        self.circuit
+            .store(CircuitState::Closed.as_u8(), Ordering::Release);
+        self.open_until_ms.store(0, Ordering::Release);
+        self.cooldown_until_ms.store(0, Ordering::Release);
+        self.cooldown_reason
+            .store(CooldownReason::None.as_u16(), Ordering::Release);
+        self.consecutive_failures.store(0, Ordering::Release);
+    }
 }
 
 fn now_ms() -> u64 {

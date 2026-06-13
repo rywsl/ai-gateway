@@ -1282,6 +1282,11 @@ async fn apply_outbound_adapter(
         path: initial_path.clone(),
     };
     {
+        // Capture the method as an owned string before `headers` takes the
+        // mutable borrow of `upstream_request` — the adapter signs the actual
+        // method (SigV4), and a borrow of `upstream_request.method` cannot
+        // coexist with the `&mut` reborrow held by `ProxyHeadersAccessor`.
+        let http_method = upstream_request.method.as_str().to_owned();
         let mut headers = ProxyHeadersAccessor(upstream_request);
         let adapter = adapter_registry.for_vendor(&picked.vendor_id);
         let mut adapter_ctx = gw_adapter::AdapterCtx {
@@ -1301,6 +1306,7 @@ async fn apply_outbound_adapter(
             url_mut: gw_adapter::UrlMut { inner: &mut url },
             auth_template: vendor.value.auth_template.as_str(),
             upstream_host,
+            http_method: http_method.as_str(),
             content_len: outbound.len(),
             body_sha256_hex: sha256_hex(&outbound),
             trace_id: ctx.trace_id.as_ref(),

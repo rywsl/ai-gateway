@@ -224,6 +224,16 @@ pub struct KmsCfg {
     #[serde(default)]
     pub kek_hex: Option<SecretString>,
     pub key_id: String,
+    /// Optional **secondary** KEK held resident alongside the active one
+    /// (`GW_KMS__PREVIOUS_KEK_HEX` / `GW_KMS__PREVIOUS_KEY_ID`). This is the
+    /// dual-read bootstrap for KEK rotation (P0 #20): without it a restart
+    /// during a rotation window can only load one KEK and cannot decrypt data
+    /// written under the other — a single point of failure. Both fields must be
+    /// supplied together, and `previous_key_id` must differ from `key_id`.
+    #[serde(default)]
+    pub previous_kek_hex: Option<SecretString>,
+    #[serde(default)]
+    pub previous_key_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

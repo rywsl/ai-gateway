@@ -32,7 +32,7 @@ Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开�
 | `0005_proxy_nodes.sql` | `proxy_nodes`（tunnel-t T1，已 merged） |
 | `0006_auth_configs.sql` | `auth_configs`（T1-E 落地） |
 | `0007_management_tokens.sql` | `management_tokens`（B2，T1-D 落地） |
-| `0008_signature_secret.sql` | `api_keys.signature_secret BYTEA`（HMAC 独立密钥列，KEK 加密 at rest；S-proxy-core H-1） |
+| `0008_signature_secret.sql` | `api_keys.signature_secret BYTEA`（HMAC 独立密钥列；当前实现按原始 BYTEA 明文读取，**不是** KEK 加密 at rest；S-proxy-core H-1 的加密迁移需 Go+Rust 同 PR 定义 envelope） |
 | `0009_egress_impersonation.sql` | `vendors.egress_mode` JSONB + `vendor_keys.identity_snapshot` JSONB（egress-impersonate 身份持久化） |
 | `0010_vendor_key_quota_state.sql` | `vendor_keys.quota_*` 结构化列（Rust 运行时写入 quota snapshot，Go 只读/管理展示） |
 
@@ -118,11 +118,13 @@ deleted_at  TIMESTAMPTZ NULL
   "expires_at": null,            // RFC3339 / time::OffsetDateTime
   "signature_required": false,   // HMAC body signing 开关
   "signature_algo": "hmac_sha256",
-  "signature_secret": null,      // Option<Vec<u8>>，独立 HMAC 密钥；null 时签名不可用。KEK 加密 at rest（migration 0008）
+  "signature_secret": null,      // Option<Vec<u8>>，独立 HMAC 密钥；null 时签名不可用。当前由 loader 从 api_keys.signature_secret BYTEA 注入原始字节数组，非 KEK 加密 envelope
   "force_capabilities": [],      // SmallVec<[String;4]>，caller-side 必需 capability
   "match_mode_exclusive": false
 }
 ```
+
+> `signature_secret` 当前真实形态：`crates/gw-store/src/loader.rs` 用 `jsonb_agg(get_byte(signature_secret, i))` 把 BYTEA 折叠为 JSON 整数数组，`ApiKeyEntry.signature_secret: Option<Vec<u8>>` 直接收到这些原始字节。任何把该列改为 KEK envelope 的迁移都必须先定义 BYTEA/envelope wire shape，并让 Rust loader dual-read 后，Go 才能开始写新格式。
 
 > 字段命名差异：`ApiKeyEntry.force_capabilities` (singular `force_`) vs `VendorKey.forced_capabilities` (plural `forced_`)。这是 [G13 已知 gap](../../architecture.md#21-crate-responsibilities)，Go 端需 schema 适配。
 
@@ -527,7 +529,7 @@ Go 端运维如要硬删除（超长归档），应当先确认无 Rust 在飞�
 字段顺序不限；Rust 端用 `serde` 按字段名反序列化（权威类型见 `crates/gw-store/src/encrypt.rs::EncryptedKey`）。
 **`ciphertext` / `nonce` / `auth_tag` 是 `Vec<u8>`，serde 仅接受 JSON 整数数组 `[b0,b1,…]`，不接受 base64 字符串**（写入方必须按整数数组落库，否则整行 `EncryptedKey` 反序列化失败、该 vendor_key 不可用）。
 
-**`kek_kid` 规范值：** 网关只把 `cfg.kms.key_id` 对应的一个 KEK 装入 `KekCache`（`config/default.toml` 默认 `key_id = "primary"`，见 `crates/gw-gateway/src/kms.rs`）。因此 Go 写入 `api_key_enc.kek_kid` 必须等于网关运行用的 `kms.key_id`；默认部署下即 `"primary"`。轮换期下文以 `primary` / `<new-kid>` 表述（早先示例中的 `kek_v1`/`kek_v2` 仅为轮换占位说明，非默认字面量）。
+**`kek_kid` 规范值：** 正常态下，网关把 `cfg.kms.key_id` 对应的 active KEK 装入 `KekCache`（`config/default.toml` 默认 `key_id = "primary"`，见 `crates/gw-gateway/src/kms.rs`）。轮换窗口内，网关可同时加载 `cfg.kms.previous_key_id` / `cfg.kms.previous_kek_hex` 作为 previous KEK，并让 active `kms.key_id` 用于新写入。因此 Go 写入 `api_key_enc.kek_kid` 必须等于当前 active `kms.key_id`；历史行可在轮换窗口内继续使用 `previous_key_id` 直到重加密完成。默认部署下 active kid 为 `"primary"`。轮换期下文以 `primary` / `<new-kid>` 表述（早先示例中的 `kek_v1`/`kek_v2` 仅为轮换占位说明，非默认字面量）。
 
 ### 3.4.2 加密算法
 
@@ -589,8 +591,8 @@ Healthy(K_new)
 ### 3.5.3 Go / 运维端责任
 
 1. 在 KMS 生成 K_new + 分配 `kek_kid`；
-2. 将 K_new 注入 Rust 集群所有 pod 的环境变量；
-3. 滚动重启 Rust（让所有 pod 进入 DualRead）；
+2. 将 K_new 作为 active `GW_KMS__KEK_HEX` / `GW_KMS__KEY_ID` 注入 Rust 集群所有 pod，并同时保留 K_old 到 `GW_KMS__PREVIOUS_KEK_HEX` / `GW_KMS__PREVIOUS_KEY_ID`；
+3. 滚动重启 Rust（让所有 pod bootstrap 进入 DualRead）；
 4. 跑 re-encryption batch：
    ```
    for row in vendor_keys WHERE payload->>'api_key_enc'->>'kek_kid' = 'kek_v1':
@@ -604,7 +606,7 @@ Healthy(K_new)
      XADD events:entity * ns vendor_key id <id> v <new_version> op upsert;
    ```
 5. 等待所有 `vendor_keys.kek_kid = 'kek_v1'` 重加密完 → 通知运维 drop K_old；
-6. Rust 滚动重启或运行时通过 admin 端点（待加）drop K_old；
+6. Rust 滚动重启移除 previous KEK；运行时 `rotate-kek`/drop 端点仍未启用；
 7. Rust 集群进入 Healthy(K_new)。
 
 ### 3.5.4 失败模式

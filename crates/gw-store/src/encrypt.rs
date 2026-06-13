@@ -82,6 +82,19 @@ impl KekCache {
         self.inner.keks.get(kid)
     }
 
+    /// True if `kid` is in the resident set. Lets the KMS bootstrap and tests
+    /// assert which KEKs survived a restart (multi-KEK / dual-read posture)
+    /// without exposing the key material itself.
+    pub fn contains_kid(&self, kid: &str) -> bool {
+        self.inner.keks.contains_key(kid)
+    }
+
+    /// Number of KEKs currently resident (1 in steady state, 2 during a
+    /// dual-read window or after a multi-KEK bootstrap).
+    pub fn resident_kid_count(&self) -> usize {
+        self.inner.keks.len()
+    }
+
     pub fn active_kid(&self) -> String {
         self.inner.active_kid.load_full().as_ref().clone()
     }
@@ -236,5 +249,116 @@ mod production_encrypt_tests {
         assert_eq!(encrypted.kek_kid, "active");
         let decrypted = decrypt(&encrypted, &cache).unwrap();
         assert_eq!(decrypted.expose_secret(), "access-token-1");
+    }
+}
+
+/// Dual-read state-machine (G-α.6 / SE3) characterization tests. These lock the
+/// invariants the KEK-rotation P0 (#20) depends on: at most 2 KEKs concurrent,
+/// `active_kid` always resident, never drop the only/active KEK, and that
+/// ciphertext written under BOTH the old and the new KEK decrypts during the
+/// dual-read window (the property a restart-mid-rotation must preserve).
+#[cfg(test)]
+mod kek_state_machine_tests {
+    use super::*;
+    use secrecy::ExposeSecret;
+    use std::collections::HashMap;
+
+    const K_OLD: [u8; 32] = [1u8; 32];
+    const K_NEW: [u8; 32] = [2u8; 32];
+
+    fn healthy_cache() -> KekCache {
+        KekCache::with_active(HashMap::from([("old".to_string(), K_OLD)]), Some("old"))
+    }
+
+    #[test]
+    fn full_rotation_cycle_transitions_through_dual_read_back_to_healthy() {
+        let mut cache = healthy_cache();
+        assert_eq!(cache.state(), KekState::Healthy);
+        assert_eq!(cache.active_kid(), "old");
+        assert_eq!(cache.resident_kid_count(), 1);
+
+        cache.enter_dual_read("new".to_string(), K_NEW).unwrap();
+        assert_eq!(
+            cache.state(),
+            KekState::DualRead {
+                reencrypting: false
+            }
+        );
+        // Active switches to the new KEK; both remain resident.
+        assert_eq!(cache.active_kid(), "new");
+        assert!(cache.contains_kid("old"));
+        assert!(cache.contains_kid("new"));
+        assert_eq!(cache.resident_kid_count(), 2);
+
+        cache.mark_reencrypting();
+        assert_eq!(cache.state(), KekState::DualRead { reencrypting: true });
+
+        cache.drop_old_kek("old").unwrap();
+        assert_eq!(cache.state(), KekState::Healthy);
+        assert_eq!(cache.active_kid(), "new");
+        assert!(!cache.contains_kid("old"));
+        assert_eq!(cache.resident_kid_count(), 1);
+    }
+
+    #[test]
+    fn both_keks_decrypt_during_dual_read_window() {
+        // Ciphertext produced under the OLD KEK before rotation started.
+        let under_old = {
+            let pre =
+                KekCache::with_active(HashMap::from([("old".to_string(), K_OLD)]), Some("old"));
+            encrypt_with_active_kek(&SecretString::from("secret-old"), &pre).unwrap()
+        };
+
+        let mut cache = healthy_cache();
+        cache.enter_dual_read("new".to_string(), K_NEW).unwrap();
+        // New writes go under the active (new) KEK.
+        let under_new = encrypt_with_active_kek(&SecretString::from("secret-new"), &cache).unwrap();
+        assert_eq!(under_new.kek_kid, "new");
+
+        // The dual-read invariant: BOTH old- and new-encrypted data are readable.
+        assert_eq!(
+            decrypt(&under_old, &cache).unwrap().expose_secret(),
+            "secret-old"
+        );
+        assert_eq!(
+            decrypt(&under_new, &cache).unwrap().expose_secret(),
+            "secret-new"
+        );
+    }
+
+    #[test]
+    fn enter_dual_read_refuses_a_second_concurrent_rotation() {
+        let mut cache = healthy_cache();
+        cache.enter_dual_read("new".to_string(), K_NEW).unwrap();
+        let err = cache
+            .enter_dual_read("newer".to_string(), [3u8; 32])
+            .unwrap_err();
+        assert!(err.to_string().contains("already in dual-read"));
+    }
+
+    #[test]
+    fn enter_dual_read_refuses_an_already_resident_kid() {
+        let mut cache = healthy_cache();
+        let err = cache.enter_dual_read("old".to_string(), K_NEW).unwrap_err();
+        assert!(err.to_string().contains("already resident"));
+    }
+
+    #[test]
+    fn drop_old_kek_refuses_when_not_in_dual_read() {
+        let mut cache = healthy_cache();
+        let err = cache.drop_old_kek("old").unwrap_err();
+        assert!(err.to_string().contains("not in dual-read"));
+    }
+
+    #[test]
+    fn drop_old_kek_refuses_to_drop_the_active_kid() {
+        let mut cache = healthy_cache();
+        cache.enter_dual_read("new".to_string(), K_NEW).unwrap();
+        // "new" is now active; refusing to drop it keeps decryption working.
+        let err = cache.drop_old_kek("new").unwrap_err();
+        assert!(err.to_string().contains("refusing to drop active"));
+        // State is unchanged — still dual-read with both KEKs.
+        assert!(matches!(cache.state(), KekState::DualRead { .. }));
+        assert_eq!(cache.resident_kid_count(), 2);
     }
 }

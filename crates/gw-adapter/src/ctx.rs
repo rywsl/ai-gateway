@@ -53,6 +53,12 @@ pub struct AdapterCtx<'a> {
 
     pub auth_template: &'a str,
     pub upstream_host: Option<&'a str>,
+    /// Outbound HTTP method (e.g. `"POST"`, `"GET"`). SigV4-style adapters
+    /// must sign the actual method — the Kiro canonical request previously
+    /// hard-coded `POST`, which produced a wrong signature for any non-POST
+    /// route. Defaults to `"POST"` at construction when the runtime has no
+    /// method handy (all current Kiro EventStream traffic is POST).
+    pub http_method: &'a str,
     pub content_len: usize,
     /// SHA-256 hex digest of the final upstream-bound body. Populated after
     /// adapter body patching so SigV4-style auth signs the exact bytes sent.
