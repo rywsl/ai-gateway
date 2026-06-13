@@ -382,7 +382,7 @@ mod kek_state_machine_tests {
 
     #[test]
     fn full_rotation_cycle_transitions_through_dual_read_back_to_healthy() {
-        let mut cache = healthy_cache();
+        let cache = healthy_cache();
         assert_eq!(cache.state(), KekState::Healthy);
         assert_eq!(cache.active_kid(), "old");
         assert_eq!(cache.resident_kid_count(), 1);
@@ -419,7 +419,7 @@ mod kek_state_machine_tests {
             encrypt_with_active_kek(&SecretString::from("secret-old"), &pre).unwrap()
         };
 
-        let mut cache = healthy_cache();
+        let cache = healthy_cache();
         cache.enter_dual_read("new".to_string(), K_NEW).unwrap();
         // New writes go under the active (new) KEK.
         let under_new = encrypt_with_active_kek(&SecretString::from("secret-new"), &cache).unwrap();
@@ -438,7 +438,7 @@ mod kek_state_machine_tests {
 
     #[test]
     fn enter_dual_read_refuses_a_second_concurrent_rotation() {
-        let mut cache = healthy_cache();
+        let cache = healthy_cache();
         cache.enter_dual_read("new".to_string(), K_NEW).unwrap();
         let err = cache
             .enter_dual_read("newer".to_string(), [3u8; 32])
@@ -448,21 +448,21 @@ mod kek_state_machine_tests {
 
     #[test]
     fn enter_dual_read_refuses_an_already_resident_kid() {
-        let mut cache = healthy_cache();
+        let cache = healthy_cache();
         let err = cache.enter_dual_read("old".to_string(), K_NEW).unwrap_err();
         assert!(err.to_string().contains("already resident"));
     }
 
     #[test]
     fn drop_old_kek_refuses_when_not_in_dual_read() {
-        let mut cache = healthy_cache();
+        let cache = healthy_cache();
         let err = cache.drop_old_kek("old").unwrap_err();
         assert!(err.to_string().contains("not in dual-read"));
     }
 
     #[test]
     fn drop_old_kek_refuses_to_drop_the_active_kid() {
-        let mut cache = healthy_cache();
+        let cache = healthy_cache();
         cache.enter_dual_read("new".to_string(), K_NEW).unwrap();
         // "new" is now active; refusing to drop it keeps decryption working.
         let err = cache.drop_old_kek("new").unwrap_err();
