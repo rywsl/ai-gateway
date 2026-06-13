@@ -78,6 +78,11 @@ async fn pricing_model_markup_lands_in_chain() {
         "expected model_markup=1.25, got {}",
         perm.markup_chain.model_markup
     );
+    assert!(
+        (perm.markup_chain.product - 1.25).abs() < 1e-4,
+        "expected product to include model_markup, got {}",
+        perm.markup_chain.product
+    );
 }
 
 #[tokio::test]
@@ -100,5 +105,10 @@ async fn no_pricing_defaults_to_one() {
         (perm.markup_chain.model_markup - 1.0).abs() < 1e-4,
         "expected model_markup=1.0 placeholder when pricing is None, got {}",
         perm.markup_chain.model_markup
+    );
+    assert!(
+        (perm.markup_chain.product - 1.0).abs() < 1e-4,
+        "expected product=1.0 when pricing is None, got {}",
+        perm.markup_chain.product
     );
 }

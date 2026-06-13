@@ -87,6 +87,23 @@ fn apikey(
     ))
 }
 
+fn pricing(model: &str, markup: f32) -> Arc<Versioned<Pricing>> {
+    Arc::new(Versioned::new(
+        1,
+        Pricing {
+            model: ModelName::from(model),
+            input_price_micro_per_token: 0,
+            output_price_micro_per_token: 0,
+            max_output: 0,
+            model_markup: markup,
+            connect_timeout_ms: None,
+            read_timeout_ms: None,
+            total_timeout_ms: None,
+            stream_total_timeout_ms: None,
+        },
+    ))
+}
+
 fn ip() -> IpAddr {
     "127.0.0.1".parse().unwrap()
 }
@@ -190,15 +207,15 @@ async fn markup_is_product_of_tiers() {
     let store = EntityStore::new();
     store
         .user
-        .insert(UserId::from("u1"), user("u1", None, &[], 0, &["g1"], 1.5))
+        .insert(UserId::from("u1"), user("u1", None, &[], 0, &["g1"], 1.0))
         .await;
     store
         .user_group
-        .insert(UserGroupId::from("g1"), group("g1", &[], 0, 2.0))
+        .insert(UserGroupId::from("g1"), group("g1", &[], 0, 1.10))
         .await;
     store
         .apikey
-        .insert(ApiKeyId::from("ak1"), apikey("ak1", "u1", &[], 0, 3.0))
+        .insert(ApiKeyId::from("ak1"), apikey("ak1", "u1", &[], 0, 1.20))
         .await;
 
     let ctx = AuthCtx {
@@ -206,9 +223,69 @@ async fn markup_is_product_of_tiers() {
         api_key_id: Some(ApiKeyId::from("ak1")),
         client_ip: ip(),
     };
+    let perm = merge_permissions(&ctx, &store, 0, Some(pricing("gpt-4", 1.10)))
+        .await
+        .unwrap();
+    assert!((perm.markup_chain.user_group_markup - 1.10).abs() < 1e-4);
+    assert!((perm.markup_chain.api_key_markup - 1.20).abs() < 1e-4);
+    assert!((perm.markup_chain.vendor_markup - 1.0).abs() < 1e-4);
+    assert!((perm.markup_chain.model_markup - 1.10).abs() < 1e-4);
+    assert!((perm.markup_chain.product - 1.452).abs() < 1e-4);
+    let product = perm.markup_chain.user_group_markup
+        * perm.markup_chain.api_key_markup
+        * perm.markup_chain.vendor_markup
+        * perm.markup_chain.model_markup;
+    assert!((perm.markup_chain.product - product).abs() < 1e-4);
+}
+
+#[tokio::test]
+async fn direct_user_markup_is_not_double_counted() {
+    let store = EntityStore::new();
+    store
+        .user
+        .insert(UserId::from("u1"), user("u1", None, &[], 0, &[], 1.5))
+        .await;
+
+    let ctx = AuthCtx {
+        user_id: UserId::from("u1"),
+        api_key_id: None,
+        client_ip: ip(),
+    };
     let perm = merge_permissions(&ctx, &store, 0, None).await.unwrap();
-    // user * main(==user) * group * apikey = 1.5 * 1.5 * 2.0 * 3.0 = 13.5
-    assert!((perm.markup_chain.product - 13.5).abs() < 1e-4);
+    assert!((perm.markup_chain.user_group_markup - 1.5).abs() < 1e-4);
+    assert!((perm.markup_chain.product - 1.5).abs() < 1e-4);
+}
+
+#[tokio::test]
+async fn sub_account_markup_includes_child_and_parent_once() {
+    let store = EntityStore::new();
+    store
+        .user
+        .insert(
+            UserId::from("parent"),
+            user("parent", None, &[], 0, &["g1"], 1.5),
+        )
+        .await;
+    store
+        .user
+        .insert(
+            UserId::from("child"),
+            user("child", Some("parent"), &[], 0, &[], 1.2),
+        )
+        .await;
+    store
+        .user_group
+        .insert(UserGroupId::from("g1"), group("g1", &[], 0, 2.0))
+        .await;
+
+    let ctx = AuthCtx {
+        user_id: UserId::from("child"),
+        api_key_id: None,
+        client_ip: ip(),
+    };
+    let perm = merge_permissions(&ctx, &store, 0, None).await.unwrap();
+    assert!((perm.markup_chain.user_group_markup - 3.6).abs() < 1e-4);
+    assert!((perm.markup_chain.product - 3.6).abs() < 1e-4);
 }
 
 // --- Audit 2026-05-30: banned-user / banned-parent admit-time gate ---

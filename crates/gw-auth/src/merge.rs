@@ -116,12 +116,21 @@ pub async fn merge_permissions(
     ]);
 
     // ---------------------------------------------------------------------
-    // markup product
+    // markup snapshot
     // ---------------------------------------------------------------------
-    let markup = user.value.markup
-        * main.value.markup
-        * groups.iter().fold(1.0_f32, |a, g| a * g.value.markup)
-        * api_key.as_ref().map(|a| a.value.markup).unwrap_or(1.0);
+    let account_markup = if user.value.parent_id.is_some() {
+        user.value.markup * main.value.markup
+    } else {
+        user.value.markup
+    };
+    let user_group_markup = account_markup * groups.iter().fold(1.0_f32, |a, g| a * g.value.markup);
+    let api_key_markup = api_key.as_ref().map(|a| a.value.markup).unwrap_or(1.0);
+    let vendor_markup = 1.0;
+    let model_markup = pricing
+        .as_ref()
+        .map(|p| p.value.model_markup)
+        .unwrap_or(1.0);
+    let markup = user_group_markup * api_key_markup * vendor_markup * model_markup;
 
     // ---------------------------------------------------------------------
     // forced model_group: highest-priority group's binding.
@@ -162,17 +171,10 @@ pub async fn merge_permissions(
         tpm_limit: tpm,
         max_concurrent_streams: main.value.max_concurrent_streams,
         markup_chain: MarkupChainSnapshot {
-            // Tier values for user-group / api-key / vendor remain 1.0.
-            // G5 (T2-B) populates `model_markup` from the loaded Pricing
-            // entry so the Go billing service receives the per-model
-            // multiplier; the remaining per-tier fields land via Bm1.
-            user_group_markup: 1.0,
-            api_key_markup: 1.0,
-            vendor_markup: 1.0,
-            model_markup: pricing
-                .as_ref()
-                .map(|p| p.value.model_markup)
-                .unwrap_or(1.0),
+            user_group_markup,
+            api_key_markup,
+            vendor_markup,
+            model_markup,
             product: markup,
         },
         model_whitelist_regex: api_key
