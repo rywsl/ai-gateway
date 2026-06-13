@@ -46,14 +46,10 @@ pub fn decode(enc: Encoding, data: &[u8], max_bytes: usize) -> Result<Bytes, Com
             }
             Ok(Bytes::copy_from_slice(data))
         }
-        Encoding::Gzip => {
-            decode_bounded(flate2::read::GzDecoder::new(data), data.len(), max_bytes)
+        Encoding::Gzip => decode_bounded(flate2::read::GzDecoder::new(data), data.len(), max_bytes),
+        Encoding::Br => {
+            decode_bounded(brotli::Decompressor::new(data, 4096), data.len(), max_bytes)
         }
-        Encoding::Br => decode_bounded(
-            brotli::Decompressor::new(data, 4096),
-            data.len(),
-            max_bytes,
-        ),
     }
 }
 

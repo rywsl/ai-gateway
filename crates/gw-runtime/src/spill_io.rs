@@ -292,13 +292,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let r = root(&tmp);
         let paths: Vec<PathBuf> = {
-            let f = r.create("ephemeral", NonZeroUsize::new(2).unwrap()).await.unwrap();
+            let f = r
+                .create("ephemeral", NonZeroUsize::new(2).unwrap())
+                .await
+                .unwrap();
             f.append(b"line\n").await.unwrap();
             f.flush().await.unwrap();
             f.shard_paths().to_vec()
         }; // drop here
         for p in &paths {
-            assert!(!p.exists(), "DeleteOnDrop must unlink shards on drop: {p:?}");
+            assert!(
+                !p.exists(),
+                "DeleteOnDrop must unlink shards on drop: {p:?}"
+            );
         }
     }
 
@@ -320,11 +326,13 @@ mod tests {
             f.shard_paths().to_vec()
         }; // drop here
         for p in &paths {
-            assert!(p.exists(), "KeepOnDrop must NOT unlink shards on drop: {p:?}");
+            assert!(
+                p.exists(),
+                "KeepOnDrop must NOT unlink shards on drop: {p:?}"
+            );
             let bytes = std::fs::read(p).unwrap();
             assert!(
-                bytes.windows(b"durable".len()).any(|w| w == b"durable")
-                    || bytes.is_empty(),
+                bytes.windows(b"durable".len()).any(|w| w == b"durable") || bytes.is_empty(),
                 "shard {p:?} should contain at least the durable line or be the unwritten shard",
             );
         }
