@@ -2,12 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Phase 1 of the Cnexus ↔ Aether tunnel compatibility spec: add a `TunnelProtocol` discriminator to `ProxyNode`, reorganize `gw-tunnel-client` so existing Cnexus transport code lives under a `cnexus/` submodule, introduce the `Transport` trait + `StreamTarget` enum abstraction in `core.rs` so Phase 2 can plug Aether in without breaking existing code, ship Go-side admin-API protocol field + Aether bootstrap registration endpoint, and stand up the `tests/tunnel-e2e/` Docker harness with the 3 Cnexus-protocol scenarios that were previously skipped — without changing any wire behaviour.
+**Goal:** Phase 1 of the Cnexus ↔ Aether tunnel compatibility spec: remove the `--features tunnel` build flag (tunnel becomes default-compile, since Phase 2 makes it core infrastructure); add a `TunnelProtocol` discriminator to `ProxyNode`; reorganize `gw-tunnel-client` so existing Cnexus transport code lives under a `cnexus/` submodule; introduce the `Transport` trait + `StreamTarget` enum abstraction in `core.rs` so Phase 2 can plug Aether in without breaking existing code; ship Go-side admin-API protocol field + Aether bootstrap registration endpoint; and stand up the `tests/tunnel-e2e/` Docker harness with the 3 Cnexus-protocol scenarios that were previously skipped — without changing any wire behaviour.
 
-**Architecture:** Three landable PRs across two repos. All Rust commits accumulate on a single feature branch in `ailinkmax-gateway` (PR 1a + PR 1c); Phase 2 will extend the same branch. PR 1b lives in `AILinkMax-Go` as its own branch (lands first per spec §3.6.8 so the Rust side's contract is met).
-- **PR 1a — Rust foundation** (Tasks 1-8, this repo): introduces the discriminator enum, the migration, the source-layout move into `cnexus/`, and the protocol-neutral abstraction in `gw-tunnel-client/src/{core,target}.rs`. Default `tunnel_protocol = Cnexus`, deserialization is forward-compatible, runtime behaviour is unchanged.
-- **PR 1b — Go management plane** (Tasks G1.1-G2.3 + G-gate, `AILinkMax-Go` repo): adds `Protocol string` field to the proxynode entity and admin APIs (G1, spec §3.6.2) and `POST /api/admin/proxy-nodes/register` plus `aether_register.go` upsert logic (G2, spec §3.6.1). Required so Phase 2's `aether-proxy` containers can bootstrap.
-- **PR 1c — tunnel-e2e harness** (Tasks 9-19, this repo): introduces `tests/tunnel-e2e/` with its own `docker-compose.yml` (no Aether services yet — that lands in Phase 2), exercises the 3 currently-skipped tunnel scenarios via a `gw-tunnel-server` container, adds `Makefile` targets, and registers the Aether submodule with `update = none` for Phase 2 to consume.
+**Branch / MR model:**
+- **`ailinkmax-gateway` repo** — Phase 1 + Phase 2 + Phase 3 all accumulate on a **single shared feature branch** (suggested name `feature/tunnel-compat`); only one final MR to `main` after all three phases land. The "PR 1a / PR 1c" labels below are **logical commit groups within that single branch**, not independent MRs to `main`. PR 1a's clean-then-feature ordering is preserved as commit sequence for review-readability of the final MR's diff history.
+- **`AILinkMax-Go` repo** — Phase 1 Go work (PR 1b), Phase 2 Go work (G3 heartbeat consumer), and Phase 3 Go work (G4 frontend) are **real PRs/MRs in that repo** with cross-repo coordination per spec §3.6.8. PR 1b lands first per the spec.
+
+**Architecture:** Three commit groups on the `ailinkmax-gateway` shared branch plus one cross-repo Go PR.
+- **PR 1a — Rust foundation** (Tasks 0a-0f, 1-8, this repo, on shared branch): Stage 0 (Tasks 0a-0f) removes `--features tunnel` and consolidates the build into a single default-compile artifact (supersedes `docs/design/2026-06-10-tunnel-artifact-release-decision.md`). Stage 1 (Tasks 1-8) introduces the discriminator enum, the migration, the source-layout move into `cnexus/`, and the protocol-neutral abstraction in `gw-tunnel-client/src/{core,target}.rs`. Default `tunnel_protocol = Cnexus`, deserialization is forward-compatible, runtime behaviour of an `enabled = false` deploy is unchanged.
+- **PR 1b — Go management plane** (Tasks G1.1-G2.3 + G-gate, `AILinkMax-Go` repo, **real MR**): adds `Protocol string` field to the proxynode entity and admin APIs (G1, spec §3.6.2) and `POST /api/admin/proxy-nodes/register` plus `aether_register.go` upsert logic (G2, spec §3.6.1). Required so Phase 2's `aether-proxy` containers can bootstrap. Lands as its own MR in the Go repo **before** the Rust shared branch's final MR.
+- **PR 1c — tunnel-e2e harness** (Tasks 9-19, this repo, on shared branch): introduces `tests/tunnel-e2e/` with its own `docker-compose.yml` (no Aether services yet — that lands in Phase 2), exercises the 3 currently-skipped tunnel scenarios via a `gw-tunnel-server` container, adds `Makefile` targets, and registers the Aether submodule with `update = none` for Phase 2 to consume.
 
 **Tech Stack:** Rust 1.88 (pinned), tokio, serde, sqlx, futures, Go 1.21+ (Gin, GORM per existing `AILinkMax-Go` conventions), pytest 8.x, Postgres 16, Redis 7, Docker Compose v2.
 
@@ -21,7 +25,13 @@
 
 ## File Structure
 
-### New files (PR 1a, this repo)
+### New files (PR 1a, Stage 0 — `--features tunnel` removal, this repo)
+
+| Path | Responsibility |
+|---|---|
+| `docs/design/2026-06-15-tunnel-default-compile-decision.md` | New ADR superseding `docs/design/2026-06-10-tunnel-artifact-release-decision.md`. Records: why the split-artifact policy made sense on 2026-06-10 (tunnel was not production-validated); why this Phase 1 reverses it (tunnel-compat work productionizes it via the e2e harness and the cross-protocol abstraction); the new policy (single default-compile image; runtime gate `cfg.tunnel.enabled` is the only off-switch). |
+
+### New files (PR 1a, Stage 1 — functional, this repo)
 
 | Path | Responsibility |
 |---|---|
@@ -63,18 +73,43 @@
 | `crates/gw-tunnel-client/src/target_filter.rs` | Generic target allow-list. |
 | Their corresponding tests | Same reason. |
 
-### Files modified (PR 1a, this repo)
+### Files modified (PR 1a, Stage 0 — `--features tunnel` removal, this repo)
+
+| Path | Change |
+|---|---|
+| `crates/gw-proxy/Cargo.toml` | Remove `[features]` table entirely. Remove `optional = true` from `gw-tunnel-client`, `tokio-rustls`, `webpki-roots` dep lines (they become unconditional deps). |
+| `crates/gw-gateway/Cargo.toml` | Remove `[features]` table entirely. Remove `optional = true` from `gw-tunnel-client` dep line. |
+| `crates/gw-proxy/src/lib.rs` | Remove `#[cfg(feature = "tunnel")]` attrs on lines 27, 29 (modules become unconditional). |
+| `crates/gw-proxy/src/gateway.rs` | Remove `#[cfg(feature = "tunnel")]` attrs on lines 372, 472, 530, 952. Comment at line 370 referencing `feature = "tunnel"` updated to describe runtime gate only. |
+| `crates/gw-proxy/src/filters/upstream.rs` | Remove `#[cfg(feature = "tunnel")]` attrs on lines 175, 481, 503, 533, 1173. **Delete** `#[cfg(not(feature = "tunnel"))]` blocks at lines 75, 614, 1187 (fallback Direct path that is now always-available via `cfg.tunnel.enabled = false`). **Delete** the `#[cfg(all(test, not(feature = "tunnel")))]` test module block at line 2513 (its tests are subsumed by the always-on tunnel build with runtime-off config). |
+| `crates/gw-gateway/src/lib.rs` | Remove `#[cfg(feature = "tunnel")]` attrs on lines 45, 104, 106, 362, 708, 1211, 1214, 1217, 1451, 1509, 1589, 1591. Replace the `#[cfg_attr(not(feature = "tunnel"), allow(unused_mut))]` at line 1506 with a plain `let mut` (the mut is always used now). |
+| `crates/gw-gateway/src/health.rs` | Remove `#[cfg(feature = "tunnel")]` attrs on lines 59, 318, 369. |
+| `crates/gw-gateway/tests/e2e_tunnel.rs` | Remove file-level `#![cfg(feature = "tunnel")]` at line 6. Remove the matching `--features tunnel` instruction from the file header comment at line 4. |
+| `crates/gw-gateway/tests/health_endpoint.rs` | Remove `#[cfg(feature = "tunnel")]` at line 39. |
+| `.gitlab-ci.yml` | Delete the entire `rust-build-tunnel` job (lines ~40-50). Delete the entire `push-tunnel-image` job (lines ~70-90). The default `push-image` job already publishes the single image and stays unchanged. |
+| `CLAUDE.md` | Tunnel bullet (line 35) updated: drop `--features tunnel` reference, keep runtime gate semantics (`cfg.tunnel.enabled`). |
+| `AGENTS.md` | Lockstep-mirror the `CLAUDE.md` edit (per `CLAUDE.md` §Sync rule). |
+| `docs/architecture.md` | Line 46 `gw-tunnel-client` row: drop `(under feature = "tunnel")` clause. Line 76 diagram comment `(feature="tunnel")` → `(default)`. |
+| `docs/workflow.md` | Line 163: rewrite the "If `feature = "tunnel"` is built AND ..." sentence to drop the feature-flag conjunction; keep the runtime check `LlmGateway::tunnel = Some(_)`. |
+| `docs/ROADMAP.md` | Line 85: strike the F3 "split artifact" decision; cross-reference the new ADR `docs/design/2026-06-15-tunnel-default-compile-decision.md`. |
+| `docs/go-contracts/parts/08-control-plane.md` | The `features.tunnel` field in the published JSON shape: keep present, fix value to `true` (Option A per 2026-06-15 decision). Add a one-line note that the field is retained for forward-compat with existing Go consumers and now always emits `true`. |
+
+### Files modified (PR 1a, Stage 1 — functional, this repo)
 
 | Path | Change |
 |---|---|
 | `crates/gw-core/src/lib.rs` | `pub mod tunnel_protocol;` |
 | `crates/gw-core/src/entity.rs` | Add `pub tunnel_protocol: TunnelProtocol` field to `ProxyNode` with `#[serde(default)]`. |
-| `crates/gw-tunnel-client/src/lib.rs` | Replace `pub mod {frame, pool, transport};` with `pub mod cnexus; pub mod core; pub mod target;` plus back-compat re-exports `pub use cnexus::{frame, pool, transport};` and forward exports `pub use core::{Transport, TransportError, StreamHandle}; pub use target::StreamTarget;`. Keep `resolver`/`safe_dns`/`target_filter` mod lines unchanged. |
+| `crates/gw-tunnel-client/src/lib.rs` | Replace `pub mod {frame, pool, transport};` with `pub mod cnexus; pub mod core; pub mod target;` plus forward exports `pub use core::{Transport, TransportError, StreamHandle}; pub use target::StreamTarget;`. Keep `resolver`/`safe_dns`/`target_filter` mod lines unchanged. **No back-compat re-exports** — call sites are migrated to `cnexus::` paths in the same task (Task 6). |
 | `crates/gw-tunnel-client/src/resolver.rs` | Add `pub tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol` to `ProxyNodeView`. |
 | `crates/gw-tunnel-client/src/cnexus/{frame,pool,transport}.rs` | Update internal `crate::frame::` / `crate::pool::` / `crate::transport::` paths to `crate::cnexus::frame::` etc. |
 | `crates/gw-tunnel-client/src/cnexus/transport.rs` | Add `impl Transport for WsTransport` adapter (convert `TunnelError` ↔ `TransportError`, wrap `TunnelStream` into `StreamHandle`, only accept `StreamTarget::Tcp`). |
 | `crates/gw-tunnel-client/src/cnexus/pool.rs` | Add `impl Transport for ReconnectingTransport` delegating to inner cnexus transport. |
-| `crates/gw-gateway/src/lib.rs` | `tunnel_refresher` reads `payload.tunnel_protocol` from `ProxyNode` and propagates into `ProxyNodeView`. |
+| `crates/gw-proxy/src/tunnel_bridge.rs` | Migrate `use gw_tunnel_client::transport::{TunnelStreamReader, TunnelStreamWriter, WsTransport};` to `use gw_tunnel_client::cnexus::transport::{...};`. |
+| `crates/gw-gateway/src/lib.rs` | Two changes: (a) migrate `use gw_tunnel_client::transport::TransportConfig;` (line 1223) and `use gw_tunnel_client::pool::PoolConfig;` (line 1219) to the explicit `cnexus::` paths; (b) `tunnel_refresher` reads `payload.tunnel_protocol` from `ProxyNode` and propagates into `ProxyNodeView`. |
+| `crates/gw-gateway/tests/e2e_tunnel.rs` | Migrate `use gw_tunnel_client::{transport, pool}::*;` imports (lines 10, 14) to the explicit `cnexus::` paths. |
+| `crates/gw-tunnel-server/src/lib.rs` | Migrate `use gw_tunnel_client::frame::{...};` at line 5 to `gw_tunnel_client::cnexus::frame::{...};`. |
+| `crates/gw-tunnel-server/tests/protocol.rs` | Migrate `use gw_tunnel_client::transport::{...};` at line 3 to `gw_tunnel_client::cnexus::transport::{...};`. |
 | `docs/spec/09-tunnel.md` | New subsection "Per-node protocol discriminator" + brief mention of `core.rs` `Transport` trait. |
 | `docs/architecture.md` | Append entries under `gw-tunnel-client` for the `cnexus/` submodule and the protocol-neutral `core.rs` trait. |
 
@@ -114,7 +149,420 @@
 
 ---
 
-## PR 1a · `TunnelProtocol` discriminator, migration, `cnexus/` reorg, `Transport` trait
+## PR 1a · Stage 0 — Remove `--features tunnel`, then `TunnelProtocol` discriminator, migration, `cnexus/` reorg, `Transport` trait
+
+> **Stage 0 (Tasks 0a-0f)** removes the `--features tunnel` flag and consolidates the build to a single default-compile artifact. Zero functional change: every `cfg(feature = "tunnel")` block becomes unconditional, every `cfg(not(feature = "tunnel"))` fallback block is deleted (covered now by runtime gate `cfg.tunnel.enabled = false`). Supersedes `docs/design/2026-06-10-tunnel-artifact-release-decision.md`. **Must complete in order Tasks 0a → 0b → 0c → 0d → 0e → 0f** — the Cargo `[features]` removal in 0c must come **after** the cfg-gate removals (0a, 0b), otherwise the `cfg(not(feature = "tunnel"))` blocks would flip on during the intermediate state and conflict with the always-on tunnel-arm code.
+>
+> **Stage 1 (Tasks 1-8)** then introduces the functional Phase 1 changes.
+
+### Task 0a: Remove `cfg(feature = "tunnel")` gates from `gw-proxy`
+
+**Files:**
+- Modify: `crates/gw-proxy/src/lib.rs` (2 gates)
+- Modify: `crates/gw-proxy/src/gateway.rs` (4 gates + 1 doc comment)
+- Modify: `crates/gw-proxy/src/filters/upstream.rs` (5 `cfg(feature="tunnel")` + 3 `cfg(not(feature="tunnel"))` + 1 `cfg(all(test, not(feature="tunnel")))`)
+
+- [ ] **Step 1: Inspect each cfg site to confirm the deletion semantics**
+
+Run: `grep -n 'cfg(feature = "tunnel")\|cfg(not(feature = "tunnel"))\|cfg(all(test, not(feature = "tunnel")))' crates/gw-proxy/src/{lib.rs,gateway.rs,filters/upstream.rs}`
+Expected output:
+
+```
+crates/gw-proxy/src/lib.rs:27:#[cfg(feature = "tunnel")]
+crates/gw-proxy/src/lib.rs:29:#[cfg(feature = "tunnel")]
+crates/gw-proxy/src/gateway.rs:372:    #[cfg(feature = "tunnel")]
+crates/gw-proxy/src/gateway.rs:472:        #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+crates/gw-proxy/src/gateway.rs:530:            #[cfg(feature = "tunnel")]
+crates/gw-proxy/src/gateway.rs:952:            #[cfg(feature = "tunnel")]
+crates/gw-proxy/src/filters/upstream.rs:75:#[cfg(not(feature = "tunnel"))]
+crates/gw-proxy/src/filters/upstream.rs:175:    #[cfg(feature = "tunnel")] tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
+crates/gw-proxy/src/filters/upstream.rs:481:    #[cfg(feature = "tunnel")]
+crates/gw-proxy/src/filters/upstream.rs:503:        #[cfg(feature = "tunnel")]
+crates/gw-proxy/src/filters/upstream.rs:533:        #[cfg(feature = "tunnel")]
+crates/gw-proxy/src/filters/upstream.rs:614:        #[cfg(not(feature = "tunnel"))]
+crates/gw-proxy/src/filters/upstream.rs:1173:#[cfg(feature = "tunnel")]
+crates/gw-proxy/src/filters/upstream.rs:1187:#[cfg(not(feature = "tunnel"))]
+crates/gw-proxy/src/filters/upstream.rs:2513:#[cfg(all(test, not(feature = "tunnel")))]
+```
+
+For each `cfg(not(feature = "tunnel"))` block, Read the surrounding ~30 lines to confirm it is the **fallback Direct path** (typically a `Direct::HttpPeer::new(...)` construction that bypasses `TunnelStack`). If any block contains logic that is **not** subsumed by the runtime gate `cfg.tunnel.enabled = false`, stop and report — that case needs design discussion before deletion.
+
+- [ ] **Step 2: Delete the cfg gates and the fallback blocks**
+
+`gw-proxy/src/lib.rs` lines 27, 29: remove `#[cfg(feature = "tunnel")]` attrs; the `pub mod tunnel_stack;` and `pub mod tunnel_bridge;` lines become unconditional.
+
+`gw-proxy/src/gateway.rs`:
+- Line 370 comment: change `/// feature = "tunnel" by gw-gateway::bootstrap only when` → `/// (runtime) by gw-gateway::bootstrap only when`.
+- Lines 372, 472, 530, 952: remove the `#[cfg(feature = "tunnel")]` attrs. Field, parameter, and field-init become unconditional.
+
+`gw-proxy/src/filters/upstream.rs`:
+- Lines 175, 481, 503, 533, 1173: remove the `#[cfg(feature = "tunnel")]` attrs (keep the code).
+- Lines 75, 614, 1187: **delete the entire `#[cfg(not(feature = "tunnel"))]` block** including the attr and the body up to the next non-cfg sibling. Refer to the symmetric tunnel-arm block as the authoritative behavior; the now-deleted block was its `else` arm.
+- Line 2513: delete the entire `#[cfg(all(test, not(feature = "tunnel")))]` test module block (closing `}` included). The tunnel-build test module already covers these cases with `cfg.tunnel.enabled = false` runtime config.
+
+- [ ] **Step 3: Compile `gw-proxy` standalone**
+
+Run: `cargo-remote-ctl build -p gw-proxy`
+Expected: clean. (`gw-proxy/Cargo.toml` still has the feature def at this point; the binary is unaffected because the feature isn't activated. The cfg-attr deletions just make the code unconditional. We delete the feature def in Task 0c after the gates are gone.)
+
+- [ ] **Step 4: Run `gw-proxy` tests (no `--features tunnel`)**
+
+Run: `cargo-remote-ctl test -p gw-proxy`
+Expected: PASS. This is the gate that proves the non-tunnel fallback deletions did not regress any test. The pre-existing tunnel-arm code path is now exercised unconditionally.
+
+> If a test fails here, it is one of: (a) a test that exercised the non-tunnel fallback's distinct semantics — investigate and adapt; (b) a real bug surfaced by the always-on tunnel-arm — file and split off. Do NOT just delete the failing test.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/gw-proxy/src/lib.rs crates/gw-proxy/src/gateway.rs crates/gw-proxy/src/filters/upstream.rs
+git commit -m "refactor(gw-proxy): remove cfg(feature=\"tunnel\") gates — tunnel becomes default-compile"
+```
+
+---
+
+### Task 0b: Remove `cfg(feature = "tunnel")` gates from `gw-gateway`
+
+**Files:**
+- Modify: `crates/gw-gateway/src/lib.rs` (12 gates incl. 1 `cfg_attr`)
+- Modify: `crates/gw-gateway/src/health.rs` (3 gates)
+- Modify: `crates/gw-gateway/tests/e2e_tunnel.rs` (file-level attr + header comment)
+- Modify: `crates/gw-gateway/tests/health_endpoint.rs` (1 gate)
+
+- [ ] **Step 1: Inspect each cfg site**
+
+Run: `grep -n 'cfg(feature = "tunnel")\|cfg_attr(not(feature = "tunnel")\|cfg(feature = "tunnel"\|cfg!(feature' crates/gw-gateway/src/{lib.rs,health.rs} crates/gw-gateway/tests/{e2e_tunnel.rs,health_endpoint.rs}`
+Expected output: the 17 sites listed in "Files modified (PR 1a, Stage 0)".
+
+- [ ] **Step 2: Delete the cfg gates**
+
+`gw-gateway/src/lib.rs`:
+- Lines 45, 104, 106, 362, 708, 1211, 1214, 1217, 1451, 1509, 1589, 1591: remove `#[cfg(feature = "tunnel")]` attrs. Code (use lines, fields, blocks) becomes unconditional.
+- Line 1506: replace `#[cfg_attr(not(feature = "tunnel"), allow(unused_mut))]` with no attribute (the `let mut` is always used now; rustc won't warn).
+
+`gw-gateway/src/health.rs`:
+- Lines 59, 318: remove `#[cfg(feature = "tunnel")]` attrs.
+- Line 369: this `#[cfg(feature = "tunnel")]` likely gates a free function (probably `build_tunnel_healthz_body`); also remove. Pre-existing note in `.omo/notepads/v2-admin-tunnel-cleanup/learnings.md` warns that `escape_json_string` is feature-gated dead code without `--features tunnel` — verify and remove that gate too if it appears here.
+
+`gw-gateway/tests/e2e_tunnel.rs`:
+- Line 4 header comment: replace `cargo test -p gw-gateway --features tunnel --test e2e_tunnel -- --ignored --nocapture` with `cargo test -p gw-gateway --test e2e_tunnel -- --ignored --nocapture`.
+- Line 6: delete `#![cfg(feature = "tunnel")]`.
+
+`gw-gateway/tests/health_endpoint.rs`:
+- Line 39: remove `#[cfg(feature = "tunnel")]` attr.
+
+- [ ] **Step 3: Compile `gw-gateway` standalone**
+
+Run: `cargo-remote-ctl build -p gw-gateway`
+Expected: clean.
+
+- [ ] **Step 4: Run `gw-gateway` tests (no `--features tunnel`)**
+
+Run: `cargo-remote-ctl test -p gw-gateway`
+Expected: PASS. `e2e_tunnel.rs` is `#[ignore]`-gated per its existing convention and is not run; the gate-removal only affects whether the file is compiled-in. Confirm with: `cargo-remote-ctl test -p gw-gateway --test e2e_tunnel -- --ignored --nocapture` returns either PASS or `connection refused` (Docker not up), **not** "test not found".
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/gw-gateway/src/lib.rs crates/gw-gateway/src/health.rs \
+        crates/gw-gateway/tests/e2e_tunnel.rs crates/gw-gateway/tests/health_endpoint.rs
+git commit -m "refactor(gw-gateway): remove cfg(feature=\"tunnel\") gates — tunnel becomes default-compile"
+```
+
+---
+
+### Task 0c: Remove `[features]` tables from `Cargo.toml`s
+
+**Files:**
+- Modify: `crates/gw-proxy/Cargo.toml`
+- Modify: `crates/gw-gateway/Cargo.toml`
+
+- [ ] **Step 1: Edit `crates/gw-proxy/Cargo.toml`**
+
+Delete the entire `[features]` block:
+
+```toml
+[features]
+default = []
+tunnel = ["dep:gw-tunnel-client", "dep:tokio-rustls", "dep:webpki-roots"]
+```
+
+Remove `optional = true` from three dep lines:
+
+```toml
+gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
+tokio-rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+```
+
+becomes:
+
+```toml
+gw-tunnel-client = { path = "../gw-tunnel-client" }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
+```
+
+- [ ] **Step 2: Edit `crates/gw-gateway/Cargo.toml`**
+
+Delete the entire `[features]` block:
+
+```toml
+[features]
+default = []
+tunnel = ["dep:gw-tunnel-client", "gw-proxy/tunnel"]
+```
+
+Remove `optional = true` from the `gw-tunnel-client` dep line:
+
+```toml
+gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
+```
+
+becomes:
+
+```toml
+gw-tunnel-client = { path = "../gw-tunnel-client" }
+```
+
+- [ ] **Step 3: Workspace-level compile**
+
+Run: `cargo-remote-ctl check --workspace --all-targets`
+Expected: clean.
+
+- [ ] **Step 4: Workspace-level tests**
+
+Run: `cargo-remote-ctl test --workspace`
+Expected: PASS. (Note: no `--features tunnel` flag anymore; the feature simply does not exist.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/gw-proxy/Cargo.toml crates/gw-gateway/Cargo.toml
+git commit -m "build: drop tunnel feature flag from gw-proxy and gw-gateway"
+```
+
+---
+
+### Task 0d: Update CI to drop the split tunnel image
+
+**Files:**
+- Modify: `.gitlab-ci.yml`
+
+- [ ] **Step 1: Open `.gitlab-ci.yml` and delete two job blocks**
+
+Delete the entire `rust-build-tunnel` job (search for `rust-build-tunnel:` and remove from that line through the next blank line / next top-level job key — currently lines ~40-50, but use grep to confirm against the live file).
+
+Delete the entire `push-tunnel-image` job (search for `push-tunnel-image:` and remove from that line through the closing job block — currently lines ~70-90).
+
+The remaining jobs (`lint-test`, `rust-build`, `push-image`) are unchanged and already publish the single image to `$GATEWAY_IMAGE:latest`.
+
+- [ ] **Step 2: Validate the YAML**
+
+Run: `python3 -c 'import yaml,sys; yaml.safe_load(open(".gitlab-ci.yml"))'`
+Expected: no output (validation pass).
+
+- [ ] **Step 3: grep for any stale `--features tunnel` references**
+
+Run: `grep -n 'features tunnel\|features.*tunnel' .gitlab-ci.yml`
+Expected: empty.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add .gitlab-ci.yml
+git commit -m "ci: drop --features tunnel build and push-tunnel-image jobs"
+```
+
+---
+
+### Task 0e: Update agent docs, architecture, workflow, ROADMAP, control-plane contract
+
+**Files:**
+- Modify: `CLAUDE.md`
+- Modify: `AGENTS.md`
+- Modify: `docs/architecture.md`
+- Modify: `docs/workflow.md`
+- Modify: `docs/ROADMAP.md`
+- Modify: `docs/go-contracts/parts/08-control-plane.md`
+
+- [ ] **Step 1: Patch `CLAUDE.md` and `AGENTS.md` in lockstep**
+
+In the "Tunnel" bullet (line ~35 in both files), change:
+
+> **Tunnel**: optional WebSocket transport to remote proxy nodes (`--features tunnel`). When `cfg.tunnel.enabled = true`, `pick_peer` consults `TunnelStack::resolve` per-request; otherwise the byte-identical Direct path runs.
+
+to:
+
+> **Tunnel**: WebSocket transport to remote proxy nodes (`cnexus` and, after Phase 2 of the 2026-06-15 tunnel-compat work, `aether` protocols). Tunnel code is default-compile as of 2026-06-15 (`docs/design/2026-06-15-tunnel-default-compile-decision.md` supersedes the prior split-artifact policy). When `cfg.tunnel.enabled = true`, `pick_peer` consults `TunnelStack::resolve` per-request; otherwise the byte-identical Direct path runs at runtime.
+
+Keep `VendorKey.tunnel_preference.require_tunnel`, `GW_TUNNEL_NO_NODE`, boot-time-only restart caveat, and the references to `docs/spec/09-tunnel.md` and `[tunnel]` in `config/default.toml` — these are unchanged.
+
+> **Mirror this edit exactly** in `AGENTS.md`. The `CLAUDE.md` § Sync rule and `AGENTS.md` ⇄ `CLAUDE.md` lockstep rule make any divergence a CI invariant failure on the next `bash scripts/check-invariants.sh` run.
+
+- [ ] **Step 2: Patch `docs/architecture.md`**
+
+Line 46 (the `gw-tunnel-client` row): change
+
+> Consumed by `gw-proxy::tunnel_stack::TunnelStack` and `gw-proxy::tunnel_bridge` (under `feature = "tunnel"`).
+
+to:
+
+> Consumed by `gw-proxy::tunnel_stack::TunnelStack` and `gw-proxy::tunnel_bridge` (default-compile since 2026-06-15).
+
+Line 76 (the dependency-DAG diagram): change `gw-tunnel-client ◄── gw-gateway (feature="tunnel")` to `gw-tunnel-client ◄── gw-gateway`.
+
+- [ ] **Step 3: Patch `docs/workflow.md`**
+
+Line 163: change
+
+> If `feature = "tunnel"` is built AND `LlmGateway::tunnel = Some(_)`, `TunnelStack::resolve(...)`...
+
+to:
+
+> If `LlmGateway::tunnel = Some(_)` (set when `cfg.tunnel.enabled = true` at boot), `TunnelStack::resolve(...)`...
+
+The rest of the paragraph is unchanged.
+
+- [ ] **Step 4: Patch `docs/ROADMAP.md`**
+
+Line 85 entry "F3 — Tunnel artifact": strike the line and append:
+
+> Superseded 2026-06-15 by `docs/design/2026-06-15-tunnel-default-compile-decision.md`. Tunnel becomes default-compile; the `latest-tunnel` image is retired.
+
+- [ ] **Step 5: Patch `docs/go-contracts/parts/08-control-plane.md`**
+
+Find the JSON shape at line ~93 containing `"features": {"tunnel": false, ...}`.
+
+Change the literal `false` to `true` and add an inline comment paragraph immediately after the JSON block:
+
+> Since 2026-06-15, `features.tunnel` is always emitted as `true`. The field is retained in the contract for forward-compat with Go consumers that may inspect it; new consumers should treat it as a constant.
+
+- [ ] **Step 6: Run invariant check**
+
+Run: `bash scripts/check-invariants.sh`
+Expected: clean. The CLAUDE.md ⇄ AGENTS.md lockstep is invariant-enforced; a divergence here would trip it.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add CLAUDE.md AGENTS.md docs/architecture.md docs/workflow.md \
+        docs/ROADMAP.md docs/go-contracts/parts/08-control-plane.md
+git commit -m "docs: drop --features tunnel from agent/arch/workflow/roadmap/control-plane"
+```
+
+---
+
+### Task 0f: Write the supersession ADR
+
+**Files:**
+- Create: `docs/design/2026-06-15-tunnel-default-compile-decision.md`
+
+- [ ] **Step 1: Create the ADR**
+
+Create the file with this body:
+
+```markdown
+# Tunnel default-compile decision (2026-06-15)
+
+## Status
+
+Accepted. Supersedes [`docs/design/2026-06-10-tunnel-artifact-release-decision.md`](./2026-06-10-tunnel-artifact-release-decision.md) (4 days prior).
+
+## Context
+
+The 2026-06-10 decision locked the policy: tunnel code stays out of `latest`
+behind the `--features tunnel` flag, with a separate `latest-tunnel` image
+built via a CI second-job. The stated reason was that tunnel was
+"not yet production-validated."
+
+Phase 1 of the Cnexus ↔ Aether tunnel compatibility work (this branch)
+changes the underlying premise:
+
+1. Tunnel is being **productionized** via the new `tests/tunnel-e2e/`
+   Docker harness with three cnexus-protocol scenarios.
+2. Tunnel becomes **core integration infrastructure** with the addition
+   of the Aether wire protocol in Phase 2 — Aether-compatible proxy
+   nodes are existing production deployments.
+3. The `cfg.tunnel.enabled = false` **runtime** gate remains, so the
+   compile-time gate's emergency-off value is fully duplicated by config.
+
+Keeping `--features tunnel` after the Aether work lands would mean:
+- Every tunnel code change requires a `cfg(feature="tunnel")` /
+  `cfg(not(feature="tunnel"))` matching pair, increasing change cost.
+- CI continues to build two artifacts for what is a single runtime config
+  switch.
+- Reviewers must mentally evaluate every diff against both feature
+  states.
+
+## Decision
+
+Remove the `--features tunnel` Cargo feature. Tunnel code compiles
+unconditionally into the single `latest` image. The runtime gate
+`[tunnel].enabled = false` (default) remains the operator's kill switch;
+flipping it requires restart per spec §1.2.
+
+The `latest-tunnel` image is retired. CI publishes one image.
+
+## Consequences
+
+- **Binary size**: grows by the size of `gw-tunnel-client` + the now-
+  unconditional `tokio-rustls` + `webpki-roots` deps. Estimated <1 MB
+  per release — acceptable.
+- **Compile time**: tunnel code is always compiled; a one-time
+  ~5-10 s increase for `cargo build -p gw-gateway` cold builds.
+- **`features.tunnel` in the control-plane contract** (per
+  `docs/go-contracts/parts/08-control-plane.md`): retained in the JSON
+  shape, value fixed at `true` for forward-compat with existing Go
+  consumers.
+- **Runtime-off behavior is unchanged**: `cfg.tunnel.enabled = false`
+  produces a byte-identical Direct path; this was the entire point of
+  the runtime gate and remains the supported kill switch.
+
+## Reversal
+
+To restore the split-artifact policy:
+
+1. Re-introduce `[features] tunnel = [...]` in `gw-proxy` and `gw-gateway`
+   Cargo.toml with `optional = true` on the gated deps.
+2. Re-introduce `cfg(feature = "tunnel")` gates on the changed sites
+   (git history at the commit of this ADR is the canonical reference).
+3. Re-introduce the CI `rust-build-tunnel` + `push-tunnel-image` jobs.
+4. Restore `features.tunnel = false` in the control-plane contract.
+
+The cost of reversal is roughly equal to the cost of this forward step,
+so reversal is feasible. The reason to do it would be: tunnel is found
+to cause a hard regression that cannot be controlled via the runtime
+gate. Document the failure mode here if that happens.
+
+## References
+
+- Spec: `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md`
+- Plan: `docs/superpowers/plans/2026-06-15-tunnel-compat-phase-1.md` Stage 0 (Tasks 0a-0f)
+- Superseded: `docs/design/2026-06-10-tunnel-artifact-release-decision.md`
+```
+
+- [ ] **Step 2: Final Stage-0 gate — full workspace test + invariants**
+
+Run: `cargo-remote-ctl test --workspace -- --include-ignored 2>&1 | tail -20`
+Expected: PASS (or `connection refused` on `e2e_tunnel.rs` if Docker is not up — that is acceptable for this gate). Capture the summary line for the PR-1a description.
+
+Run: `cargo-remote-ctl clippy --workspace --all-targets -- -D warnings`
+Expected: clean.
+
+Run: `bash scripts/check-invariants.sh`
+Expected: clean.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/design/2026-06-15-tunnel-default-compile-decision.md
+git commit -m "docs(design): supersede 2026-06-10 split-artifact ADR with default-compile"
+```
+
+---
+
+## PR 1a · Stage 1 — `TunnelProtocol`, migration, `cnexus/` reorg, `Transport` trait
 
 ### Task 1: Add `TunnelProtocol` enum to `gw-core`
 
@@ -452,7 +900,7 @@ ProxyNodeView {
 
 - [ ] **Step 3: Compile-check the workspace**
 
-Run: `cargo-remote-ctl build --workspace --features tunnel`
+Run: `cargo-remote-ctl build --workspace`
 Expected: clean build, no warnings about the new field.
 
 - [ ] **Step 4: Run the gateway crate's tests**
@@ -530,17 +978,30 @@ pub mod resolver;
 pub mod safe_dns;
 pub mod target_filter;
 
-// Back-compat re-exports so call sites built before the cnexus/ reorg still
-// resolve. Remove these once all downstream call sites use the cnexus::
-// path explicitly (tracked in the Phase 2 plan).
-pub use cnexus::{frame, pool, transport};
-
 pub use resolver::{
     resolve_tunnel, ProxyNodeView, TunnelPreference, TunnelResolution, TunnelResolveCtx,
 };
 ```
 
-- [ ] **Step 5: Move the integration tests so test names stay readable**
+> **No back-compat re-exports.** All external call sites are migrated in Step 5 within the same commit so Phase 1 ends in a clean state. The single-branch / single-MR model means there is no external consumer of the old import paths to support.
+
+- [ ] **Step 5: Migrate external call sites to `cnexus::` paths**
+
+Seven import lines across four crates reference the old top-level modules. Update each:
+
+| File | Old import | New import |
+|---|---|---|
+| `crates/gw-proxy/src/tunnel_bridge.rs:4` | `use gw_tunnel_client::transport::{TunnelStreamReader, TunnelStreamWriter, WsTransport};` | `use gw_tunnel_client::cnexus::transport::{TunnelStreamReader, TunnelStreamWriter, WsTransport};` |
+| `crates/gw-gateway/src/lib.rs:1219` | `use gw_tunnel_client::pool::PoolConfig;` | `use gw_tunnel_client::cnexus::pool::PoolConfig;` |
+| `crates/gw-gateway/src/lib.rs:1223` | `use gw_tunnel_client::transport::TransportConfig;` | `use gw_tunnel_client::cnexus::transport::TransportConfig;` |
+| `crates/gw-gateway/tests/e2e_tunnel.rs:10` | `use gw_tunnel_client::pool::PoolConfig;` | `use gw_tunnel_client::cnexus::pool::PoolConfig;` |
+| `crates/gw-gateway/tests/e2e_tunnel.rs:14` | `use gw_tunnel_client::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};` | `use gw_tunnel_client::cnexus::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};` |
+| `crates/gw-tunnel-server/src/lib.rs:5` | `use gw_tunnel_client::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};` | `use gw_tunnel_client::cnexus::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};` |
+| `crates/gw-tunnel-server/tests/protocol.rs:3` | `use gw_tunnel_client::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};` | `use gw_tunnel_client::cnexus::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};` |
+
+Run after each batch: `grep -rn 'gw_tunnel_client::\(frame\|pool\|transport\)::' crates/ 2>/dev/null` — expected empty after all 7 edits land.
+
+- [ ] **Step 6: Move the integration tests so test names stay readable**
 
 Run:
 ```bash
@@ -549,28 +1010,33 @@ git mv crates/gw-tunnel-client/tests/pool.rs      crates/gw-tunnel-client/tests/
 git mv crates/gw-tunnel-client/tests/transport.rs crates/gw-tunnel-client/tests/cnexus_transport.rs
 ```
 
-The integration tests use `use gw_tunnel_client::frame::...` etc. which still resolve via the back-compat re-exports — no edits to the test bodies needed.
+These test files also import the moved modules. Grep them and update the imports:
 
-- [ ] **Step 6: Compile the crate**
+Run: `grep -n 'use gw_tunnel_client::\(frame\|pool\|transport\)::' crates/gw-tunnel-client/tests/cnexus_*.rs`
+Expected: a handful of hits. Replace each `gw_tunnel_client::<old>::` with `gw_tunnel_client::cnexus::<old>::`.
+
+- [ ] **Step 7: Compile the crate**
 
 Run: `cargo-remote-ctl build -p gw-tunnel-client`
 Expected: clean build.
 
-- [ ] **Step 7: Run every tunnel-client test**
+- [ ] **Step 8: Run every tunnel-client test**
 
 Run: `cargo-remote-ctl test -p gw-tunnel-client`
 Expected: PASS, identical test names to before the move except the three renames above.
 
-- [ ] **Step 8: Workspace-level compile + tests with `--features tunnel`**
+- [ ] **Step 9: Workspace-level compile + tests**
 
-Run: `cargo-remote-ctl test --workspace --features tunnel`
-Expected: PASS. This is the gate that proves no downstream crate's compile broke. Capture the final 5 lines of output for the PR description.
+Run: `cargo-remote-ctl test --workspace`
+Expected: PASS. This is the gate that proves no downstream crate's compile broke after the call-site migration in Step 5. Capture the final 5 lines of output for the PR-1a description.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit (one commit covering the move + migration)**
 
 ```bash
-git add crates/gw-tunnel-client
-git commit -m "refactor(gw-tunnel-client): move frame/pool/transport into cnexus/ submodule"
+git add crates/gw-tunnel-client crates/gw-proxy/src/tunnel_bridge.rs \
+        crates/gw-gateway/src/lib.rs crates/gw-gateway/tests/e2e_tunnel.rs \
+        crates/gw-tunnel-server/src/lib.rs crates/gw-tunnel-server/tests/protocol.rs
+git commit -m "refactor(tunnel-client): move frame/pool/transport into cnexus/ + migrate call sites"
 ```
 
 ---
@@ -732,15 +1198,12 @@ pub mod target_filter;
 pub use core::{StreamHandle, Transport, TransportError, TunnelStream};
 pub use target::StreamTarget;
 
-// Back-compat re-exports so call sites built before the cnexus/ reorg still
-// resolve. Remove once all downstream call sites use the cnexus::* path
-// explicitly (tracked in the Phase 2 plan).
-pub use cnexus::{frame, pool, transport};
-
 pub use resolver::{
     resolve_tunnel, ProxyNodeView, TunnelPreference, TunnelResolution, TunnelResolveCtx,
 };
 ```
+
+> **No back-compat re-exports.** The cnexus reorg in Task 6 Step 5 already migrated all external call sites to `gw_tunnel_client::cnexus::*` paths. This `lib.rs` does not re-export the cnexus submodules at the crate root.
 
 - [ ] **Step 6: Run the failing test (now compiles)**
 
@@ -928,9 +1391,9 @@ impl Transport for ReconnectingTransport {
 Run: `cargo-remote-ctl test -p gw-tunnel-client --test cnexus_transport 2>&1 | tail -20`
 Expected: PASS.
 
-- [ ] **Step 6: Full workspace test with `--features tunnel`**
+- [ ] **Step 6: Full workspace test**
 
-Run: `cargo-remote-ctl test --workspace --features tunnel`
+Run: `cargo-remote-ctl test --workspace`
 Expected: PASS. Capture the final 5 lines of output for the PR description.
 
 - [ ] **Step 7: Commit**
@@ -1003,8 +1466,8 @@ git commit -m "docs(tunnel): record cnexus/ reorg, Transport trait, tunnel_proto
 
 - [ ] **Step 1: Run the dep-only build to surface any forgotten consumer**
 
-Run: `cargo-remote-ctl check --workspace --all-features`
-Expected: clean. `--all-features` is broader than `--features tunnel` and catches code that may be feature-gated elsewhere.
+Run: `cargo-remote-ctl check --workspace --all-targets`
+Expected: clean. After Stage 0 there is no `tunnel` Cargo feature; this check catches any forgotten consumer of the moved cnexus types.
 
 - [ ] **Step 2: Run clippy at warning-as-error**
 
@@ -1034,7 +1497,7 @@ PR title: `feat(tunnel): Phase 1a — TunnelProtocol discriminator, migration 00
 
 PR body should include:
 - One-line summary of each commit (Tasks 1–7, i.e. enum, ProxyNode field, migration, ProxyNodeView field, refresher wire, cnexus reorg, `core.rs` trait, cnexus impl `Transport`, docs sync).
-- The captured 5-line `cargo-remote-ctl test --workspace --features tunnel` tail from Task 6b Step 6.
+- The captured 5-line `cargo-remote-ctl test --workspace` tail from Task 6b Step 6.
 - The captured `make e2e` summary from Step 5 above.
 - Link to the spec: `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md`.
 - A note that PR 1b (Go management plane in `AILinkMax-Go`) must land before any Aether-shaped row is created in production.
@@ -1873,7 +2336,6 @@ services:
       context: ../../
       dockerfile: Dockerfile
       args:
-        CARGO_FEATURES: "--features tunnel"
         BIN: gw-tunnel-server
     command: >
       gw-tunnel-server
@@ -1906,8 +2368,6 @@ services:
     build:
       context: ../../
       dockerfile: Dockerfile
-      args:
-        CARGO_FEATURES: "--features tunnel"
     environment:
       GW_PGSQL__URL: postgres://postgres:e2e@postgres:5432/cnexus
       GW_REDIS__URL: redis://redis:6379/0
@@ -2278,10 +2738,10 @@ Create `tests/tunnel-e2e/scenarios/test_cnexus_protocol.py`:
 
 ```python
 """Phase-1 cnexus-protocol scenarios. These three tests are adapted from
-tests/e2e/client/scenarios/test_tunnel.py, which has been skipped behind
-`pytestmark = pytest.mark.skip(reason='requires --features tunnel build')`.
-Phase 1 brings them back into a `--features tunnel` build that runs against a
-real `gw-tunnel-server` container.
+tests/e2e/client/scenarios/test_tunnel.py, which has been skipped (previously
+behind a `--features tunnel` build requirement; that flag is removed in
+Stage 0 of this plan). They now run against a real `gw-tunnel-server`
+container in the tunnel-e2e harness.
 
 Spec reference:
 docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md §6.5.A
@@ -2531,7 +2991,7 @@ make tunnel-e2e
 ```
 Expected: `3 passed`. This is the gate the reviewer will replay.
 
-- [ ] **Step 2: Re-run `cargo-remote-ctl test --workspace --features tunnel`**
+- [ ] **Step 2: Re-run `cargo-remote-ctl test --workspace`**
 
 Expected: unchanged from PR 1a baseline. (`tests/tunnel-e2e/` is Python — it should not affect the cargo workspace.)
 
@@ -2553,9 +3013,10 @@ PR body should include:
 
 ## Self-Review
 
-After PR 1a + PR 1b + PR 1c merge (PR 1b in `AILinkMax-Go`, the others in this repo on the shared feature branch that Phase 2 will extend):
+After PR 1a + PR 1b + PR 1c are complete on their respective branches (PR 1b in `AILinkMax-Go` as a real MR, PR 1a + PR 1c as commit groups on the `ailinkmax-gateway` shared feature branch that Phase 2 and Phase 3 will extend before the single final MR to `main`):
 
 1. **Spec coverage (Phase 1 only):**
+   - **Pre-spec prep — `--features tunnel` removal** (decided 2026-06-15 per `docs/design/2026-06-15-tunnel-default-compile-decision.md`) — Tasks 0a-0f. Supersedes the 2026-06-10 split-artifact decision; tunnel becomes default-compile so Phase 2's Aether work doesn't need to introduce new feature-gated complexity.
    - §3.1 migration 0011 — Task 3.
    - §3.2 `TunnelProtocol` enum + `ProxyNodePayload.protocol` field — Tasks 1 & 2.
    - §3.3 `StreamTarget` enum (Tcp-only in Phase 1) — Task 6a.
@@ -2574,6 +3035,7 @@ After PR 1a + PR 1b + PR 1c merge (PR 1b in `AILinkMax-Go`, the others in this r
 
 2. **Placeholder scan:**
    - No "TBD"/"TODO" inside concrete code blocks.
+   - Tasks 0a/0b contain "Read the surrounding ~30 lines to confirm it is the fallback Direct path" — concrete inspection step, not a placeholder; the plan tells the engineer exactly what to look for (`Direct::HttpPeer::new`) and what to do if the block contains unexpected logic (stop and report).
    - Tasks 6a/6b contain "If `WsTransport::is_alive()` doesn't exist yet" / "If `current_inner()` doesn't exist" — these are documented adjustment-points with explicit guidance on how to add the helper if absent, not unresolved unknowns.
    - Task G1.1 Step 3 notes "If the entity is persisted via `payload JSONB` ... change the GORM tag" — documented adjustment-point with the concrete file to inspect (`entity.go`) before editing.
    - Task G1.2 Step 3 notes "The existing Update path likely already pushes; if so, do not duplicate" — documented anti-duplication guard with a concrete check.
@@ -2591,8 +3053,13 @@ After PR 1a + PR 1b + PR 1c merge (PR 1b in `AILinkMax-Go`, the others in this r
    - Service names in compose match the URLs the Python tests use: `cnexus-tunnel-server:7000`, `ali-gateway:8000`, `fake-upstream:9000`. Phase 1 compose does **not** include the AILinkMax-Go binary; the registration endpoint exists in Go (PR 1b) but Phase 1 e2e doesn't exercise it (no `aether-proxy` yet). Phase 2 compose extension adds it.
 
 4. **Cross-repo coordination invariants:**
-   - PR 1b lands first in `AILinkMax-Go`. PR 1a default is `Cnexus`, so the Rust pre-Phase-1a binary deserializing a Go-written row with `protocol="cnexus"` is byte-identical to today's behavior. No forward-incompat window.
+   - PR 1b lands first in `AILinkMax-Go` as a real MR. PR 1a default is `Cnexus`, so the Rust pre-Phase-1a binary deserializing a Go-written row with `protocol="cnexus"` is byte-identical to today's behavior. No forward-incompat window.
    - No Aether-shaped row is created in Phase 1 either by the e2e (PR 1c does not seed Aether nodes) or by ops (Phase 2 spec says Aether proxies are not deployed until after Phase 2 lands). So `InboundListener` being absent in Phase 1 cannot cause user-visible failure.
+
+5. **Single-branch / single-MR consistency check:**
+   - Stage 0 (`--features tunnel` removal) lands as commits 0a-0f on the shared branch. Phase 2 and Phase 3 build on top of those commits. **No later phase reverses Stage 0**: tunnel stays default-compile through Phase 3. The control-plane JSON `features.tunnel` field remains permanently set to `true` (Option A per 2026-06-15 decision).
+   - Stage 1 (functional Phase 1) lands on top of Stage 0 — Tasks 6's external call-site migration is the **final state** for cnexus call paths (no back-compat re-exports; Phase 2 simply adds `aether::` paths alongside).
+   - The Aether submodule `.gitmodules` line (Task 9) ships with `update = none` in Phase 1 and is flipped to `update = checkout` in Phase 2 Task 1 (or equivalent). This is a setup-then-activate sequence, not an add-then-remove; the Phase 1 state is intentionally incomplete and Phase 2's flip is part of the converging design.
 
 ---
 
