@@ -43,7 +43,7 @@ Three layers with strict one-way dependency (enforced by `scripts/check-invarian
 | `gw-health` | Business | `KeyHealthStore` — multi-dim (KeyId, ApiFormat) circuit/cooldown state machine, sliding window. |
 | `gw-routing` | Business | Candidate filtering, `InFlightStore`, 8 `Strategy` impls. Takes `&KeyHealthStore` in `pick`. |
 | `gw-capability` | Business | Model-capability resolution: `Capability` enum, `RequiredCapabilities`, `ModelMapper`, `CapabilityResolver`, `AdapterCapabilityHook`, `CapabilityFilter`, `PricingReader`. |
-| `gw-tunnel-client` | Business | First-party tunnel client: frame codec (magic `0xAE21`, 8 msg types), WebSocket transport w/ heartbeat / reconnect, stream-id routing, `TunnelStream`, DoH resolver, target-filter whitelist. Consumed by `gw-proxy::tunnel_stack::TunnelStack` and `gw-proxy::tunnel_bridge` in the default build. Active when `cfg.tunnel.enabled = true`; otherwise `pick_peer` runs the byte-identical Direct path. |
+| `gw-tunnel-client` | Business | First-party tunnel client: `cnexus/` holds the Cnexus frame codec (magic `0xAE21`, 8 msg types), WebSocket transport w/ heartbeat / reconnect, stream-id routing, and `TunnelStream`; `core.rs` / `target.rs` expose the protocol-neutral `Transport` trait and `StreamTarget`; `resolver`, `safe_dns`, and `target_filter` stay protocol-agnostic at the crate root. Consumed by `gw-proxy::tunnel_stack::TunnelStack` and `gw-proxy::tunnel_bridge` in the default build. Active when `cfg.tunnel.enabled = true`; otherwise `pick_peer` runs the byte-identical Direct path. |
 | `gw-tunnel-server` | Business | First-party `ailinkmax-tunnel` server and binary. Accepts WebSocket, optional `ControlAuth`, `ControlNodeInfo`, `Open host:port`, target validation, TCP relay, `Data` / `Close` / `Error`, and stream-cap enforcement. |
 | `gw-billing` | Business | Task-level billing formulas: base micro amounts, vendor/task-kind multipliers, duration buckets. No per-token pricing, no `cost_micro` — the `no_cost_micro` invariant applies. Depends only on `gw-task` + `serde`. Supporting crates must not depend on it. |
 | `gw-egress-impersonate` | Business | In-process loopback egress for vendor keys whose `egress_mode = Impersonate { profile }`. Wraps `wreq` 6 + BoringSSL into a per-profile `ClientPool` (LRU), accepts gateway requests over a UDS or TCP listener, replays the request with a Chrome-class TLS/H2/header fingerprint, and surfaces transport-level failure classes via `X-Egress-Error-Class` headers. `EgressHandle::start` returns synchronously and supervises the listener + supervisor tasks; see `crates/gw-egress-impersonate/`. Depends on `gw-core` (`ImpersonateProfile`); supporting crates must not depend on it. Direct vendors do not touch this crate. |
@@ -73,7 +73,7 @@ Business:
   gw-adapter       ◄── gw-proxy, gw-gateway (error analyzers only)
   gw-routing       ◄── gw-proxy, gw-gateway
   gw-capability    ◄── gw-proxy, gw-gateway
-  gw-tunnel-client ◄── gw-gateway (feature="tunnel")
+  gw-tunnel-client ◄── gw-gateway (default)
   gw-billing       ◄── gw-gateway
   gw-task-runtime  ◄── gw-task-worker
 
