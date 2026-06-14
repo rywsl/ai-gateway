@@ -731,3 +731,30 @@ pub fn describe_all() {
         }
     }
 }
+
+/// Page-on-call billing counters that must be present in `/metrics` with a `0`
+/// baseline *before* any incident. `describe_*` (see `describe_all`) only
+/// registers HELP/TYPE — `metrics-exporter-prometheus` does not render a series
+/// until a `counter!()` handle is created. Without the zero-init below these
+/// counters are absent from `/metrics` until the bad event first fires, which
+/// makes the Go-side `billing-rules.yml` alerts evaluate against an absent
+/// series ("No data") instead of a healthy `0`. Each name here is documented as
+/// "page on-call" in `METRICS`; `page_on_call_set_is_subset_of_catalog`
+/// (tests/metrics_catalog.rs) keeps the two in sync.
+pub static PAGE_ON_CALL_BILLING_COUNTERS: &[&str] = &[
+    "gw_billing_flusher_panic_total",
+    "gw_billing_flusher_dead_total",
+    "gw_billing_emit_lag_t0_total",
+];
+
+/// Zero-initialize the page-on-call billing counters so their series render at
+/// `0` immediately at boot. Call once, after `describe_all()`, during metrics
+/// bootstrap. `increment(0)` is enough to materialize the (label-less) series;
+/// it never perturbs a real incident count. For `gw_billing_emit_lag_t0_total`
+/// the real emit carries `request_id`/`attempt_index` labels — this baseline is
+/// the label-less family series that `sum(increase(...))` alerts key off of.
+pub fn zero_init_page_on_call() {
+    for name in PAGE_ON_CALL_BILLING_COUNTERS {
+        metrics::counter!(*name).increment(0);
+    }
+}
