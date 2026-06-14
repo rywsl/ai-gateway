@@ -1,6 +1,6 @@
 use bytes::Bytes;
+use gw_tunnel_client::cnexus::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
 use gw_tunnel_client::target_filter::{set_whitelist, ResetGuard};
-use gw_tunnel_client::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
 use gw_tunnel_server::{spawn, TunnelServerConfig};
 use secrecy::SecretString;
 use std::time::Duration;

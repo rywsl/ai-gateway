@@ -1208,11 +1208,11 @@ async fn bootstrap(
     let mut tunnel_refresher_unhealthy: Option<Arc<std::sync::atomic::AtomicBool>> = None;
 
     let tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>> = if cfg.tunnel.enabled {
-        use gw_tunnel_client::pool::PoolConfig;
+        use gw_tunnel_client::cnexus::pool::PoolConfig;
+        use gw_tunnel_client::cnexus::transport::TransportConfig;
         use gw_tunnel_client::resolver::ProxyNodeView;
         use gw_tunnel_client::safe_dns::SafeDnsResolver;
         use gw_tunnel_client::target_filter;
-        use gw_tunnel_client::transport::TransportConfig;
 
         // Whitelist mapping: "host:port" strings → Vec<(String, u16)>.
         let mut wl = Vec::with_capacity(cfg.tunnel.target_whitelist.len());

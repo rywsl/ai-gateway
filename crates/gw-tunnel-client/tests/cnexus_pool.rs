@@ -1,4 +1,4 @@
-use gw_tunnel_client::pool::{jittered_backoff, PoolConfig};
+use gw_tunnel_client::cnexus::pool::{jittered_backoff, PoolConfig};
 use std::time::Duration;
 
 #[test]

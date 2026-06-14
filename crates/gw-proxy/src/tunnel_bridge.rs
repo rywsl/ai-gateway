@@ -1,7 +1,7 @@
 //! Loopback HTTP/1 bridge for owned tunnel traffic.
 
 use bytes::{Bytes, BytesMut};
-use gw_tunnel_client::transport::{TunnelStreamReader, TunnelStreamWriter, WsTransport};
+use gw_tunnel_client::cnexus::transport::{TunnelStreamReader, TunnelStreamWriter, WsTransport};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -336,8 +336,8 @@ async fn write_error(client: &mut TcpStream, status: u16, message: &str) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gw_tunnel_client::cnexus::transport::{TransportConfig, WsTransport};
     use gw_tunnel_client::target_filter::{set_whitelist, ResetGuard};
-    use gw_tunnel_client::transport::{TransportConfig, WsTransport};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 

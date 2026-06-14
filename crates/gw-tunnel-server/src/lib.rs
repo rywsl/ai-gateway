@@ -2,7 +2,9 @@
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
-use gw_tunnel_client::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
+use gw_tunnel_client::cnexus::frame::{
+    decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};

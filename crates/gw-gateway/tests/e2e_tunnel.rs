@@ -5,11 +5,11 @@
 
 use bytes::Bytes;
 use gw_proxy::tunnel_stack::{TunnelPeerError, TunnelStack};
-use gw_tunnel_client::pool::PoolConfig;
+use gw_tunnel_client::cnexus::pool::PoolConfig;
+use gw_tunnel_client::cnexus::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
 use gw_tunnel_client::resolver::ProxyNodeView;
 use gw_tunnel_client::safe_dns::{set_override, OverrideGuard, SafeDnsResolver};
 use gw_tunnel_client::target_filter::{set_whitelist, ResetGuard};
-use gw_tunnel_client::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
 use gw_tunnel_server::{spawn, TunnelServerConfig};
 use secrecy::SecretString;
 use std::sync::Arc;

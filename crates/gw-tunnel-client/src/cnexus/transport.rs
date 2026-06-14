@@ -1,7 +1,7 @@
 //! WebSocket transport — heartbeat + alive-tracking layer over the frame
-//! protocol. Reconnect orchestration lives in `pool::ReconnectingTransport`.
+//! protocol. Reconnect orchestration lives in `cnexus::pool::ReconnectingTransport`.
 
-use crate::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
+use crate::cnexus::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use secrecy::{ExposeSecret, SecretString};

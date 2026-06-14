@@ -38,7 +38,7 @@ pub fn jittered_backoff(attempt: u32, cfg: &PoolConfig) -> Duration {
     Duration::from_millis(final_ms.max(0.0) as u64)
 }
 
-use crate::transport::{TransportConfig, WsTransport};
+use crate::cnexus::transport::{TransportConfig, WsTransport};
 use std::sync::Arc;
 
 /// Reconnecting transport — supervises a `WsTransport`, recreates it on
