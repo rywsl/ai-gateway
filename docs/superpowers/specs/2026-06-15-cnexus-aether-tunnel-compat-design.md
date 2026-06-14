@@ -102,30 +102,47 @@ Both transports still implement the same `trait Transport` and present identical
   - `protocol_kind=Cnexus`: forwards the loopback HTTP/1 byte stream as-is into a `StreamTarget::Tcp` (current behavior).
   - `protocol_kind=Aether`: parses the loopback HTTP/1 stream with `httparse`, constructs a `StreamTarget::Http`, lets the transport translate it to Aether frames, and serializes the response back to HTTP/1 bytes for Pingora.
 - **The `cnexus/` module is bit-compatible with the existing `gw-tunnel-server` wire protocol** (14-byte big-endian header with magic `[0xAE, 0x21]` + version + msg_type + flags + stream_id + length). No protocol change for existing nodes.
-- **The `aether/` module is bit-compatible with the Aether wire protocol** as observed in the Aether reference source: 10-byte little-endian header, `RequestMeta`/`ResponseMeta` JSON, gzip flag 0x02, Bearer-token WS upgrade auth at `/api/internal/proxy-tunnel`.
+- **The `aether/` module is bit-compatible with the Aether wire protocol** as observed in the Aether reference source: 10-byte **big-endian** header (matches `aether-proxy/src/tunnel/protocol.rs:46` `u32::from_be_bytes` and `aether-hub/src/protocol.rs:89` `BytesMut::put_u32`), `RequestMeta`/`ResponseMeta` JSON, gzip flag 0x02, Bearer-token WS upgrade auth at the App-layer path `/api/internal/proxy-tunnel` (which the Cnexus hub mounts directly; in Aether's deployment topology this path lives on the App layer that proxies to hub's `/proxy` internal route, but Cnexus collapses both layers).
 - **`aether::InboundListener` is the only new long-running service** the hub spawns. It is started by `gw-gateway` when at least one Aether-protocol node exists (or when `tunnel.aether_listener_enabled` config is true).
 
 ### 2.4 Change Footprint Summary
+
+**Cnexus Rust repo:**
 
 | Crate / path | Change kind | Phase |
 |---|---|---|
 | `crates/gw-tunnel-client/src/cnexus/` | new submodule housing existing outbound-dialing transport logic | 1 |
 | `crates/gw-tunnel-client/src/aether/` | new submodule (frame / transport / heartbeat / meta / gzip / http_adapter / listener) | 2 |
-| `crates/gw-tunnel-client/src/lib.rs` | export `trait Transport`, `AnyTransport`, `factory::build_or_attach` | 2 |
+| `crates/gw-tunnel-client/src/lib.rs` | export `trait Transport`, `AnyTransport`, `factory::{build_cnexus_supervised, attach_aether}` | 2 |
 | `crates/gw-tunnel-client/src/target.rs` | `enum StreamTarget { Tcp, Http }` | 2 |
-| `crates/gw-proxy/src/tunnel_stack.rs` | `ProxyNodeView.protocol`; DashMap holds `Arc<dyn Transport>`; `peer_for_node` returns kind; new `attach_inbound_transport(node_id, transport)` API | 2 |
+| `crates/gw-proxy/src/tunnel_stack.rs` | `ProxyNodeView.protocol`; DashMap holds `Arc<dyn Transport>`; `peer_for_node` returns kind; new `attach_inbound_transport(node_id, transport)` + `on_protocol_change(node_id, new_kind)` + `drop_node(node_id)` APIs | 2 |
 | `crates/gw-proxy/src/tunnel_bridge.rs` | per-protocol branching at accept | 2 |
-| `crates/gw-gateway/src/lib.rs` | `tunnel_refresher` reads `payload.protocol`, dispatches outbound (Cnexus) vs InboundListener (Aether); spawns listener if any aether node present | 2 |
-| `crates/gw-gateway/src/routes.rs` | new route `/api/internal/proxy-tunnel` → delegates to `aether::InboundListener::accept` | 2 |
+| `crates/gw-gateway/src/lib.rs` | `tunnel_refresher` reads `payload.protocol`, dispatches outbound (Cnexus supervisor) vs InboundListener (Aether); manages listener auto-enable per §3.5 rule; consumes `events:entity` for protocol transitions; pushes `events:aether_heartbeat` (§3.6.5) | 2 |
+| `crates/gw-gateway/src/routes.rs` | new route `/api/internal/proxy-tunnel` → delegates to `aether::InboundListener::accept`; extends `/healthz/tunnel` with per-node `present/alive` schema (§3.5) | 2 |
+| `crates/gw-gateway` SIGTERM handler | drain Aether (GoAway + close) + Cnexus (skip-reconnect) + grace timeout | 2 |
 | `crates/gw-store/migrations/0011_proxy_nodes_protocol.sql` | backfill + partial index | 1 |
 | `crates/gw-store/src/entity/proxy_node.rs` | add `protocol: ProtocolKind` field | 1 |
-| `config/default.toml` | new `[tunnel.aether_listener]` section (enabled, bind path) | 2 |
+| `config/default.toml` | new `[tunnel.aether_listener]` section (`enabled`, `path`, `max_concurrent_connections`); new `tunnel.shutdown_grace_secs` | 2 |
 | `tests/tunnel-e2e/` | full new directory | 1 + 2 + 3 |
 | `Makefile` | `tunnel-e2e` / `tunnel-e2e-up` / `tunnel-e2e-down` / `tunnel-e2e-logs` / `check-tunnel-deps` targets | 1 + 3 |
 | `scripts/check-tunnel-deps.sh` | dep-boundary enforcement (shell + jq) | 3 |
 | `.gitmodules` | `tests/tunnel-e2e/aether-src` → `https://gitlab.ailinkmax.com/ailinkmax/Aether` | 1 |
 | `docs/spec/09-tunnel.md` | new sections: `protocol_kind`, Aether compatibility, dep boundary | 3 |
 | `tests/tunnel-e2e/README.md` | new — usage, scenario catalog, failure-mode guide | 3 |
+
+**AILinkMax-Go repo (parallel, cross-repo PRs — coordinated per §3.6.8):**
+
+| path | Change kind | Phase |
+|---|---|---|
+| `modules/proxynode/business/entity.go` | add `Protocol string` field | G1 |
+| `modules/proxynode/business/service.go` | validate `protocol` enum; default `"cnexus"` | G1 |
+| `modules/proxynode/api/routes.go` | `manual` / `PATCH` / `GET` accept and return `protocol` | G1 |
+| `modules/proxynode/api/routes.go` | new `POST /api/admin/proxy-nodes/register` (Aether-bootstrap) | G2 |
+| `modules/proxynode/business/aether_register.go` | upsert-by-token logic per §3.6.1 | G2 |
+| `modules/monitoring` (or `modules/proxynode/aether_heartbeat`) | new `events:aether_heartbeat` consumer | G3 |
+| `migrations-clickhouse/00NN_aether_heartbeat_samples.sql` | new ClickHouse table | G3 |
+| `modules/monitoring/api/routes.go` | new `GET /api/admin/monitoring/aether/{node_id}` | G3 |
+| `frontend/...` | Protocol column / radio / Aether status panel | G4 |
 
 ### 2.5 Untouched Surfaces
 
@@ -228,7 +245,10 @@ pub trait Transport: Send + Sync {
         target: StreamTarget,
     ) -> futures::future::BoxFuture<'a, Result<StreamHandle, TransportError>>;
     fn alive(&self) -> bool;
-    fn last_pong_age(&self) -> Option<std::time::Duration>;
+    /// Time since the most recent liveness signal: Pong (Cnexus) or HeartbeatData (Aether).
+    /// Renamed from the original `last_pong_age` because Aether uses HeartbeatData/Ack,
+    /// not Ping/Pong, for liveness.
+    fn last_heartbeat_age(&self) -> Option<std::time::Duration>;
     fn protocol_kind(&self) -> ProtocolKind;
     fn close(&self) -> futures::future::BoxFuture<'_, ()>;
 }
@@ -243,29 +263,31 @@ impl Transport for AnyTransport { /* delegating dispatch */ }
 
 Because connection direction differs per protocol, the construction surface splits into two paths:
 
-**Outbound (Cnexus)** — used by `tunnel_refresher` when seeding nodes:
+**Outbound (Cnexus)** — used by `tunnel_refresher` when seeding nodes. The reconnect supervisor wraps the inner `cnexus::WsTransport` (not the trait object) so existing supervisor semantics are preserved:
 
 ```rust
 // gw-tunnel-client/src/factory.rs
 
-pub async fn dial_cnexus(
+pub fn build_cnexus_supervised(
     cfg: TransportConfig,
-    node: &ProxyNodeView,
-) -> Result<AnyTransport, TransportError> {
-    // outbound WS upgrade to node.ws_url; wraps in ReconnectingTransport supervisor.
-    Ok(AnyTransport::Cnexus(cnexus::WsTransport::connect(cfg, node).await?))
+    node: ProxyNodeView,
+) -> Arc<dyn Transport> {
+    // ReconnectingTransport stays type-parameterized over the concrete inner
+    // transport (Phase 1 keeps the supervisor exactly as today). It implements
+    // `Transport` itself, so erasing it to `Arc<dyn Transport>` is safe.
+    Arc::new(ReconnectingTransport::<cnexus::WsTransport>::new(cfg, node))
 }
 ```
 
-**Inbound (Aether)** — used by `aether::InboundListener` when an Aether proxy dials in:
+**Inbound (Aether)** — used by `aether::InboundListener` when an Aether proxy dials in. No supervisor: the proxy owns reconnection, the hub just accepts:
 
 ```rust
 pub async fn attach_aether(
     cfg: TransportConfig,
     node_view: ProxyNodeView,
     upgraded_ws: tokio_tungstenite::WebSocketStream<...>,
-) -> Result<AnyTransport, TransportError> {
-    Ok(AnyTransport::Aether(aether::WsTransport::attach(cfg, node_view, upgraded_ws).await?))
+) -> Result<Arc<dyn Transport>, TransportError> {
+    Ok(Arc::new(aether::WsTransport::attach(cfg, node_view, upgraded_ws).await?))
 }
 ```
 
@@ -274,7 +296,7 @@ pub async fn attach_aether(
 1. Ensures the row exists in the in-memory `proxy_nodes` snapshot (so `peer_for_node` can later look up the node by id and the listener can authenticate inbound connections against it).
 2. Verifies the `InboundListener` is running (spawns it idempotently the first time an Aether node appears).
 
-The DashMap in `tunnel_stack` becomes `DashMap<NodeId, Arc<dyn Transport>>` (no `ReconnectingTransport` wrapper for the abstract type; the supervisor wraps the inner Cnexus transport only). For Aether nodes the slot is populated by `InboundListener::on_upgrade` callback after a successful WS handshake, and removed on disconnect; reconnection is entirely driven by `aether-proxy` redialing.
+The DashMap in `tunnel_stack` becomes `DashMap<NodeId, Arc<dyn Transport>>`. For Cnexus nodes the entry is the `ReconnectingTransport` supervisor (its `Transport::alive()` reflects the inner transport's live status); for Aether nodes the entry is the bare `aether::WsTransport`, populated by `InboundListener::on_upgrade` after a successful WS handshake and removed on disconnect. Reconnection of Aether nodes is entirely driven by `aether-proxy` redialing.
 
 ### 3.5 `aether::InboundListener`
 
@@ -291,9 +313,169 @@ A new long-running service inside `gw-tunnel-client`. It owns:
 4. Performs the WS upgrade; on success constructs `aether::WsTransport::attach(...)` and pushes it into the stack via the sender.
 5. On WS close: the transport's read loop exits, the transport marks itself dead, and the stack-side cleanup task removes the DashMap entry. No retry by hub side; `aether-proxy` reconnects on its own.
 
-Mounting the route is opt-in: `tunnel.aether_listener.enabled` (default false). `gw-gateway` auto-enables when `tunnel_refresher` sees at least one Aether node, OR when the operator sets the flag explicitly in config.
+Mounting the route is opt-in with a config-overrides-DB rule:
 
-### 3.6 End-to-End Flow
+- `tunnel.aether_listener.enabled` (default `null`): if `false`, the listener is **forcibly disabled** even if Aether nodes exist in DB (operator kill-switch for emergency rollback). If `true`, always enabled. If `null` (default), auto-enable iff `tunnel_refresher` sees at least one row with `protocol = 'aether'`.
+- `tunnel.aether_listener.path` (default `/api/internal/proxy-tunnel`): route path; almost never changed.
+- `tunnel.aether_listener.max_concurrent_connections` (default `256`): InboundListener tracks a semaphore; if exhausted, new upgrade attempts get `503` with `Retry-After: 5`. Prevents a misbehaving fleet of proxies from exhausting hub resources.
+
+Health surface:
+
+- `GET /healthz/tunnel` (existing endpoint, admin-token authenticated) is extended with per-node `present` and `alive` flags. Schema:
+
+  ```json
+  {
+    "nodes": [
+      {
+        "node_id": "aether-node-1",
+        "protocol": "aether",
+        "present": true,               // transport slot occupied in DashMap
+        "alive": true,                 // last_heartbeat_age < threshold
+        "last_heartbeat_age_ms": 12340,
+        "active_streams": 7
+      },
+      { "node_id": "cnexus-node-1", "protocol": "cnexus", "present": true, "alive": true, ... }
+    ]
+  }
+  ```
+
+  `present=false` distinguishes "registered in DB but no proxy ever dialed in" from "dialed in but stale". Critical for diagnosing why an Aether node looks down.
+
+Graceful shutdown:
+
+- On SIGTERM, gateway initiates shutdown drain:
+  1. Stop accepting new WS upgrades on the listener route (return 503 to in-progress upgrades).
+  2. For each Aether transport in the DashMap, send a `GoAway` frame and close the WS. The proxy's read loop breaks, and the proxy's redial logic backs off (it sees the deliberate close).
+  3. For each Cnexus transport (the reconnect supervisor), call `Transport::close()` which the supervisor honors by skipping its next reconnect attempt.
+  4. Wait up to `cfg.shutdown_grace_secs` (default 10) for in-flight streams to flush `StreamEnd` from upstream, then force-close.
+
+### 3.6 Go Management Plane Integration (`AILinkMax-Go`)
+
+The Aether proxy's startup sequence is **HTTP-register-then-WS-dial**, not just WS-dial. Before any WebSocket upgrade, `aether-proxy` does `POST /api/admin/proxy-nodes/register` with its management token and hardware/region/version payload and waits for the response to learn its assigned `node_id` (`aether-proxy/src/registration/client.rs:96-146`). Only then does it open the WS. `node_id` is not in the proxy's config at all.
+
+Cnexus has no native concept of "issuing node IDs to dialing proxies". This section specifies the Go-side additions that make Aether proxies bootable.
+
+#### 3.6.1 Registration endpoint (Go side, new)
+
+**Endpoint**: `POST /api/admin/proxy-nodes/register`
+**Owner**: AILinkMax-Go web binary (`modules/proxynode`).
+**Authentication**: `Authorization: Bearer ae_<token>` (the proxy's management token).
+
+Request body (Aether's schema, copied verbatim from `aether-proxy/src/registration/client.rs:48-72`):
+
+```json
+{
+  "node_name": "aether-node-01",
+  "public_ip": "203.0.113.7",
+  "region": "us-east-1",
+  "hardware": { "cpu_cores": 4, "mem_mb": 8192, ... },
+  "version": "1.4.2",
+  "tunnel_capabilities": { "max_streams": 64, ... }
+}
+```
+
+Response body:
+
+```json
+{
+  "node_id": "aether-node-1",
+  "heartbeat_interval_secs": 30,
+  "config": { /* optional remote_config snapshot */ }
+}
+```
+
+Go side behavior:
+
+1. Decrypt-and-match: scan `proxy_nodes` rows with `protocol = 'aether'` and `auth_token_enc` decrypting to the supplied token. The token has an `ae_` prefix (Aether convention, see `aether-proxy/src/config.rs:48` and `aether-proxy/src/setup/tui.rs:81`); reject if no match → 401.
+   - **Auth discrimination from existing admin endpoints**: the existing admin-token auth middleware accepts any token in the configured admin set. The register endpoint is a *separate* route mounted with a different middleware that only accepts `ae_*`-prefixed tokens (and looks them up in `proxy_nodes`, not the admin token store). The two auth paths never overlap because they are different endpoints (`/manual` vs `/register`) and the validators reject the wrong format up-front.
+2. **Upsert semantics**: if a row matches, update `node_name`, `public_ip`, `region`, `hardware`, `version` from the request body and return that row's `id` as `node_id`. If no row matches but the token is recognized via an "auto-provision" flag (see §3.6.4), insert a new row with `protocol='aether'`. Default policy: **auto-provision disabled**; operators must pre-create the row.
+3. Push `events:entity` Redis stream with `{ns: "proxy_node", op: "upsert", id}` so the Rust gateway refreshes its in-memory snapshot (existing channel, no new wire).
+
+The endpoint **does not interact with the Rust gateway directly**. The gateway learns about new/updated aether nodes through the existing `events:entity` Redis stream consumer.
+
+#### 3.6.2 Admin API `protocol` field
+
+The existing endpoints gain a `protocol` field:
+
+| Endpoint | Change |
+|---|---|
+| `GET /api/admin/proxy-nodes` | response includes `protocol` per row |
+| `POST /api/admin/proxy-nodes/manual` | request accepts `protocol` (default `"cnexus"`) |
+| `PATCH /api/admin/proxy-nodes/{id}` | request accepts `protocol`; transition rules below |
+| `DELETE /api/admin/proxy-nodes/{id}` | no change |
+| `PUT /api/admin/proxy-nodes/{id}/config` | applies only to Cnexus nodes (no-op for Aether; Aether config is delivered via HeartbeatAck — which Cnexus does not push, see §1.2) |
+| `POST /api/admin/proxy-nodes/upgrade` | applies only to Cnexus nodes |
+| `POST /api/admin/proxy-nodes/test-url` | applies only to Cnexus nodes (no WS-server to dial for Aether) |
+
+#### 3.6.3 Protocol transition state machine
+
+When `PATCH` changes a node's `protocol`:
+
+- **Cnexus → Aether**: existing outbound `cnexus::WsTransport` is torn down (`tunnel_stack::drop_node(node_id)`). The node row is updated in DB; `events:entity` stream notifies the gateway, which removes the cnexus supervisor and (if Aether listener is enabled) waits for an aether-proxy to dial in using the new protocol. While in-flight, requests to that node return 502 `GW_TUNNEL_NO_NODE`. Operators are expected to switch in maintenance windows.
+- **Aether → Cnexus**: existing inbound `aether::WsTransport` is dropped; the gateway begins outbound dialing per the (updated) `ws_url`.
+- The transition is mediated by a single `tunnel_stack::on_protocol_change(node_id, new_kind)` callback the entity-stream consumer calls. The callback is idempotent (calling it with the current kind is a no-op).
+
+#### 3.6.4 Optional auto-provision
+
+For unattended ops, Go side may set `AETHER_AUTO_PROVISION=true` to make `/api/admin/proxy-nodes/register` create rows on first contact instead of 401. **Default off**; spec recommends explicit pre-creation for auditability. tunnel-e2e suite explicitly sets it on for B/D scenarios.
+
+#### 3.6.5 Heartbeat metric ingestion (Rust → Redis → Go → ClickHouse)
+
+Rust hub: on every incoming `HeartbeatData` (§4.6), after telemetry-decode, push a JSON record to Redis stream `events:aether_heartbeat`:
+
+```json
+{
+  "node_id": "aether-node-1",
+  "heartbeat_session_id": "12345-1718500000000",
+  "heartbeat_id": 42,
+  "received_at_ms": 1718500000123,
+  "active_connections": 17,
+  "total_requests": 12340,
+  "avg_latency_ms": 53.7,
+  "failed_requests": 4,
+  "dns_failures": 0,
+  "stream_errors": 1,
+  "proxy_version": "1.4.2"
+}
+```
+
+Field flattening intentionally matches the on-wire schema (§4.6) plus the synthesized `received_at_ms` and `proxy_version` (extracted from `proxy_metadata`).
+
+Go side `modules/monitoring`: a new `aether-heartbeat-sink` worker (housed in `binaries/worker-monitoring` or as a goroutine in the existing monitoring worker — TBD by Go team) consumes the stream and writes rows to ClickHouse table `aether_heartbeat_samples` (mirrors the existing `gateway_runtime_samples` shape but with the Aether metric set). Existing Go monitoring admin APIs gain a new endpoint `GET /api/admin/monitoring/aether/{node_id}` returning a 1h window of these rows.
+
+Redis stream config: max length 50k entries (XADD with MAXLEN ~), so the queue is bounded if the consumer falls behind.
+
+#### 3.6.6 GatewayControl semantics for Aether nodes
+
+The existing `reload-config`, `cooldown-key`, `clear-cooldown`, `clear-cache` commands target the Cnexus gateway process. They are not understood by `aether-proxy`. Spec posture:
+
+- All four commands explicitly **no-op for Aether nodes**: the Rust hub's command dispatcher checks `protocol_kind` on the resolved node and short-circuits with an ack carrying `{status: "skipped", reason: "aether_node_does_not_support_command"}`.
+- Future work (out of scope here): if Aether's `remote_config` reverse-push is ever implemented, a new command kind `aether-remote-config` can map onto it.
+- The Go side admin UI surfaces this by graying out the four buttons for Aether nodes and showing a tooltip "Aether nodes do not accept GatewayControl commands".
+
+#### 3.6.7 Frontend UI
+
+The AILinkMax-Go frontend gains:
+
+- A `Protocol` column in the proxy nodes table (badge: blue=cnexus, purple=aether).
+- A `Protocol` radio in the create/edit form, default `cnexus`.
+- An "Aether status" detail panel showing the latest sampled metrics from `aether_heartbeat_samples` for the past 1h.
+
+UI changes are tracked in the AILinkMax-Go repo's PR list, not enumerated here. This spec's commitment is the API contract above.
+
+#### 3.6.8 Cross-repo PR coordination
+
+Order of landing across the two repos:
+
+1. AILinkMax-Go: add `protocol` field to entity (forward-compatible with current Rust — defaults to `cnexus` on Rust side). Add `auto-provision` flag (off). Land.
+2. Cnexus Rust: §3 + §4 + §5 work. Land. Until step 3, the registration endpoint does not exist — that's OK because no aether-proxy is configured yet.
+3. AILinkMax-Go: add registration endpoint + heartbeat ingester. Land.
+4. AILinkMax-Go: admin API + frontend UI. Land.
+5. Operations: provision one aether-proxy in staging; run tunnel-e2e suite locally.
+
+This sequence keeps each step deployable in isolation.
+
+### 3.7 End-to-End Flow
 
 ```
 upstream_peer filter selects node_id by routing
@@ -349,8 +531,10 @@ crates/gw-tunnel-client/src/
 
 ### 4.2 `aether/frame.rs`
 
+Byte order is **big-endian** throughout. This is the network byte order Aether uses on the wire (proxy: `aether-proxy/src/tunnel/protocol.rs:46,103`; hub: `aether-hub/src/protocol.rs:89,105`). Writing little-endian here would silently produce garbage that decodes to bogus stream IDs.
+
 ```rust
-// 10-byte LE header: stream_id (4) | msg_type (1) | flags (1) | payload_len (4)
+// 10-byte BIG-endian header: stream_id (4) | msg_type (1) | flags (1) | payload_len (4)
 pub const HEADER_SIZE: usize = 10;
 
 #[repr(u8)]
@@ -361,7 +545,7 @@ pub enum MsgType {
     ResponseHeaders = 0x03,
     ResponseBody    = 0x04,
     StreamEnd       = 0x05,
-    StreamError     = 0x06,
+    StreamError     = 0x06,  // bidirectional: client can cancel, server can signal upstream error
     Ping            = 0x10,
     Pong            = 0x11,
     GoAway          = 0x12,
@@ -385,27 +569,42 @@ pub struct Frame {
 
 impl Frame {
     pub fn encode(&self, dst: &mut bytes::BytesMut) {
-        // put_u32_le(stream_id), put_u8(msg_type), put_u8(flags),
-        // put_u32_le(payload.len()), put_slice(payload)
+        use bytes::BufMut;
+        dst.put_u32(self.stream_id);                          // BE
+        dst.put_u8(self.msg_type as u8);
+        dst.put_u8(self.flags);
+        dst.put_u32(self.payload.len() as u32);               // BE
+        dst.put_slice(&self.payload);
     }
+
     pub fn decode(src: &mut std::io::Cursor<&[u8]>) -> Result<Option<Self>, FrameError> {
-        // peek 10 bytes; bail with None if short; otherwise consume and yield Frame
+        // Peek 10 bytes for header; bail with None if short.
+        // Read stream_id, msg_type, flags, payload_len using u32::from_be_bytes / get_u32.
+        // If src has < HEADER_SIZE + payload_len remaining, restore cursor and return None.
+        // Otherwise consume the frame and yield it.
+        unimplemented!("see Cargo doc comment for sketch")
     }
 }
 ```
 
-The byte layout mirrors `aether-proxy/src/tunnel/protocol.rs` exactly. Before implementing, Phase 2 starts with a fixture-capture pass: run a throwaway client against a real `aether-proxy` container, dump hex of one `RequestHeaders` + one `ResponseHeaders` + one `HeartbeatData` frame, save to `crates/gw-tunnel-client/tests/fixtures/aether/`. Encoder roundtrip tests reference these fixtures so any drift breaks the build.
+Stream-id 0 is reserved for control frames (Ping/Pong, HeartbeatData/HeartbeatAck, GoAway). Stream IDs 2, 4, 6, ... are hub-initiated (Cnexus hub plays the hub role). The proxy never initiates a new stream; it only responds within streams the hub opened (`aether-hub/src/proxy_conn.rs:104,128-133`).
+
+The byte layout mirrors `aether-proxy/src/tunnel/protocol.rs` exactly. Before implementing, Phase 2 starts with a fixture-capture pass: stand up a one-shot `aether-proxy` container pointing at a localhost listener, dump hex of one `RequestHeaders` + one `RequestBody` + one `ResponseHeaders` + one `ResponseBody` + one `HeartbeatData` + one `HeartbeatAck` frame, save to `crates/gw-tunnel-client/tests/fixtures/aether/`. Encoder roundtrip tests reference these fixtures so any drift breaks the build.
+
+Stream-id parity is captured in fixtures too, so the eventual `next_stream_id: AtomicU32::new(2)` initialization (matching `aether-hub/src/proxy_conn.rs:104`) is verified rather than assumed.
 
 ### 4.3 `aether/meta.rs`
 
 ```rust
+fn default_timeout() -> u64 { 60 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestMeta {
     pub method: String,
     pub url: String,
     pub headers: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    pub timeout: Option<u64>,
+    #[serde(default = "default_timeout", deserialize_with = "deserialize_timeout")]
+    pub timeout: u64,             // seconds; Aether clamps to [5, 300]
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -413,9 +612,22 @@ pub struct ResponseMeta {
     pub status: u16,
     pub headers: Vec<(String, String)>,
 }
+
+// Matches aether-proxy/src/tunnel/protocol.rs:155-183: accept integers or
+// integer-valued floats (e.g. 15.0 -> 15u64).
+fn deserialize_timeout<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    /* dispatch on Value::U64 / Value::F64 -> u64; reject negative/NaN/Inf */
+    unimplemented!()
+}
 ```
 
-Header container type asymmetry (request = `HashMap`, response = `Vec`) reflects Aether's wire-level decision: response headers may repeat (`Set-Cookie`), request headers in Aether's model do not. Preserving this asymmetry is a wire-compatibility requirement.
+Three traits to preserve byte-for-byte:
+
+- `timeout` is a **non-optional `u64`** (not `Option<u64>`), default `60`, units **seconds**. Aether proxy uses `meta.timeout.clamp(5, 300)` then `Duration::from_secs(...)` (`stream_handler.rs:161`, `local_relay.rs:154`). Serializing `null` here would cause the proxy to reject the frame.
+- `RequestMeta.headers` is `HashMap<String, String>` (single-valued); the Aether request model loses multi-value request headers like `Set-Cookie`-in-requests by design.
+- `ResponseMeta.headers` is `Vec<(String, String)>` preserving order and multi-values (notably response `Set-Cookie`). Both `aether-proxy/src/tunnel/stream_handler.rs:251-255` and `aether-hub/src/local_relay.rs:235-245` push entries one by one without deduping.
+
+The `ResponseMeta` carries **no `reason_phrase`** field. Both Aether and Cnexus drop the upstream's custom reason and synthesize one from `http::StatusCode::canonical_reason()` when serializing back to HTTP/1.1.
 
 ### 4.4 `aether/transport.rs`
 
@@ -498,7 +710,7 @@ Stream ID allocation: in Aether's convention the **hub** (which initiates stream
 - `ResponseBody` → forward bytes to `body_tx_response` mpsc (decompressing first if `GZIP_COMPRESSED` flag set).
 - `StreamEnd` → close mpsc, remove slot.
 - `StreamError` → translate to `TransportError`, propagate so bridge writes a 502 back to Pingora.
-- `GoAway` → mark transport as draining; existing streams complete; new `open_stream` calls fail until reconnect.
+- `GoAway` → **immediate close**, matching Aether semantics. Hub sends it to signal "I am going away; do not send more frames" then calls `request_close` (`aether-hub/src/proxy_conn.rs:110-113`). Proxy on receipt breaks its read loop (`aether-proxy/src/tunnel/dispatcher.rs:204-206`). No graceful drain on either side. In-flight streams that have not produced `StreamEnd` propagate as a 502 to Pingora upstream callers.
 
 ### 4.5 `aether/http_adapter.rs`
 
@@ -581,39 +793,63 @@ Bounds and assumptions:
 
 Direction reminder: in Aether's protocol, the **proxy** sends `HeartbeatData` and the **hub** replies with `HeartbeatAck`. Cnexus hub plays the hub role, so we *receive* `HeartbeatData` and *send* `HeartbeatAck`.
 
+`HeartbeatData` (decoded from inbound; field layout mirrors `aether-proxy/src/tunnel/heartbeat.rs:233-248`):
+
 ```rust
 #[derive(Deserialize)]
 struct HeartbeatData {
     node_id: String,
     heartbeat_session_id: String,
     heartbeat_id: u64,
-    sent_at_ms: u64,
     active_connections: u32,
+    // Five metrics counters live as TOP-LEVEL fields, not nested:
+    total_requests: u64,
+    avg_latency_ms: f64,
+    failed_requests: u64,
+    dns_failures: u64,
+    stream_errors: u64,
+    // proxy_metadata is the only nested object and only contains version:
     proxy_metadata: ProxyMetadata,
-    metrics: HeartbeatMetrics, // exact field list mirrored from Aether source
 }
 
-#[derive(Serialize, Default)]
-struct HeartbeatAck {
-    heartbeat_id: u64,
-    received_at_ms: u64,
-    // Reverse-push fields intentionally omitted from our serialized ACK.
-    // Field-presence remains tolerant on the wire because the proxy decodes with
-    // `#[serde(default)]` semantics; this is the explicit "do not reverse-push"
-    // contract from §1.2.
+#[derive(Deserialize)]
+struct ProxyMetadata {
+    version: String,
 }
 ```
 
-- We never populate `remote_config` or `upgrade_to` in outgoing ACKs.
-- Inbound `HeartbeatData` payloads are decoded for telemetry only (emitted via `tracing::debug!`); the transport itself uses arrival time, not payload metrics, for liveness.
-- Heartbeat cadence is driven by the proxy. Liveness is declared dead after `cfg.missed_heartbeat_threshold` consecutive `cfg.heartbeat_interval` windows pass with no `HeartbeatData` (defaults: threshold 3, interval 30s — i.e. ~90s of silence).
-- Field list (`metrics`, `proxy_metadata`) is captured from Aether source at Phase 2 start and pinned to a JSON fixture under `crates/gw-tunnel-client/tests/fixtures/aether/heartbeat.json`. Any field rename in Aether breaks the fixture roundtrip test before it reaches a container.
+Notably absent: `sent_at_ms` (not on the wire), no nested `metrics: {...}` object, no `proxy_metadata.region` / `proxy_metadata.public_ip` (they live elsewhere, not in heartbeat).
+
+`HeartbeatAck` (encoded; field layout intentionally minimal):
+
+```rust
+#[derive(Serialize, Default)]
+struct HeartbeatAck {
+    // Option per aether-proxy/src/tunnel/heartbeat.rs:260-268 (`#[serde(default)]`),
+    // so the proxy tolerates absence; emitting it is still correct and easier to debug.
+    heartbeat_id: Option<u64>,
+
+    // Reverse-push fields intentionally omitted. The proxy's AckPayload decoder
+    // also marks `remote_config` and `upgrade_to` as `#[serde(default)]`, so
+    // their absence is non-fatal.
+}
+```
+
+Wire-compatibility checks:
+
+- We populate `heartbeat_id` from the received `HeartbeatData.heartbeat_id` so the proxy can correlate.
+- We never populate `remote_config` or `upgrade_to`.
+- Inbound `HeartbeatData` payloads are decoded for telemetry **and pushed to the Redis stream `events:aether_heartbeat`** for Go-side monitoring ingestion (see §3.7).
+- Liveness is judged from `HeartbeatData` arrival time alone, not payload metrics: dead after `cfg.missed_heartbeat_threshold` consecutive `cfg.heartbeat_interval` windows pass without any `HeartbeatData`. Defaults (matching `aether-proxy/src/config.rs:65` and Aether hub's broader `tunnel_stale_timeout_secs = 300`): interval 30s, threshold 3 → ~90s of silence. The Aether hub's own 300s stale timeout is a wider net that covers any kind of frame silence; Cnexus narrows to heartbeat-only because that's the dominant idle traffic.
+- The exact field list above is verified at Phase 2 start by capturing one real `HeartbeatData` JSON into `crates/gw-tunnel-client/tests/fixtures/aether/heartbeat_data.json`. Any rename in Aether breaks the fixture roundtrip test before it reaches a container.
+- `heartbeat_session_id` is generated **once** at proxy startup (format `"{pid}-{nanos_since_epoch}"`, `aether-proxy/src/tunnel/heartbeat.rs:80-88`); restart → new session id. Cnexus hub stores the latest seen session id per node so an unexpected change tells operators the proxy restarted.
 
 ### 4.7 `aether/gzip.rs`
 
 ```rust
 pub fn maybe_compress(payload: bytes::Bytes) -> (bytes::Bytes, bool) {
     if payload.len() < 512 { return (payload, false); }
+    // aether-hub/src/protocol.rs:168 uses Compression::default(); we match it.
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     if enc.write_all(&payload).is_err() { return (payload, false); }
     match enc.finish() {
@@ -631,7 +867,12 @@ pub fn decompress(payload: &[u8]) -> Result<bytes::Bytes, std::io::Error> {
 }
 ```
 
-Compression is opportunistic: ≥ 512 bytes payload + actual size reduction. Applied to outbound `RequestBody`; honored on inbound `ResponseBody` when `GZIP_COMPRESSED` flag is set.
+Compression scope:
+
+- **Outbound** (hub → proxy): both `RequestHeaders` (JSON meta serialization) and `RequestBody` (each chunk independently). `Compression::default()` matches `aether-hub/src/protocol.rs:168`.
+- **Inbound** (proxy → hub): the proxy may set `GZIP_COMPRESSED` on `ResponseHeaders` and `ResponseBody` frames. Note the proxy internally uses `Compression::fast()` (`aether-proxy/src/tunnel/protocol.rs:237`) for encode; the difference is irrelevant on the decode side since gzip is self-describing.
+- The 512-byte threshold is per-frame, not cumulative. Sub-512 payloads ship plain, even if a series of small chunks would benefit from compression.
+- Skipped when `enc.finish()` yields a no-savings result (compressed ≥ original).
 
 ## 5. Decoupling Discipline
 
@@ -764,6 +1005,7 @@ tests/tunnel-e2e/
 ├── docker-compose.yml
 ├── Dockerfile.aether-proxy
 ├── Dockerfile.aether-hub
+├── edge.nginx.conf            (path-routes Aether-proxy traffic to Go vs Rust)
 ├── requirements.txt
 ├── pytest.ini
 ├── conftest.py
@@ -779,9 +1021,35 @@ tests/tunnel-e2e/
 ├── support/
 │   ├── aether_admin.py
 │   ├── http_helpers.py
+│   ├── wait_for_aether_attach.py
 │   └── docker_helpers.py     (kill/start helpers for failover scenarios)
 └── aether-src/                (git submodule -> Aether repo)
 ```
+
+`edge.nginx.conf` (referenced by the `edge` service in §6.3 compose):
+
+```nginx
+server {
+  listen 80;
+  # Aether proxy hits POST /api/admin/proxy-nodes/register first → Go.
+  location /api/admin/proxy-nodes/ {
+    proxy_pass http://ailinkmax-go-web:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
+  # Then WS upgrade at /api/internal/proxy-tunnel → Rust gateway.
+  location /api/internal/proxy-tunnel {
+    proxy_pass http://ali-gateway:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+  }
+}
+```
+
+In production this routing is the operator's existing reverse proxy (nginx / Traefik / Envoy). The compose service exists so tunnel-e2e can validate the contract.
 
 `.gitmodules`:
 
@@ -870,22 +1138,48 @@ services:
     networks: [tunnel-net]
     expose: ["7000"]
 
-  # In the compatibility scenarios (B), this proxy dials INTO ali-gateway.
-  # In the baseline scenario (C), an additional aether-proxy-baseline instance
-  # below dials into aether-hub to keep the two test surfaces independent.
+  # AILinkMax-Go web binary — serves /api/admin/proxy-nodes/* including the new
+  # /register endpoint per §3.6.1. Path-routed in front of ali-gateway via nginx.
+  ailinkmax-go-web:
+    build:
+      context: ../../../AILinkMax-Go
+      dockerfile: Dockerfile
+      target: web
+    environment:
+      DATABASE_URL: postgres://postgres:e2e@postgres:5432/cnexus
+      REDIS_URL: redis://redis:6379/0
+      AETHER_AUTO_PROVISION: "true"     # tunnel-e2e convenience; prod-default off
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks: [tunnel-net]
+    expose: ["8080"]
+
+  # Path-router: aether-proxy uses ONE base URL (AETHER_PROXY_AETHER_URL),
+  # but registration goes to Go and WS goes to Rust. nginx splits them.
+  edge:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./edge.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      ali-gateway:      { condition: service_started }
+      ailinkmax-go-web: { condition: service_started }
+    networks: [tunnel-net]
+    expose: ["80"]
+
+  # Compatibility (B/D) — proxy dials INTO edge, which routes to ali-gateway / go-web.
   aether-proxy:
     build:
       context: .
       dockerfile: Dockerfile.aether-proxy
     environment:
-      AETHER_PROXY_AETHER_URL: ws://ali-gateway:8000
-      AETHER_PROXY_MANAGEMENT_TOKEN: e2e-aether-mgmt
+      AETHER_PROXY_AETHER_URL: ws://edge:80
+      AETHER_PROXY_MANAGEMENT_TOKEN: ae_e2e_compat
       AETHER_PROXY_NODE_NAME: aether-node-01
-      AETHER_PROXY_NODE_ID: aether-node-1
       AETHER_PROXY_ALLOWED_PORTS: "9000,9443"
     networks: [tunnel-net]
     depends_on:
-      ali-gateway:
+      edge:
         condition: service_started
 
   # Baseline (C) — proves the Aether images themselves work; dials its own hub.
@@ -895,7 +1189,7 @@ services:
       dockerfile: Dockerfile.aether-proxy
     environment:
       AETHER_PROXY_AETHER_URL: ws://aether-hub:8001
-      AETHER_PROXY_MANAGEMENT_TOKEN: e2e-aether-mgmt
+      AETHER_PROXY_MANAGEMENT_TOKEN: ae_e2e_baseline
       AETHER_PROXY_NODE_NAME: aether-baseline-01
       AETHER_PROXY_ALLOWED_PORTS: "9000,9443"
     networks: [tunnel-net]
@@ -990,20 +1284,20 @@ Scenario examples:
 
 ```python
 def test_aether_simple_get(seed_nodes, gateway_client, wait_for_aether_attach):
-    # node row pre-registers the proxy so InboundListener accepts its inbound auth.
-    # ws_url is informational only for Aether (connection direction is reversed —
-    # the proxy dials INTO the hub at /api/internal/proxy-tunnel).
+    # Pre-create the row so Go-side /register can authenticate by management token
+    # and return this row's id. ws_url is informational for Aether (the proxy
+    # dials INTO edge → /api/internal/proxy-tunnel → Rust gateway).
     seed_nodes({
         "id": "aether-node-1",
-        "ws_url": "ws://ali-gateway:8000/api/internal/proxy-tunnel",
-        "auth_token_enc": encrypt_for_test("e2e-aether-mgmt"),
+        "ws_url": "ws://edge:80/api/internal/proxy-tunnel",
+        "auth_token_enc": encrypt_for_test("ae_e2e_compat"),
         "protocol": "aether",
         "enabled": True,
         "allowed_provider_ids": ["fake"],
         "allowed_vendor_key_ids": ["fake-key"],
     })
-    # wait_for_aether_attach polls /healthz/tunnel until aether-proxy has dialed in.
-    wait_for_aether_attach("aether-node-1", timeout_s=10)
+    # wait_for_aether_attach polls /healthz/tunnel until the per-node `present=true`.
+    wait_for_aether_attach("aether-node-1", timeout_s=15)
     resp = gateway_client.get("/v1/proxy/fake/echo?via=tunnel")
     assert resp.status_code == 200
 ```
@@ -1075,7 +1369,11 @@ By explicit design decision, `make tunnel-e2e` is **not** wired into CI. Existin
 
 Goal: `make tunnel-e2e` passes the 3 cases in `test_cnexus_protocol.py`. No protocol divergence yet.
 
-Change set:
+Companion Go work (parallel cross-repo, lands first per §3.6.8):
+
+- **G1 (lands before any Rust phase-2 work)**: AILinkMax-Go adds `Protocol string` to the proxynode entity and accepts it in admin APIs. Default `"cnexus"` so all existing rows remain valid. The Rust side does not need this yet; G1 just unblocks Phase 2 entry.
+
+Change set (Cnexus Rust):
 
 - Reorganize `gw-tunnel-client` so existing transport logic lives under `cnexus/`. Public re-exports preserve backwards-compatible call sites.
 - Add migration `0011_proxy_nodes_protocol.sql`.
@@ -1106,7 +1404,12 @@ PR breakdown:
 
 Goal: `make tunnel-e2e` passes 12 cases (3 cnexus + 8 aether compat + 1 aether baseline).
 
-Change set:
+Companion Go work:
+
+- **G2 (must land before Phase 2 PR-2d)**: AILinkMax-Go adds `POST /api/admin/proxy-nodes/register` + `aether_register.go` per §3.6.1. The tunnel-e2e suite cannot bring up `aether-proxy` without it. Includes the Go web binary in compose.
+- **G3 (can land in parallel with PR-2d or just after)**: heartbeat Redis stream consumer + ClickHouse table + monitoring API per §3.6.5.
+
+Change set (Cnexus Rust):
 
 - Full `aether/` subtree under `gw-tunnel-client/src/`: `frame.rs`, `meta.rs`, `transport.rs` (with `attach` not `connect`), `heartbeat.rs`, `gzip.rs`, `http_adapter.rs`, `listener.rs`.
 - `gw-tunnel-client` introduces a `ProxyNodeRegistry` trait that `gw-proxy::tunnel_stack` implements; this keeps the listener decoupled from `gw-store`.
@@ -1121,11 +1424,12 @@ Change set:
 - Add `test_aether_compat.py` (8 cases), `test_aether_baseline.py` (1 case), `support/aether_admin.py`, `support/wait_for_aether_attach` helper.
 - Capture Aether wire fixtures: connect to real `aether-proxy` once (via a one-shot listener), save hex dumps under `crates/gw-tunnel-client/tests/fixtures/aether/`.
 
-Risk-bound PR breakdown:
+Risk-bound PR breakdown (per audit recommendation, PR-2c is split to keep blast radius small):
 
 - **PR 2a**: Structural refactor — `trait Transport`, `AnyTransport`, `StreamTarget`, `gw-proxy` view changes — **with only `cnexus::` implementation**. Behavior identical to Phase 1. All existing tests green. This isolates the structural blast radius.
 - **PR 2b**: `aether/` implementation + unit tests + Aether fixture roundtrips. No bridge changes yet (Aether path unreachable from the bridge in this PR).
-- **PR 2c**: Bridge branching + Dockerfiles + compose extension + Aether scenarios.
+- **PR 2c**: Bridge branching + `InboundListener` + new gateway route `/api/internal/proxy-tunnel` + `/healthz/tunnel` per-node schema + SIGTERM drain + config keys. Pure backend wiring; the new route exists but no e2e suite exercises it yet (covered by Rust integration tests against a mock Aether client).
+- **PR 2d**: tunnel-e2e Dockerfiles + compose extension (adds `aether-proxy`, `aether-proxy-baseline`, `aether-hub`, AILinkMax-Go web binary, nginx path-router — see §6.3) + Aether scenarios + `support/aether_admin.py` + `support/wait_for_aether_attach`. Lands only after G2.
 
 Verification:
 
@@ -1137,7 +1441,12 @@ Verification:
 
 Goal: `make tunnel-e2e` passes 15 cases; `make check-tunnel-deps` reports 0 violations; documentation is current.
 
-Change set:
+Companion Go work:
+
+- **G3 (lands during or just after Rust PR-2d)**: heartbeat consumer + ClickHouse schema + monitoring API per §3.6.5.
+- **G4 (after Phase 3)**: admin UI frontend changes per §3.6.7. Not strictly required for `make tunnel-e2e` (tests hit JSON APIs), but required for human operators.
+
+Change set (Cnexus Rust):
 
 - `test_mixed_pool.py` (3 cases): load distribution, failover, no-corruption.
 - `support/docker_helpers.py`: docker.sock-mediated `kill_service` / `start_service` helpers for failover.
@@ -1250,10 +1559,16 @@ No automation enforces this; it is a checklist item in the MR template (the repo
 | `gw-codec` has hidden business coupling | low | dep-boundary false alarm | Phase 1 audit (§5.4) runs `cargo tree`; narrow whitelist to `gw-core` only if audit reveals coupling |
 | Aether submodule URL requires credentials new contributors lack | medium | fresh clones blocked on submodule init | `update = none` in `.gitmodules`; `make tunnel-e2e-deps` opt-in; documented in README |
 | `pytest-runner` failover scenarios need docker.sock | medium | privilege concern | Document explicitly in README; failover suite is local-only by design (no CI = no production risk) |
-| Aether heartbeat schema includes undocumented required fields | medium | Phase 2 B7 fails | Capture heartbeat fixture early; serde misses report missing field name, fail-fast |
-| `aether-proxy` rejects the Cnexus hub's HeartbeatAck (e.g. expects `remote_config` key present) | medium | proxy disconnects in B7 | If observed during fixture capture, emit an empty `remote_config: {}` rather than omit. Tracked as an Open Item to resolve at Phase 2 start |
+| Aether heartbeat schema differs from initial estimate | medium | Phase 2 B7 fails | Captured wire fixture in PR-2b; serde mismatch fail-fast. Verified field list in §4.6 already matches audit findings |
+| `aether-proxy` rejects ACK with absent `remote_config` | low | proxy disconnects in B7 | `AckPayload` decoder uses `#[serde(default)]` for both `remote_config` and `upgrade_to` (confirmed via audit); empty ACK is safe |
 | `/api/internal/proxy-tunnel` shared on existing axum port (8000) introduces auth surface | low | misconfigured admin token leak | Bearer enforcement is per-node-token (`auth_token_enc` lookup), independent from the admin token; verify in PR 2c review |
 | `tunnel_refresher` for Aether nodes that have never dialed in reports them as "registered but absent" | low | user confusion when reading `/healthz/tunnel` | health endpoint distinguishes `present=false` (proxy never dialed) from `alive=false` (dialed but stale heartbeat); documented in README |
+| Go register endpoint not deployed before Aether proxy provisioned in prod | high | proxy stuck in registration retry loop | §3.6.8 sequence: G1 lands first, G2 lands before any Aether proxy is started in prod; runbook documents the order |
+| Auto-provision flag toggled on in prod by mistake | medium | bad token creates spurious nodes | default off in `AETHER_AUTO_PROVISION`; tunnel-e2e is the only path that flips it on; alert on any new `proxy_nodes` row created via register endpoint |
+| Edge reverse-proxy timeout drops long-lived WS | medium | proxy reconnect storm | `proxy_read_timeout 3600s` baked into `edge.nginx.conf`; production deployments document the same requirement for their nginx/envoy |
+| Heartbeat Redis stream backlog grows when Go consumer is down | low | memory pressure on Redis | XADD uses `MAXLEN ~ 50000`; documented in §3.6.5 |
+| macOS Docker Desktop docker.sock latency disrupts failover scenarios | low | flaky D2 locally | README notes "Docker Desktop ≥ 4.x; on macOS allow extra timeout slack via `TUNNEL_E2E_FAILOVER_SLACK_MS=2000`" |
+| Frame-level trace logs grow huge under mixed-pool stress | medium | local disk fills | per-frame logs default to `trace` (off); README warns and provides `RUST_LOG=gw_tunnel_client=debug` recipe |
 
 ### 9.2 Open Items (deferred to implementation plan, not blocking)
 
@@ -1279,6 +1594,10 @@ No automation enforces this; it is a checklist item in the MR template (the repo
   - `aether-proxy` (Aether protocol): **does not listen**; dials out to the hub at `/api/internal/proxy-tunnel`.
 - **hub** — `gw-gateway` running locally / centrally. Plays both an outbound WS-client role (to Cnexus nodes) and an inbound WS-server role (for Aether nodes) over the same `axum` HTTP port.
 - **`InboundListener`** — the hub-side service that accepts inbound Aether WS upgrades, validates Bearer + `X-Node-Id`, and registers the resulting transport into `tunnel_stack`.
+- **edge router** — in production an existing reverse proxy (nginx/Traefik/Envoy); in tunnel-e2e a dedicated nginx container. Path-splits the Aether proxy's single `AETHER_PROXY_AETHER_URL` between the Go register endpoint and the Rust WS endpoint.
+- **`events:aether_heartbeat`** — Redis stream the Rust hub pushes per HeartbeatData; the Go monitoring sink consumes and persists to ClickHouse. Bounded at 50k entries via `MAXLEN ~`.
+- **`ae_` prefix** — Aether management token convention. Used by Go register endpoint to discriminate Aether-protocol auth from admin-token auth on the same DB.
+- **G1 / G2 / G3 / G4** — milestones in the AILinkMax-Go repo (§3.6.8 cross-repo coordination). G1: entity `Protocol` field; G2: register endpoint; G3: heartbeat ingest + monitoring API; G4: frontend UI.
 - **`protocol_kind`** — discriminator on a `ProxyNode` selecting which wire protocol to use. Values: `cnexus` (default), `aether`.
 - **`StreamTarget`** — request to the transport layer to open a stream. Two variants: `Tcp` (Cnexus) and `Http` (Aether).
 - **`AnyTransport`** — enum that holds either `cnexus::WsTransport` or `aether::WsTransport`; implements `trait Transport` via delegation.
