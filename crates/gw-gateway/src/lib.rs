@@ -42,7 +42,6 @@ pub mod metrics_catalog;
 pub mod observability;
 pub mod quota_probe_transport;
 
-#[cfg(feature = "tunnel")]
 pub use gw_tunnel_client;
 
 use anyhow::Context;
@@ -101,9 +100,7 @@ struct Wired {
     /// Capability resolver (T3-C). `None` until wired.
     capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
     /// TunnelStack (T5-B). `Some` iff `cfg.tunnel.enabled = true`.
-    #[cfg(feature = "tunnel")]
     tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
-    #[cfg(feature = "tunnel")]
     _tunnel_bridge: Option<gw_proxy::tunnel_bridge::TunnelBridgeHandle>,
     /// Management-token blacklist + JWT blacklist (T3-Pre wiring). Threaded
     /// through `LlmGateway`'s request filter and the admin `/healthz/*`
@@ -359,7 +356,6 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.capability_resolver,
                 wired.mgmt_blacklist,
                 wired.resilience,
-                #[cfg(feature = "tunnel")]
                 wired.tunnel,
                 wired.egress,
                 wired.egress_disabled,
@@ -705,7 +701,6 @@ async fn bootstrap(
         kek: kek_cache,
     };
     let oauth_kek = loader.kek.clone();
-    #[cfg(feature = "tunnel")]
     let tunnel_kek = loader.kek.clone();
     let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
         &cfg.adaptive_rpm,
@@ -1208,13 +1203,10 @@ async fn bootstrap(
     // T5 / ADR-T-2 — Build TunnelStack iff `cfg.tunnel.enabled`. Skipping the
     // entire stack on `false` keeps the byte-identical Direct path: pick_peer
     // sees `tunnel = None` and never branches.
-    #[cfg(feature = "tunnel")]
     let mut tunnel_bridge: Option<gw_proxy::tunnel_bridge::TunnelBridgeHandle> = None;
 
-    #[cfg(feature = "tunnel")]
     let mut tunnel_refresher_unhealthy: Option<Arc<std::sync::atomic::AtomicBool>> = None;
 
-    #[cfg(feature = "tunnel")]
     let tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>> = if cfg.tunnel.enabled {
         use gw_tunnel_client::pool::PoolConfig;
         use gw_tunnel_client::resolver::ProxyNodeView;
@@ -1448,7 +1440,6 @@ async fn bootstrap(
         resilience: resilience.clone(),
         latency_tracker: latency_tracker.clone(),
         tunnel_enabled: cfg.tunnel.enabled,
-        #[cfg(feature = "tunnel")]
         tunnel_stack: tunnel.clone(),
     };
     let health_store = store.clone();
@@ -1503,10 +1494,8 @@ async fn bootstrap(
     // gw-ledger / gw-task-worker / gw-egress-impersonate do not expose their
     // flags externally yet. T3.5+ refactor can revisit to unify all flags.
     let unhealthy_flags: Vec<Arc<std::sync::atomic::AtomicBool>> = {
-        #[cfg_attr(not(feature = "tunnel"), allow(unused_mut))]
         let mut v: Vec<Arc<std::sync::atomic::AtomicBool>> =
             vec![health_server_unhealthy, decay_unhealthy, ip_sweep_unhealthy];
-        #[cfg(feature = "tunnel")]
         if let Some(f) = tunnel_refresher_unhealthy {
             v.push(f);
         }
@@ -1586,9 +1575,7 @@ async fn bootstrap(
             )),
             affinity,
             capability_resolver,
-            #[cfg(feature = "tunnel")]
             tunnel,
-            #[cfg(feature = "tunnel")]
             _tunnel_bridge: tunnel_bridge,
             mgmt_blacklist,
             resilience,

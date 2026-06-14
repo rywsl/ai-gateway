@@ -90,11 +90,15 @@ SET gateway:instance:<id>:capability <json>   [无 TTL 或随心跳续]
   "cli_variants": ["claude:cli","openai:cli","openai:compact","gemini:cli","kiro:cli"],
   "routing_strategies": ["FixedOrder","RoundRobin","LoadBalance","WeightedRr",
                          "CostFirst","LatencyFirst","CacheAffinity","Sticky"],
-  "features": {"tunnel": false, "egress_impersonate": true, "credit_lease": true,
+  "features": {"tunnel": true, "egress_impersonate": true, "credit_lease": true,
                "detailed_log": true, "task_worker": false},
   "impersonate_identities": ["claude_code_chrome131","openai_codex","gemini_cli"]
 }
 ```
+Since 2026-06-15, `features.tunnel` is always emitted as `true`. The field is
+retained in the contract for forward compatibility with Go consumers that may
+inspect it; new consumers should treat it as a constant.
+
 版本/feature 变(=新部署)才重写。
 
 ### 8.3.2 `:effective`(reload 事件写,闭环 SP-A)

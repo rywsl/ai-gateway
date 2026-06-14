@@ -1,9 +1,7 @@
 //! Ignored owned tunnel e2e tests.
 //!
 //! Run with:
-//! `cargo test -p gw-gateway --features tunnel --test e2e_tunnel -- --ignored --nocapture`
-
-#![cfg(feature = "tunnel")]
+//! `cargo test -p gw-gateway --test e2e_tunnel -- --ignored --nocapture`
 
 use bytes::Bytes;
 use gw_proxy::tunnel_stack::{TunnelPeerError, TunnelStack};

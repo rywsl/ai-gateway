@@ -82,7 +82,7 @@ No open roadmap items after W4 full IR task request/response persistence.
 
 ### Default artifact policy — `closed / as-built decision recorded`
 - **Intent:** decide whether tunnel remains a separate operator-selected artifact or compiles into the default release image after W8 delivered the bridge/e2e/split CI artifacts.
-- **Decision:** keep the split artifact policy. Default `latest` remains the non-tunnel image built with Cargo defaults (`default = []`), and `latest-tunnel` remains the opt-in image built with `--features tunnel`. Do not promote tunnel into default `latest`.
+- **Decision:** superseded by `docs/design/2026-06-15-tunnel-default-compile-decision.md`. Tunnel is now default-compiled into the single gateway image; `[tunnel].enabled` remains the runtime off-switch.
 - **Design points:** `docs/spec/09-tunnel.md` documents this as the as-built operator model: runtime tunnel use still requires both the tunnel-enabled artifact and `[tunnel].enabled = true`, while non-tunnel operators continue pulling `latest`.
 - **Source:** master program F3 resolved input; W8 implementation evidence; `docs/design/2026-06-10-tunnel-artifact-release-decision.md`.
 

@@ -36,7 +36,6 @@ async fn start_server() -> Option<(u16, tokio::task::JoinHandle<anyhow::Result<(
         resilience,
         latency_tracker: Arc::new(gw_routing::LatencyTracker::new()),
         tunnel_enabled: false,
-        #[cfg(feature = "tunnel")]
         tunnel_stack: None,
     };
     let phase_handle = gw_runtime::PhaseHandle::detached_for_test();

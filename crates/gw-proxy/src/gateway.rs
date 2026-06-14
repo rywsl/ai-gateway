@@ -366,10 +366,8 @@ pub struct LlmGateway {
     /// surface (T3-C) renders it via `ResilienceState::snapshot_json`.
     pub resilience: Arc<ResilienceState>,
     /// Tunnel decision stack (ADR-T-2). `None` ⇒ pick_peer always picks Direct,
-    /// behaviour byte-identical to pre-tunnel builds. Built under
-    /// `feature = "tunnel"` by `gw-gateway::bootstrap` only when
-    /// `cfg.tunnel.enabled = true`.
-    #[cfg(feature = "tunnel")]
+    /// behaviour byte-identical to pre-tunnel builds. Built by
+    /// `gw-gateway::bootstrap` only when `cfg.tunnel.enabled = true`.
     pub tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
     /// Egress impersonation handle (Phase 4). Holds the loopback listener bind
     /// (`EgressBind::Uds | Tcp`) that `pick_peer` points an `HttpPeer` at when
@@ -469,7 +467,7 @@ impl LlmGateway {
         capability_resolver: Option<Arc<gw_capability::resolver::CapabilityResolver>>,
         mgmt_blacklist: Arc<RedisJwtBlacklist>,
         resilience: Arc<ResilienceState>,
-        #[cfg(feature = "tunnel")] tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
+        tunnel: Option<Arc<crate::tunnel_stack::TunnelStack>>,
         egress: Arc<gw_egress_impersonate::EgressHandle>,
         egress_disabled: bool,
         identity_persist: Arc<gw_store::identity_persist::IdentityPersistQueue>,
@@ -527,7 +525,6 @@ impl LlmGateway {
             capability_resolver,
             mgmt_blacklist,
             resilience,
-            #[cfg(feature = "tunnel")]
             tunnel,
             egress,
             egress_disabled,
@@ -949,7 +946,6 @@ impl ProxyHttp for LlmGateway {
             &self.ratelimit,
             &self.egress,
             self.egress_disabled,
-            #[cfg(feature = "tunnel")]
             self.tunnel.as_ref(),
         )
         .await?;
