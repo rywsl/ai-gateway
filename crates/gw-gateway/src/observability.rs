@@ -53,5 +53,11 @@ fn init_metrics(cfg: &Config) -> anyhow::Result<()> {
 
     crate::metrics_catalog::describe_all();
 
+    // Page-on-call billing counters fire only on an incident, so without a boot
+    // zero-init they are absent from `/metrics` until the bad event — leaving the
+    // Go-side `billing-rules.yml` alerts pointed at an absent series. Materialize
+    // them at `0` so the alert rules always have a healthy baseline.
+    crate::metrics_catalog::zero_init_page_on_call();
+
     Ok(())
 }
