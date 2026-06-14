@@ -96,11 +96,11 @@ Both transports still implement the same `trait Transport` and present identical
 
 ### 2.3 Key Invariants
 
-- **Protocol divergence is sealed inside `gw-tunnel-client`.** Upstream code (`gw-proxy`, `gw-gateway`) selects a node and asks the transport layer to open a stream. The transport layer dispatches to the correct protocol implementation based on `protocol_kind` carried in the node view.
+- **Protocol divergence is sealed inside `gw-tunnel-client`.** Upstream code (`gw-proxy`, `gw-gateway`) selects a node and asks the transport layer to open a stream. The transport layer dispatches to the correct protocol implementation based on `tunnel_protocol` carried in the node view.
 - **Connection direction is also sealed inside `gw-tunnel-client`.** Outside callers do not know who initiated the WS; they only see a `Transport` trait object.
 - **`tunnel_bridge` learns about protocol kind only once**, when it looks up the transport handle by `node_id`. It then branches between two code paths:
-  - `protocol_kind=Cnexus`: forwards the loopback HTTP/1 byte stream as-is into a `StreamTarget::Tcp` (current behavior).
-  - `protocol_kind=Aether`: parses the loopback HTTP/1 stream with `httparse`, constructs a `StreamTarget::Http`, lets the transport translate it to Aether frames, and serializes the response back to HTTP/1 bytes for Pingora.
+  - `tunnel_protocol=Cnexus`: forwards the loopback HTTP/1 byte stream as-is into a `StreamTarget::Tcp` (current behavior).
+  - `tunnel_protocol=Aether`: parses the loopback HTTP/1 stream with `httparse`, constructs a `StreamTarget::Http`, lets the transport translate it to Aether frames, and serializes the response back to HTTP/1 bytes for Pingora.
 - **The `cnexus/` module is bit-compatible with the existing `gw-tunnel-server` wire protocol** (14-byte big-endian header with magic `[0xAE, 0x21]` + version + msg_type + flags + stream_id + length). No protocol change for existing nodes.
 - **The `aether/` module is bit-compatible with the Aether wire protocol** as observed in the Aether reference source: 10-byte **big-endian** header (matches `aether-proxy/src/tunnel/protocol.rs:46` `u32::from_be_bytes` and `aether-hub/src/protocol.rs:89` `BytesMut::put_u32`), `RequestMeta`/`ResponseMeta` JSON, gzip flag 0x02, Bearer-token WS upgrade auth at the App-layer path `/api/internal/proxy-tunnel` (which the Cnexus hub mounts directly; in Aether's deployment topology this path lives on the App layer that proxies to hub's `/proxy` internal route, but Cnexus collapses both layers).
 - **`aether::InboundListener` is the only new long-running service** the hub spawns. It is started by `gw-gateway` when at least one Aether-protocol node exists (or when `tunnel.aether_listener_enabled` config is true).
@@ -121,13 +121,13 @@ Both transports still implement the same `trait Transport` and present identical
 | `crates/gw-gateway/src/routes.rs` | new route `/api/internal/proxy-tunnel` → delegates to `aether::InboundListener::accept`; extends `/healthz/tunnel` with per-node `present/alive` schema (§3.5) | 2 |
 | `crates/gw-gateway` SIGTERM handler | drain Aether (GoAway + close) + Cnexus (skip-reconnect) + grace timeout | 2 |
 | `crates/gw-store/migrations/0011_proxy_nodes_protocol.sql` | backfill + partial index | 1 |
-| `crates/gw-store/src/entity/proxy_node.rs` | add `protocol: ProtocolKind` field | 1 |
+| `crates/gw-store/src/entity/proxy_node.rs` | add `protocol: TunnelProtocol` field | 1 |
 | `config/default.toml` | new `[tunnel.aether_listener]` section (`enabled`, `path`, `max_concurrent_connections`); new `tunnel.shutdown_grace_secs` | 2 |
 | `tests/tunnel-e2e/` | full new directory | 1 + 2 + 3 |
 | `Makefile` | `tunnel-e2e` / `tunnel-e2e-up` / `tunnel-e2e-down` / `tunnel-e2e-logs` / `check-tunnel-deps` targets | 1 + 3 |
 | `scripts/check-tunnel-deps.sh` | dep-boundary enforcement (shell + jq) | 3 |
 | `.gitmodules` | `tests/tunnel-e2e/aether-src` → `https://gitlab.ailinkmax.com/ailinkmax/Aether` | 1 |
-| `docs/spec/09-tunnel.md` | new sections: `protocol_kind`, Aether compatibility, dep boundary | 3 |
+| `docs/spec/09-tunnel.md` | new sections: `tunnel_protocol`, Aether compatibility, dep boundary | 3 |
 | `tests/tunnel-e2e/README.md` | new — usage, scenario catalog, failure-mode guide | 3 |
 
 **AILinkMax-Go repo (parallel, cross-repo PRs — coordinated per §3.6.8):**
@@ -190,12 +190,12 @@ The Cnexus-side migration runs independently and is forward-compatible with old 
 ```rust
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ProtocolKind {
+pub enum TunnelProtocol {
     Cnexus,
     Aether,
 }
 
-impl Default for ProtocolKind {
+impl Default for TunnelProtocol {
     fn default() -> Self { Self::Cnexus }
 }
 
@@ -203,11 +203,11 @@ impl Default for ProtocolKind {
 pub struct ProxyNodePayload {
     // ... existing fields
     #[serde(default)]
-    pub protocol: ProtocolKind,
+    pub protocol: TunnelProtocol,
 }
 ```
 
-`crates/gw-proxy/src/tunnel_stack.rs` adds `protocol: ProtocolKind` to `ProxyNodeView`. `tunnel_refresher` propagates the field from payload into the view.
+`crates/gw-proxy/src/tunnel_stack.rs` adds `protocol: TunnelProtocol` to `ProxyNodeView`. `tunnel_refresher` propagates the field from payload into the view.
 
 ### 3.3 `StreamTarget` Two-Variant Enum
 
@@ -249,7 +249,7 @@ pub trait Transport: Send + Sync {
     /// Renamed from the original `last_pong_age` because Aether uses HeartbeatData/Ack,
     /// not Ping/Pong, for liveness.
     fn last_heartbeat_age(&self) -> Option<std::time::Duration>;
-    fn protocol_kind(&self) -> ProtocolKind;
+    fn tunnel_protocol(&self) -> TunnelProtocol;
     fn close(&self) -> futures::future::BoxFuture<'_, ()>;
 }
 
@@ -449,7 +449,7 @@ Redis stream config: max length 50k entries (XADD with MAXLEN ~), so the queue i
 
 The existing `reload-config`, `cooldown-key`, `clear-cooldown`, `clear-cache` commands target the Cnexus gateway process. They are not understood by `aether-proxy`. Spec posture:
 
-- All four commands explicitly **no-op for Aether nodes**: the Rust hub's command dispatcher checks `protocol_kind` on the resolved node and short-circuits with an ack carrying `{status: "skipped", reason: "aether_node_does_not_support_command"}`.
+- All four commands explicitly **no-op for Aether nodes**: the Rust hub's command dispatcher checks `tunnel_protocol` on the resolved node and short-circuits with an ack carrying `{status: "skipped", reason: "aether_node_does_not_support_command"}`.
 - Future work (out of scope here): if Aether's `remote_config` reverse-push is ever implemented, a new command kind `aether-remote-config` can map onto it.
 - The Go side admin UI surfaces this by graying out the four buttons for Aether nodes and showing a tooltip "Aether nodes do not accept GatewayControl commands".
 
@@ -481,7 +481,7 @@ This sequence keeps each step deployable in isolation.
 upstream_peer filter selects node_id by routing
         │
         ▼
-tunnel_stack::peer_for_node(node_id) → (Arc<dyn Transport>, ProtocolKind)
+tunnel_stack::peer_for_node(node_id) → (Arc<dyn Transport>, TunnelProtocol)
         │  (returns None if Aether proxy has not dialed in yet → 502 GW_TUNNEL_NO_NODE)
         ▼
 Pingora upstream_peer points to tunnel_bridge loopback :PORT
@@ -1377,7 +1377,7 @@ Change set (Cnexus Rust):
 
 - Reorganize `gw-tunnel-client` so existing transport logic lives under `cnexus/`. Public re-exports preserve backwards-compatible call sites.
 - Add migration `0011_proxy_nodes_protocol.sql`.
-- Add `ProtocolKind` enum and `protocol` field to `ProxyNodePayload`; deserialization defaults to `Cnexus`.
+- Add `TunnelProtocol` enum and `protocol` field to `ProxyNodePayload`; deserialization defaults to `Cnexus`.
 - Create `tests/tunnel-e2e/` skeleton including `docker-compose.yml` (without `aether-proxy` / `aether-hub`), `conftest.py`, `requirements.txt`, `pytest.ini`, `test_cnexus_protocol.py`, `support/http_helpers.py`.
 - Add `Makefile` targets: `tunnel-e2e`, `tunnel-e2e-up`, `tunnel-e2e-down`, `tunnel-e2e-logs`, `tunnel-e2e-deps`.
 - Add `.gitmodules` entry pointing to `https://gitlab.ailinkmax.com/ailinkmax/Aether` with `update = none`. Submodule is registered but unused by Phase 1 compose.
@@ -1397,7 +1397,7 @@ Verification:
 
 PR breakdown:
 
-- **PR 1a**: `cnexus/` submodule reorg + `ProtocolKind` + migration.
+- **PR 1a**: `cnexus/` submodule reorg + `TunnelProtocol` + migration.
 - **PR 1b**: `tests/tunnel-e2e/` skeleton + 3 cases + Makefile targets + `.gitmodules`.
 
 ### Phase 2 · Aether adapter + compatibility cases (core deliverable)
@@ -1415,8 +1415,8 @@ Change set (Cnexus Rust):
 - `gw-tunnel-client` introduces a `ProxyNodeRegistry` trait that `gw-proxy::tunnel_stack` implements; this keeps the listener decoupled from `gw-store`.
 - New dependencies in `gw-tunnel-client/Cargo.toml`: `httparse = "1"`, `flate2 = "1"`, `http = "1"`, `axum` (only for `WebSocketUpgrade` extractor on the listener side).
 - Introduce `trait Transport`, `AnyTransport`, `factory::{dial_cnexus, attach_aether}`, `StreamTarget` two-variant enum.
-- Update `gw-proxy::tunnel_stack`: `DashMap<NodeId, Arc<dyn Transport>>`; `peer_for_node` returns `(Arc<dyn Transport>, ProtocolKind)`; new `attach_inbound_transport(node_id, Arc<dyn Transport>)` API exposed for the listener.
-- Update `gw-proxy::tunnel_bridge` to branch by `ProtocolKind` at accept; the Aether branch uses `aether::http_adapter`.
+- Update `gw-proxy::tunnel_stack`: `DashMap<NodeId, Arc<dyn Transport>>`; `peer_for_node` returns `(Arc<dyn Transport>, TunnelProtocol)`; new `attach_inbound_transport(node_id, Arc<dyn Transport>)` API exposed for the listener.
+- Update `gw-proxy::tunnel_bridge` to branch by `TunnelProtocol` at accept; the Aether branch uses `aether::http_adapter`.
 - Update `gw-gateway`: `tunnel_refresher` dispatches Cnexus nodes via `dial_cnexus`; for Aether nodes it ensures the listener is running and the node is registered in the stack snapshot. Add `/api/internal/proxy-tunnel` route in the axum router that hands the upgrade to `aether::InboundListener`.
 - New config section `[tunnel.aether_listener]` in `config/default.toml` with fields `enabled` (default false) and `path` (default `/api/internal/proxy-tunnel`).
 - Add `tests/tunnel-e2e/Dockerfile.aether-proxy` and `Dockerfile.aether-hub`.
@@ -1452,7 +1452,7 @@ Change set (Cnexus Rust):
 - `support/docker_helpers.py`: docker.sock-mediated `kill_service` / `start_service` helpers for failover.
 - `scripts/check-tunnel-deps.sh` + `Makefile check-tunnel-deps` target.
 - `crates/gw-tunnel-client/README.md` and `crates/gw-tunnel-server/README.md`: dep-boundary warnings.
-- `docs/spec/09-tunnel.md`: new sections (`protocol_kind`, `Aether compatibility`, `Crate dependency boundary`).
+- `docs/spec/09-tunnel.md`: new sections (`tunnel_protocol`, `Aether compatibility`, `Crate dependency boundary`).
 - `tests/tunnel-e2e/README.md`: usage, scenarios, common-failure-mode guide.
 
 PR breakdown:
@@ -1598,7 +1598,7 @@ No automation enforces this; it is a checklist item in the MR template (the repo
 - **`events:aether_heartbeat`** — Redis stream the Rust hub pushes per HeartbeatData; the Go monitoring sink consumes and persists to ClickHouse. Bounded at 50k entries via `MAXLEN ~`.
 - **`ae_` prefix** — Aether management token convention. Used by Go register endpoint to discriminate Aether-protocol auth from admin-token auth on the same DB.
 - **G1 / G2 / G3 / G4** — milestones in the AILinkMax-Go repo (§3.6.8 cross-repo coordination). G1: entity `Protocol` field; G2: register endpoint; G3: heartbeat ingest + monitoring API; G4: frontend UI.
-- **`protocol_kind`** — discriminator on a `ProxyNode` selecting which wire protocol to use. Values: `cnexus` (default), `aether`.
+- **`tunnel_protocol`** — discriminator on a `ProxyNode` selecting which wire protocol to use. Values: `cnexus` (default), `aether`.
 - **`StreamTarget`** — request to the transport layer to open a stream. Two variants: `Tcp` (Cnexus) and `Http` (Aether).
 - **`AnyTransport`** — enum that holds either `cnexus::WsTransport` or `aether::WsTransport`; implements `trait Transport` via delegation.
 - **`cargo-remote-ctl`** — project-specific wrapper for remote-executed `cargo` operations (build / test / clippy). Local-only `cargo metadata` operations do not require it.
