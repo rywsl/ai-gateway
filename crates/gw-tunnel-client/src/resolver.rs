@@ -14,6 +14,9 @@ pub struct ProxyNodeView {
     pub latency_ms: u32,
     pub allowed_provider_ids: Vec<String>,
     pub allowed_vendor_key_ids: Vec<String>,
+    /// Wire protocol this node speaks. Phase 1 always populates Cnexus;
+    /// Phase 2 starts honoring Aether.
+    pub tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol,
 }
 
 pub struct TunnelResolveCtx<'a> {

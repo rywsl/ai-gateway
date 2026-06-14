@@ -11,6 +11,7 @@ pub mod observability;
 pub mod permissions;
 pub mod protocol;
 pub mod traits;
+pub mod tunnel_protocol;
 pub mod usage;
 pub mod versioned;
 

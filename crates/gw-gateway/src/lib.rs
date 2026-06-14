@@ -1274,6 +1274,7 @@ async fn bootstrap(
                 latency_ms: n.latency_ms,
                 allowed_provider_ids: n.allowed_provider_ids,
                 allowed_vendor_key_ids: n.allowed_vendor_key_ids,
+                tunnel_protocol: n.tunnel_protocol,
             })
         }
 

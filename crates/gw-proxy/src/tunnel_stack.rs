@@ -305,6 +305,7 @@ mod tests {
             latency_ms: latency,
             allowed_provider_ids: providers.iter().map(|s| (*s).to_string()).collect(),
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         }
     }
 

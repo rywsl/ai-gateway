@@ -106,6 +106,7 @@ async fn e2e_tunnel_stack_reports_no_live_node() {
             latency_ms: 0,
             allowed_provider_ids: vec!["openai".to_owned()],
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         }],
         Arc::new(SafeDnsResolver::cloudflare_default()),
         PoolConfig::default(),
