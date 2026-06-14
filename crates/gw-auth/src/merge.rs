@@ -206,15 +206,15 @@ fn min_pos(vals: &[u32]) -> u32 {
 
 /// Missing-user / missing-parent error.
 ///
-/// No dedicated `GW_AUTH_USER_NOT_FOUND` code exists yet; we reuse
-/// `GW_AUTH_INVALID_APIKEY` (auth context fails closed at the same 401 status)
-/// to keep the stable-codes dictionary stable and avoid cross-crate churn.
+/// Emits the dedicated `GW_AUTH_USER_NOT_FOUND` code (HTTP 401) so a dangling
+/// user reference (key authenticated, user row gone) is distinguishable from a
+/// bad/missing API key (`GW_AUTH_INVALID_APIKEY`). See P0 #16.
 fn user_not_found() -> ErrorIR<'static> {
     ErrorIR {
         category: ErrorCategory::ClientAuth,
         status: 401,
         upstream_status: None,
-        code: Cow::Borrowed(codes::GW_AUTH_INVALID_APIKEY),
+        code: Cow::Borrowed(codes::GW_AUTH_USER_NOT_FOUND),
         message: Cow::Borrowed("user not found"),
         retryable: false,
         upstream_raw: None,

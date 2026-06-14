@@ -724,4 +724,24 @@ mod tests {
         let entry: ApiKeyEntry = serde_json::from_str(json).expect("deser without regex");
         assert!(entry.model_whitelist_regex.is_none());
     }
+
+    /// Locks the current cross-process contract: `api_keys.signature_secret`
+    /// is folded into payload by the PgSQL loader as raw JSON byte integers,
+    /// not as a KEK-encrypted envelope.
+    #[test]
+    fn api_key_entry_deser_signature_secret_as_raw_bytes() {
+        let json = r#"{
+            "key_id": "ak3",
+            "user_id": "u3",
+            "status": "active",
+            "hash": [0,0,0,0],
+            "signature_secret": [115,105,103,45,115,101,99,114,101,116]
+        }"#;
+        let entry: ApiKeyEntry = serde_json::from_str(json).expect("deser with signature_secret");
+
+        assert_eq!(
+            entry.signature_secret.as_deref(),
+            Some(b"sig-secret".as_slice())
+        );
+    }
 }

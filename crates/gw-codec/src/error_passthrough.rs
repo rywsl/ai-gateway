@@ -1,16 +1,21 @@
 //! Render upstream-vendor error bodies into client-protocol error envelopes.
 //!
 //! Each protocol expects a different error shape:
-//! - OpenAI: `{"error": {"type": ..., "message": ..., "code": null}}`
-//! - Anthropic: `{"type": "error", "error": {"type": ..., "message": ...}}`
-//! - Gemini: `{"error": {"code": <int>, "status": ..., "message": ...}}`
-//! - Kiro: `{"type": "error", "code": ..., "message": ...}`
+//! - OpenAI: `{"error": {"type": ..., "message": ..., "code": <GW_...>}}`
+//! - Anthropic: `{"type": "error", "error": {"type": ..., "message": ..., "code": <GW_...>}}`
+//! - Gemini: `{"error": {"code": <int>, "status": ..., "message": ..., "gateway_code": <GW_...>}}`
+//! - Kiro: `{"type": "error", "code": <vendor type>, "message": ..., "gateway_code": <GW_...>}`
+//!
+//! Every envelope carries a stable `GW_...` gateway code (P0 #16) so SSE
+//! `event: error` frames and non-stream errors alike give clients/ops a stable
+//! field to branch on. The vendor-compatible `type`/`status`/numeric Gemini
+//! `code` are preserved; the gateway code is additive.
 //!
 //! For SSE responses, wrap as `event: error\ndata: <json>\n\n`.
 
 use bytes::Bytes;
 use gw_core::error::rules::{message_allowed, PassthroughRule};
-use gw_core::error::{ErrorClass, PassthroughBody};
+use gw_core::error::{codes, ErrorClass, PassthroughBody};
 use gw_core::protocol::ProtocolKind;
 use serde_json::{json, Value};
 
@@ -35,14 +40,16 @@ pub fn render_error_to_client(
 fn json_for_protocol(
     p: ProtocolKind,
     b: &PassthroughBody,
-    _fb: ErrorClass,
+    fb: ErrorClass,
     rules: &[PassthroughRule],
 ) -> Value {
     let typ = error_type_for(p, b.upstream_status);
+    let gw_code = gateway_code(b, fb);
     // Audit 2026-05-30 §3.8: per-pattern allow/deny over the upstream message.
-    // The envelope (type + status) is always rendered; only the MESSAGE is masked
-    // when a Deny rule matches, so a denied error still surfaces as a clean,
-    // status-appropriate client error rather than leaking internal detail.
+    // The envelope (type + status + stable gateway code) is always rendered; only
+    // the MESSAGE is masked when a Deny rule matches, so a denied error still
+    // surfaces as a clean, status-appropriate client error rather than leaking
+    // internal detail.
     let raw_msg = extract_message(&b.body_json);
     let msg = if message_allowed(&raw_msg, rules) {
         raw_msg
@@ -52,21 +59,70 @@ fn json_for_protocol(
     };
     match p {
         ProtocolKind::OpenAi => json!({
-            "error": { "type": typ, "message": msg, "code": null }
+            "error": { "type": typ, "message": msg, "code": gw_code }
         }),
         ProtocolKind::Anthropic => json!({
             "type": "error",
-            "error": { "type": typ, "message": msg }
+            "error": { "type": typ, "message": msg, "code": gw_code }
         }),
         ProtocolKind::Gemini => json!({
-            "error": { "code": b.upstream_status, "status": typ, "message": msg }
+            "error": { "code": b.upstream_status, "status": typ, "message": msg, "gateway_code": gw_code }
         }),
         ProtocolKind::Kiro => json!({
             "type": "error",
             "code": typ,
-            "message": msg
+            "message": msg,
+            "gateway_code": gw_code
         }),
     }
+}
+
+/// Derive the stable `GW_...` gateway code for a passthrough envelope (P0 #16).
+///
+/// 1. Preserve an upstream-supplied gateway code if the body already carries a
+///    `GW_...` string in `code` / `error.code` / `gateway_code` /
+///    `error.gateway_code` (e.g. the upstream is itself a gateway).
+/// 2. Otherwise map from the upstream HTTP status, falling back to the
+///    [`ErrorClass`] when the status is unknown.
+fn gateway_code(b: &PassthroughBody, fb: ErrorClass) -> String {
+    if let Some(c) = extract_gateway_code(&b.body_json) {
+        return c;
+    }
+    let mapped = match b.upstream_status {
+        401 => codes::GW_AUTH_INVALID_APIKEY,
+        429 => codes::GW_UPSTREAM_OVERLOADED,
+        500..=599 => codes::GW_UPSTREAM_5XX,
+        400..=499 => codes::GW_UPSTREAM_4XX,
+        _ => match fb {
+            ErrorClass::AuthDenied => codes::GW_AUTH_INVALID_APIKEY,
+            ErrorClass::RateLimitedUpstream(_) => codes::GW_UPSTREAM_OVERLOADED,
+            ErrorClass::UpstreamTransient => codes::GW_UPSTREAM_5XX,
+            _ => codes::GW_GATEWAY_INTERNAL,
+        },
+    };
+    mapped.to_string()
+}
+
+/// Scan common fields for an already-present `GW_...` gateway code.
+fn extract_gateway_code(body: &Value) -> Option<String> {
+    let is_gw = |v: &Value| {
+        v.as_str()
+            .filter(|s| s.starts_with("GW_"))
+            .map(String::from)
+    };
+    body.get("gateway_code")
+        .and_then(is_gw)
+        .or_else(|| body.get("code").and_then(is_gw))
+        .or_else(|| {
+            body.get("error")
+                .and_then(|e| e.get("gateway_code"))
+                .and_then(is_gw)
+        })
+        .or_else(|| {
+            body.get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(is_gw)
+        })
 }
 
 fn error_type_for(p: ProtocolKind, status: u16) -> &'static str {

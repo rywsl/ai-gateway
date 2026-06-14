@@ -76,6 +76,8 @@ flush_interval_ms = 200
 [kms]
 # Dev mode: provide a 32-byte KEK as 64 hex chars via env var
 # `GW_KMS__KEK_HEX=...`. Production mode (AWS KMS) is wired separately.
+# Rotation window: also set `GW_KMS__PREVIOUS_KEK_HEX=...` and
+# `GW_KMS__PREVIOUS_KEY_ID=...` so restarted pods can read old and new rows.
 key_id = "primary"
 
 [detailed_log]

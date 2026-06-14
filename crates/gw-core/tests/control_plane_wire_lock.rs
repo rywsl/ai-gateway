@@ -84,6 +84,7 @@ fn capability_snapshot_wire_paths_are_locked() {
                 {"action": "reload-config", "enabled": true},
                 {"action": "cooldown-key", "enabled": true},
                 {"action": "clear-cooldown", "enabled": true},
+                {"action": "reset-cost", "enabled": true},
                 {"action": "clear-cache", "enabled": true},
                 {
                     "action": "set-log-level",

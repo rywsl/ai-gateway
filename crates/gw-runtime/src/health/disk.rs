@@ -1,11 +1,17 @@
-//! SpillDiskFullHook — Linux only; uses libc::statvfs.
+//! SpillDiskFullHook — Linux/Unix only; uses libc::statvfs. On non-Unix targets
+//! the disk probe is a no-op: `statvfs()` returns `None`, so the hook always
+//! reports `HealthSignal::Healthy`.
 
 use super::{HealthHook, HealthSignal};
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 pub struct SpillDiskFullHook {
+    // Only read by the Unix `statvfs()` probe; unused on other targets.
+    #[cfg_attr(not(unix), allow(dead_code))]
     path: PathBuf,
     threshold_used_ratio: f64, // 0.99 = 99%
 }
@@ -24,6 +30,7 @@ impl SpillDiskFullHook {
         }
     }
 
+    #[cfg(unix)]
     fn statvfs(&self) -> Option<(u64, u64)> {
         let c = CString::new(self.path.as_os_str().as_bytes()).ok()?;
         // SAFETY: zero-initialised struct passed to libc::statvfs.
@@ -42,6 +49,13 @@ impl SpillDiskFullHook {
         let total = blocks * block_size;
         let free = available * block_size;
         Some((total, free))
+    }
+
+    /// Non-Unix targets have no `statvfs`; report "no data" so the hook stays a
+    /// healthy no-op.
+    #[cfg(not(unix))]
+    fn statvfs(&self) -> Option<(u64, u64)> {
+        None
     }
 }
 

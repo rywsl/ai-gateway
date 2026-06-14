@@ -76,6 +76,11 @@ pub const GW_AUTH_SIGNATURE_NOT_CONFIGURED: &str = "GW_AUTH_SIGNATURE_NOT_CONFIG
 pub const GW_AUTH_KEY_DISABLED: &str = "GW_AUTH_KEY_DISABLED";
 // Auth: UserEntry.status == Banned (resolved user or its parent). HTTP 403.
 pub const GW_AUTH_USER_BANNED: &str = "GW_AUTH_USER_BANNED";
+// Auth: the API key authenticated but its owning user (or a sub-account's
+// parent) row is absent — the principal loaded yet the user vanished. HTTP 401.
+// Distinct from GW_AUTH_INVALID_APIKEY (bad/missing key) so ops can tell a
+// dangling-user-reference from a bad credential (P0 #16).
+pub const GW_AUTH_USER_NOT_FOUND: &str = "GW_AUTH_USER_NOT_FOUND";
 // Auth: client JWT carries a `jti` present in the `jwt:blacklist:` namespace,
 // or (fail-closed) carries no `jti` while revocation enforcement is on. HTTP 401.
 pub const GW_AUTH_JWT_REVOKED: &str = "GW_AUTH_JWT_REVOKED";

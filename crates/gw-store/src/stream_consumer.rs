@@ -156,6 +156,10 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
                 }
             }
         }
+        "config" => {
+            // Generic system config rows do not have a dedicated Moka cache in
+            // gw-store. The Redis L1 DEL above is the invalidation this ns needs.
+        }
         "jwks" => store.jwks.invalidate(&Kid::from(id)).await,
         "ipblock" => store.ipblock.invalidate(&id.to_string()).await,
         "proxy_node" => {
@@ -563,5 +567,19 @@ mod auth_config_tests {
             0,
             "only id=global rebuilds the global validator"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn config_namespace_is_accepted() {
+        let store = Arc::new(EntityStore::new());
+
+        apply_entity_event(&store, "config", "module.apikey.enabled").await;
     }
 }

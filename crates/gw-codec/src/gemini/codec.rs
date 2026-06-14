@@ -230,8 +230,20 @@ impl ProtocolCodec for Gemini {
                     extra: Some(&"ThinkingDelta"),
                 });
             }
-            StreamEventIR::RefusalDelta { .. }
-            | StreamEventIR::CitationsDelta { .. }
+            StreamEventIR::RefusalDelta { .. } => {
+                // Gemini's wire has no streaming refusal shape, so the drop is
+                // correct — but make it observable rather than silent (audit
+                // P0 #13 §5), matching the Start / ThinkingDelta markers above.
+                observe(ErrorObservation {
+                    code: "gemini_render_drop_refusal_delta",
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"RefusalDelta"),
+                });
+            }
+            StreamEventIR::CitationsDelta { .. }
             | StreamEventIR::ServerToolStart { .. }
             | StreamEventIR::ServerToolDelta { .. } => {}
         }
@@ -535,6 +547,38 @@ mod tests {
         assert_eq!(ir.model.as_ref(), "gemini-1.5-pro");
     }
 
+    /// Audit P0 #13 §2: native Gemini top-level `safetySettings` and
+    /// `toolConfig` must survive the parse→render round trip (the path taken
+    /// whenever a mutation — forced params, model mapping, body rules —
+    /// forces a re-render instead of zero-copy passthrough). The wire struct
+    /// previously declared neither field, so serde silently dropped them.
+    #[test]
+    fn render_request_preserves_safety_settings_and_tool_config() {
+        let body = br#"{
+            "contents":[{"role":"user","parts":[{"text":"hi"}]}],
+            "safetySettings":[{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_NONE"}],
+            "toolConfig":{"functionCallingConfig":{"mode":"AUTO"}}
+        }"#;
+        let codec = Gemini;
+        let ir = codec.parse_request(body).expect("parse ok");
+        let mut buf = BytesMut::new();
+        codec.render_request(&ir, &mut buf).expect("render ok");
+        let rendered: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        assert_eq!(
+            rendered["safetySettings"][0]["category"],
+            serde_json::json!("HARM_CATEGORY_HATE_SPEECH")
+        );
+        assert_eq!(
+            rendered["safetySettings"][0]["threshold"],
+            serde_json::json!("BLOCK_NONE")
+        );
+        assert_eq!(
+            rendered["toolConfig"]["functionCallingConfig"]["mode"],
+            serde_json::json!("AUTO")
+        );
+    }
+
     #[test]
     fn render_request_merges_passthrough_overrides() {
         let mut overrides = HashMap::new();
@@ -654,6 +698,23 @@ mod tests {
             ir.finish_reason,
             Some(FinishReasonIR::ContentFilter)
         ));
+    }
+
+    /// Audit P0 #13 §5: Gemini has no streaming refusal wire shape, so a
+    /// `RefusalDelta` is dropped — but gracefully and without emitting bytes
+    /// (the drop is now also surfaced via `observe()` for parity with the
+    /// Start / ThinkingDelta markers). Locks the no-wire-output behaviour.
+    #[test]
+    fn render_stream_chunk_refusal_delta_emits_nothing() {
+        let event = StreamEventIR::RefusalDelta {
+            text: Cow::Borrowed("I won't do that"),
+        };
+        let mut buf = BytesMut::new();
+        Gemini.render_stream_chunk(&event, &mut buf).unwrap();
+        assert!(
+            buf.is_empty(),
+            "gemini has no refusal wire shape; nothing must be emitted"
+        );
     }
 
     #[test]

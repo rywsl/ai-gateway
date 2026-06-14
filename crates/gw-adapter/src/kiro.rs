@@ -148,7 +148,8 @@ fn build_authorization(
         canonical_headers.push_str(token.expose_secret());
     }
     let canonical_request = format!(
-        "POST\n{}\n\n{}\n\n{}\n{}",
+        "{}\n{}\n\n{}\n\n{}\n{}",
+        ctx.http_method,
         ctx.url_mut.path(),
         canonical_headers,
         signed_headers,
@@ -290,6 +291,7 @@ mod tests {
             url_mut: UrlMut { inner: &mut url },
             auth_template: "",
             upstream_host: Some("kiro.example.com"),
+            http_method: "POST",
             content_len: 17,
             body_sha256_hex: "8f434346648f6b96df89dda901c5176d09833210c989a459b957023e1ffde663"
                 .to_owned(),
@@ -340,6 +342,7 @@ mod tests {
             url_mut: UrlMut { inner: &mut url },
             auth_template: "",
             upstream_host: Some("kiro.example.com"),
+            http_method: "POST",
             content_len: 17,
             body_sha256_hex: "8f434346648f6b96df89dda901c5176d09833210c989a459b957023e1ffde663"
                 .to_owned(),
@@ -356,5 +359,60 @@ mod tests {
         let auth = ctx.headers_mut.get("authorization").unwrap();
         assert!(auth
             .contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"));
+    }
+
+    /// Regression: the SigV4 canonical request must sign the request's actual
+    /// HTTP method. Previously `build_authorization` hard-coded `POST`, so a
+    /// GET/DELETE route would be signed as POST and rejected by AWS. Two
+    /// otherwise-identical signing inputs that differ only in method must
+    /// produce different signatures.
+    #[test]
+    fn kiro_canonical_request_signs_actual_http_method() {
+        let cfg = parse_sigv4_config(&vendor_key().api_key).unwrap();
+
+        fn sig_for(cfg: &KiroSigV4Config, method: &'static str) -> String {
+            let health = Arc::new(KeyHealthStore::default());
+            let mut headers = Headers(HashMap::new());
+            let mut url = Url;
+            let ctx = AdapterCtx {
+                vendor_id: VendorId::from("kiro"),
+                vendor_key_id: KeyId::from("vk-kiro"),
+                vendor_key: vendor_key(),
+                client_protocol: ProtocolKind::Kiro,
+                upstream_protocol: ProtocolKind::Kiro,
+                model: ModelName::from("kiro-model"),
+                user_id: UserId::from("u-1"),
+                api_format: ProtocolKind::Kiro,
+                health_store: &health,
+                oauth_runtime: None,
+                headers_mut: HeadersMut {
+                    inner: &mut headers,
+                },
+                url_mut: UrlMut { inner: &mut url },
+                auth_template: "",
+                upstream_host: Some("kiro.example.com"),
+                http_method: method,
+                content_len: 17,
+                body_sha256_hex: "8f434346648f6b96df89dda901c5176d09833210c989a459b957023e1ffde663"
+                    .to_owned(),
+                trace_id: "0000000000000000aaaaaaaaaaaaaaaa",
+                request_id: "req-1",
+            };
+            build_authorization(
+                &ctx,
+                cfg,
+                "20240101",
+                "20240101T000000Z",
+                "kiro.example.com",
+            )
+            .unwrap()
+        }
+
+        let post = sig_for(&cfg, "POST");
+        let delete = sig_for(&cfg, "DELETE");
+        assert_ne!(
+            post, delete,
+            "canonical request must sign the actual method, not a hard-coded POST"
+        );
     }
 }

@@ -358,3 +358,46 @@ async fn banned_parent_rejects_active_sub_account() {
         .expect_err("active sub-account of a banned owner must be rejected");
     assert_eq!(err.code, gw_core::error::codes::GW_AUTH_USER_BANNED);
 }
+
+// --- P0 #16: dedicated user-not-found code (distinct from invalid api key) ---
+
+#[tokio::test]
+async fn missing_user_emits_dedicated_user_not_found_code() {
+    // A loaded auth principal whose user row has since disappeared must NOT be
+    // reported as a bad API key — that confuses ops and clients.
+    let store = EntityStore::new();
+    let ctx = AuthCtx {
+        user_id: UserId::from("ghost"),
+        api_key_id: None,
+        client_ip: ip(),
+    };
+    let err = merge_permissions(&ctx, &store, 0, None)
+        .await
+        .expect_err("missing user must be rejected");
+    assert_eq!(err.code, gw_core::error::codes::GW_AUTH_USER_NOT_FOUND);
+    assert_ne!(err.code, gw_core::error::codes::GW_AUTH_INVALID_APIKEY);
+    assert_eq!(err.status, 401);
+}
+
+#[tokio::test]
+async fn missing_parent_of_sub_account_emits_user_not_found_code() {
+    // The sub-account row exists but its parent (owner) row is absent.
+    let store = EntityStore::new();
+    store
+        .user
+        .insert(
+            UserId::from("sub"),
+            user("sub", Some("missing-owner"), &[], 0, &[], 1.0),
+        )
+        .await;
+    let ctx = AuthCtx {
+        user_id: UserId::from("sub"),
+        api_key_id: None,
+        client_ip: ip(),
+    };
+    let err = merge_permissions(&ctx, &store, 0, None)
+        .await
+        .expect_err("sub-account with a missing parent must be rejected");
+    assert_eq!(err.code, gw_core::error::codes::GW_AUTH_USER_NOT_FOUND);
+    assert_eq!(err.status, 401);
+}

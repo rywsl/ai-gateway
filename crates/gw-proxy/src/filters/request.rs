@@ -377,7 +377,7 @@ pub async fn run(
                 category: ErrorCategory::ClientAuth,
                 status: 401,
                 upstream_status: None,
-                code: Cow::Borrowed(codes::GW_AUTH_INVALID_APIKEY),
+                code: Cow::Borrowed(codes::GW_AUTH_USER_NOT_FOUND),
                 message: Cow::Borrowed("user not found"),
                 retryable: false,
                 upstream_raw: None,

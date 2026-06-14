@@ -19,6 +19,7 @@
 //! reconstructed.
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use std::borrow::Cow;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -39,6 +40,17 @@ pub struct GeminiRequest<'a> {
 
     #[serde(default, borrow, skip_serializing_if = "Option::is_none")]
     pub generation_config: Option<GeminiGenerationConfig<'a>>,
+
+    /// Gemini-native top-level passthrough fields. The IR has no typed slot
+    /// for these vendor-specific shapes, so they round-trip through
+    /// `RequestIR.extensions` (keyed `"safetySettings"` / `"toolConfig"`) and
+    /// are restored on render. Held as `RawValue` so the exact wire JSON is
+    /// preserved without an intermediate typed model. See audit P0 #13 §2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_settings: Option<Box<RawValue>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_config: Option<Box<RawValue>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

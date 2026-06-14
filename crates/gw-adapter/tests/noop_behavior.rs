@@ -154,6 +154,7 @@ async fn run_noop(
         url_mut: UrlMut { inner: &mut url },
         auth_template,
         upstream_host: Some("api.openai.com"),
+        http_method: "POST",
         content_len: 42,
         body_sha256_hex: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
             .to_owned(),

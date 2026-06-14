@@ -227,8 +227,20 @@ impl ProtocolCodec for Anthropic {
                     extra: Some(&"Start"),
                 });
             }
-            StreamEventIR::RefusalDelta { .. }
-            | StreamEventIR::CitationsDelta { .. }
+            StreamEventIR::RefusalDelta { .. } => {
+                // Anthropic Messages has no streaming refusal delta shape, so
+                // the drop is correct — but observe it rather than dropping
+                // silently (audit P0 #13 §5), matching the Start marker above.
+                observe(ErrorObservation {
+                    code: "anthropic_render_drop_refusal_delta",
+                    kind: ErrorKind::CodecRender,
+                    stage: Stage::Response,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&"RefusalDelta"),
+                });
+            }
+            StreamEventIR::CitationsDelta { .. }
             | StreamEventIR::ServerToolStart { .. }
             | StreamEventIR::ServerToolDelta { .. } => {}
         }
@@ -944,6 +956,23 @@ data: {"type":"content_block_stop","index":0}
         assert!(
             output.contains("\"stop_reason\":\"refusal\""),
             "expected refusal stop_reason in stream; got: {output}"
+        );
+    }
+
+    /// Audit P0 #13 §5: Anthropic Messages has no streaming refusal delta
+    /// shape, so a `RefusalDelta` is dropped gracefully without emitting bytes
+    /// (the drop is now also surfaced via `observe()`). Locks the no-wire
+    /// output behaviour.
+    #[test]
+    fn render_stream_chunk_refusal_delta_emits_nothing() {
+        let ir = StreamEventIR::RefusalDelta {
+            text: Cow::Borrowed("I won't do that"),
+        };
+        let mut buf = BytesMut::new();
+        Anthropic.render_stream_chunk(&ir, &mut buf).unwrap();
+        assert!(
+            buf.is_empty(),
+            "anthropic has no refusal wire shape; nothing must be emitted"
         );
     }
 

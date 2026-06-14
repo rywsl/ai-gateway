@@ -241,7 +241,7 @@ After parsing, the loop decides how to forward the chunk to the client. If `ctx.
 
 `error_emit::send_error(session, codec, &ErrorIR)` renders the envelope through the **client's** codec (so OpenAI clients get OpenAI-shaped errors, etc.), sets `Content-Type: application/json`, propagates `X-Request-Id` and `Retry-After`, writes header + body in one shot. The caller returns `short_circuit(status)`.
 
-`error_passthrough::render_error_to_client(client_kind, &PassthroughBody, error_class)` produces a structured protocol-specific error envelope from the upstream error body. Activated when `[error.passthrough].enabled = true` — the `response_body_filter` replaces the final body chunk at EOS. HTML upstream bodies bypass passthrough (always wrapped as JSON).
+`error_passthrough::render_error_to_client(client_kind, &PassthroughBody, error_class)` produces a structured protocol-specific error envelope from the upstream error body. Activated when `[error.passthrough].enabled = true` — the `response_body_filter` replaces the final body chunk at EOS. HTML upstream bodies bypass passthrough (always wrapped as JSON). Every envelope (stream `event: error` frame and non-stream alike) carries a stable `GW_...` gateway code (P0 #16): OpenAI/Anthropic in `error.code`, Gemini/Kiro in an additive `gateway_code` field (their `code` stays the numeric/vendor value). The code is derived from any upstream-supplied `GW_...` code, else mapped from `upstream_status`/`error_class`; message allow/deny masking never touches it.
 
 ### 3.1 Connect-failure retry path (billing emit)
 

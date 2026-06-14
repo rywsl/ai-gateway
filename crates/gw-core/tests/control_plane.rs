@@ -168,6 +168,42 @@ fn capability_serializes_legacy_shape_names_and_readiness_details() {
 }
 
 #[test]
+fn reset_cost_command_is_advertised_executable_with_wire_string() {
+    assert_eq!(GatewayCommandAction::ResetCost.as_str(), "reset-cost");
+    assert_eq!(
+        serde_json::to_value(GatewayCommandAction::ResetCost).unwrap(),
+        json!("reset-cost")
+    );
+
+    let capability = default_gateway_capability("gw-a", 100);
+    let reset_cost = capability
+        .commands
+        .iter()
+        .find(|cmd| cmd.action == GatewayCommandAction::ResetCost)
+        .expect("reset-cost capability must be advertised");
+    assert!(
+        reset_cost.enabled,
+        "reset-cost is executable so it must be advertised enabled"
+    );
+    assert!(reset_cost.reason.is_none());
+
+    // A Go-issued delivery body decodes to the ResetCost action.
+    let delivery: GatewayCommandDeliveryEntity = serde_json::from_value(json!({
+        "command_id": "cmd-1",
+        "delivery_id": "cmd-1:gw-a",
+        "action": "reset-cost",
+        "target_scope": "all",
+        "target_instance_id": "gw-a",
+        "args": { "key_id": "vk-1", "format": "openai" },
+        "delivery_mode": "durable",
+        "issued_at_ms": 42,
+        "issued_by": "admin-1"
+    }))
+    .unwrap();
+    assert_eq!(delivery.action, GatewayCommandAction::ResetCost);
+}
+
+#[test]
 fn capability_preserves_started_at_when_refreshing_snapshot() {
     let capability = gateway_capability("gw-a", "gw-test-version", 200, 100);
 

@@ -197,8 +197,17 @@ impl ProtocolCodec for OpenAiResponsesCodec {
                     "openai responses: StreamEventIR::Start dropped (no direct equivalent)"
                 );
             }
-            StreamEventIR::RefusalDelta { .. }
-            | StreamEventIR::CitationsDelta { .. }
+            StreamEventIR::RefusalDelta { text } => {
+                // OpenAI Responses has a native streaming refusal shape and the
+                // parser already lifts it into `RefusalDelta`; render it back
+                // instead of dropping the model's refusal (audit P0 #13 §5).
+                let payload = serde_json::json!({
+                    "type": "response.refusal.delta",
+                    "delta": text,
+                });
+                write_sse(buf, &payload)?;
+            }
+            StreamEventIR::CitationsDelta { .. }
             | StreamEventIR::ServerToolStart { .. }
             | StreamEventIR::ServerToolDelta { .. } => {}
         }
@@ -1058,6 +1067,29 @@ data: {"type":"response.refusal.delta","delta":"I can't help with that"}
             })
             .expect("RefusalDelta emitted");
         assert_eq!(refusal, "I can't help with that");
+    }
+
+    /// Audit P0 #13 §5: a `RefusalDelta` must render back to the native
+    /// `response.refusal.delta` SSE event, not be silently dropped. OpenAI
+    /// Responses both parses and emits this shape, so a refusal streamed
+    /// through the IR must survive round-trip rendering.
+    #[test]
+    fn render_stream_chunk_refusal_delta_emits_native_event() {
+        let codec = OpenAiResponsesCodec;
+        let event = StreamEventIR::RefusalDelta {
+            text: Cow::Borrowed("I can't help with that"),
+        };
+        let mut buf = BytesMut::new();
+        codec.render_stream_chunk(&event, &mut buf).unwrap();
+        let out = String::from_utf8(buf.to_vec()).unwrap();
+        assert!(
+            out.contains("response.refusal.delta"),
+            "refusal must render as the native event: {out}"
+        );
+        assert!(
+            out.contains("I can't help with that"),
+            "refusal text must be preserved: {out}"
+        );
     }
 
     #[test]

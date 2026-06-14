@@ -136,7 +136,7 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 | `[adaptive_rpm]` | `enforcement_threshold` (0.6), `confidence_decay_per_min` (0.02), `min_header_observations` (2), `min_no_header_observations` (3), `buffer_ratio` (0.85), `probe_after_min` (30), `probe_increment` (5), `min_rpm` (5), `max_rpm` (10000) | Adaptive RPM tuning knobs for confidence-based per-key throttling. |
 | `[task]` | `enabled` (false), `queue_stream` (`tasks:queue`), `cancel_stream` (`tasks:cancel`) | Background task worker toggle plus Redis stream names for queue/cancel traffic. |
 | `[ledger]` | `channel_capacity`, `batch_size`, `flush_interval_ms` for the billing flusher | |
-| `[kms]` | KEK identifier; secret is env-only | |
+| `[kms]` | active KEK identifier plus optional previous KEK identifier during rotation; secret material is env-only | `previous_key_id` / `previous_kek_hex` let a restarted gateway keep dual-read compatibility while old rows are re-encrypted. |
 | `[debug]` | Sampling rate + body-capture toggles for detailed logs | |
 | `[security]` | `trust_xff` (default `false`) | |
 | `[routing]` | `sticky_ttl_secs` (1800) | Routing knobs loaded at boot. `sticky_ttl_secs` controls Sticky's conversation binding TTL. |
@@ -162,7 +162,7 @@ Secrets must come from env, never the TOML.
 
 ### 4.2 Env-var caveat
 
-`GW_KMS__KEK_HEX` **must contain at least one a-f character**. Figment tries integer coercion first; an all-digit 64-char hex round-trips as `i64` and fails the hex parser downstream. Use `python3 -c 'import secrets; print(secrets.token_hex(32))'`.
+`GW_KMS__KEK_HEX` **must contain at least one a-f character**. Figment tries integer coercion first; an all-digit 64-char hex round-trips as `i64` and fails the hex parser downstream. Use `python3 -c 'import secrets; print(secrets.token_hex(32))'`. During a KEK rotation window, `GW_KMS__PREVIOUS_KEK_HEX` and `GW_KMS__PREVIOUS_KEY_ID` must be supplied together; the previous kid must differ from the active `GW_KMS__KEY_ID`.
 
 ### 4.3 KEK rotation state machine
 
@@ -179,6 +179,8 @@ Healthy(K_new)
 ```
 
 Invariants: max 2 KEKs concurrent; never drop only KEK; cannot drop active KEK; cannot enter dual-read twice.
+
+Bootstrap supports the same two-KEK read window: when `previous_kek_hex` and `previous_key_id` are configured, the gateway loads the previous KEK first and then enters dual-read with `kms.key_id` as active. This protects restarts during a rotation. The `rotate-kek` control-plane command is still advertised disabled until a re-encryption worker and runtime command hook are implemented end to end.
 
 ## 5. Persistence
 
