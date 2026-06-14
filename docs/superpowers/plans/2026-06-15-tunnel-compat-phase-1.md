@@ -2,17 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Phase 1 of the Cnexus ↔ Aether tunnel compatibility spec: add a `TunnelProtocol` discriminator to `ProxyNode`, reorganize `gw-tunnel-client` so existing transport code lives under a `cnexus/` submodule, and stand up the `tests/tunnel-e2e/` Docker harness with the 3 Cnexus-protocol scenarios that were previously skipped — without changing any wire behaviour.
+**Goal:** Phase 1 of the Cnexus ↔ Aether tunnel compatibility spec: add a `TunnelProtocol` discriminator to `ProxyNode`, reorganize `gw-tunnel-client` so existing Cnexus transport code lives under a `cnexus/` submodule, introduce the `Transport` trait + `StreamTarget` enum abstraction in `core.rs` so Phase 2 can plug Aether in without breaking existing code, ship Go-side admin-API protocol field + Aether bootstrap registration endpoint, and stand up the `tests/tunnel-e2e/` Docker harness with the 3 Cnexus-protocol scenarios that were previously skipped — without changing any wire behaviour.
 
-**Architecture:** Two landable PRs.
-- **PR 1a (in this plan, Tasks 1-13)** introduces the discriminator, the migration, and the source-layout move. Default value is `cnexus`, deserialization is forward-compatible, runtime behaviour is unchanged.
-- **PR 1b (Tasks 14-26)** introduces `tests/tunnel-e2e/` with its own `docker-compose.yml` (no Aether services yet — that lands in Phase 2), exercises the 3 currently-skipped tunnel scenarios via a `gw-tunnel-server` container, adds `Makefile` targets, and registers the Aether submodule with `update = none` for Phase 2 to consume.
+**Architecture:** Three landable PRs across two repos. All Rust commits accumulate on a single feature branch in `ailinkmax-gateway` (PR 1a + PR 1c); Phase 2 will extend the same branch. PR 1b lives in `AILinkMax-Go` as its own branch (lands first per spec §3.6.8 so the Rust side's contract is met).
+- **PR 1a — Rust foundation** (Tasks 1-8, this repo): introduces the discriminator enum, the migration, the source-layout move into `cnexus/`, and the protocol-neutral abstraction in `gw-tunnel-client/src/{core,target}.rs`. Default `tunnel_protocol = Cnexus`, deserialization is forward-compatible, runtime behaviour is unchanged.
+- **PR 1b — Go management plane** (Tasks G1.1-G2.3 + G-gate, `AILinkMax-Go` repo): adds `Protocol string` field to the proxynode entity and admin APIs (G1, spec §3.6.2) and `POST /api/admin/proxy-nodes/register` plus `aether_register.go` upsert logic (G2, spec §3.6.1). Required so Phase 2's `aether-proxy` containers can bootstrap.
+- **PR 1c — tunnel-e2e harness** (Tasks 9-19, this repo): introduces `tests/tunnel-e2e/` with its own `docker-compose.yml` (no Aether services yet — that lands in Phase 2), exercises the 3 currently-skipped tunnel scenarios via a `gw-tunnel-server` container, adds `Makefile` targets, and registers the Aether submodule with `update = none` for Phase 2 to consume.
 
-**Tech Stack:** Rust 1.88 (pinned), tokio, serde, sqlx, pytest 8.x, Postgres 16, Redis 7, Docker Compose v2.
+**Tech Stack:** Rust 1.88 (pinned), tokio, serde, sqlx, futures, Go 1.21+ (Gin, GORM per existing `AILinkMax-Go` conventions), pytest 8.x, Postgres 16, Redis 7, Docker Compose v2.
 
-**Reference spec:** `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md` (§1, §2, §3.1, §3.2, §6.1, §6.3, §6.4, §6.5 A-scenarios, §7 Phase 1).
+**Reference spec:** `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md` (§1, §2, §3.1, §3.2, §3.3, §3.4, §3.6.1, §3.6.2, §6.1, §6.3, §6.4, §6.5 A-scenarios, §7 Phase 1).
 
-**Out of scope for this plan (deferred to Phase 2/3 plans):** Aether wire protocol (`aether/` submodule), `InboundListener`, `/api/internal/proxy-tunnel` route, `Transport` trait + `AnyTransport` enum, `StreamTarget` two-variant enum, Aether Docker images, Aether scenarios, mixed-pool scenarios, dep-boundary script, Go-side cross-repo PRs.
+**Out of scope for this plan (deferred to Phase 2/3 plans):** Aether wire protocol (`aether/` submodule under `gw-tunnel-client`), `InboundListener`, `/api/internal/aether-tunnel` route, `StreamTarget::Http` variant (Phase 1 ships `Tcp`-only), `AnyTransport` enum (deferred; Phase 1 uses `Arc<dyn Transport>` directly), Aether Docker images, Aether scenarios, mixed-pool scenarios, dep-boundary script, Go G3 heartbeat consumer (Phase 2), Go G4 frontend UI (Phase 3).
 
 **Verification policy:** Per project convention all `cargo` compile/test commands run via `cargo-remote-ctl` (remote build runner). `docker compose` / `make tunnel-e2e` / `make e2e` / `psql` / shell utilities run locally. Migrations are **not** auto-applied (see `CLAUDE.md`): the tunnel-e2e harness applies them via a shell runner pre-baked into Phase 1.
 
@@ -20,13 +21,27 @@
 
 ## File Structure
 
-### New files (PR 1a)
+### New files (PR 1a, this repo)
 
 | Path | Responsibility |
 |---|---|
 | `crates/gw-core/src/tunnel_protocol.rs` | New `TunnelProtocol` enum (`Cnexus` \| `Aether`) with `Default = Cnexus`. Distinct from existing `gw-core::protocol::ProtocolKind` which discriminates vendor API families (OpenAi/Anthropic/Gemini/Kiro). |
 | `crates/gw-tunnel-client/src/cnexus/mod.rs` | New submodule that re-exports the contents of `frame.rs`, `pool.rs`, `transport.rs`. |
+| `crates/gw-tunnel-client/src/core.rs` | Protocol-neutral abstraction: `Transport` trait (`open_stream`, `alive`, `last_heartbeat_age`, `tunnel_protocol`, `close`), `TransportError` enum, `StreamHandle` boxed trait object. Phase 2 adds `aether::WsTransport` as a second impl behind this trait. |
+| `crates/gw-tunnel-client/src/target.rs` | `StreamTarget` enum. Phase 1 ships **only** the `Tcp { host, port, tls }` variant; Phase 2 adds the `Http { ... }` variant for Aether. |
 | `crates/gw-store/migrations/0011_proxy_nodes_protocol.sql` | Backfill payload `protocol` key on existing rows; add partial index on `payload->>'protocol'`. |
+
+### New files (PR 1b, `AILinkMax-Go` repo)
+
+> PR 1b lives in `AILinkMax-Go`, not `ailinkmax-gateway`. All file paths below are relative to the **Go** repo root (`/Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go/`).
+
+| Path | Responsibility |
+|---|---|
+| `modules/proxynode/business/aether_register.go` | Upsert-by-token logic for Aether bootstrap registration (spec §3.6.1). Lookup by decrypted `ae_*` token among `protocol='aether'` rows, update mutable fields, return `node_id`. Auto-provision flag gated by env var `AETHER_AUTO_PROVISION` (default off). |
+| `modules/proxynode/api/aether_register_handler.go` | HTTP handler for `POST /api/admin/proxy-nodes/register`. Mounted on a **separate route** from the existing admin handlers; uses dedicated middleware that only accepts `ae_*`-prefixed tokens (spec §3.6.1.1). |
+| `modules/proxynode/api/aether_token_middleware.go` | Bearer middleware that validates `ae_*` prefix and decrypts against `proxy_nodes.auth_token_enc` column. Distinct from existing admin-token middleware. |
+| `modules/proxynode/business/aether_register_test.go` | Table-driven tests for upsert/auto-provision/reject branches. |
+| `modules/proxynode/api/aether_register_handler_test.go` | Handler-layer tests (401 on bad prefix, 404 on unknown token + auto-provision off, 200 on match). |
 
 ### Files moved (PR 1a)
 
@@ -48,20 +63,32 @@
 | `crates/gw-tunnel-client/src/target_filter.rs` | Generic target allow-list. |
 | Their corresponding tests | Same reason. |
 
-### Files modified (PR 1a)
+### Files modified (PR 1a, this repo)
 
 | Path | Change |
 |---|---|
 | `crates/gw-core/src/lib.rs` | `pub mod tunnel_protocol;` |
 | `crates/gw-core/src/entity.rs` | Add `pub tunnel_protocol: TunnelProtocol` field to `ProxyNode` with `#[serde(default)]`. |
-| `crates/gw-tunnel-client/src/lib.rs` | Replace `pub mod {frame, pool, transport};` with `pub mod cnexus;` plus back-compat re-exports `pub use cnexus::{frame, pool, transport};`. Keep `resolver`/`safe_dns`/`target_filter` mod lines unchanged. |
+| `crates/gw-tunnel-client/src/lib.rs` | Replace `pub mod {frame, pool, transport};` with `pub mod cnexus; pub mod core; pub mod target;` plus back-compat re-exports `pub use cnexus::{frame, pool, transport};` and forward exports `pub use core::{Transport, TransportError, StreamHandle}; pub use target::StreamTarget;`. Keep `resolver`/`safe_dns`/`target_filter` mod lines unchanged. |
 | `crates/gw-tunnel-client/src/resolver.rs` | Add `pub tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol` to `ProxyNodeView`. |
 | `crates/gw-tunnel-client/src/cnexus/{frame,pool,transport}.rs` | Update internal `crate::frame::` / `crate::pool::` / `crate::transport::` paths to `crate::cnexus::frame::` etc. |
+| `crates/gw-tunnel-client/src/cnexus/transport.rs` | Add `impl Transport for WsTransport` adapter (convert `TunnelError` ↔ `TransportError`, wrap `TunnelStream` into `StreamHandle`, only accept `StreamTarget::Tcp`). |
+| `crates/gw-tunnel-client/src/cnexus/pool.rs` | Add `impl Transport for ReconnectingTransport` delegating to inner cnexus transport. |
 | `crates/gw-gateway/src/lib.rs` | `tunnel_refresher` reads `payload.tunnel_protocol` from `ProxyNode` and propagates into `ProxyNodeView`. |
-| `docs/spec/09-tunnel.md` | New subsection "Per-node protocol discriminator" documenting the field, the default, and the future Aether use. |
-| `docs/architecture.md` | Append a one-line entry under the `gw-tunnel-client` crate row noting the `cnexus/` submodule. |
+| `docs/spec/09-tunnel.md` | New subsection "Per-node protocol discriminator" + brief mention of `core.rs` `Transport` trait. |
+| `docs/architecture.md` | Append entries under `gw-tunnel-client` for the `cnexus/` submodule and the protocol-neutral `core.rs` trait. |
 
-### New files (PR 1b)
+### Files modified (PR 1b, `AILinkMax-Go` repo)
+
+| Path | Change |
+|---|---|
+| `modules/proxynode/business/entity.go` | Add `Protocol string` field to the proxynode struct (json tag `protocol`, validate `oneof=cnexus aether`, GORM default `cnexus`). |
+| `modules/proxynode/business/service.go` | Validate `Protocol` enum on create/update; default `"cnexus"`; reject unknown values with 400. Transition rule per spec §3.6.3 (Cnexus→Aether and Aether→Cnexus both allowed; both trigger `events:entity` push). |
+| `modules/proxynode/api/routes.go` | `GET /api/admin/proxy-nodes` response includes `protocol`; `POST /api/admin/proxy-nodes/manual` accepts `protocol`; `PATCH /api/admin/proxy-nodes/{id}` accepts `protocol`. Register new route `POST /api/admin/proxy-nodes/register` under the Aether-token middleware. |
+| `modules/proxynode/api/handlers_test.go` | Extend table-driven tests to cover the new `protocol` field on each touched route. |
+| `modules/proxynode/business/service_test.go` | Extend cases for enum validation + transition. |
+
+### New files (PR 1c, this repo)
 
 | Path | Responsibility |
 |---|---|
@@ -79,7 +106,7 @@
 | `tests/tunnel-e2e/.gitignore` | `logs/`, `.pytest_cache/`. |
 | `.gitmodules` | `tests/tunnel-e2e/aether-src` → `https://gitlab.ailinkmax.com/ailinkmax/Aether`, `update = none` (Phase 1 does not consume it; Phase 2 does). |
 
-### Files modified (PR 1b)
+### Files modified (PR 1c, this repo)
 
 | Path | Change |
 |---|---|
@@ -87,7 +114,7 @@
 
 ---
 
-## PR 1a · `TunnelProtocol` discriminator, migration, `cnexus/` reorg
+## PR 1a · `TunnelProtocol` discriminator, migration, `cnexus/` reorg, `Transport` trait
 
 ### Task 1: Add `TunnelProtocol` enum to `gw-core`
 
@@ -548,6 +575,375 @@ git commit -m "refactor(gw-tunnel-client): move frame/pool/transport into cnexus
 
 ---
 
+### Task 6a: Add `core.rs` (`Transport` trait + `TransportError` + `StreamHandle`) and `target.rs` (`StreamTarget`)
+
+**Why this task exists:** Phase 2 adds `aether::WsTransport` as a second impl. Without an abstraction now, Phase 2 either has to retrofit a trait through a wider blast radius (because cnexus types will already have proliferated into call sites), or has to duplicate the dispatch logic. Doing it in Phase 1 — with only one impl on hand — keeps the trait surface minimal and forces the cnexus impl to prove the shape before Aether arrives.
+
+**Files:**
+- Create: `crates/gw-tunnel-client/src/core.rs`
+- Create: `crates/gw-tunnel-client/src/target.rs`
+- Modify: `crates/gw-tunnel-client/src/lib.rs`
+- Test: `crates/gw-tunnel-client/src/core.rs` (inline `#[cfg(test)]` for `TransportError` Display + StreamHandle compile-fence)
+
+- [ ] **Step 1: Write the failing test (in `core.rs`)**
+
+Append a `#[cfg(test)] mod tests` at the end of the file that doesn't yet exist:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_error_display_includes_variant_tag() {
+        let err = TransportError::Closed;
+        assert!(format!("{err}").contains("closed"));
+        let err = TransportError::UnsupportedTarget;
+        assert!(format!("{err}").contains("unsupported"));
+    }
+
+    /// Compile-fence: any `tokio::io::AsyncRead + AsyncWrite + Send + Unpin`
+    /// must be usable as a `StreamHandle`. If this stops compiling, the
+    /// `StreamHandle` blanket impl has regressed.
+    fn _assert_stream_handle_accepts_tokio_io<T>()
+    where
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        fn assert_box<S: TunnelStream + ?Sized>(_: Box<S>) {}
+        let _: fn(Box<T>) = |b| assert_box(b);
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cargo-remote-ctl test -p gw-tunnel-client --test-of-mod core 2>&1 | tail -20`
+Expected: FAIL with `error[E0432]: unresolved import` for `crate::core`. (The file doesn't exist yet; lib.rs has no `pub mod core;`.)
+
+- [ ] **Step 3: Create `crates/gw-tunnel-client/src/target.rs`**
+
+```rust
+//! Protocol-neutral target descriptor for `Transport::open_stream`.
+//!
+//! Phase 1 ships only the `Tcp` variant (Cnexus is a TCP relay; `tunnel_bridge`
+//! has already serialized HTTP into bytes before calling `open_stream`).
+//!
+//! Phase 2 of the design at
+//! `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md` §3.3
+//! adds the `Http { method, url, headers, body_rx, body_tx_response, meta_tx_response }`
+//! variant for Aether. Phase 1 leaves the enum non-exhaustive so adding the
+//! variant in Phase 2 is forward-compatible (existing exhaustive matches over
+//! `StreamTarget` are a compile error, which is the intended migration signal).
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum StreamTarget {
+    /// Cnexus: opaque TCP stream identified by host + port.
+    Tcp { host: String, port: u16, tls: bool },
+}
+```
+
+- [ ] **Step 4: Create `crates/gw-tunnel-client/src/core.rs`**
+
+```rust
+//! Protocol-neutral transport abstraction.
+//!
+//! Phase 1 has one impl (`cnexus::WsTransport`, wrapped by `cnexus::pool::ReconnectingTransport`).
+//! Phase 2 adds `aether::WsTransport` behind the same trait. Call sites should
+//! depend on `Arc<dyn Transport>` from then on; Phase 1 keeps the concrete cnexus
+//! path direct because dynamic dispatch is unobservable with a single impl.
+//!
+//! See `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md` §3.4.
+
+use std::time::Duration;
+
+use futures::future::BoxFuture;
+use gw_core::tunnel_protocol::TunnelProtocol;
+
+use crate::target::StreamTarget;
+
+/// Bidirectional stream produced by `Transport::open_stream`.
+/// Phase 1: `cnexus::transport::TunnelStream` satisfies this via its existing
+/// `AsyncRead + AsyncWrite` impls.
+pub trait TunnelStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+
+impl<T> TunnelStream for T where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + ?Sized
+{
+}
+
+pub type StreamHandle = Box<dyn TunnelStream>;
+
+/// Errors surfaced through the protocol-neutral `Transport` surface.
+/// cnexus and (in Phase 2) aether impls convert their internal error types to this.
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("transport closed")]
+    Closed,
+    #[error("unsupported target variant for this protocol")]
+    UnsupportedTarget,
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("protocol error: {0}")]
+    Protocol(String),
+}
+
+/// Common surface for any tunnel transport. Implementations must be cheap to
+/// `Arc`-share across `tokio` tasks (the gateway's `tunnel_stack` holds them
+/// behind `DashMap<NodeId, Arc<dyn Transport>>`).
+pub trait Transport: Send + Sync {
+    fn open_stream<'a>(
+        &'a self,
+        target: StreamTarget,
+    ) -> BoxFuture<'a, Result<StreamHandle, TransportError>>;
+
+    fn alive(&self) -> bool;
+
+    /// Time since the most recent liveness signal: Pong (Cnexus) or HeartbeatData (Aether).
+    /// `None` if no signal has been observed yet (just-attached transport).
+    fn last_heartbeat_age(&self) -> Option<Duration>;
+
+    fn tunnel_protocol(&self) -> TunnelProtocol;
+
+    fn close<'a>(&'a self) -> BoxFuture<'a, Result<(), TransportError>>;
+}
+```
+
+- [ ] **Step 5: Rewrite `crates/gw-tunnel-client/src/lib.rs`**
+
+Replace the existing module declarations with:
+
+```rust
+//! Tunnel client — connects gateway to remote proxy nodes.
+//!
+//! Phase 1 ships only the cnexus wire-protocol submodule and the
+//! protocol-neutral abstraction (`core::Transport`, `target::StreamTarget`).
+//! Phase 2 of `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md`
+//! adds an `aether/` sibling submodule that implements the same trait surface.
+
+pub mod cnexus;
+pub mod core;
+pub mod resolver;
+pub mod safe_dns;
+pub mod target;
+pub mod target_filter;
+
+// Forward exports of the protocol-neutral surface.
+pub use core::{StreamHandle, Transport, TransportError, TunnelStream};
+pub use target::StreamTarget;
+
+// Back-compat re-exports so call sites built before the cnexus/ reorg still
+// resolve. Remove once all downstream call sites use the cnexus::* path
+// explicitly (tracked in the Phase 2 plan).
+pub use cnexus::{frame, pool, transport};
+
+pub use resolver::{
+    resolve_tunnel, ProxyNodeView, TunnelPreference, TunnelResolution, TunnelResolveCtx,
+};
+```
+
+- [ ] **Step 6: Run the failing test (now compiles)**
+
+Run: `cargo-remote-ctl test -p gw-tunnel-client core::tests 2>&1 | tail -20`
+Expected: PASS.
+
+- [ ] **Step 7: Verify nothing else broke**
+
+Run: `cargo-remote-ctl test -p gw-tunnel-client`
+Expected: PASS for all existing tests. The new trait is *defined* but not yet *implemented* by `WsTransport`/`ReconnectingTransport` (that's Task 6b), so no existing test depends on the impl.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add crates/gw-tunnel-client/src/core.rs \
+        crates/gw-tunnel-client/src/target.rs \
+        crates/gw-tunnel-client/src/lib.rs
+git commit -m "feat(gw-tunnel-client): add Transport trait + StreamTarget in core.rs/target.rs"
+```
+
+---
+
+### Task 6b: Implement `Transport` for `cnexus::WsTransport` and `ReconnectingTransport`
+
+**Files:**
+- Modify: `crates/gw-tunnel-client/src/cnexus/transport.rs`
+- Modify: `crates/gw-tunnel-client/src/cnexus/pool.rs`
+- Test: `crates/gw-tunnel-client/tests/cnexus_transport.rs` (extend existing)
+
+- [ ] **Step 1: Write the failing test (extend `cnexus_transport.rs`)**
+
+Append at the end of `crates/gw-tunnel-client/tests/cnexus_transport.rs`:
+
+```rust
+/// Prove `cnexus::WsTransport` satisfies the protocol-neutral `Transport` trait.
+/// This is a compile-time check: if the trait surface drifts away from the cnexus
+/// impl, this test stops building.
+#[test]
+fn cnexus_ws_transport_is_a_transport() {
+    fn assert_transport<T: gw_tunnel_client::Transport>() {}
+    assert_transport::<gw_tunnel_client::cnexus::transport::WsTransport>();
+}
+
+#[test]
+fn cnexus_ws_transport_reports_protocol() {
+    use gw_core::tunnel_protocol::TunnelProtocol;
+    use gw_tunnel_client::cnexus::transport::WsTransport;
+    use gw_tunnel_client::Transport;
+    // Construction helper used elsewhere in this file:
+    let t = WsTransport::disconnected_for_test();
+    assert_eq!(t.tunnel_protocol(), TunnelProtocol::Cnexus);
+}
+
+#[test]
+fn reconnecting_transport_is_a_transport() {
+    fn assert_transport<T: gw_tunnel_client::Transport>() {}
+    assert_transport::<gw_tunnel_client::cnexus::pool::ReconnectingTransport>();
+}
+```
+
+> If `disconnected_for_test()` doesn't already exist on `WsTransport`, add it as a `#[cfg(test)]` constructor returning a transport whose `alive()` is `false`. Its sole purpose is to exercise the trait methods that don't need a live socket.
+
+- [ ] **Step 2: Run the failing test**
+
+Run: `cargo-remote-ctl test -p gw-tunnel-client --test cnexus_transport cnexus_ws_transport_is_a_transport 2>&1 | tail -20`
+Expected: FAIL with `the trait bound 'gw_tunnel_client::cnexus::transport::WsTransport: gw_tunnel_client::Transport' is not satisfied`.
+
+- [ ] **Step 3: Implement `Transport` for `cnexus::WsTransport`**
+
+Add to `crates/gw-tunnel-client/src/cnexus/transport.rs`:
+
+```rust
+use std::time::Duration;
+use futures::FutureExt;
+use futures::future::BoxFuture;
+use gw_core::tunnel_protocol::TunnelProtocol;
+use crate::core::{StreamHandle, Transport, TransportError};
+use crate::target::StreamTarget;
+
+impl From<TunnelError> for TransportError {
+    fn from(e: TunnelError) -> Self {
+        match e {
+            TunnelError::Closed => TransportError::Closed,
+            TunnelError::Io(io) => TransportError::Io(io),
+            other => TransportError::Protocol(other.to_string()),
+        }
+    }
+}
+
+impl Transport for WsTransport {
+    fn open_stream<'a>(
+        &'a self,
+        target: StreamTarget,
+    ) -> BoxFuture<'a, Result<StreamHandle, TransportError>> {
+        async move {
+            let target_str = match target {
+                StreamTarget::Tcp { host, port, tls: false } => format!("{host}:{port}"),
+                StreamTarget::Tcp { host, port, tls: true } => format!("tls://{host}:{port}"),
+                #[allow(unreachable_patterns)]
+                _ => return Err(TransportError::UnsupportedTarget),
+            };
+            let stream = WsTransport::open_stream(self, &target_str).await?;
+            Ok(Box::new(stream) as StreamHandle)
+        }
+        .boxed()
+    }
+
+    fn alive(&self) -> bool {
+        self.is_alive()
+    }
+
+    fn last_heartbeat_age(&self) -> Option<Duration> {
+        // Phase 1 cnexus only: the existing `last_pong_age` returns `Duration::MAX`
+        // for "never seen". Convert that sentinel to `None`.
+        let age = self.last_pong_age();
+        if age == Duration::MAX { None } else { Some(age) }
+    }
+
+    fn tunnel_protocol(&self) -> TunnelProtocol {
+        TunnelProtocol::Cnexus
+    }
+
+    fn close<'a>(&'a self) -> BoxFuture<'a, Result<(), TransportError>> {
+        async move {
+            WsTransport::close(self).await.map_err(TransportError::from)
+        }
+        .boxed()
+    }
+}
+```
+
+> If `WsTransport::is_alive()` doesn't exist yet, add it in the same diff: `pub fn is_alive(&self) -> bool { /* mirror existing alive flag */ }`. Match the existing pattern in `transport.rs`; do NOT introduce new shared state.
+
+- [ ] **Step 4: Implement `Transport` for `ReconnectingTransport`**
+
+Add to `crates/gw-tunnel-client/src/cnexus/pool.rs`:
+
+```rust
+use std::time::Duration;
+use futures::FutureExt;
+use futures::future::BoxFuture;
+use gw_core::tunnel_protocol::TunnelProtocol;
+use crate::core::{StreamHandle, Transport, TransportError};
+use crate::target::StreamTarget;
+
+impl Transport for ReconnectingTransport {
+    fn open_stream<'a>(
+        &'a self,
+        target: StreamTarget,
+    ) -> BoxFuture<'a, Result<StreamHandle, TransportError>> {
+        async move {
+            let inner = self.current_inner()
+                .ok_or(TransportError::Closed)?;
+            inner.open_stream(target).await
+        }
+        .boxed()
+    }
+
+    fn alive(&self) -> bool {
+        self.current_inner().map(|t| t.alive()).unwrap_or(false)
+    }
+
+    fn last_heartbeat_age(&self) -> Option<Duration> {
+        self.current_inner().and_then(|t| t.last_heartbeat_age())
+    }
+
+    fn tunnel_protocol(&self) -> TunnelProtocol {
+        TunnelProtocol::Cnexus
+    }
+
+    fn close<'a>(&'a self) -> BoxFuture<'a, Result<(), TransportError>> {
+        async move {
+            self.shutdown().await;
+            Ok(())
+        }
+        .boxed()
+    }
+}
+```
+
+> `current_inner()` is expected to exist on `ReconnectingTransport` (it gives the supervisor's currently-attached inner transport, if any). If it doesn't exist with exactly this signature, add a thin `pub fn current_inner(&self) -> Option<Arc<WsTransport>>` wrapper over whatever the supervisor already exposes — do not change the supervisor's underlying state model.
+
+- [ ] **Step 5: Run the trait tests**
+
+Run: `cargo-remote-ctl test -p gw-tunnel-client --test cnexus_transport 2>&1 | tail -20`
+Expected: PASS.
+
+- [ ] **Step 6: Full workspace test with `--features tunnel`**
+
+Run: `cargo-remote-ctl test --workspace --features tunnel`
+Expected: PASS. Capture the final 5 lines of output for the PR description.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/gw-tunnel-client/src/cnexus/transport.rs \
+        crates/gw-tunnel-client/src/cnexus/pool.rs \
+        crates/gw-tunnel-client/tests/cnexus_transport.rs
+git commit -m "feat(gw-tunnel-client): impl Transport for cnexus::{WsTransport, ReconnectingTransport}"
+```
+
+---
+
 ### Task 7: Sync the architecture and tunnel spec docs
 
 **Files:**
@@ -558,13 +954,15 @@ git commit -m "refactor(gw-tunnel-client): move frame/pool/transport into cnexus
 
 - [ ] **Step 1: Patch `docs/architecture.md`**
 
-Search for the existing description of `gw-tunnel-client`. Append one sentence:
+Search for the existing description of `gw-tunnel-client`. Append two sentences:
 
 ```
 Phase 1 of the tunnel-compat work (2026-06-15) moves the Cnexus-protocol
-codec, pool, and transport into the `cnexus/` submodule; `resolver`,
-`safe_dns`, and `target_filter` remain at the crate root because they
-are protocol-agnostic.
+codec, pool, and transport into the `cnexus/` submodule and introduces
+the protocol-neutral `Transport` trait + `StreamTarget` enum in
+`core.rs`/`target.rs` so Phase 2 can plug an `aether/` sibling under the
+same surface. `resolver`, `safe_dns`, and `target_filter` remain at the
+crate root because they are protocol-agnostic.
 ```
 
 - [ ] **Step 2: Patch `docs/spec/09-tunnel.md`**
@@ -581,13 +979,22 @@ written before this addition. Phase 1 implements only the `Cnexus`
 variant; Phase 2 of the design at
 `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md`
 adds the Aether variant and the `InboundListener` route that goes with it.
+
+## `Transport` trait (Phase 1, 2026-06-15)
+
+`gw-tunnel-client::core::Transport` is the protocol-neutral surface the
+gateway depends on. Methods: `open_stream(StreamTarget) → StreamHandle`,
+`alive()`, `last_heartbeat_age()`, `tunnel_protocol()`, `close()`.
+`StreamTarget` is `#[non_exhaustive]`; Phase 1 ships only the `Tcp`
+variant. The cnexus impls (`WsTransport`, `ReconnectingTransport`)
+return `TransportError::UnsupportedTarget` for any non-`Tcp` target.
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add docs/architecture.md docs/spec/09-tunnel.md
-git commit -m "docs(tunnel): record cnexus/ reorg and tunnel_protocol field"
+git commit -m "docs(tunnel): record cnexus/ reorg, Transport trait, tunnel_protocol field"
 ```
 
 ---
@@ -623,17 +1030,760 @@ Expected: 25 scenarios PASS. Capture the final summary line for the PR descripti
 
 - [ ] **Step 6: Open PR 1a**
 
-PR title: `feat(tunnel): Phase 1a — TunnelProtocol discriminator, migration 0011, cnexus/ reorg`
+PR title: `feat(tunnel): Phase 1a — TunnelProtocol discriminator, migration 0011, cnexus/ reorg, Transport trait`
 
 PR body should include:
-- One-line summary of each commit.
-- The captured 5-line `cargo-remote-ctl test --workspace --features tunnel` tail from Task 6 Step 8.
+- One-line summary of each commit (Tasks 1–7, i.e. enum, ProxyNode field, migration, ProxyNodeView field, refresher wire, cnexus reorg, `core.rs` trait, cnexus impl `Transport`, docs sync).
+- The captured 5-line `cargo-remote-ctl test --workspace --features tunnel` tail from Task 6b Step 6.
 - The captured `make e2e` summary from Step 5 above.
 - Link to the spec: `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md`.
+- A note that PR 1b (Go management plane in `AILinkMax-Go`) must land before any Aether-shaped row is created in production.
 
 ---
 
-## PR 1b · `tests/tunnel-e2e/` skeleton + 3 Cnexus-protocol scenarios
+## PR 1b · Go Management Plane (`AILinkMax-Go` repo)
+
+> **Repo:** `AILinkMax-Go` (located at `/Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go/`). All paths below are relative to that repo's root.
+>
+> **Landing order:** Per spec §3.6.8, PR 1b lands **first** in the AILinkMax-Go repo, before any production deploy of PR 1a. Reason: PR 1a default `tunnel_protocol = Cnexus` means PR 1a is forward-compatible with existing rows, and PR 1b only writes the new `protocol` column (default `cnexus`) — so the Rust read-side never sees an unknown value. There is **no Aether-shaped row creation** in Phase 1; that happens in Phase 2.
+>
+> **Branch:** Create `feature/tunnel-compat-phase-1-go` in `AILinkMax-Go`. All Phase 1 Go commits land on this branch; submit as a single MR upon PR-1b gate passing.
+
+### Task G1.1: Add `Protocol` field to `proxynode` entity
+
+**Files:**
+- Modify: `modules/proxynode/business/entity.go`
+- Test: `modules/proxynode/business/service_test.go` (extend)
+
+- [ ] **Step 1: Write the failing test**
+
+In `modules/proxynode/business/service_test.go` add:
+
+```go
+func TestProxyNode_DefaultProtocolIsCnexus(t *testing.T) {
+    var n ProxyNode
+    if n.Protocol != "" && n.Protocol != "cnexus" {
+        t.Fatalf("expected zero-value Protocol to be empty or 'cnexus', got %q", n.Protocol)
+    }
+}
+
+func TestProxyNode_ProtocolJSONRoundTrip(t *testing.T) {
+    n := ProxyNode{Protocol: "aether"}
+    b, err := json.Marshal(n)
+    if err != nil { t.Fatal(err) }
+    if !strings.Contains(string(b), `"protocol":"aether"`) {
+        t.Fatalf("expected json to include protocol=aether, got %s", b)
+    }
+    var n2 ProxyNode
+    if err := json.Unmarshal(b, &n2); err != nil { t.Fatal(err) }
+    if n2.Protocol != "aether" { t.Fatalf("round-trip lost Protocol: %+v", n2) }
+}
+```
+
+- [ ] **Step 2: Run failing test**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/business -run TestProxyNode_DefaultProtocolIsCnexus -v`
+Expected: COMPILE FAIL — `n.Protocol undefined`.
+
+- [ ] **Step 3: Add the field to `entity.go`**
+
+```go
+// ProxyNode represents one proxy node row.
+type ProxyNode struct {
+    // ... existing fields ...
+
+    // Protocol selects the wire protocol the tunnel transport speaks to
+    // this node. "cnexus" (default) means outbound dial-out to the node;
+    // "aether" means the node dials in via /api/internal/aether-tunnel.
+    // See ailinkmax-gateway/docs/spec/09-tunnel.md.
+    Protocol string `json:"protocol" gorm:"column:protocol;type:varchar(16);not null;default:cnexus" validate:"omitempty,oneof=cnexus aether"`
+}
+```
+
+> If the entity is persisted via `payload JSONB` (as in the Rust side's `proxy_nodes` table) rather than as a top-level column, change the GORM tag to embed inside the JSONB payload column. Inspect the existing `entity.go` for the persistence model **before** editing — match what's already there. The wire JSON (`json:"protocol"`) tag is the same either way.
+
+- [ ] **Step 4: Run test, verify pass**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/business -run 'TestProxyNode_(DefaultProtocol|ProtocolJSON)' -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
+git add modules/proxynode/business/entity.go modules/proxynode/business/service_test.go
+git commit -m "feat(proxynode): add Protocol field (cnexus/aether, default cnexus)"
+```
+
+---
+
+### Task G1.2: Validate `Protocol` enum on create/update; default `cnexus`
+
+**Files:**
+- Modify: `modules/proxynode/business/service.go`
+- Test: `modules/proxynode/business/service_test.go` (extend)
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+func TestService_RejectsUnknownProtocol(t *testing.T) {
+    svc := newServiceForTest(t)
+    _, err := svc.Create(context.Background(), CreateInput{
+        NodeName: "n1",
+        WsURL:    "wss://n1.example.com/tunnel",
+        Protocol: "blockchain", // invalid
+    })
+    if err == nil { t.Fatal("expected error for unknown protocol") }
+    if !errors.Is(err, ErrInvalidProtocol) {
+        t.Fatalf("expected ErrInvalidProtocol, got %v", err)
+    }
+}
+
+func TestService_DefaultsProtocolToCnexusOnCreate(t *testing.T) {
+    svc := newServiceForTest(t)
+    n, err := svc.Create(context.Background(), CreateInput{NodeName: "n2", WsURL: "wss://n2/tunnel"})
+    if err != nil { t.Fatal(err) }
+    if n.Protocol != "cnexus" {
+        t.Fatalf("expected default cnexus, got %q", n.Protocol)
+    }
+}
+
+func TestService_AllowsCnexusToAetherTransition(t *testing.T) {
+    svc := newServiceForTest(t)
+    n, _ := svc.Create(context.Background(), CreateInput{NodeName: "n3", WsURL: "wss://n3/tunnel"})
+    updated, err := svc.Update(context.Background(), n.ID, UpdateInput{Protocol: ptrString("aether")})
+    if err != nil { t.Fatalf("transition should succeed: %v", err) }
+    if updated.Protocol != "aether" {
+        t.Fatalf("expected aether after update, got %q", updated.Protocol)
+    }
+}
+```
+
+> `newServiceForTest`, `ptrString`, `CreateInput`, `UpdateInput`, `ErrInvalidProtocol` follow the conventions of the existing test file. Mirror the existing helper signatures exactly — do not reinvent them.
+
+- [ ] **Step 2: Run failing test**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/business -run TestService_RejectsUnknownProtocol -v`
+Expected: FAIL.
+
+- [ ] **Step 3: Implement validation + default**
+
+In `modules/proxynode/business/service.go` add:
+
+```go
+var ErrInvalidProtocol = errors.New("proxynode: protocol must be 'cnexus' or 'aether'")
+
+func validateProtocol(p string) error {
+    switch p {
+    case "", "cnexus", "aether":
+        return nil
+    default:
+        return fmt.Errorf("%w: got %q", ErrInvalidProtocol, p)
+    }
+}
+```
+
+Then in `Service.Create`:
+
+```go
+func (s *Service) Create(ctx context.Context, in CreateInput) (*ProxyNode, error) {
+    if err := validateProtocol(in.Protocol); err != nil {
+        return nil, err
+    }
+    if in.Protocol == "" {
+        in.Protocol = "cnexus"
+    }
+    // ... rest unchanged ...
+}
+```
+
+In `Service.Update`:
+
+```go
+func (s *Service) Update(ctx context.Context, id string, in UpdateInput) (*ProxyNode, error) {
+    if in.Protocol != nil {
+        if err := validateProtocol(*in.Protocol); err != nil {
+            return nil, err
+        }
+    }
+    // ... apply update ...
+    // Push events:entity so the Rust side refreshes its in-memory snapshot.
+    s.eventsBus.PushEntityChange(ctx, "proxy_node", "upsert", id)
+    return updated, nil
+}
+```
+
+> The events-bus push on Update is mandatory because protocol transitions per spec §3.6.3 require the Rust side to drop / re-attach the transport. The existing Update path likely already pushes; if so, do not duplicate. Inspect the existing handler chain first.
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/business -run 'TestService_(Rejects|Defaults|Allows)' -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
+git add modules/proxynode/business/service.go modules/proxynode/business/service_test.go
+git commit -m "feat(proxynode): validate Protocol enum, default cnexus, push events:entity on update"
+```
+
+---
+
+### Task G1.3: Surface `Protocol` in admin API routes
+
+**Files:**
+- Modify: `modules/proxynode/api/routes.go`
+- Test: `modules/proxynode/api/handlers_test.go` (extend)
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+func TestRoutes_CreateAcceptsProtocol(t *testing.T) {
+    r := newTestRouter(t)
+    body := `{"node_name":"n1","ws_url":"wss://n1/tunnel","protocol":"aether"}`
+    rec := httptest.NewRecorder()
+    req := httptest.NewRequest("POST", "/api/admin/proxy-nodes/manual", strings.NewReader(body))
+    req.Header.Set("Authorization", "Bearer "+testAdminToken)
+    r.ServeHTTP(rec, req)
+    if rec.Code != 200 { t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String()) }
+    var resp map[string]any
+    if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil { t.Fatal(err) }
+    if resp["protocol"] != "aether" {
+        t.Fatalf("expected protocol=aether in response, got %v", resp["protocol"])
+    }
+}
+
+func TestRoutes_GetIncludesProtocol(t *testing.T) {
+    r := newTestRouter(t)
+    seedNode(t, r, "n2", "cnexus")
+    rec := httptest.NewRecorder()
+    req := httptest.NewRequest("GET", "/api/admin/proxy-nodes", nil)
+    req.Header.Set("Authorization", "Bearer "+testAdminToken)
+    r.ServeHTTP(rec, req)
+    if rec.Code != 200 { t.Fatalf("got %d: %s", rec.Code, rec.Body.String()) }
+    if !strings.Contains(rec.Body.String(), `"protocol":"cnexus"`) {
+        t.Fatalf("expected protocol field in list response, got %s", rec.Body.String())
+    }
+}
+```
+
+- [ ] **Step 2: Run failing test**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/api -run TestRoutes_CreateAcceptsProtocol -v`
+Expected: FAIL (handler ignores `protocol` field).
+
+- [ ] **Step 3: Plumb `Protocol` into the create/update DTOs**
+
+In `modules/proxynode/api/routes.go` (or whichever file defines the request DTO), add:
+
+```go
+type createProxyNodeRequest struct {
+    NodeName string `json:"node_name" binding:"required"`
+    WsURL    string `json:"ws_url" binding:"required"`
+    Protocol string `json:"protocol"` // optional; defaults to "cnexus" in service layer
+    // ... existing fields ...
+}
+
+type updateProxyNodeRequest struct {
+    NodeName *string `json:"node_name,omitempty"`
+    WsURL    *string `json:"ws_url,omitempty"`
+    Protocol *string `json:"protocol,omitempty"`
+    // ... existing fields ...
+}
+```
+
+Map them through the existing handler to `business.CreateInput` / `business.UpdateInput`. The GET handler that lists nodes already serializes the entity — and Task G1.1 added the `json:"protocol"` tag — so list output picks up `protocol` automatically with no handler change required (verify with the test above).
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/api -run 'TestRoutes_(Create|Get)' -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
+git add modules/proxynode/api/routes.go modules/proxynode/api/handlers_test.go
+git commit -m "feat(proxynode-api): accept and return protocol on manual/patch/get"
+```
+
+---
+
+### Task G2.1: Add `ae_*` Aether-token middleware
+
+**Files:**
+- Create: `modules/proxynode/api/aether_token_middleware.go`
+- Test: `modules/proxynode/api/aether_token_middleware_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `modules/proxynode/api/aether_token_middleware_test.go`:
+
+```go
+package api
+
+import (
+    "net/http"
+    "net/http/httptest"
+    "strings"
+    "testing"
+)
+
+func TestAetherTokenMiddleware_Rejects_NonAePrefix(t *testing.T) {
+    mw := AetherTokenMiddleware(stubAetherTokenStore{})
+    h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+    rec := httptest.NewRecorder()
+    req := httptest.NewRequest("POST", "/", nil)
+    req.Header.Set("Authorization", "Bearer admin-foo-bar")
+    h.ServeHTTP(rec, req)
+    if rec.Code != http.StatusUnauthorized {
+        t.Fatalf("expected 401 for non-ae_ token, got %d", rec.Code)
+    }
+}
+
+func TestAetherTokenMiddleware_Rejects_MissingBearer(t *testing.T) {
+    mw := AetherTokenMiddleware(stubAetherTokenStore{})
+    h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+    rec := httptest.NewRecorder()
+    req := httptest.NewRequest("POST", "/", nil)
+    h.ServeHTTP(rec, req)
+    if rec.Code != http.StatusUnauthorized {
+        t.Fatalf("expected 401 for missing Authorization, got %d", rec.Code)
+    }
+}
+
+func TestAetherTokenMiddleware_Accepts_AePrefix_KnownToken(t *testing.T) {
+    store := stubAetherTokenStore{validToken: "ae_known_token", nodeID: "aether-node-1"}
+    mw := AetherTokenMiddleware(store)
+    h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        nid := r.Context().Value(CtxKeyAetherNodeID).(string)
+        if nid != "aether-node-1" { t.Fatalf("wrong nodeID: %s", nid) }
+        w.WriteHeader(200)
+    }))
+    rec := httptest.NewRecorder()
+    req := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
+    req.Header.Set("Authorization", "Bearer ae_known_token")
+    h.ServeHTTP(rec, req)
+    if rec.Code != 200 { t.Fatalf("expected 200, got %d", rec.Code) }
+}
+
+type stubAetherTokenStore struct {
+    validToken string
+    nodeID     string
+}
+
+func (s stubAetherTokenStore) ResolveAetherToken(_ string, candidate string) (string, bool) {
+    if candidate == s.validToken { return s.nodeID, true }
+    return "", false
+}
+```
+
+- [ ] **Step 2: Run failing test**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/api -run TestAetherTokenMiddleware -v`
+Expected: COMPILE FAIL (`AetherTokenMiddleware` undefined).
+
+- [ ] **Step 3: Implement the middleware**
+
+Create `modules/proxynode/api/aether_token_middleware.go`:
+
+```go
+package api
+
+import (
+    "context"
+    "net/http"
+    "strings"
+)
+
+type ctxKey string
+
+const CtxKeyAetherNodeID ctxKey = "proxynode.aether.node_id"
+
+// AetherTokenStore knows how to resolve a raw `ae_*` token (presented by an
+// aether-proxy at /register-time) into the `proxy_nodes.id` value to return
+// in the response body. Phase 1 implementations may scan all
+// protocol='aether' rows and decrypt `auth_token_enc`; the lookup happens
+// once per registration, so cost is not a concern.
+type AetherTokenStore interface {
+    ResolveAetherToken(ctx string, candidate string) (nodeID string, ok bool)
+}
+
+// AetherTokenMiddleware accepts Bearer tokens prefixed with `ae_`, resolves
+// them against the store, and sets `CtxKeyAetherNodeID` on the request
+// context. Any token without the `ae_` prefix is rejected up-front so this
+// middleware can never collide with the existing admin-token middleware.
+func AetherTokenMiddleware(store AetherTokenStore) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            authz := r.Header.Get("Authorization")
+            if !strings.HasPrefix(authz, "Bearer ae_") {
+                http.Error(w, "unauthorized", http.StatusUnauthorized)
+                return
+            }
+            token := strings.TrimPrefix(authz, "Bearer ")
+            nodeID, ok := store.ResolveAetherToken(r.Context().Value("requestID").(string), token)
+            if !ok {
+                http.Error(w, "unauthorized", http.StatusUnauthorized)
+                return
+            }
+            ctx := context.WithValue(r.Context(), CtxKeyAetherNodeID, nodeID)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+}
+```
+
+> If `requestID` retrieval differs in the existing codebase (e.g. gin context key), follow the existing convention — do not introduce a new request-id mechanism.
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/api -run TestAetherTokenMiddleware -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
+git add modules/proxynode/api/aether_token_middleware.go \
+        modules/proxynode/api/aether_token_middleware_test.go
+git commit -m "feat(proxynode-api): add Aether bearer-token middleware (ae_* prefix)"
+```
+
+---
+
+### Task G2.2: Implement `aether_register.go` upsert business logic
+
+**Files:**
+- Create: `modules/proxynode/business/aether_register.go`
+- Create: `modules/proxynode/business/aether_register_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `modules/proxynode/business/aether_register_test.go`:
+
+```go
+package business
+
+import (
+    "context"
+    "os"
+    "testing"
+)
+
+func TestAetherRegister_Upserts_KnownToken(t *testing.T) {
+    svc := newServiceForTest(t)
+    n, _ := svc.Create(context.Background(), CreateInput{
+        NodeName: "aether-1", WsURL: "", Protocol: "aether", AuthToken: "ae_known",
+    })
+    in := RegisterInput{
+        NodeName: "aether-1-updated",
+        PublicIP: "203.0.113.7",
+        Region:   "us-east-1",
+        Hardware: map[string]any{"cpu_cores": 4},
+        Version:  "1.4.2",
+        Token:    "ae_known",
+    }
+    out, err := svc.AetherRegister(context.Background(), in)
+    if err != nil { t.Fatal(err) }
+    if out.NodeID != n.ID {
+        t.Fatalf("expected upsert to existing id %q, got %q", n.ID, out.NodeID)
+    }
+    if out.HeartbeatIntervalSecs == 0 {
+        t.Fatalf("expected heartbeat interval to be set, got 0")
+    }
+    refreshed, _ := svc.Get(context.Background(), n.ID)
+    if refreshed.NodeName != "aether-1-updated" {
+        t.Fatalf("expected NodeName updated, got %q", refreshed.NodeName)
+    }
+}
+
+func TestAetherRegister_RejectsUnknownToken_WhenAutoProvisionOff(t *testing.T) {
+    t.Setenv("AETHER_AUTO_PROVISION", "false")
+    svc := newServiceForTest(t)
+    _, err := svc.AetherRegister(context.Background(), RegisterInput{Token: "ae_unknown"})
+    if err == nil { t.Fatal("expected error for unknown token + auto-provision off") }
+    if !errors.Is(err, ErrAetherTokenUnknown) {
+        t.Fatalf("expected ErrAetherTokenUnknown, got %v", err)
+    }
+}
+
+func TestAetherRegister_AutoProvisions_WhenEnabled(t *testing.T) {
+    t.Setenv("AETHER_AUTO_PROVISION", "true")
+    svc := newServiceForTest(t)
+    in := RegisterInput{
+        NodeName: "auto-1", PublicIP: "203.0.113.8", Region: "eu-west-1",
+        Hardware: map[string]any{"cpu_cores": 2}, Version: "1.4.2",
+        Token: "ae_brand_new",
+    }
+    out, err := svc.AetherRegister(context.Background(), in)
+    if err != nil { t.Fatal(err) }
+    if out.NodeID == "" { t.Fatal("expected new node id") }
+    created, _ := svc.Get(context.Background(), out.NodeID)
+    if created.Protocol != "aether" {
+        t.Fatalf("auto-provisioned node must have Protocol=aether, got %q", created.Protocol)
+    }
+}
+```
+
+- [ ] **Step 2: Run failing test**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/business -run TestAetherRegister -v`
+Expected: COMPILE FAIL.
+
+- [ ] **Step 3: Implement `aether_register.go`**
+
+Create `modules/proxynode/business/aether_register.go`:
+
+```go
+package business
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "os"
+)
+
+var ErrAetherTokenUnknown = errors.New("aether register: token not recognized and auto-provision disabled")
+
+type RegisterInput struct {
+    NodeName            string                 `json:"node_name"`
+    PublicIP            string                 `json:"public_ip"`
+    Region              string                 `json:"region"`
+    Hardware            map[string]any         `json:"hardware"`
+    Version             string                 `json:"version"`
+    TunnelCapabilities  map[string]any         `json:"tunnel_capabilities"`
+    Token               string                 `json:"-"` // injected by middleware/handler
+}
+
+type RegisterOutput struct {
+    NodeID                string         `json:"node_id"`
+    HeartbeatIntervalSecs int            `json:"heartbeat_interval_secs"`
+    Config                map[string]any `json:"config,omitempty"`
+}
+
+func (s *Service) AetherRegister(ctx context.Context, in RegisterInput) (*RegisterOutput, error) {
+    if in.Token == "" {
+        return nil, fmt.Errorf("aether register: missing token")
+    }
+
+    // 1. Scan protocol='aether' rows, decrypt auth_token_enc, find matching row.
+    matched, err := s.repo.FindAetherByToken(ctx, in.Token)
+    if err != nil { return nil, err }
+
+    if matched == nil {
+        if os.Getenv("AETHER_AUTO_PROVISION") != "true" {
+            return nil, ErrAetherTokenUnknown
+        }
+        // 2. Auto-provision: insert a new row with protocol='aether'.
+        created, err := s.Create(ctx, CreateInput{
+            NodeName:  in.NodeName,
+            PublicIP:  in.PublicIP,
+            Region:    in.Region,
+            Hardware:  in.Hardware,
+            Version:   in.Version,
+            Protocol:  "aether",
+            AuthToken: in.Token,
+        })
+        if err != nil { return nil, err }
+        s.eventsBus.PushEntityChange(ctx, "proxy_node", "upsert", created.ID)
+        return &RegisterOutput{
+            NodeID:                created.ID,
+            HeartbeatIntervalSecs: 30,
+        }, nil
+    }
+
+    // 3. Upsert mutable fields and return the row's id.
+    matched.NodeName = in.NodeName
+    matched.PublicIP = in.PublicIP
+    matched.Region = in.Region
+    matched.Hardware = in.Hardware
+    matched.Version = in.Version
+    if err := s.repo.Save(ctx, matched); err != nil { return nil, err }
+    s.eventsBus.PushEntityChange(ctx, "proxy_node", "upsert", matched.ID)
+
+    return &RegisterOutput{
+        NodeID:                matched.ID,
+        HeartbeatIntervalSecs: 30,
+    }, nil
+}
+```
+
+> `s.repo.FindAetherByToken`, `s.repo.Save`, and `CreateInput.AuthToken` are expected to exist on the existing repo/service shape. If they don't, add thin wrappers that call into the existing repository — do not redesign the repository contract. `auth_token_enc` decryption uses whatever KMS helper the existing entity already uses.
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/business -run TestAetherRegister -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
+git add modules/proxynode/business/aether_register.go \
+        modules/proxynode/business/aether_register_test.go
+git commit -m "feat(proxynode): add Aether registration upsert + auto-provision logic"
+```
+
+---
+
+### Task G2.3: Wire the HTTP handler and route
+
+**Files:**
+- Create: `modules/proxynode/api/aether_register_handler.go`
+- Create: `modules/proxynode/api/aether_register_handler_test.go`
+- Modify: `modules/proxynode/api/routes.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `modules/proxynode/api/aether_register_handler_test.go`:
+
+```go
+package api
+
+import (
+    "bytes"
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
+    "strings"
+    "testing"
+)
+
+func TestAetherRegister_HandlerSucceeds_WithKnownToken(t *testing.T) {
+    r := newTestRouterWithAetherToken(t, "ae_known", "aether-node-1")
+    body := `{"node_name":"a1","public_ip":"203.0.113.7","region":"us-east-1","hardware":{"cpu_cores":4},"version":"1.4.2","tunnel_capabilities":{"max_streams":64}}`
+    rec := httptest.NewRecorder()
+    req := httptest.NewRequest("POST", "/api/admin/proxy-nodes/register", strings.NewReader(body))
+    req.Header.Set("Authorization", "Bearer ae_known")
+    req.Header.Set("Content-Type", "application/json")
+    r.ServeHTTP(rec, req)
+    if rec.Code != 200 { t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String()) }
+    var resp map[string]any
+    if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil { t.Fatal(err) }
+    if resp["node_id"] != "aether-node-1" {
+        t.Fatalf("expected node_id=aether-node-1, got %v", resp["node_id"])
+    }
+}
+
+func TestAetherRegister_HandlerRejects_BadPrefix(t *testing.T) {
+    r := newTestRouterWithAetherToken(t, "ae_known", "aether-node-1")
+    rec := httptest.NewRecorder()
+    req := httptest.NewRequest("POST", "/api/admin/proxy-nodes/register", bytes.NewReader(nil))
+    req.Header.Set("Authorization", "Bearer admin_token_x") // wrong prefix
+    r.ServeHTTP(rec, req)
+    if rec.Code != http.StatusUnauthorized {
+        t.Fatalf("expected 401, got %d", rec.Code)
+    }
+}
+```
+
+- [ ] **Step 2: Run failing test**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/api -run TestAetherRegister_Handler -v`
+Expected: FAIL (route not mounted).
+
+- [ ] **Step 3: Implement the handler**
+
+Create `modules/proxynode/api/aether_register_handler.go`:
+
+```go
+package api
+
+import (
+    "encoding/json"
+    "errors"
+    "net/http"
+
+    "ailinkmax-go/modules/proxynode/business"
+)
+
+func AetherRegisterHandler(svc *business.Service) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        var in business.RegisterInput
+        if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+            http.Error(w, "bad request", http.StatusBadRequest)
+            return
+        }
+        // The Aether-token middleware verified the prefix; pass the raw token through.
+        authz := r.Header.Get("Authorization")
+        in.Token = authz[len("Bearer "):]
+
+        out, err := svc.AetherRegister(r.Context(), in)
+        if err != nil {
+            if errors.Is(err, business.ErrAetherTokenUnknown) {
+                http.Error(w, "unauthorized", http.StatusUnauthorized)
+                return
+            }
+            http.Error(w, "internal", http.StatusInternalServerError)
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(out)
+    }
+}
+```
+
+- [ ] **Step 4: Mount the route**
+
+In `modules/proxynode/api/routes.go`, add a new route block under the aether-token middleware:
+
+```go
+aether := api.Group("/api/admin/proxy-nodes")
+aether.Use(AetherTokenMiddleware(svc.AetherTokenStore()))
+aether.POST("/register", gin.WrapF(AetherRegisterHandler(svc)))
+```
+
+> Replace `api.Group(...)` / `gin.WrapF` with whatever router idiom the existing routes.go uses (chi, mux, gin, etc.). The key invariants are: (a) the `/register` route is **separate** from the existing admin-token routes; (b) only the aether-token middleware is in the chain — admin-token middleware must NOT also apply (collision risk).
+
+- [ ] **Step 5: Run tests**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/api -run TestAetherRegister_Handler -v`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
+git add modules/proxynode/api/aether_register_handler.go \
+        modules/proxynode/api/aether_register_handler_test.go \
+        modules/proxynode/api/routes.go
+git commit -m "feat(proxynode-api): mount POST /api/admin/proxy-nodes/register under ae_* middleware"
+```
+
+---
+
+### Task G-gate: PR 1b verification
+
+- [ ] **Step 1: Full Go module test**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go test ./modules/proxynode/... -race -v`
+Expected: PASS. `-race` is required because the registration path writes through the repo while readers may be iterating.
+
+- [ ] **Step 2: Go module-wide build**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go build ./...`
+Expected: clean.
+
+- [ ] **Step 3: `go vet` and `gofmt -d` check**
+
+Run: `cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go && go vet ./modules/proxynode/... && gofmt -l modules/proxynode/`
+Expected: empty output (no diagnostics, no formatting drift).
+
+- [ ] **Step 4: Open the AILinkMax-Go MR**
+
+MR title: `feat(proxynode): Phase 1b — protocol field + Aether registration endpoint (G1+G2)`
+
+MR description should include:
+- Forward-compatibility note: default `protocol = "cnexus"` for all existing rows, so the Rust gateway (still on pre-Phase-1a code) deserializes them as before.
+- Test summary from Step 1.
+- Cross-link to the Cnexus Rust spec: `/Users/whereslow/Desktop/work/Cnewxus/ailinkmax-gateway/docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md` §3.6.
+
+---
+
+## PR 1c · `tests/tunnel-e2e/` skeleton + 3 Cnexus-protocol scenarios
 
 ### Task 9: Add Aether submodule placeholder with `update = none`
 
@@ -1286,7 +2436,7 @@ Quick triage:
 - `GW_TUNNEL_NO_NODE` when not expected: the `seed_nodes` fixture's `time.sleep(2)` may need to grow; the gateway's refresh cadence is config-driven (see `[tunnel].refresh_interval_ms` in `config/default.toml`). Bump the sleep before tightening other knobs.
 - Byte mismatch: `docker compose ... logs fake-upstream` to confirm what the upstream actually received vs. what came back. A mismatch usually means chunked vs. content-length disagreement on the loopback path; capture both responses and diff with `xxd`.
 
-> Do not adjust the gateway code or shipping config to make the tests pass — Phase 1 is supposed to be wire-identical to the prior behavior. If a real bug surfaces, file it and decide whether to fix in PR 1b or split off.
+> Do not adjust the gateway code or shipping config to make the tests pass — Phase 1 is supposed to be wire-identical to the prior behavior. If a real bug surfaces, file it and decide whether to fix in PR 1c or split off.
 
 - [ ] **Step 4: Capture the green summary for the PR description**
 
@@ -1369,7 +2519,7 @@ git commit -m "docs(tunnel-e2e): README with scenarios, run targets, triage"
 
 ---
 
-### Task 19: PR-1b verification gate
+### Task 19: PR-1c verification gate
 
 - [ ] **Step 1: Confirm `make tunnel-e2e` passes from a clean tree**
 
@@ -1389,9 +2539,9 @@ Expected: unchanged from PR 1a baseline. (`tests/tunnel-e2e/` is Python — it s
 
 Expected: 25 passed.
 
-- [ ] **Step 4: Open PR 1b**
+- [ ] **Step 4: Open PR 1c**
 
-PR title: `feat(tunnel-e2e): Phase 1b — Docker harness + 3 cnexus scenarios`
+PR title: `feat(tunnel-e2e): Phase 1c — Docker harness + 3 cnexus scenarios`
 
 PR body should include:
 - The captured `make tunnel-e2e` green summary.
@@ -1403,34 +2553,52 @@ PR body should include:
 
 ## Self-Review
 
-After PR 1a + PR 1b merge:
+After PR 1a + PR 1b + PR 1c merge (PR 1b in `AILinkMax-Go`, the others in this repo on the shared feature branch that Phase 2 will extend):
 
 1. **Spec coverage (Phase 1 only):**
    - §3.1 migration 0011 — Task 3.
    - §3.2 `TunnelProtocol` enum + `ProxyNodePayload.protocol` field — Tasks 1 & 2.
+   - §3.3 `StreamTarget` enum (Tcp-only in Phase 1) — Task 6a.
+   - §3.4 `Transport` trait + cnexus impls — Tasks 6a (trait definition) and 6b (impls). `AnyTransport` enum deferred to Phase 2 (Phase 1 uses `Arc<dyn Transport>` directly).
+   - §3.6.1 Registration endpoint — Tasks G2.1 (middleware), G2.2 (business logic), G2.3 (handler/route).
+   - §3.6.2 Admin API `protocol` field — Tasks G1.1 (entity), G1.2 (service validation + transition events), G1.3 (routes).
+   - §3.6.3 Protocol transition state machine — Task G1.2 Step 3 (push `events:entity` on Update). Rust-side transport teardown/reattach driven by the existing entity-stream consumer; no new Rust code in Phase 1 since both impls of `Transport` exist only after Phase 2.
+   - §3.6.4 Auto-provision flag — Task G2.2 Step 3 (`AETHER_AUTO_PROVISION` env, default off).
    - §6.1 directory layout (Phase 1 subset) — Tasks 9-15 cover compose, seed, fixtures, scenarios, README; the Aether-specific files are explicitly deferred to Phase 2.
    - §6.3 docker-compose (Phase 1 subset) — Task 10.
    - §6.4 seed_nodes fixture — Task 13.
    - §6.5.A 3 scenarios — Task 15.
    - §6.6 Makefile targets — Task 16.
-   - §7 Phase 1 PR-1a / PR-1b breakdown — Tasks 1-8 / 9-19.
-   - Phase 1 explicitly out of scope per the plan header: §3.3 (StreamTarget), §3.4 (Transport trait), §3.5 (InboundListener), §4 (Aether internals), §5 (dep boundary), §6.5.B-D scenarios, §3.6 (Go management plane). These are in the Phase 2 / Phase 3 plans (to be written after Phase 1 lands).
+   - §7 Phase 1 PR breakdown — PR 1a Tasks 1-8 (including 6a/6b), PR 1b Tasks G1.1-G2.3 + G-gate, PR 1c Tasks 9-19.
+   - Phase 1 explicitly out of scope per the plan header: §3.3 `StreamTarget::Http` variant, §3.5 `InboundListener`, §4 Aether internals, §5 dep boundary, §6.5.B-D scenarios, §3.6.5 G3 heartbeat consumer (Phase 2), §3.6.6 GatewayControl semantics for Aether (Phase 2 — the dispatcher needs the `aether` protocol resolvable, which requires Phase 2's adapter), §3.6.7 G4 frontend UI (Phase 3).
 
 2. **Placeholder scan:**
    - No "TBD"/"TODO" inside concrete code blocks.
-   - Task 11 Step 3 notes "schema may differ — adjust to match production" — this is a real, documented adjustment-point against the running schema, not a placeholder. The plan tells the engineer exactly where to look (`crates/gw-core/src/entity.rs`) to confirm the field names.
-   - Task 14 Step 1 notes the `require_tunnel` header is illustrative and points to the real surface (`VendorKey.tunnel_preference.require_tunnel`) — again, a documented adjustment-point with a concrete file reference.
+   - Tasks 6a/6b contain "If `WsTransport::is_alive()` doesn't exist yet" / "If `current_inner()` doesn't exist" — these are documented adjustment-points with explicit guidance on how to add the helper if absent, not unresolved unknowns.
+   - Task G1.1 Step 3 notes "If the entity is persisted via `payload JSONB` ... change the GORM tag" — documented adjustment-point with the concrete file to inspect (`entity.go`) before editing.
+   - Task G1.2 Step 3 notes "The existing Update path likely already pushes; if so, do not duplicate" — documented anti-duplication guard with a concrete check.
+   - Task G2.1 Step 3 references `requestID` retrieval — documented as "follow the existing convention," explicit anti-reinvention guard.
+   - Task G2.2 Step 3 notes `FindAetherByToken` / `Save` may need thin wrappers — explicit instruction not to redesign the repo contract.
+   - Task G2.3 Step 4 says "Replace `api.Group(...)` / `gin.WrapF` with whatever router idiom..." — documented adjustment-point with the binding invariant (route separated from admin-token middleware) preserved across idiom choices.
+   - Task 11 Step 3 notes "schema may differ — adjust to match production" — documented adjustment-point against the running schema. The plan tells the engineer exactly where to look (`crates/gw-core/src/entity.rs`) to confirm the field names.
+   - Task 14 Step 1 notes the `require_tunnel` header is illustrative and points to the real surface (`VendorKey.tunnel_preference.require_tunnel`) — documented adjustment-point with a concrete file reference.
 
 3. **Type consistency:**
    - `TunnelProtocol` (gw-core), `ProxyNode.tunnel_protocol` (gw-core entity), `ProxyNodeView.tunnel_protocol` (gw-tunnel-client resolver), payload key `"tunnel_protocol"` — all four match.
-   - Values: `"cnexus"` (default) / `"aether"` consistent in SQL, Rust serde, Python seed.
-   - Service names in compose match the URLs the Python tests use: `cnexus-tunnel-server:7000`, `ali-gateway:8000`, `fake-upstream:9000`.
+   - Values: `"cnexus"` (default) / `"aether"` consistent in SQL, Rust serde, Python seed, Go entity tag (`oneof=cnexus aether`).
+   - Trait surface: Task 6a's `Transport`/`TransportError`/`StreamHandle`/`StreamTarget` names match Task 6b's impl signatures and Task 7's doc patch.
+   - Go-side type names: `RegisterInput`/`RegisterOutput` (Task G2.2) match handler usage (Task G2.3); `ErrAetherTokenUnknown` is the same in both. `CtxKeyAetherNodeID` (Task G2.1) is the only context-key name; handler does not reach for it (it pulls token from the Authorization header instead). `AetherTokenStore.ResolveAetherToken` signature in Task G2.1 (`ctx string`, `candidate string`) matches the stub used in tests.
+   - Service names in compose match the URLs the Python tests use: `cnexus-tunnel-server:7000`, `ali-gateway:8000`, `fake-upstream:9000`. Phase 1 compose does **not** include the AILinkMax-Go binary; the registration endpoint exists in Go (PR 1b) but Phase 1 e2e doesn't exercise it (no `aether-proxy` yet). Phase 2 compose extension adds it.
+
+4. **Cross-repo coordination invariants:**
+   - PR 1b lands first in `AILinkMax-Go`. PR 1a default is `Cnexus`, so the Rust pre-Phase-1a binary deserializing a Go-written row with `protocol="cnexus"` is byte-identical to today's behavior. No forward-incompat window.
+   - No Aether-shaped row is created in Phase 1 either by the e2e (PR 1c does not seed Aether nodes) or by ops (Phase 2 spec says Aether proxies are not deployed until after Phase 2 lands). So `InboundListener` being absent in Phase 1 cannot cause user-visible failure.
 
 ---
 
 Plan complete and saved to `docs/superpowers/plans/2026-06-15-tunnel-compat-phase-1.md`. Two execution options:
 
-**1. Subagent-Driven (recommended)** — A fresh subagent runs each task, I review between tasks. Fast iteration; protects this session's context for coordination across all three phases.
+**1. Subagent-Driven (recommended)** — A fresh subagent runs each task, I review between tasks. Fast iteration; protects this session's context for coordination across all three phases. Cross-repo subagents (PR 1b in `AILinkMax-Go`) are launched with explicit `cwd` set to that repo.
 
 **2. Inline Execution** — Execute tasks in this session via the executing-plans skill, with checkpoints for review.
 
