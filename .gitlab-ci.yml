@@ -91,10 +91,11 @@ variables:
 
       ci_rust_command() {
         command="$1"
+        export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
 
         if command -v cargo >/dev/null 2>&1; then
           ensure_native_rust_deps
-          bash -lc "$command"
+          bash -c "$command"
           return
         fi
 
@@ -104,7 +105,7 @@ variables:
             -w /work \
             -e CARGO_TERM_COLOR=always \
             rust:1.88-bookworm \
-            bash -lc "apt-get update && apt-get install -y --no-install-recommends $rust_deps_packages && rustup component add rustfmt clippy && $command"
+            bash -c "export PATH=/usr/local/cargo/bin:\$HOME/.cargo/bin:\$PATH && apt-get update && apt-get install -y --no-install-recommends $rust_deps_packages && rustup component add rustfmt clippy && $command"
           return
         fi
 
@@ -114,7 +115,7 @@ variables:
             -w /work \
             -e CARGO_TERM_COLOR=always \
             rust:1.88-bookworm \
-            bash -lc "apt-get update && apt-get install -y --no-install-recommends $rust_deps_packages && rustup component add rustfmt clippy && $command"
+            bash -c "export PATH=/usr/local/cargo/bin:\$HOME/.cargo/bin:\$PATH && apt-get update && apt-get install -y --no-install-recommends $rust_deps_packages && rustup component add rustfmt clippy && $command"
           return
         fi
 
