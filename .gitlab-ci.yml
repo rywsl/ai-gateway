@@ -16,13 +16,100 @@ variables:
   BUILDAH_FORMAT: "docker"
   BUILDAH_ISOLATION: "chroot"
 
+.retry:
+  before_script:
+    - |
+      retry() {
+        attempts="${RETRY_ATTEMPTS:-4}"
+        delay="${RETRY_DELAY_SECONDS:-15}"
+        n=1
+        until "$@"; do
+          status="$?"
+          if [ "$n" -ge "$attempts" ]; then
+            echo "command failed after $n attempts: $*" >&2
+            return "$status"
+          fi
+          echo "command failed with status $status; retrying in ${delay}s ($n/$attempts): $*" >&2
+          sleep "$delay"
+          n=$((n + 1))
+          delay=$((delay * 2))
+        done
+      }
+
+.setup-tools:
+  before_script:
+    - !reference [.retry, before_script]
+    - |
+      run_as_root() {
+        if [ "$(id -u)" = "0" ]; then
+          "$@"
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo "$@"
+        else
+          echo "required system dependency is missing and this shell runner cannot elevate to install it" >&2
+          return 127
+        fi
+      }
+
+      install_deb_packages() {
+        retry run_as_root apt-get update
+        retry run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+      }
+
+.setup-rust-deps:
+  before_script:
+    - !reference [.setup-tools, before_script]
+    - |
+      ensure_rust_deps() {
+        missing=""
+        for tool in cmake cc c++ pkg-config perl jq; do
+          command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+        done
+        if ! ldconfig -p 2>/dev/null | grep -q 'libclang\.so'; then
+          missing="$missing libclang"
+        fi
+
+        if [ -n "$missing" ]; then
+          if command -v apt-get >/dev/null 2>&1; then
+            install_deb_packages cmake build-essential pkg-config perl libssl-dev libclang-dev jq
+          else
+            echo "missing rust build dependencies:$missing" >&2
+            return 127
+          fi
+        fi
+
+        rustup component add rustfmt clippy
+      }
+
+      ensure_rust_deps
+
+.setup-buildah:
+  before_script:
+    - !reference [.setup-tools, before_script]
+    - |
+      ensure_buildah() {
+        if command -v buildah >/dev/null 2>&1; then
+          buildah --version
+          return
+        fi
+
+        if command -v apt-get >/dev/null 2>&1; then
+          install_deb_packages buildah ca-certificates uidmap slirp4netns fuse-overlayfs
+        else
+          echo "buildah is not installed and no supported package manager was found" >&2
+          return 127
+        fi
+
+        buildah --version
+      }
+
+      ensure_buildah
+    - retry sh -c 'printf "%s" "$CI_REGISTRY_PASSWORD" | buildah login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"'
+
 lint-test:
   stage: test
   image: rust:1.88-bookworm
-  before_script:
-    - apt-get update
-    - apt-get install -y --no-install-recommends cmake build-essential pkg-config perl libssl-dev libclang-dev jq
-    - rustup component add rustfmt clippy
+  extends: .setup-rust-deps
   script:
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -31,9 +118,7 @@ rust-build:
   image: rust:1.88-bookworm
   needs:
     - lint-test
-  before_script:
-    - apt-get update
-    - apt-get install -y --no-install-recommends cmake build-essential pkg-config perl libssl-dev libclang-dev jq
+  extends: .setup-rust-deps
   script:
     - cargo build --release --locked -p gw-gateway
 
@@ -42,21 +127,18 @@ rust-build-tunnel:
   image: rust:1.88-bookworm
   needs:
     - lint-test
-  before_script:
-    - apt-get update
-    - apt-get install -y --no-install-recommends cmake build-essential pkg-config perl libssl-dev libclang-dev jq
+  extends: .setup-rust-deps
   script:
     - cargo build --release --locked --features tunnel -p gw-gateway
 
 push-image:
   stage: push
   image: quay.io/buildah/stable:latest
+  extends: .setup-buildah
   needs:
     - rust-build
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-  before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | buildah login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     - buildah build --file "$CI_PROJECT_DIR/Dockerfile" --tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA" "$CI_PROJECT_DIR"
     - buildah push "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA"
@@ -69,12 +151,11 @@ push-image:
 push-tunnel-image:
   stage: push
   image: quay.io/buildah/stable:latest
+  extends: .setup-buildah
   needs:
     - rust-build-tunnel
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-  before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | buildah login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     - buildah build --build-arg CARGO_FEATURES="--features tunnel" --file "$CI_PROJECT_DIR/Dockerfile" --tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA-tunnel" "$CI_PROJECT_DIR"
     - buildah push "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA-tunnel"
