@@ -1,4 +1,7 @@
-use gw_gateway::metrics_catalog::{describe_all, MetricKind, METRICS};
+use gw_gateway::metrics_catalog::{
+    describe_all, zero_init_page_on_call, MetricKind, MetricSpec, METRICS,
+    PAGE_ON_CALL_BILLING_COUNTERS,
+};
 
 #[test]
 fn catalog_includes_required_families() {
@@ -160,6 +163,80 @@ fn billing_w4_t3_emit_lag_t0_registered() {
 fn billing_w4_t4_inflight_recovered_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(names.contains(&"gw_billing_inflight_recovered_total"));
+}
+
+// --- P0 #30: page-on-call billing metrics must be visible in /metrics at boot ---
+
+/// Helper: render a fresh, isolated Prometheus recorder after running `setup`
+/// against it. Uses `with_local_recorder` so no global recorder is installed
+/// and tests stay independent of each other / of process-wide state.
+fn render_with<F: FnOnce()>(setup: F) -> String {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, setup);
+    handle.render()
+}
+
+/// Diagnostic / root-cause lock-in: `describe_all()` alone (HELP/TYPE only)
+/// does NOT create the series, so the page-on-call counters are ABSENT from a
+/// rendered `/metrics`. This is exactly why a zero-init boot step is required.
+#[test]
+fn describe_only_does_not_render_page_on_call_counters() {
+    let rendered = render_with(|| {
+        describe_all();
+    });
+    for name in PAGE_ON_CALL_BILLING_COUNTERS {
+        assert!(
+            !rendered.contains(name),
+            "expected describe-only render to OMIT {name}; if this now renders, \
+             the exporter behaviour changed and zero-init may be redundant"
+        );
+    }
+}
+
+/// Fix verification: after the boot sequence (`describe_all` + zero-init), each
+/// page-on-call counter is present in `/metrics` with a `0` baseline, before any
+/// incident has occurred — so the Go-side alert rules evaluate against a healthy
+/// 0 rather than an absent series.
+#[test]
+fn boot_init_renders_page_on_call_counters_at_zero() {
+    let rendered = render_with(|| {
+        describe_all();
+        zero_init_page_on_call();
+    });
+    for name in PAGE_ON_CALL_BILLING_COUNTERS {
+        assert!(
+            rendered.contains(name),
+            "metric {name} absent from /metrics after boot zero-init:\n{rendered}"
+        );
+        // Counter renders as `<name> 0` (no labels) at the zero baseline.
+        assert!(
+            rendered.contains(&format!("{name} 0")),
+            "metric {name} should render with a 0 baseline:\n{rendered}"
+        );
+    }
+}
+
+/// Consistency: every page-on-call name exists in the static catalog and is
+/// documented as page-on-call, so the boot zero-init set can't drift from the
+/// catalog or silently lose its severity contract.
+#[test]
+fn page_on_call_set_is_subset_of_catalog() {
+    for name in PAGE_ON_CALL_BILLING_COUNTERS {
+        let spec: &MetricSpec = METRICS
+            .iter()
+            .find(|m| m.name == *name)
+            .unwrap_or_else(|| panic!("page-on-call metric {name} missing from catalog"));
+        assert!(
+            matches!(spec.kind, MetricKind::Counter),
+            "page-on-call metric {name} must be a Counter"
+        );
+        assert!(
+            spec.help.contains("page on-call"),
+            "page-on-call metric {name} help must document the page-on-call contract"
+        );
+    }
 }
 
 #[test]

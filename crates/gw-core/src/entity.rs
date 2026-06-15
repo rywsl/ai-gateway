@@ -96,6 +96,8 @@ pub struct UserEntry {
     pub markup: f32,
     #[serde(default)]
     pub debug_enabled: bool,
+    #[serde(default)]
+    pub token_version: u64,
 }
 fn default_concurrent() -> u32 {
     100
@@ -746,5 +748,29 @@ mod tests {
             entry.signature_secret.as_deref(),
             Some(b"sig-secret".as_slice())
         );
+    }
+
+    #[test]
+    fn user_entry_deser_with_token_version() {
+        let json = r#"{
+            "user_id": "u1",
+            "tier": "standard",
+            "status": "active",
+            "token_version": 5
+        }"#;
+        let entry: super::UserEntry = serde_json::from_str(json).expect("deser with token_version");
+        assert_eq!(entry.token_version, 5);
+    }
+
+    #[test]
+    fn user_entry_deser_without_token_version_defaults_zero() {
+        let json = r#"{
+            "user_id": "u1",
+            "tier": "standard",
+            "status": "active"
+        }"#;
+        let entry: super::UserEntry =
+            serde_json::from_str(json).expect("deser without token_version");
+        assert_eq!(entry.token_version, 0);
     }
 }
