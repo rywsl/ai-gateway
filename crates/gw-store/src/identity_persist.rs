@@ -79,6 +79,19 @@ impl IdentityPersistQueue {
 
 use sqlx::PgPool;
 
+/// Conditional UPDATE used by [`PgSnapshotWriter`]. Writes `identity_snapshot`
+/// only when the column is currently NULL, preserving admin-edited values.
+/// `vendor_keys` primary key column is `id` (see migration 0001).
+///
+/// This is a cross-process contract surface (Go production exposes
+/// `vendor_keys` as a writable VIEW over `provider_keys`; the VIEW must keep
+/// `identity_snapshot` + `updated_at` writable). It is a `pub fn` so the
+/// contract test can lock the column set against silent drift.
+pub fn update_sql() -> &'static str {
+    "UPDATE vendor_keys SET identity_snapshot = $1, updated_at = NOW() \
+     WHERE id = $2 AND identity_snapshot IS NULL"
+}
+
 pub struct PgSnapshotWriter {
     pool: PgPool,
 }
@@ -93,16 +106,26 @@ impl PgSnapshotWriter {
 impl SnapshotWriter for PgSnapshotWriter {
     async fn write_if_null(&self, key_id: &str, snap: &IdentitySnapshot) -> anyhow::Result<()> {
         let payload = serde_json::to_value(snap)?;
-        // Conditional UPDATE: only write when NULL (preserves admin edits).
-        // `vendor_keys` primary key column is `id` (see migration 0001).
-        sqlx::query(
-            "UPDATE vendor_keys SET identity_snapshot = $1, updated_at = NOW() \
-             WHERE id = $2 AND identity_snapshot IS NULL",
-        )
-        .bind(payload)
-        .bind(key_id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query(update_sql())
+            .bind(payload)
+            .bind(key_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_sql_writes_identity_snapshot_only_when_null() {
+        let sql = update_sql();
+        assert!(sql.contains("UPDATE vendor_keys"));
+        assert!(sql.contains("identity_snapshot = $1"));
+        assert!(sql.contains("updated_at = NOW()"));
+        // Conditional write preserves admin edits.
+        assert!(sql.contains("WHERE id = $2 AND identity_snapshot IS NULL"));
     }
 }

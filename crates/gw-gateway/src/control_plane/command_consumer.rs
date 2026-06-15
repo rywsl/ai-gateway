@@ -11,6 +11,7 @@ use gw_core::control_plane::{
 use gw_core::ids::*;
 use gw_core::protocol::ProtocolKind;
 use gw_health::{CooldownDirective, CooldownReason, KeyHealthStore};
+use gw_store::encrypt::{KekCache, KekState};
 use gw_store::{redis_client::RedisCtx, EntityStore};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -31,6 +32,10 @@ pub struct CommandConsumer {
     pub consumer: String,
     pub dynamic: Arc<DynamicRuntimeCfg>,
     pub observed: Arc<ControlPlaneObserved>,
+    /// In-process KEK cache, shared (via `Arc` clone) with the loader/decrypt
+    /// hot path. `rotate-kek` drives its dual-read state machine; new KEK
+    /// material is never carried over the command channel.
+    pub kek: KekCache,
 }
 
 impl CommandConsumer {
@@ -195,12 +200,12 @@ impl CommandConsumer {
             GatewayCommandAction::ClearCooldown => self.clear_cooldown(&entity.args),
             GatewayCommandAction::ResetCost => self.reset_cost(&entity.args),
             GatewayCommandAction::ClearCache => self.clear_cache(&entity.args).await,
+            GatewayCommandAction::RotateKek => self.rotate_kek(&entity.args),
             GatewayCommandAction::SetLogLevel
             | GatewayCommandAction::RefreshOauth
             | GatewayCommandAction::Drain
             | GatewayCommandAction::Undrain
-            | GatewayCommandAction::RestartInstance
-            | GatewayCommandAction::RotateKek => {
+            | GatewayCommandAction::RestartInstance => {
                 CommandOutcome::failed(format!("command_disabled:{}", entity.action.as_str()))
             }
         }
@@ -304,6 +309,10 @@ impl CommandConsumer {
             Ok(()) => CommandOutcome::ok("cache_cleared"),
             Err(detail) => CommandOutcome::failed(detail),
         }
+    }
+
+    fn rotate_kek(&self, args: &serde_json::Value) -> CommandOutcome {
+        rotate_kek_outcome(&self.kek, args)
     }
 }
 
@@ -531,6 +540,66 @@ fn parse_command_format(format: &str) -> Result<ProtocolKind, String> {
     }
 }
 
+/// Drive the in-process KEK dual-read state machine from a `rotate-kek`
+/// command. KEK *material* is never carried over the command channel — it is
+/// env-seeded at boot (`GW_KMS__KEK_HEX` / `GW_KMS__PREVIOUS_KEK_HEX`). This
+/// handler only finalizes / inspects an in-flight rotation:
+///
+/// - `status`            — read-only state report (no key material).
+/// - `mark-reencrypting` — flip the dual-read flag (requires dual-read).
+/// - `drop-old`          — drop the previous KEK, returning to Healthy
+///   (fail-closed via `KekCache::drop_old_kek` guards).
+/// - `enter-dual-read`   — rejected: new KEK material must arrive at boot.
+fn rotate_kek_outcome(kek: &KekCache, args: &serde_json::Value) -> CommandOutcome {
+    let args: RotateKekArgs = match serde_json::from_value(args.clone()) {
+        Ok(args) => args,
+        Err(err) => return CommandOutcome::failed(format!("invalid_args:{err}")),
+    };
+    match args.step.as_str() {
+        "status" => CommandOutcome::ok(kek_status_message(kek)),
+        "mark-reencrypting" => {
+            if !matches!(kek.state(), KekState::DualRead { .. }) {
+                return CommandOutcome::failed("kek_mark_reencrypting_requires_dual_read");
+            }
+            kek.mark_reencrypting();
+            CommandOutcome::ok(format!(
+                "kek_marked_reencrypting {}",
+                kek_status_message(kek)
+            ))
+        }
+        "drop-old" => {
+            let Some(old_kid) = args.old_kid.as_deref().filter(|s| !s.is_empty()) else {
+                return CommandOutcome::failed("rotate_kek_drop_old_requires_old_kid");
+            };
+            match kek.drop_old_kek(old_kid) {
+                Ok(()) => {
+                    CommandOutcome::ok(format!("kek_dropped_old {}", kek_status_message(kek)))
+                }
+                Err(err) => CommandOutcome::failed(format!("kek_drop_old_refused:{err}")),
+            }
+        }
+        "enter-dual-read" => CommandOutcome::failed("kek_enter_dual_read_requires_bootstrap"),
+        other => CommandOutcome::failed(format!("rotate_kek_unknown_step:{other}")),
+    }
+}
+
+/// Operator-facing state summary. Emits only the rotation state, the active
+/// kid, and the resident KEK count — never any key material.
+fn kek_status_message(kek: &KekCache) -> String {
+    let state = match kek.state() {
+        KekState::Healthy => "healthy",
+        KekState::DualRead {
+            reencrypting: false,
+        } => "dual_read",
+        KekState::DualRead { reencrypting: true } => "dual_read_reencrypting",
+    };
+    format!(
+        "state={state} active_kid={} resident={}",
+        kek.active_kid(),
+        kek.resident_kid_count()
+    )
+}
+
 fn reset_cost_outcome(health: &KeyHealthStore, args: &serde_json::Value) -> CommandOutcome {
     let args: ResetCostArgs = match serde_json::from_value(args.clone()) {
         Ok(args) => args,
@@ -659,6 +728,15 @@ impl ClearCacheArgs {
     fn ns(&self) -> &str {
         self.ns.as_str()
     }
+}
+
+#[derive(Deserialize)]
+struct RotateKekArgs {
+    /// `status` | `mark-reencrypting` | `drop-old` | `enter-dual-read`.
+    step: String,
+    /// Required for `drop-old`: the previous (non-active) kid to evict.
+    #[serde(default)]
+    old_kid: Option<String>,
 }
 
 struct CommandOutcome {
@@ -926,5 +1004,102 @@ mod tests {
 
         assert_eq!(outcome.status, GatewayCommandStatus::Failed);
         assert_eq!(outcome.message, "invalid_format");
+    }
+
+    fn healthy_kek() -> KekCache {
+        KekCache::with_active(HashMap::from([("old".to_string(), [1u8; 32])]), Some("old"))
+    }
+
+    fn dual_read_kek() -> KekCache {
+        let cache = healthy_kek();
+        cache.enter_dual_read("new".to_string(), [2u8; 32]).unwrap();
+        cache
+    }
+
+    #[test]
+    fn rotate_kek_status_reports_state_without_material() {
+        let outcome = rotate_kek_outcome(&healthy_kek(), &json!({ "step": "status" }));
+
+        assert_eq!(outcome.status, GatewayCommandStatus::Ok);
+        assert_eq!(outcome.message, "state=healthy active_kid=old resident=1");
+    }
+
+    #[test]
+    fn rotate_kek_drop_old_finalizes_rotation_back_to_healthy() {
+        let cache = dual_read_kek();
+        let outcome = rotate_kek_outcome(&cache, &json!({ "step": "drop-old", "old_kid": "old" }));
+
+        assert_eq!(outcome.status, GatewayCommandStatus::Ok);
+        assert!(
+            outcome
+                .message
+                .contains("state=healthy active_kid=new resident=1"),
+            "got {}",
+            outcome.message
+        );
+        assert_eq!(cache.state(), KekState::Healthy);
+        assert!(!cache.contains_kid("old"));
+    }
+
+    #[test]
+    fn rotate_kek_mark_reencrypting_requires_dual_read() {
+        // Healthy cache: refused (would otherwise corrupt the state to a
+        // single-KEK "dual-read").
+        let healthy = rotate_kek_outcome(&healthy_kek(), &json!({ "step": "mark-reencrypting" }));
+        assert_eq!(healthy.status, GatewayCommandStatus::Failed);
+        assert_eq!(healthy.message, "kek_mark_reencrypting_requires_dual_read");
+
+        // Dual-read cache: accepted.
+        let cache = dual_read_kek();
+        let ok = rotate_kek_outcome(&cache, &json!({ "step": "mark-reencrypting" }));
+        assert_eq!(ok.status, GatewayCommandStatus::Ok);
+        assert_eq!(cache.state(), KekState::DualRead { reencrypting: true });
+    }
+
+    #[test]
+    fn rotate_kek_drop_old_is_fail_closed_when_not_in_dual_read() {
+        let outcome = rotate_kek_outcome(
+            &healthy_kek(),
+            &json!({ "step": "drop-old", "old_kid": "old" }),
+        );
+
+        assert_eq!(outcome.status, GatewayCommandStatus::Failed);
+        assert!(
+            outcome.message.starts_with("kek_drop_old_refused:"),
+            "got {}",
+            outcome.message
+        );
+    }
+
+    #[test]
+    fn rotate_kek_drop_old_requires_old_kid() {
+        let outcome = rotate_kek_outcome(&dual_read_kek(), &json!({ "step": "drop-old" }));
+
+        assert_eq!(outcome.status, GatewayCommandStatus::Failed);
+        assert_eq!(outcome.message, "rotate_kek_drop_old_requires_old_kid");
+    }
+
+    #[test]
+    fn rotate_kek_rejects_enter_dual_read_over_the_command_channel() {
+        let outcome = rotate_kek_outcome(&healthy_kek(), &json!({ "step": "enter-dual-read" }));
+
+        assert_eq!(outcome.status, GatewayCommandStatus::Failed);
+        assert_eq!(outcome.message, "kek_enter_dual_read_requires_bootstrap");
+    }
+
+    #[test]
+    fn rotate_kek_rejects_unknown_step_and_bad_args() {
+        let unknown = rotate_kek_outcome(&healthy_kek(), &json!({ "step": "frobnicate" }));
+        assert_eq!(unknown.status, GatewayCommandStatus::Failed);
+        assert_eq!(unknown.message, "rotate_kek_unknown_step:frobnicate");
+
+        // Missing the required `step` field → deserialization failure.
+        let bad = rotate_kek_outcome(&healthy_kek(), &json!({ "old_kid": "old" }));
+        assert_eq!(bad.status, GatewayCommandStatus::Failed);
+        assert!(
+            bad.message.starts_with("invalid_args:"),
+            "got {}",
+            bad.message
+        );
     }
 }

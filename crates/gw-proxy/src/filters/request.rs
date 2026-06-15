@@ -374,6 +374,24 @@ pub async fn run(
     };
     let (user_id, api_key_id, ip_allowlist_for_request) = user_id_res?;
 
+    if apikey_module_blocks(
+        api_key_id.as_ref(),
+        store.module_enabled_or_load("apikey").await,
+    ) {
+        let err = ErrorIR {
+            category: ErrorCategory::ClientAuth,
+            status: 403,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_AUTH_MODULE_DISABLED),
+            message: Cow::Borrowed("api key module disabled"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        };
+        bail!(session, ctx, &err, &request_id)
+    }
+
     // Load the user entry (used by ReqCtx for downstream consumers).
     let user_entry = match store.user_or_load(&user_id).await {
         Some(u) => u,
@@ -1772,6 +1790,10 @@ fn single_api_key_secret<'a>(
         .or_else(|| bearer_token.filter(|token| token.starts_with("ak_")))
 }
 
+pub fn apikey_module_blocks(api_key_id: Option<&ApiKeyId>, enabled: bool) -> bool {
+    api_key_id.is_some() && !enabled
+}
+
 fn lease_expired_error() -> ErrorIR<'static> {
     ErrorIR {
         category: ErrorCategory::UpstreamError,
@@ -1836,6 +1858,16 @@ mod api_key_auth_shape_tests {
             single_api_key_secret(Some("eyJhbGciOiJIUzI1NiJ9.payload.sig"), None, None),
             None
         );
+    }
+
+    #[test]
+    fn api_key_module_toggle_only_blocks_api_key_auth() {
+        let akid = ApiKeyId::from("ak_test");
+
+        assert!(apikey_module_blocks(Some(&akid), false));
+        assert!(!apikey_module_blocks(Some(&akid), true));
+        assert!(!apikey_module_blocks(None, false));
+        assert!(!apikey_module_blocks(None, true));
     }
 }
 

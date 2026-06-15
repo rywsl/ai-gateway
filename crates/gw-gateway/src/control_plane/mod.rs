@@ -4,7 +4,7 @@ pub mod state_writer;
 use crate::config::ControlPlaneCfg;
 use gw_health::KeyHealthStore;
 use gw_routing::InFlightStore;
-use gw_store::{redis_client::RedisCtx, EntityStore};
+use gw_store::{encrypt::KekCache, redis_client::RedisCtx, EntityStore};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -25,6 +25,7 @@ pub fn start(
     in_flight: Arc<InFlightStore>,
     instance_id: String,
     cfg: &ControlPlaneCfg,
+    kek: KekCache,
 ) -> ControlPlaneHandles {
     let observed = Arc::new(ControlPlaneObserved::default());
     let dynamic = Arc::new(state_writer::DynamicRuntimeCfg::new(
@@ -55,6 +56,7 @@ pub fn start(
         consumer: command_consumer::consumer_name(cfg, &instance_id),
         dynamic,
         observed: observed.clone(),
+        kek,
     })
     .start();
 
