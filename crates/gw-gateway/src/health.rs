@@ -323,8 +323,19 @@ fn build_tunnel_healthz_body(state: &HealthState) -> String {
                     buf.push(',');
                 }
                 buf.push_str(&format!(
-                    r#"{{"node_id":"{}","transport_present":{},"last_pong_age_seconds":{}}}"#,
+                    r#"{{"node_id":"{}","protocol":"{}","present":{},"alive":{},"last_heartbeat_age_ms":{},"active_streams":{},"transport_present":{},"last_pong_age_seconds":{}}}"#,
                     escape_json_string(&n.node_id),
+                    match n.protocol {
+                        gw_core::tunnel_protocol::TunnelProtocol::Cnexus => "cnexus",
+                        gw_core::tunnel_protocol::TunnelProtocol::Aether => "aether",
+                    },
+                    n.present,
+                    n.alive,
+                    match n.last_heartbeat_age_ms {
+                        Some(v) => v.to_string(),
+                        None => "null".to_owned(),
+                    },
+                    n.active_streams,
                     n.transport_present,
                     match n.last_pong_age_secs {
                         Some(v) => format!("{v:.1}"),

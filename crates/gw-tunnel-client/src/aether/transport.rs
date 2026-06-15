@@ -187,6 +187,10 @@ impl Transport for WsTransport {
             .unwrap_or(Duration::MAX)
     }
 
+    fn active_streams(&self) -> u32 {
+        self.inner.streams.len().try_into().unwrap_or(u32::MAX)
+    }
+
     fn tunnel_protocol(&self) -> TunnelProtocol {
         TunnelProtocol::Aether
     }

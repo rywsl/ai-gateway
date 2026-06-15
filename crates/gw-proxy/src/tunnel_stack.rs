@@ -20,6 +20,7 @@ use gw_tunnel_client::resolver::{
     resolve_tunnel, ProxyNodeView, TunnelResolution, TunnelResolveCtx,
 };
 use gw_tunnel_client::safe_dns::SafeDnsResolver;
+use gw_tunnel_client::Transport;
 use pingora::upstreams::peer::HttpPeer;
 use secrecy::ExposeSecret;
 use std::net::SocketAddr;
@@ -46,13 +47,22 @@ pub enum TunnelPeerError {
 
 pub struct TunnelNodeHealth {
     pub node_id: String,
+    pub protocol: gw_core::tunnel_protocol::TunnelProtocol,
+    pub present: bool,
+    pub alive: bool,
+    pub last_heartbeat_age_ms: Option<u64>,
+    pub active_streams: u32,
+    /// Back-compat field consumed by the existing `/healthz/tunnel` renderer.
     pub transport_present: bool,
+    /// Back-compat field consumed by the existing `/healthz/tunnel` renderer.
     pub last_pong_age_secs: Option<f64>,
 }
 
 pub struct TunnelStack {
-    /// node_id -> reconnecting transport. Created lazily on first use.
-    transports: DashMap<String, Arc<ReconnectingTransport>>,
+    /// Cnexus node_id -> reconnecting transport. Created lazily on first use.
+    cnexus_transports: DashMap<String, Arc<ReconnectingTransport>>,
+    /// Aether node_id -> inbound transport published when proxy nodes dial in.
+    inbound_transports: DashMap<String, Arc<dyn Transport>>,
     /// Live `ProxyNodeView`s. Swapped wholesale by `reload_nodes`.
     nodes: ArcSwap<Vec<ProxyNodeView>>,
     /// DoH resolver used by probe_loop for DNS-based health checks.
@@ -74,7 +84,8 @@ impl TunnelStack {
         transport_cfg_template: TransportConfig,
     ) -> Self {
         Self {
-            transports: DashMap::new(),
+            cnexus_transports: DashMap::new(),
+            inbound_transports: DashMap::new(),
             nodes: ArcSwap::from_pointee(nodes),
             dns,
             pool_cfg,
@@ -117,14 +128,14 @@ impl TunnelStack {
                     _ = ticker.tick() => {
                         let nodes = stack.nodes.load_full();
                         for node in nodes.iter() {
-                            let current = stack.transports.get(&node.id).and_then(|t| t.current());
-                            let present = current.as_ref().is_some_and(|t| t.is_alive());
+                            let current = stack.current_dyn_transport(&node.id);
+                            let present = current.as_ref().is_some_and(|t| t.alive());
                             metrics::gauge!(
                                 "gw_tunnel_transport_present",
                                 "node_id" => node.id.clone()
                             )
                             .set(if present { 1.0 } else { 0.0 });
-                            if let Some(age) = current.as_ref().map(|t| t.last_pong_age().as_secs_f64()) {
+                            if let Some(age) = current.as_ref().map(|t| t.last_heartbeat_age().as_secs_f64()) {
                                 metrics::gauge!(
                                     "gw_tunnel_last_pong_age_seconds",
                                     "node_id" => node.id.clone()
@@ -145,19 +156,45 @@ impl TunnelStack {
         nodes
             .iter()
             .map(|n| {
-                let current = self.transports.get(&n.id).and_then(|t| t.current());
-                let transport_present = current.as_ref().is_some_and(|t| t.is_alive());
+                let current = self.current_dyn_transport(&n.id);
+                let present = current.is_some();
+                let alive = current.as_ref().is_some_and(|t| t.alive());
+                let last_heartbeat_age = current.as_ref().and_then(|t| {
+                    let age = t.last_heartbeat_age();
+                    (age != Duration::MAX).then_some(age)
+                });
                 TunnelNodeHealth {
                     node_id: n.id.clone(),
-                    transport_present,
-                    last_pong_age_secs: current.as_ref().map(|t| t.last_pong_age().as_secs_f64()),
+                    protocol: n.tunnel_protocol,
+                    present,
+                    alive,
+                    last_heartbeat_age_ms: last_heartbeat_age
+                        .map(|age| age.as_millis().try_into().unwrap_or(u64::MAX)),
+                    active_streams: current.as_ref().map(|t| t.active_streams()).unwrap_or(0),
+                    transport_present: alive,
+                    last_pong_age_secs: last_heartbeat_age.map(|age| age.as_secs_f64()),
                 }
             })
             .collect()
     }
 
     pub fn current_transport(&self, node_id: &str) -> Option<Arc<WsTransport>> {
-        self.transports.get(node_id).and_then(|t| t.current())
+        self.cnexus_transports
+            .get(node_id)
+            .and_then(|t| t.current())
+    }
+
+    pub fn current_dyn_transport(&self, node_id: &str) -> Option<Arc<dyn Transport>> {
+        if let Some(t) = self.inbound_transports.get(node_id) {
+            return Some(t.clone());
+        }
+        self.cnexus_transports
+            .get(node_id)
+            .map(|t| t.clone() as Arc<dyn Transport>)
+    }
+
+    pub fn publish_inbound_transport(&self, node_id: String, transport: Arc<dyn Transport>) {
+        self.inbound_transports.insert(node_id, transport);
     }
 
     /// Decide Direct vs Tunnel for a given (provider, key, preference).
@@ -205,7 +242,7 @@ impl TunnelStack {
         let snapshot = self.nodes.load_full();
 
         // Lazily create the transport on first use.
-        let transport = if let Some(t) = self.transports.get(node_id) {
+        let transport = if let Some(t) = self.cnexus_transports.get(node_id) {
             t.clone()
         } else {
             // The node ws_url comes from the matching ProxyNodeView. If the
@@ -222,7 +259,7 @@ impl TunnelStack {
             cfg.url = node.ws_url.clone();
             cfg.auth_token = node.auth_token.clone();
             let t = ReconnectingTransport::start(cfg, self.pool_cfg.clone()).await;
-            self.transports.insert(node_id.to_owned(), t.clone());
+            self.cnexus_transports.insert(node_id.to_owned(), t.clone());
             t
         };
 
@@ -336,6 +373,13 @@ mod tests {
         }
     }
 
+    fn aether_view(id: &str) -> ProxyNodeView {
+        ProxyNodeView {
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Aether,
+            ..view(id, 0, &["openai"])
+        }
+    }
+
     fn empty_stack(nodes: Vec<ProxyNodeView>) -> TunnelStack {
         TunnelStack::new(
             nodes,
@@ -408,12 +452,49 @@ mod tests {
                 .expect("read tunnel_stack source");
         let prod_src = src.split("#[cfg(test)]").next().unwrap_or(&src);
         assert!(
-            prod_src.contains("last_pong_age().as_secs_f64()"),
-            "health_snapshot must expose live transport pong age"
+            prod_src.contains("last_heartbeat_age().as_secs_f64()"),
+            "health_snapshot must expose live transport heartbeat age"
         );
         assert!(
             !prod_src.contains("last_pong_age_secs: None,"),
             "health_snapshot must not hard-code null pong age"
+        );
+    }
+
+    #[test]
+    fn health_snapshot_includes_aether_node_before_attach() {
+        let stack = empty_stack(vec![aether_view("ae1")]);
+
+        let nodes = stack.health_snapshot();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, "ae1");
+        assert_eq!(
+            nodes[0].protocol,
+            gw_core::tunnel_protocol::TunnelProtocol::Aether
+        );
+        assert!(!nodes[0].present);
+        assert!(!nodes[0].alive);
+        assert_eq!(nodes[0].active_streams, 0);
+        assert!(nodes[0].last_heartbeat_age_ms.is_none());
+    }
+
+    #[test]
+    fn publish_aether_transport_marks_node_present() {
+        let stack = empty_stack(vec![aether_view("ae1")]);
+        let transport =
+            Arc::new(gw_tunnel_client::aether::transport::WsTransport::disconnected_for_test())
+                as Arc<dyn gw_tunnel_client::Transport>;
+
+        stack.publish_inbound_transport("ae1".to_string(), transport);
+
+        assert!(stack.current_dyn_transport("ae1").is_some());
+        let node = stack.health_snapshot().pop().unwrap();
+        assert!(node.present);
+        assert!(!node.alive);
+        assert_eq!(
+            node.protocol,
+            gw_core::tunnel_protocol::TunnelProtocol::Aether
         );
     }
 
