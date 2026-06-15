@@ -21,6 +21,7 @@ use gw_tunnel_client::resolver::{
 };
 use gw_tunnel_client::safe_dns::SafeDnsResolver;
 use pingora::upstreams::peer::HttpPeer;
+use secrecy::ExposeSecret;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -282,6 +283,32 @@ impl TunnelStack {
             false,
             "127.0.0.1".to_owned(),
         ))
+    }
+}
+
+impl gw_tunnel_client::registry::ProxyNodeRegistry for TunnelStack {
+    fn lookup_by_id(&self, node_id: &str) -> Option<ProxyNodeView> {
+        self.nodes
+            .load_full()
+            .iter()
+            .find(|node| node.id == node_id)
+            .cloned()
+    }
+
+    fn verify_auth_token(&self, node_id: &str, candidate: &str) -> bool {
+        let Some(node) = self.lookup_by_id(node_id) else {
+            return false;
+        };
+        let Some(token) = node.auth_token.as_ref() else {
+            return false;
+        };
+        use subtle::ConstantTimeEq;
+        token
+            .expose_secret()
+            .as_bytes()
+            .ct_eq(candidate.as_bytes())
+            .unwrap_u8()
+            == 1
     }
 }
 
