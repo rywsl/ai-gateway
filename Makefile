@@ -1,4 +1,5 @@
-.PHONY: e2e e2e-up e2e-down e2e-logs e2e-soak e2e-soak-smoke e2e-soak-kill
+.PHONY: e2e e2e-up e2e-down e2e-logs e2e-soak e2e-soak-smoke e2e-soak-kill \
+	tunnel-e2e tunnel-e2e-up tunnel-e2e-down tunnel-e2e-logs tunnel-e2e-deps
 
 e2e:
 	$(MAKE) e2e-up
@@ -45,3 +46,25 @@ e2e-soak-kill:
 	./tests/e2e/wait_for_ready.sh
 	cd tests/e2e/client && SOAK_KILL_PROB=0.1 .venv/bin/python3 -m pytest -m soak -k chaos_kill -v --tb=short
 	docker compose -f tests/e2e/docker-compose.yml down -v
+
+# Tunnel compatibility e2e suite. Phase 1 exercises the cnexus wire protocol;
+# Phase 2 adds Aether services and scenarios.
+TUNNEL_E2E_COMPOSE := -f tests/tunnel-e2e/docker-compose.yml --project-directory tests/tunnel-e2e
+
+tunnel-e2e-deps:
+	@echo "Phase 1: Aether submodule is registered with update=none."
+	@echo "Phase 2 will run git submodule update --init tests/tunnel-e2e/aether-src."
+
+tunnel-e2e: tunnel-e2e-down
+	docker compose $(TUNNEL_E2E_COMPOSE) build
+	docker compose $(TUNNEL_E2E_COMPOSE) run --rm pytest-runner
+	$(MAKE) tunnel-e2e-down
+
+tunnel-e2e-up:
+	docker compose $(TUNNEL_E2E_COMPOSE) up -d --build
+
+tunnel-e2e-down:
+	docker compose $(TUNNEL_E2E_COMPOSE) down -v --remove-orphans
+
+tunnel-e2e-logs:
+	docker compose $(TUNNEL_E2E_COMPOSE) logs --tail=200 -f

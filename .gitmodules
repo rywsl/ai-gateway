@@ -1,0 +1,4 @@
+[submodule "tests/tunnel-e2e/aether-src"]
+	path = tests/tunnel-e2e/aether-src
+	url = https://gitlab.ailinkmax.com/ailinkmax/Aether
+	update = none
