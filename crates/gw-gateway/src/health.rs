@@ -24,6 +24,8 @@
 //!   receive 401.
 
 use bytes::Buf;
+use fred::interfaces::StreamsInterface;
+use fred::types::{XCap, XCapKind, XCapTrim};
 use gw_tunnel_client::Transport;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -64,6 +66,7 @@ pub struct HealthState {
     pub tunnel_stack: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
     pub aether_listener: Option<Arc<gw_tunnel_client::aether::listener::InboundListener>>,
     pub aether_listener_path: String,
+    pub aether_heartbeat_sink: Arc<dyn gw_tunnel_client::aether::redis_sink::HeartbeatSink>,
 }
 
 pub async fn run_health_server(
@@ -317,7 +320,7 @@ async fn handle_aether_upgrade(
         cfg,
         authorized.node_view,
         ws,
-        Arc::new(gw_tunnel_client::aether::redis_sink::NoopSink),
+        state.aether_heartbeat_sink.clone(),
     )
     .await?;
     let transport = Arc::new(transport);
@@ -334,6 +337,62 @@ async fn handle_aether_upgrade(
         drop(permit);
     });
     Ok(())
+}
+
+const AETHER_HEARTBEAT_STREAM: &str = "events:aether_heartbeat";
+const AETHER_HEARTBEAT_MAXLEN: u64 = 50_000;
+
+#[derive(Clone)]
+pub struct RedisHeartbeatSink {
+    pool: fred::clients::RedisPool,
+}
+
+impl RedisHeartbeatSink {
+    pub fn new(pool: fred::clients::RedisPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl gw_tunnel_client::aether::redis_sink::HeartbeatSink for RedisHeartbeatSink {
+    async fn push(&self, event: gw_tunnel_client::aether::redis_sink::HeartbeatEvent) {
+        let client = self.pool.next();
+        let fields = aether_heartbeat_fields(&event);
+        let cap = XCap::try_from((
+            XCapKind::MaxLen,
+            XCapTrim::AlmostExact,
+            AETHER_HEARTBEAT_MAXLEN,
+        ))
+        .expect("valid Aether heartbeat stream cap");
+        if let Err(err) = client
+            .xadd::<(), _, _, _, _>(AETHER_HEARTBEAT_STREAM, false, cap, "*", fields)
+            .await
+        {
+            tracing::warn!(
+                target: "gw_gateway::aether",
+                error = %err,
+                "events:aether_heartbeat XADD failed"
+            );
+        }
+    }
+}
+
+fn aether_heartbeat_fields(
+    event: &gw_tunnel_client::aether::redis_sink::HeartbeatEvent,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("node_id", event.node_id.clone()),
+        ("heartbeat_session_id", event.heartbeat_session_id.clone()),
+        ("heartbeat_id", event.heartbeat_id.to_string()),
+        ("received_at_ms", event.received_at_ms.to_string()),
+        ("active_connections", event.active_connections.to_string()),
+        ("total_requests", event.total_requests.to_string()),
+        ("avg_latency_ms", event.avg_latency_ms.to_string()),
+        ("failed_requests", event.failed_requests.to_string()),
+        ("dns_failures", event.dns_failures.to_string()),
+        ("stream_errors", event.stream_errors.to_string()),
+        ("proxy_version", event.proxy_version.clone()),
+    ]
 }
 
 fn parse_headers(req: &[u8]) -> anyhow::Result<http::HeaderMap> {
@@ -861,6 +920,7 @@ mod tests {
             tunnel_stack: None,
             aether_listener: Some(aether_listener),
             aether_listener_path: "/api/internal/aether-tunnel".to_string(),
+            aether_heartbeat_sink: Arc::new(gw_tunnel_client::aether::redis_sink::NoopSink),
         });
         let store = Arc::new(gw_store::EntityStore::new());
         let blacklist = Arc::new(dummy_blacklist());
@@ -908,6 +968,44 @@ mod tests {
         assert_eq!(transport.tunnel_protocol(), TunnelProtocol::Aether);
         drop(ws);
         server.await.unwrap();
+    }
+
+    #[test]
+    fn aether_heartbeat_fields_match_go_consumer_schema() {
+        let event = gw_tunnel_client::aether::redis_sink::HeartbeatEvent {
+            node_id: "n1".to_string(),
+            heartbeat_session_id: "s1".to_string(),
+            heartbeat_id: 7,
+            received_at_ms: 123,
+            active_connections: 2,
+            total_requests: 3,
+            avg_latency_ms: 4.5,
+            failed_requests: 6,
+            dns_failures: 8,
+            stream_errors: 9,
+            proxy_version: "v0.0.8".to_string(),
+        };
+
+        let fields = aether_heartbeat_fields(&event);
+
+        assert_eq!(
+            fields.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            vec![
+                "node_id",
+                "heartbeat_session_id",
+                "heartbeat_id",
+                "received_at_ms",
+                "active_connections",
+                "total_requests",
+                "avg_latency_ms",
+                "failed_requests",
+                "dns_failures",
+                "stream_errors",
+                "proxy_version",
+            ]
+        );
+        assert_eq!(fields[2].1, "7");
+        assert_eq!(fields[6].1, "4.5");
     }
 
     fn dummy_blacklist() -> gw_auth::jwt_blacklist::RedisJwtBlacklist {

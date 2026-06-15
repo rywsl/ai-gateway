@@ -1483,6 +1483,7 @@ async fn bootstrap(
         tunnel_stack: tunnel.clone(),
         aether_listener,
         aether_listener_path: cfg.tunnel.aether_listener.path.clone(),
+        aether_heartbeat_sink: Arc::new(health::RedisHeartbeatSink::new((*redis.pool).clone())),
     };
     let health_store = store.clone();
     let health_blacklist = mgmt_blacklist.clone();
