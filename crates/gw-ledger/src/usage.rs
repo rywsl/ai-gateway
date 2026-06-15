@@ -27,6 +27,22 @@ pub enum VendorExposureState {
     CrashFallback,
 }
 
+/// One vendor-key candidate that this request actually attempted. The chain
+/// of these (`UsageRecord.attempted_keys`) lets Go reconstruct the per-request
+/// routing/retry trace for the monitoring "request detail" view.
+///
+/// Matches the Go `shared/rustpact/usage.go` `AttemptedKey` shape exactly:
+/// `error_code` is `omitempty` (omitted when absent on both sides).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AttemptedKey {
+    pub vendor_key_id: String,
+    pub vendor: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub attempt_index: u32,
+}
+
 /// Per-dimension provenance snapshot frozen at UsageRecord emission time.
 /// Each field records the highest-confidence `ProvenanceTag` seen across all
 /// extraction passes for that usage dimension.
@@ -114,6 +130,15 @@ pub struct UsageRecord {
     /// use this same version when reconciling outstanding ledger entries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coef_table_version: Option<u64>,
+
+    // --- Candidate / retry chain (P0-32) ---
+    /// Vendor-key candidates this request attempted, in attempt order. The
+    /// final record carries the full chain (prior failed attempts + the final
+    /// key); a per-attempt failure record carries just its own current key.
+    /// Omitted from JSON when empty (no key picked / legacy paths) — Go must
+    /// accept records without this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempted_keys: Vec<AttemptedKey>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -163,6 +188,7 @@ mod tests {
             pod_id: String::new(),
             credits_consumed: None,
             coef_table_version: None,
+            attempted_keys: Vec::new(),
         }
     }
 
@@ -229,5 +255,72 @@ mod tests {
         let json = serde_json::to_value(&rec).unwrap();
         assert_eq!(json["credits_consumed"], 12345);
         assert_eq!(json["coef_table_version"], 7);
+    }
+
+    #[test]
+    fn attempted_keys_omitted_when_empty() {
+        let rec = make_minimal_record();
+        let s = serde_json::to_string(&rec).unwrap();
+        assert!(
+            !s.contains("attempted_keys"),
+            "attempted_keys must be omitted when empty"
+        );
+    }
+
+    #[test]
+    fn attempted_keys_serialized_when_present() {
+        let mut rec = make_minimal_record();
+        rec.attempted_keys = vec![
+            AttemptedKey {
+                vendor_key_id: "vk-a".into(),
+                vendor: "v1".into(),
+                model: "gpt-4".into(),
+                error_code: Some("GW_UPSTREAM_CONNECT_FAILED".into()),
+                attempt_index: 0,
+            },
+            AttemptedKey {
+                vendor_key_id: "vk-b".into(),
+                vendor: "v1".into(),
+                model: "gpt-4".into(),
+                error_code: None,
+                attempt_index: 1,
+            },
+        ];
+        let json = serde_json::to_value(&rec).unwrap();
+        let keys = json["attempted_keys"].as_array().expect("array");
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0]["vendor_key_id"], "vk-a");
+        assert_eq!(keys[0]["vendor"], "v1");
+        assert_eq!(keys[0]["model"], "gpt-4");
+        assert_eq!(keys[0]["error_code"], "GW_UPSTREAM_CONNECT_FAILED");
+        assert_eq!(keys[0]["attempt_index"], 0);
+        // error_code omitted (Go `omitempty`) when None.
+        assert!(
+            keys[1].get("error_code").is_none(),
+            "error_code must be omitted when None"
+        );
+        assert_eq!(keys[1]["attempt_index"], 1);
+    }
+
+    #[test]
+    fn attempted_keys_roundtrips_and_old_records_without_field_parse() {
+        let mut rec = make_minimal_record();
+        rec.attempted_keys = vec![AttemptedKey {
+            vendor_key_id: "vk-a".into(),
+            vendor: "v1".into(),
+            model: "gpt-4".into(),
+            error_code: None,
+            attempt_index: 0,
+        }];
+        let s = serde_json::to_string(&rec).unwrap();
+        let back: UsageRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.attempted_keys, rec.attempted_keys);
+
+        // A record JSON missing the field (legacy/Go old producer) parses with
+        // an empty chain via `#[serde(default)]`.
+        let legacy = serde_json::to_string(&make_minimal_record()).unwrap();
+        assert!(!legacy.contains("attempted_keys"));
+        let parsed: UsageRecord = serde_json::from_str(&legacy).unwrap();
+        assert!(parsed.attempted_keys.is_empty());
     }
 }

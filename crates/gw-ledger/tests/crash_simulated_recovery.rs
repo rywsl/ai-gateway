@@ -73,6 +73,7 @@ fn fresh_usage_record(req_id: &str, attempt: u32) -> UsageRecord {
         pod_id: String::new(),
         credits_consumed: None,
         coef_table_version: None,
+        attempted_keys: Vec::new(),
     }
 }
 

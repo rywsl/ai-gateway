@@ -477,6 +477,24 @@ fn build_final_usage_record(
     let is_subaccount = effective != auth_user_id;
     let (usage, usage_provenance) = usage_snapshot_and_provenance_for_record(ctx, ok)?;
 
+    // P0-32 — candidate chain: prior failed attempts (accumulated across
+    // failover in `on_retry_sync`) plus this final attempt's key. The final
+    // key carries no error_code on success; on failure it reuses the pingora
+    // error etype, falling back to the per-attempt ctx signal.
+    let final_attempt_error_code = if ok {
+        None
+    } else {
+        err.map(|e| format!("{:?}", e.etype))
+            .or_else(|| crate::billing_lifecycle::ctx_error_code(ctx))
+    };
+    let mut attempted_keys = ctx.attempted_keys.clone();
+    attempted_keys.push(crate::billing_lifecycle::attempted_key_from(
+        picked,
+        model,
+        ctx.attempt_index,
+        final_attempt_error_code,
+    ));
+
     Some(UsageRecord {
         ts_ms: now_ms,
         request_id: ctx.request_id.0.clone(),
@@ -542,6 +560,7 @@ fn build_final_usage_record(
         pod_id: gw_ledger::instance_id::cached().unwrap_or_default(),
         credits_consumed: ctx.credits_consumed,
         coef_table_version: ctx.coef_table_version_at_settle,
+        attempted_keys,
     })
 }
 
@@ -727,5 +746,66 @@ mod tests {
             actual > 0,
             "protected settlement credits must stay billable"
         );
+    }
+
+    #[test]
+    fn final_logging_records_single_attempted_key_on_success() {
+        let (mut ctx, auth_user_id, effective, model, picked) = seeded_cli_ctx();
+        ctx.usage.input_tokens = 10;
+        ctx.usage_provenance.input = ProvenanceTag::UpstreamFinal;
+
+        let rec =
+            build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked)
+                .expect("final usage record");
+
+        assert_eq!(rec.attempted_keys.len(), 1, "single-candidate success");
+        let k = &rec.attempted_keys[0];
+        assert_eq!(k.vendor_key_id, "vk-1");
+        assert_eq!(k.vendor, "vendor-1");
+        assert_eq!(k.model, "gpt-4o");
+        assert_eq!(k.attempt_index, 0);
+        assert!(
+            k.error_code.is_none(),
+            "successful final key must have no error_code"
+        );
+    }
+
+    #[test]
+    fn final_logging_preserves_failed_attempt_chain() {
+        let (mut ctx, auth_user_id, effective, model, picked) = seeded_cli_ctx();
+        ctx.usage.input_tokens = 10;
+        ctx.usage_provenance.input = ProvenanceTag::UpstreamFinal;
+
+        // Simulate one prior failed attempt, as `on_retry_sync` would have
+        // accumulated into the persistent chain before failover.
+        ctx.attempted_keys.push(gw_ledger::usage::AttemptedKey {
+            vendor_key_id: "vk-prior".into(),
+            vendor: "vendor-1".into(),
+            model: "gpt-4o".into(),
+            error_code: Some("GW_UPSTREAM_CONNECT_FAILED".into()),
+            attempt_index: 0,
+        });
+        ctx.attempt_index = 1;
+
+        let rec =
+            build_final_usage_record(&ctx, true, None, &auth_user_id, &effective, &model, &picked)
+                .expect("final usage record");
+
+        assert_eq!(
+            rec.attempted_keys.len(),
+            2,
+            "prior failed attempt + final key"
+        );
+        // Prior failed attempt preserved verbatim, in order.
+        assert_eq!(rec.attempted_keys[0].vendor_key_id, "vk-prior");
+        assert_eq!(rec.attempted_keys[0].attempt_index, 0);
+        assert_eq!(
+            rec.attempted_keys[0].error_code.as_deref(),
+            Some("GW_UPSTREAM_CONNECT_FAILED")
+        );
+        // Final successful key appended with no error_code.
+        assert_eq!(rec.attempted_keys[1].vendor_key_id, "vk-1");
+        assert_eq!(rec.attempted_keys[1].attempt_index, 1);
+        assert!(rec.attempted_keys[1].error_code.is_none());
     }
 }

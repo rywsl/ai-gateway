@@ -42,6 +42,7 @@ fn make_record() -> UsageRecord {
         pod_id: "pod-a".into(),
         credits_consumed: None,
         coef_table_version: None,
+        attempted_keys: Vec::new(),
     }
 }
 
