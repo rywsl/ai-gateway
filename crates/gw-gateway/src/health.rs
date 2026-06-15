@@ -23,11 +23,16 @@
 //!   management-token verify chain (S-admin-tunnel). Unverified requests
 //!   receive 401.
 
+use bytes::Buf;
+use gw_tunnel_client::Transport;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::Error as WsError;
 
 /// Flipped to `true` by the main thread once init succeeds. Readers use
 /// `Acquire`, the writer uses `Release`.
@@ -57,6 +62,8 @@ pub struct HealthState {
     pub latency_tracker: Arc<gw_routing::LatencyTracker>,
     pub tunnel_enabled: bool,
     pub tunnel_stack: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
+    pub aether_listener: Option<Arc<gw_tunnel_client::aether::listener::InboundListener>>,
+    pub aether_listener_path: String,
 }
 
 pub async fn run_health_server(
@@ -139,6 +146,12 @@ async fn handle_connection(
     };
 
     match path {
+        path if state.aether_listener.is_some() && path == state.aether_listener_path => {
+            if let Err(err) = handle_aether_upgrade(stream, req, &state).await {
+                tracing::debug!(target: "gw_gateway::health", error = %err, "aether upgrade failed");
+            }
+            return;
+        }
         "/livez" => {
             let _ = write_response(&mut stream, 200, "OK", OK_BODY).await;
         }
@@ -234,6 +247,201 @@ async fn handle_connection(
     }
 
     let _ = stream.shutdown().await;
+}
+
+async fn handle_aether_upgrade(
+    stream: TcpStream,
+    req: &[u8],
+    state: &HealthState,
+) -> anyhow::Result<()> {
+    let Some(listener) = state.aether_listener.as_ref().cloned() else {
+        return Ok(());
+    };
+    let headers = parse_headers(req)?;
+    let authorized = match listener.authorize(&headers) {
+        Ok(v) => v,
+        Err(err) => {
+            let mut stream = stream;
+            let status = listener_error_status(&err);
+            write_response(
+                &mut stream,
+                status,
+                listener_error_reason(status),
+                err.to_string().as_bytes(),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let permit = match listener.try_acquire_permit() {
+        Ok(permit) => permit,
+        Err(err) => {
+            let mut stream = stream;
+            write_response(
+                &mut stream,
+                503,
+                "Service Unavailable",
+                err.to_string().as_bytes(),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let node_id = authorized.node_view.id.clone();
+    let max_streams = authorized.max_streams;
+    let ws_stream = PrebufferedStream::new(req.to_vec(), stream);
+    let ws = tokio_tungstenite::accept_hdr_async(
+        ws_stream,
+        move |request: &Request, response: Response| {
+            validate_ws_headers(request.headers(), &headers)?;
+            Ok(response)
+        },
+    )
+    .await;
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(WsError::Http(response)) => {
+            tracing::debug!(target: "gw_gateway::health", status = %response.status(), "aether websocket rejected");
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let cfg = gw_tunnel_client::aether::transport::TransportConfig {
+        heartbeat_interval: Duration::from_secs(30),
+        missed_heartbeat_threshold: 3,
+        max_streams_per_conn: max_streams,
+    };
+    let transport = gw_tunnel_client::aether::transport::WsTransport::attach(
+        cfg,
+        authorized.node_view,
+        ws,
+        Arc::new(gw_tunnel_client::aether::redis_sink::NoopSink),
+    )
+    .await?;
+    let transport = Arc::new(transport);
+    listener
+        .publish(
+            node_id,
+            transport.clone() as Arc<dyn gw_tunnel_client::Transport>,
+        )
+        .await;
+    tokio::spawn(async move {
+        while transport.alive() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        drop(permit);
+    });
+    Ok(())
+}
+
+fn parse_headers(req: &[u8]) -> anyhow::Result<http::HeaderMap> {
+    let text = std::str::from_utf8(req)?;
+    let mut headers = http::HeaderMap::new();
+    for line in text.split('\n').skip(1) {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = http::HeaderName::from_bytes(name.trim().as_bytes())?;
+        let value = http::HeaderValue::from_str(value.trim())?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+fn validate_ws_headers(
+    actual: &http::HeaderMap,
+    authorized: &http::HeaderMap,
+) -> Result<(), http::Response<Option<String>>> {
+    let authorized_node = authorized.get("x-node-id");
+    if actual.get("x-node-id") != authorized_node {
+        return Err(http::Response::builder()
+            .status(http::StatusCode::BAD_REQUEST)
+            .body(Some("node id changed during websocket upgrade".to_string()))
+            .unwrap());
+    }
+    Ok(())
+}
+
+struct PrebufferedStream {
+    prebuffer: bytes::Bytes,
+    stream: TcpStream,
+}
+
+impl PrebufferedStream {
+    fn new(prebuffer: Vec<u8>, stream: TcpStream) -> Self {
+        Self {
+            prebuffer: bytes::Bytes::from(prebuffer),
+            stream,
+        }
+    }
+}
+
+impl AsyncRead for PrebufferedStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if !self.prebuffer.is_empty() {
+            let n = self.prebuffer.len().min(buf.remaining());
+            buf.put_slice(&self.prebuffer[..n]);
+            self.prebuffer.advance(n);
+            return Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PrebufferedStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stream).poll_write(cx, data)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+fn listener_error_status(err: &gw_tunnel_client::aether::listener::ListenerError) -> u16 {
+    use gw_tunnel_client::aether::listener::ListenerError;
+    match err {
+        ListenerError::UnknownNode => 404,
+        ListenerError::Saturated => 503,
+        ListenerError::Unauthorized | ListenerError::BadToken => 401,
+        ListenerError::WrongProtocol
+        | ListenerError::MissingHeader(_)
+        | ListenerError::MalformedHeader(_) => 400,
+    }
+}
+
+fn listener_error_reason(status: u16) -> &'static str {
+    match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        503 => "Service Unavailable",
+        _ => "Internal Server Error",
+    }
 }
 
 /// Internal mgmt-verify outcome for `/healthz/*`. Mirrors the proxy
@@ -560,4 +768,158 @@ async fn write_json_response(
         stream.write_all(body).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gw_core::tunnel_protocol::TunnelProtocol;
+    use gw_tunnel_client::registry::ProxyNodeRegistry;
+    use gw_tunnel_client::resolver::ProxyNodeView;
+    use secrecy::SecretString;
+    use tokio::io::AsyncReadExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    struct StubRegistry;
+
+    impl ProxyNodeRegistry for StubRegistry {
+        fn lookup_by_id(&self, node_id: &str) -> Option<ProxyNodeView> {
+            (node_id == "n1").then(|| ProxyNodeView {
+                id: node_id.to_string(),
+                ws_url: "wss://example.test/aether".parse().unwrap(),
+                auth_token: Some(SecretString::from("ae_t")),
+                enabled: true,
+                latency_ms: 0,
+                allowed_provider_ids: Vec::new(),
+                allowed_vendor_key_ids: Vec::new(),
+                tunnel_protocol: TunnelProtocol::Aether,
+            })
+        }
+
+        fn verify_auth_token(&self, node_id: &str, candidate: &str) -> bool {
+            node_id == "n1" && candidate == "ae_t"
+        }
+    }
+
+    #[test]
+    fn parse_headers_captures_aether_upgrade_headers() {
+        let req = b"GET /api/internal/aether-tunnel HTTP/1.1\r\nHost: gateway\r\nAuthorization: Bearer ae_t\r\nX-Node-Id: n1\r\nX-Node-Name: node\r\nX-Tunnel-Max-Streams: 64\r\n\r\n";
+
+        let headers = parse_headers(req).unwrap();
+
+        assert_eq!(headers["authorization"], "Bearer ae_t");
+        assert_eq!(headers["x-node-id"], "n1");
+        assert_eq!(headers["x-tunnel-max-streams"], "64");
+    }
+
+    #[test]
+    fn listener_errors_map_to_http_statuses() {
+        use gw_tunnel_client::aether::listener::ListenerError;
+
+        assert_eq!(listener_error_status(&ListenerError::Unauthorized), 401);
+        assert_eq!(listener_error_status(&ListenerError::BadToken), 401);
+        assert_eq!(listener_error_status(&ListenerError::UnknownNode), 404);
+        assert_eq!(listener_error_status(&ListenerError::Saturated), 503);
+        assert_eq!(
+            listener_error_status(&ListenerError::MalformedHeader("X-Node-Id")),
+            400
+        );
+    }
+
+    #[tokio::test]
+    async fn prebuffered_stream_replays_already_read_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(b"tail").await.unwrap();
+        });
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut replay = PrebufferedStream::new(b"head-".to_vec(), stream);
+        let mut out = Vec::new();
+        replay.read_to_end(&mut out).await.unwrap();
+        client.await.unwrap();
+
+        assert_eq!(out, b"head-tail");
+    }
+
+    #[tokio::test]
+    async fn aether_route_upgrades_and_publishes_transport() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (attach_tx, mut attach_rx) =
+            tokio::sync::mpsc::channel::<(String, Arc<dyn gw_tunnel_client::Transport>)>(1);
+        let aether_listener = Arc::new(gw_tunnel_client::aether::listener::InboundListener::new(
+            Arc::new(StubRegistry),
+            attach_tx,
+        ));
+        let state = Arc::new(HealthState {
+            key_health: Arc::new(gw_health::KeyHealthStore::default()),
+            resilience: Arc::new(gw_proxy::resilience::ResilienceState::default()),
+            latency_tracker: Arc::new(gw_routing::LatencyTracker::new()),
+            tunnel_enabled: true,
+            tunnel_stack: None,
+            aether_listener: Some(aether_listener),
+            aether_listener_path: "/api/internal/aether-tunnel".to_string(),
+        });
+        let store = Arc::new(gw_store::EntityStore::new());
+        let blacklist = Arc::new(dummy_blacklist());
+        let phase = gw_runtime::PhaseHandle::detached_for_test();
+        let backpressure = Arc::new(AtomicU8::new(0));
+        let unhealthy = Arc::new(AtomicBool::new(false));
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connection(
+                stream,
+                state,
+                store,
+                blacklist,
+                phase,
+                backpressure,
+                unhealthy,
+            )
+            .await;
+        });
+
+        let mut req = format!("ws://{addr}/api/internal/aether-tunnel")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "authorization",
+            http::HeaderValue::from_static("Bearer ae_t"),
+        );
+        req.headers_mut()
+            .insert("x-node-id", http::HeaderValue::from_static("n1"));
+        req.headers_mut().insert(
+            "x-node-name",
+            http::HeaderValue::from_static("aether-node-1"),
+        );
+        req.headers_mut()
+            .insert("x-tunnel-max-streams", http::HeaderValue::from_static("64"));
+
+        let (ws, response) = tokio_tungstenite::connect_async(req).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::SWITCHING_PROTOCOLS);
+        let (node_id, transport) = tokio::time::timeout(Duration::from_secs(2), attach_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(node_id, "n1");
+        assert_eq!(transport.tunnel_protocol(), TunnelProtocol::Aether);
+        drop(ws);
+        server.await.unwrap();
+    }
+
+    fn dummy_blacklist() -> gw_auth::jwt_blacklist::RedisJwtBlacklist {
+        let cfg = fred::types::RedisConfig::from_url("redis://127.0.0.1:6379").unwrap();
+        let pool = fred::clients::RedisPool::new(
+            cfg,
+            Some(fred::types::PerformanceConfig::default()),
+            Some(fred::types::ConnectionConfig::default()),
+            Some(fred::types::ReconnectPolicy::default()),
+            1,
+        )
+        .unwrap();
+        gw_auth::jwt_blacklist::RedisJwtBlacklist::new(pool)
+    }
 }
