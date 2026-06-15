@@ -15,12 +15,14 @@ tokio     = { workspace = true, features = ["sync", "net", "macros", "rt", "time
 thiserror = { workspace = true }
 anyhow    = { workspace = true }
 serde     = { workspace = true }
+serde_json = { workspace = true }
 url       = { workspace = true }
 secrecy   = { workspace = true }
 arc-swap  = { workspace = true }
 parking_lot = { workspace = true }
 rand      = { workspace = true }
 once_cell = { workspace = true }
+flate2    = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 hickory-resolver = { workspace = true }

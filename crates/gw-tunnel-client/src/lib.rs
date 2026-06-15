@@ -2,6 +2,7 @@
 //! frame protocol. Wave 2 lands the frame codec; Wave 3 adds pool / resolver
 //! / safe_dns / target_filter and the WebSocket transport (T3-G).
 
+pub mod aether;
 pub mod cnexus;
 pub mod core;
 pub mod resolver;
