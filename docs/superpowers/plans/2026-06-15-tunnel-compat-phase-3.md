@@ -921,6 +921,12 @@ Commit.
 
 ### Task F3: Final integrated MR to `main`
 
+> **DEFERRED if Phase 4 is in scope** (added 2026-06-15 after the SOCKS5-egress requirement was identified). When Phase 4 (Cnexus SOCKS5 egress for Aether `proxy_url` migration continuity, per `docs/superpowers/plans/2026-06-15-tunnel-compat-phase-4.md` and spec §3.8 / §7 Phase 4) is included in this shared-branch work, **skip Task F3 here** and let Phase 4's final task (`F1`) open the integrated MR instead — it will carry Phase 1+2+3+4 commits.
+>
+> If Phase 4 is **not** in scope (e.g. SOCKS5 deemed deferrable), run Task F3 here as written and Phase 4 becomes a separate future branch.
+>
+> Below assumes the Phase-3-as-final case. Adjust the title and contents only if Phase 4 is excluded.
+>
 > This is the **only** MR opened against `main` in the `ailinkmax-gateway` repo for the entire tunnel-compat work. It carries Phase 1 + Phase 2 + Phase 3 commits.
 
 - [ ] **Step 1: Push the shared branch**
