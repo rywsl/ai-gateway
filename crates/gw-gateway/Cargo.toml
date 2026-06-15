@@ -30,7 +30,6 @@ gw-adapter = { path = "../gw-adapter" }
 gw-tunnel-client = { path = "../gw-tunnel-client" }
 gw-runtime = { path = "../gw-runtime" }
 anyhow.workspace = true
-bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -56,8 +55,6 @@ tikv-jemallocator.workspace = true
 secrecy.workspace = true
 hex.workspace = true
 url.workspace = true
-http.workspace = true
-tokio-tungstenite.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true

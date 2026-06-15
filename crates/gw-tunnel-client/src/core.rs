@@ -20,10 +20,6 @@ pub trait Transport: Send + Sync {
 
     fn last_heartbeat_age(&self) -> Duration;
 
-    fn active_streams(&self) -> u32 {
-        0
-    }
-
     fn tunnel_protocol(&self) -> TunnelProtocol;
 
     fn close(&self);

@@ -593,8 +593,6 @@ pub struct TunnelCfg {
     pub backoff_max_secs: u32,
     #[serde(default = "default_max_streams")]
     pub max_streams_per_conn: u32,
-    #[serde(default)]
-    pub aether_listener: AetherListenerConfig,
 }
 
 fn default_doh() -> String {
@@ -619,34 +617,6 @@ fn default_max_streams() -> u32 {
     256
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct AetherListenerConfig {
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    #[serde(default = "default_aether_listener_path")]
-    pub path: String,
-    #[serde(default = "default_aether_listener_max")]
-    pub max_concurrent_connections: usize,
-}
-
-fn default_aether_listener_path() -> String {
-    "/api/internal/aether-tunnel".into()
-}
-
-fn default_aether_listener_max() -> usize {
-    256
-}
-
-impl Default for AetherListenerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: None,
-            path: default_aether_listener_path(),
-            max_concurrent_connections: default_aether_listener_max(),
-        }
-    }
-}
-
 impl Default for TunnelCfg {
     fn default() -> Self {
         Self {
@@ -660,7 +630,6 @@ impl Default for TunnelCfg {
             backoff_min_secs: default_backoff_min_secs(),
             backoff_max_secs: default_backoff_max_secs(),
             max_streams_per_conn: default_max_streams(),
-            aether_listener: AetherListenerConfig::default(),
         }
     }
 }
@@ -1530,14 +1499,6 @@ impl Config {
             if self.tunnel.missed_pong_threshold == 0 {
                 anyhow::bail!("invalid config: tunnel.missed_pong_threshold must be > 0");
             }
-            if self.tunnel.aether_listener.max_concurrent_connections == 0 {
-                anyhow::bail!(
-                    "invalid config: tunnel.aether_listener.max_concurrent_connections must be > 0"
-                );
-            }
-            if !self.tunnel.aether_listener.path.starts_with('/') {
-                anyhow::bail!("invalid config: tunnel.aether_listener.path must start with '/'");
-            }
             for (host, ips) in &self.tunnel.dns_overrides {
                 if ips.is_empty() {
                     anyhow::bail!("invalid config: tunnel.dns_overrides.{host} must not be empty");
@@ -1918,47 +1879,6 @@ mod tunnel_cfg_tests {
             .unwrap();
         assert!(cfg.validate().is_ok());
         assert!(cfg.tunnel.dns_overrides.contains_key("example.com"));
-    }
-
-    #[test]
-    fn tunnel_aether_listener_defaults_match_spec() {
-        let defaults = include_str!("../../../config/default.toml");
-        let cfg: Config = Figment::new()
-            .merge(Toml::string(defaults))
-            .extract()
-            .unwrap();
-        assert_eq!(cfg.tunnel.aether_listener.enabled, None);
-        assert_eq!(
-            cfg.tunnel.aether_listener.path,
-            "/api/internal/aether-tunnel"
-        );
-        assert_eq!(cfg.tunnel.aether_listener.max_concurrent_connections, 256);
-    }
-
-    #[test]
-    fn tunnel_aether_listener_accepts_explicit_false() {
-        let defaults = include_str!("../../../config/default.toml");
-        let overrides = "[tunnel.aether_listener]\nenabled = false\n";
-        let cfg: Config = Figment::new()
-            .merge(Toml::string(defaults))
-            .merge(Toml::string(overrides))
-            .extract()
-            .unwrap();
-        assert_eq!(cfg.tunnel.aether_listener.enabled, Some(false));
-        cfg.validate().unwrap();
-    }
-
-    #[test]
-    fn tunnel_aether_listener_rejects_zero_capacity() {
-        let defaults = include_str!("../../../config/default.toml");
-        let overrides =
-            "[tunnel]\nenabled = true\n[tunnel.aether_listener]\nmax_concurrent_connections = 0\n";
-        let cfg: Config = Figment::new()
-            .merge(Toml::string(defaults))
-            .merge(Toml::string(overrides))
-            .extract()
-            .unwrap();
-        assert!(cfg.validate().is_err());
     }
 }
 

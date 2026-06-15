@@ -1206,8 +1206,6 @@ async fn bootstrap(
     let mut tunnel_bridge: Option<gw_proxy::tunnel_bridge::TunnelBridgeHandle> = None;
 
     let mut tunnel_refresher_unhealthy: Option<Arc<std::sync::atomic::AtomicBool>> = None;
-    let mut aether_listener: Option<Arc<gw_tunnel_client::aether::listener::InboundListener>> =
-        None;
 
     let tunnel: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>> = if cfg.tunnel.enabled {
         use gw_tunnel_client::cnexus::pool::PoolConfig;
@@ -1300,47 +1298,13 @@ async fn bootstrap(
             transport_template,
         ));
 
-        let has_aether_nodes = stack
-            .health_snapshot()
-            .iter()
-            .any(|node| node.protocol == gw_core::tunnel_protocol::TunnelProtocol::Aether);
-        let want_aether_listener = cfg
-            .tunnel
-            .aether_listener
-            .enabled
-            .unwrap_or(has_aether_nodes);
-        if want_aether_listener {
-            let (attach_tx, mut attach_rx) =
-                tokio::sync::mpsc::channel::<(String, Arc<dyn gw_tunnel_client::Transport>)>(32);
-            let listener = Arc::new(
-                gw_tunnel_client::aether::listener::InboundListener::with_capacity(
-                    stack.clone(),
-                    attach_tx,
-                    cfg.tunnel.aether_listener.max_concurrent_connections,
-                ),
-            );
-            aether_listener = Some(listener);
-            let stack_for_attach = stack.clone();
-            let attach_handle = tokio::spawn(async move {
-                while let Some((node_id, transport)) = attach_rx.recv().await {
-                    stack_for_attach.publish_inbound_transport(node_id, transport);
-                }
-            });
-            shutdown.register(attach_handle);
-            tracing::info!(
-                target: "gw_gateway::tunnel",
-                path = %cfg.tunnel.aether_listener.path,
-                "aether inbound listener enabled"
-            );
-        }
-
         let weak_stack = Arc::downgrade(&stack);
         let bridge = gw_proxy::tunnel_bridge::spawn(gw_proxy::tunnel_bridge::TunnelBridgeConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             transport_for_node: Arc::new(move |node_id: &str| {
                 weak_stack
                     .upgrade()
-                    .and_then(|stack| stack.current_dyn_transport(node_id))
+                    .and_then(|stack| stack.current_transport(node_id))
             }),
         })
         .await?;
@@ -1481,9 +1445,6 @@ async fn bootstrap(
         latency_tracker: latency_tracker.clone(),
         tunnel_enabled: cfg.tunnel.enabled,
         tunnel_stack: tunnel.clone(),
-        aether_listener,
-        aether_listener_path: cfg.tunnel.aether_listener.path.clone(),
-        aether_heartbeat_sink: Arc::new(health::RedisHeartbeatSink::new((*redis.pool).clone())),
     };
     let health_store = store.clone();
     let health_blacklist = mgmt_blacklist.clone();

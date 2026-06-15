@@ -1,9 +1,9 @@
-# tunnel-e2e (Phase 1)
+# tunnel-e2e
 
 Local-only Docker e2e suite for the tunnel subsystem. It is not wired into CI;
 run it on demand from the repo root.
 
-## Phase 1 Scope
+## Scope
 
 `scenarios/test_cnexus_protocol.py` runs three scenarios against a real
 `gw-tunnel-server` container:
@@ -14,8 +14,8 @@ run it on demand from the repo root.
 | `test_tunnel_target_denied` | global target whitelist mismatch returns `GW_TUNNEL_TARGET_DENIED` |
 | `test_tunnel_direct_vs_tunnel_byte_identity` | direct and cnexus-tunnel streaming responses match byte-for-byte |
 
-Phase 2 adds Aether protocol services and scenarios. Phase 3 adds mixed-pool
-stress coverage.
+Aether source is retained as reference material only. This suite does not run
+original Aether-node compatibility scenarios.
 
 ## Commands
 
@@ -42,8 +42,8 @@ First build is a cold Rust Docker build. Later runs should reuse Docker layers.
 ## Aether Submodule
 
 `aether-src/` is registered in `.gitmodules` with `update = none` so fresh
-clones do not require private GitLab credentials during Phase 1. Phase 2 is the
-first phase that consumes that source. The Phase 1 gitlink records
+clones do not require private GitLab credentials for cnexus tunnel tests. The
+gitlink records
 `a01f699502d1536a63daa1a8110afe9dbe1b362f` (`v0.0.7-15-ga01f6995`).
 
 ## Spec

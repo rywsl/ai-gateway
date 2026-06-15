@@ -37,9 +37,6 @@ async fn start_server() -> Option<(u16, tokio::task::JoinHandle<anyhow::Result<(
         latency_tracker: Arc::new(gw_routing::LatencyTracker::new()),
         tunnel_enabled: false,
         tunnel_stack: None,
-        aether_listener: None,
-        aether_listener_path: "/api/internal/aether-tunnel".to_string(),
-        aether_heartbeat_sink: Arc::new(gw_gateway::gw_tunnel_client::aether::redis_sink::NoopSink),
     };
     let phase_handle = gw_runtime::PhaseHandle::detached_for_test();
     let backpressure_state = Arc::new(AtomicU8::new(0));

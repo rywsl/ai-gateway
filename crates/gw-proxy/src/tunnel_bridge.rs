@@ -1,10 +1,7 @@
 //! Loopback HTTP/1 bridge for owned tunnel traffic.
 
-use bytes::{Buf, Bytes, BytesMut};
-use gw_core::tunnel_protocol::TunnelProtocol;
-use gw_tunnel_client::aether::http_adapter::{HttpAdapter, ResponseMetaInput};
-use gw_tunnel_client::core::{StreamHandle, Transport};
-use gw_tunnel_client::target::StreamTarget;
+use bytes::{Bytes, BytesMut};
+use gw_tunnel_client::cnexus::transport::{TunnelStreamReader, TunnelStreamWriter, WsTransport};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,9 +15,8 @@ pub const HDR_TARGET: &str = "X-Gateway-Tunnel-Target";
 pub const HDR_TARGET_TLS: &str = "X-Gateway-Tunnel-Target-Tls";
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
-const BODY_CHUNK_BYTES: usize = 16 * 1024;
 
-pub type TransportForNode = Arc<dyn Fn(&str) -> Option<Arc<dyn Transport>> + Send + Sync>;
+pub type TransportForNode = Arc<dyn Fn(&str) -> Option<Arc<WsTransport>> + Send + Sync>;
 
 pub struct TunnelBridgeHandle {
     pub local_addr: SocketAddr,
@@ -118,56 +114,39 @@ async fn handle_conn(
         write_error(&mut client, 502, "tunnel node not live").await?;
         return Ok(());
     };
+    let stream = match transport.open_stream(&parsed.target).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            write_error(&mut client, 502, &format!("tunnel open failed: {err}")).await?;
+            return Ok(());
+        }
+    };
     let mut initial = parsed.stripped_head;
     initial.extend_from_slice(&head[header_end..]);
-    let (client_reader, mut client_writer) = tokio::io::split(client);
+    let (tunnel_reader, tunnel_writer) = stream.split();
+    let (client_reader, client_writer) = tokio::io::split(client);
 
-    match transport.tunnel_protocol() {
-        TunnelProtocol::Cnexus => {
-            let (host, port) = parse_target_host_port(&parsed.target)
-                .ok_or_else(|| anyhow::anyhow!("invalid tunnel bridge target {}", parsed.target))?;
-            let stream = match transport
-                .open_stream(StreamTarget::Tcp {
-                    host,
-                    port,
-                    tls: parsed.target_tls,
-                })
-                .await
-            {
-                Ok(stream) => stream,
-                Err(err) => {
-                    write_error_like(
-                        &mut client_writer,
-                        502,
-                        &format!("tunnel open failed: {err}"),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-            if parsed.target_tls {
-                relay_tls(
-                    parsed.host,
-                    initial.freeze(),
-                    client_reader,
-                    client_writer,
-                    stream,
-                )
-                .await?;
-            } else {
-                relay_plain(initial.freeze(), client_reader, client_writer, stream).await?;
-            }
-        }
-        TunnelProtocol::Aether => {
-            relay_aether_http(
-                parsed.node_id,
-                initial.freeze(),
-                client_reader,
-                client_writer,
-                transport,
-            )
-            .await?;
-        }
+    if parsed.target_tls {
+        relay_tls(
+            parsed.host,
+            initial.freeze(),
+            client_reader,
+            client_writer,
+            TunnelIo {
+                reader: tunnel_reader,
+                writer: tunnel_writer,
+            },
+        )
+        .await?;
+    } else {
+        relay_plain(
+            initial.freeze(),
+            client_reader,
+            client_writer,
+            tunnel_reader,
+            tunnel_writer,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -176,13 +155,13 @@ async fn relay_plain<R, W>(
     initial: Bytes,
     mut client_reader: R,
     mut client_writer: W,
-    stream: StreamHandle,
+    mut tunnel_reader: TunnelStreamReader,
+    mut tunnel_writer: TunnelStreamWriter,
 ) -> anyhow::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
-    let (mut tunnel_reader, mut tunnel_writer) = tokio::io::split(stream);
     if !initial.is_empty() {
         tunnel_writer.write_all(&initial).await?;
     }
@@ -193,65 +172,6 @@ where
     let response = tokio::io::copy(&mut tunnel_reader, &mut client_writer).await;
     request_task.abort();
     response?;
-    Ok(())
-}
-
-async fn relay_aether_http<R, W>(
-    node_id: String,
-    initial: Bytes,
-    client_reader: R,
-    mut client_writer: W,
-    transport: Arc<dyn Transport>,
-) -> anyhow::Result<()>
-where
-    R: AsyncRead + Unpin + Send + 'static,
-    W: AsyncWrite + Unpin,
-{
-    let mut replay = ReplayReader::new(initial, client_reader);
-    let (preamble, mut remaining) = {
-        let mut adapter = HttpAdapter::new(&mut replay, &mut client_writer, node_id);
-        adapter.parse_request().await?
-    };
-
-    let content_length = content_length(&preamble.headers);
-    let (req_body_tx, req_body_rx) = tokio::sync::mpsc::channel(8);
-    let (resp_body_tx, resp_body_rx) = tokio::sync::mpsc::channel(8);
-    let (resp_meta_tx, resp_meta_rx) = tokio::sync::oneshot::channel();
-
-    tokio::spawn(async move {
-        pump_aether_request_body(&mut remaining, replay, content_length, req_body_tx).await;
-    });
-
-    let target = StreamTarget::Http {
-        method: http::Method::from_bytes(preamble.method.as_bytes())?,
-        url: preamble.url,
-        headers: preamble.headers,
-        body_rx: req_body_rx,
-        body_tx_response: resp_body_tx,
-        meta_tx_response: resp_meta_tx,
-    };
-
-    match transport.open_stream(target).await {
-        Ok(_handle) => {}
-        Err(err) => {
-            write_error_like(
-                &mut client_writer,
-                502,
-                &format!("tunnel open failed: {err}"),
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-
-    let meta = resp_meta_rx.await?;
-    let meta = ResponseMetaInput {
-        status: meta.status,
-        headers: meta.headers,
-    };
-    let mut empty = tokio::io::empty();
-    let mut adapter = HttpAdapter::new(&mut empty, &mut client_writer, String::new());
-    adapter.write_response(meta, resp_body_rx).await?;
     Ok(())
 }
 
@@ -287,6 +207,39 @@ where
     request_task.abort();
     response?;
     Ok(())
+}
+
+struct TunnelIo {
+    reader: TunnelStreamReader,
+    writer: TunnelStreamWriter,
+}
+
+impl AsyncRead for TunnelIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.reader).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TunnelIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.writer).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.writer).poll_shutdown(cx)
+    }
 }
 
 struct ParsedRequest {
@@ -348,22 +301,12 @@ fn parse_and_strip(head: &[u8]) -> Result<ParsedRequest, u16> {
 }
 
 fn parse_target_host(target: &str) -> Option<String> {
-    let (host, _) = parse_target_host_port_raw(target)?;
+    let (host, _) = target.rsplit_once(':')?;
     let host = host.trim_matches(['[', ']']);
     if host.parse::<IpAddr>().is_ok() {
         return Some(host.to_owned());
     }
     Some(host.to_owned())
-}
-
-fn parse_target_host_port(target: &str) -> Option<(String, u16)> {
-    let (host, port) = parse_target_host_port_raw(target)?;
-    Some((host.trim_matches(['[', ']']).to_owned(), port.parse().ok()?))
-}
-
-fn parse_target_host_port_raw(target: &str) -> Option<(&str, &str)> {
-    let (host, port) = target.rsplit_once(':')?;
-    Some((host, port))
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -392,125 +335,10 @@ async fn write_error(client: &mut TcpStream, status: u16, message: &str) -> std:
         .await
 }
 
-async fn write_error_like<W>(writer: &mut W, status: u16, message: &str) -> std::io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let reason = match status {
-        400 => "Bad Request",
-        431 => "Request Header Fields Too Large",
-        502 => "Bad Gateway",
-        _ => "Internal Server Error",
-    };
-    let body = format!("{message}\n");
-    writer
-        .write_all(
-            format!(
-                "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .as_bytes(),
-        )
-        .await
-}
-
-fn content_length(headers: &[(String, String)]) -> Option<usize> {
-    headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse().ok())
-}
-
-async fn pump_aether_request_body<R1, R2>(
-    remaining: &mut R1,
-    mut reader: R2,
-    content_length: Option<usize>,
-    tx: tokio::sync::mpsc::Sender<Bytes>,
-) where
-    R1: AsyncRead + Unpin,
-    R2: AsyncRead + Unpin,
-{
-    let Some(mut bytes_left) = content_length else {
-        return;
-    };
-    let mut buf = vec![0u8; BODY_CHUNK_BYTES];
-    loop {
-        if bytes_left == 0 {
-            return;
-        }
-        let before = bytes_left;
-        bytes_left = pump_aether_body_reader(remaining, bytes_left, &mut buf, &tx).await;
-        if bytes_left == 0 || bytes_left == before {
-            break;
-        }
-    }
-    while bytes_left > 0 {
-        let before = bytes_left;
-        bytes_left = pump_aether_body_reader(&mut reader, bytes_left, &mut buf, &tx).await;
-        if bytes_left == 0 || bytes_left == before {
-            break;
-        }
-    }
-}
-
-async fn pump_aether_body_reader<R>(
-    reader: &mut R,
-    bytes_left: usize,
-    buf: &mut [u8],
-    tx: &tokio::sync::mpsc::Sender<Bytes>,
-) -> usize
-where
-    R: AsyncRead + Unpin,
-{
-    let limit = bytes_left.min(buf.len());
-    let n = match reader.read(&mut buf[..limit]).await {
-        Ok(0) | Err(_) => return bytes_left,
-        Ok(n) => n,
-    };
-    if tx.send(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
-        return 0;
-    }
-    bytes_left - n
-}
-
-struct ReplayReader<R> {
-    remaining: Bytes,
-    reader: R,
-}
-
-impl<R> ReplayReader<R> {
-    fn new(remaining: Bytes, reader: R) -> Self {
-        Self { remaining, reader }
-    }
-}
-
-impl<R> AsyncRead for ReplayReader<R>
-where
-    R: AsyncRead + Unpin,
-{
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if !self.remaining.is_empty() {
-            let n = self.remaining.len().min(buf.remaining());
-            buf.put_slice(&self.remaining[..n]);
-            self.remaining.advance(n);
-            return Poll::Ready(Ok(()));
-        }
-        Pin::new(&mut self.reader).poll_read(cx, buf)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gw_core::tunnel_protocol::TunnelProtocol;
     use gw_tunnel_client::cnexus::transport::{TransportConfig, WsTransport};
-    use gw_tunnel_client::core::{StreamHandle, Transport, TransportError, TransportFuture};
-    use gw_tunnel_client::target::StreamTarget;
     use gw_tunnel_client::target_filter::{set_whitelist, ResetGuard};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
@@ -593,99 +421,5 @@ mod tests {
         assert!(!seen.to_ascii_lowercase().contains("x-gateway-tunnel-"));
         bridge.shutdown().await;
         server.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn bridge_routes_aether_as_http_target() {
-        struct FakeAetherTransport {
-            seen: Arc<StdMutex<Option<String>>>,
-        }
-
-        impl Transport for FakeAetherTransport {
-            fn open_stream<'a>(&'a self, target: StreamTarget) -> TransportFuture<'a> {
-                Box::pin(async move {
-                    let StreamTarget::Http {
-                        method,
-                        url,
-                        headers,
-                        mut body_rx,
-                        body_tx_response,
-                        meta_tx_response,
-                    } = target
-                    else {
-                        return Err(TransportError::UnsupportedTarget);
-                    };
-                    let host = headers
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
-                        .map(|(_, value)| value.clone())
-                        .unwrap_or_default();
-                    let mut body = Vec::new();
-                    while let Some(chunk) = body_rx.recv().await {
-                        body.extend_from_slice(&chunk);
-                    }
-                    *self.seen.lock().unwrap() = Some(format!(
-                        "{method} {url} host={host} body={}",
-                        String::from_utf8_lossy(&body)
-                    ));
-                    meta_tx_response
-                        .send(gw_tunnel_client::aether::meta::ResponseMeta {
-                            status: 201,
-                            headers: vec![("content-type".into(), "text/plain".into())],
-                        })
-                        .map_err(|_| TransportError::Closed)?;
-                    body_tx_response
-                        .send(Bytes::from_static(b"aether-ok"))
-                        .await
-                        .map_err(|_| TransportError::Closed)?;
-                    let (stream, _peer) = tokio::io::duplex(1);
-                    Ok(Box::new(stream) as StreamHandle)
-                })
-            }
-
-            fn alive(&self) -> bool {
-                true
-            }
-
-            fn last_heartbeat_age(&self) -> Duration {
-                Duration::from_millis(0)
-            }
-
-            fn tunnel_protocol(&self) -> TunnelProtocol {
-                TunnelProtocol::Aether
-            }
-
-            fn close(&self) {}
-        }
-
-        let seen = Arc::new(StdMutex::new(None));
-        let transport: Arc<dyn Transport> = Arc::new(FakeAetherTransport { seen: seen.clone() });
-        let bridge = spawn(TunnelBridgeConfig {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            transport_for_node: Arc::new(move |node_id| {
-                (node_id == "node-a").then_some(transport.clone())
-            }),
-        })
-        .await
-        .unwrap();
-
-        let mut client = TcpStream::connect(bridge.local_addr).await.unwrap();
-        let request = format!(
-            "POST /v1/chat HTTP/1.1\r\nHost: aether-upstream.internal\r\n{HDR_NODE_ID}: node-a\r\n{HDR_TARGET}: aether-upstream.internal:80\r\n{HDR_TARGET_TLS}: false\r\nContent-Length: 4\r\nConnection: close\r\n\r\nping",
-        );
-        client.write_all(request.as_bytes()).await.unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
-        let response_text = String::from_utf8_lossy(&response);
-        assert!(
-            response_text.contains("201 Created"),
-            "unexpected bridge response: {response_text}"
-        );
-        assert!(response_text.ends_with("9\r\naether-ok\r\n0\r\n\r\n"));
-        assert_eq!(
-            seen.lock().unwrap().as_deref(),
-            Some("POST http://aether-upstream.internal/v1/chat host=aether-upstream.internal body=ping")
-        );
-        bridge.shutdown().await;
     }
 }

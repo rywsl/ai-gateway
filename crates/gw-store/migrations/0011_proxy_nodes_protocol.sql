@@ -1,6 +1,7 @@
 -- 0011_proxy_nodes_protocol.sql - add `tunnel_protocol` discriminator to
--- proxy_nodes payload (cnexus default; aether variant lands in Phase 2 of the
--- tunnel-compat design at docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md).
+-- proxy_nodes payload protocol label. Runtime tunnel transport is Cnexus-only
+-- in this branch; the aether enum value is retained for stored-data
+-- compatibility and operator visibility.
 --
 -- Schema shape is unchanged: entity table rows still carry payload/version
 -- columns. Only the JSONB payload schema is extended.

@@ -47,13 +47,13 @@ e2e-soak-kill:
 	cd tests/e2e/client && SOAK_KILL_PROB=0.1 .venv/bin/python3 -m pytest -m soak -k chaos_kill -v --tb=short
 	docker compose -f tests/e2e/docker-compose.yml down -v
 
-# Tunnel compatibility e2e suite. Phase 1 exercises the cnexus wire protocol;
-# Phase 2 adds Aether services and scenarios.
+# Tunnel compatibility e2e suite. Exercises the cnexus wire protocol.
+# Aether source is retained as reference material only; this branch does not
+# run original Aether-node compatibility scenarios.
 TUNNEL_E2E_COMPOSE := -f tests/tunnel-e2e/docker-compose.yml --project-directory tests/tunnel-e2e
 
 tunnel-e2e-deps:
-	@echo "Phase 1: Aether submodule is registered with update=none."
-	@echo "Phase 2 will run git submodule update --init tests/tunnel-e2e/aether-src."
+	@echo "Aether submodule is registered with update=none and is not required for cnexus tunnel e2e."
 
 tunnel-e2e: tunnel-e2e-down
 	docker compose $(TUNNEL_E2E_COMPOSE) build
