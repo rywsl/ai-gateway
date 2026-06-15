@@ -156,5 +156,7 @@ async fn build_fallback_record(pool: &RedisPool, key: &str) -> anyhow::Result<Op
         pod_id: crate::instance_id::cached().unwrap_or_default(),
         credits_consumed: None,
         coef_table_version: None,
+        // Crash-recovery fallback has no candidate chain to report.
+        attempted_keys: Vec::new(),
     }))
 }

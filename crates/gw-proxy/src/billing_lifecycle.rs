@@ -36,6 +36,38 @@ use gw_core::usage::ProvenanceTag;
 use gw_ledger::FreezeGuard as _;
 use gw_ledger::{ClearKey, LedgerItem};
 
+/// Build an [`gw_ledger::usage::AttemptedKey`] from explicit parts. Shared by
+/// the per-attempt failure record (`build_attempt_record`) and the final
+/// record built in `filters/logging.rs`, so both render an identical shape.
+pub(crate) fn attempted_key_from(
+    picked: &gw_core::entity::VendorKey,
+    model: &gw_core::ids::ModelName,
+    attempt_index: u32,
+    error_code: Option<String>,
+) -> gw_ledger::usage::AttemptedKey {
+    gw_ledger::usage::AttemptedKey {
+        vendor_key_id: picked.key_id.0.clone(),
+        vendor: picked.vendor_id.0.clone(),
+        model: model.0.clone(),
+        error_code,
+        attempt_index,
+    }
+}
+
+/// Best-effort error code for the current attempt, derived from the per-attempt
+/// upstream signals on [`ReqCtx`] (no `pingora::Error` is in scope on the
+/// connect/retry path). Prefers the stamped `GW_*` code, then an
+/// `HTTP_<status>` token for a >=400 upstream status, else `None`.
+pub(crate) fn ctx_error_code(ctx: &ReqCtx) -> Option<String> {
+    if let Some(code) = ctx.upstream_error_code {
+        return Some(code.to_string());
+    }
+    match ctx.upstream_status {
+        Some(s) if s >= 400 => Some(format!("HTTP_{s}")),
+        _ => None,
+    }
+}
+
 /// Apply a `VendorExposure` state transition to the ReqCtx.
 ///
 /// Transitions are validated against [`can_transition`]; in debug builds an
@@ -134,6 +166,15 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
     };
     let usage_provenance = ctx.usage_provenance;
 
+    // Built before the literal: the `model` shorthand below moves the local,
+    // so borrow it for the attempted key here while it is still owned.
+    let attempted_keys = vec![attempted_key_from(
+        picked,
+        &model,
+        ctx.attempt_index,
+        ctx_error_code(ctx),
+    )];
+
     Some(UsageRecord {
         ts_ms: now_ms,
         request_id: ctx.request_id.0.clone(),
@@ -198,6 +239,8 @@ pub fn build_attempt_record(ctx: &ReqCtx) -> Option<gw_ledger::usage::UsageRecor
         pod_id: gw_ledger::instance_id::cached().unwrap_or_default(),
         credits_consumed: ctx.credits_consumed,
         coef_table_version: ctx.coef_table_version_at_settle,
+        // A per-attempt failure record carries just its own current key.
+        attempted_keys,
     })
 }
 
@@ -280,6 +323,14 @@ pub fn on_retry_sync(ctx: &mut ReqCtx) -> Option<gw_ledger::usage::UsageRecord> 
 
     // Snapshot the record BEFORE resetting ctx.
     let record = build_attempt_record(ctx);
+
+    // Preserve the failed attempt's candidate(s) in the persistent chain so the
+    // final logging record can report the full failover sequence (P0-32). The
+    // accumulator is intentionally NOT reset by the per-attempt resets below.
+    if let Some(rec) = &record {
+        ctx.attempted_keys
+            .extend(rec.attempted_keys.iter().cloned());
+    }
 
     // Reset per-attempt transient state.
     ctx.attempt_index = ctx.attempt_index.saturating_add(1);

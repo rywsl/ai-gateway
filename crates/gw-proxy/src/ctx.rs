@@ -351,6 +351,12 @@ pub struct ReqCtx {
     pub usage: UsageAccumulator,
     pub vendor_exposure: crate::billing_lifecycle::VendorExposure,
     pub attempt_index: u32,
+    /// Accumulator of vendor-key candidates that have already been *attempted
+    /// and failed* on this request (P0-32). Appended by `on_retry_sync` for
+    /// each failed attempt and **never reset** across attempts, so the final
+    /// `logging` record can reconstruct the full candidate chain. Empty when
+    /// no failover occurred. Surfaced as `UsageRecord.attempted_keys`.
+    pub attempted_keys: Vec<gw_ledger::usage::AttemptedKey>,
     /// Per-dimension provenance accumulator: promoted by each extraction pass
     /// via `copy_provenance` in `filters/response.rs`. Frozen into the
     /// `UsageRecord` at logging time.
@@ -636,6 +642,7 @@ impl ReqCtx {
             },
             vendor_exposure: crate::billing_lifecycle::VendorExposure::Idle,
             attempt_index: 0,
+            attempted_keys: Vec::new(),
             usage_provenance: gw_ledger::usage::UsageProvenance::default(),
             cancel_observed_at_ms: None,
             cancel_cause: None,
