@@ -150,6 +150,11 @@ backoff_min_secs = 1
 backoff_max_secs = 60
 max_streams_per_conn = 256
 
+[tunnel.aether_listener]
+# omitted enabled = auto-enable when at least one aether proxy node exists.
+path = "/api/internal/aether-tunnel"
+max_concurrent_connections = 256
+
 [billing]
 cancel_grace_ms = 200             # 上游 cancel 后等待 final usage frame 的窗口 (ms)
 response_deadline_ms = 300_000    # 上游响应总超时, 默认 5min
