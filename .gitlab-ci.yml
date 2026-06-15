@@ -43,12 +43,16 @@ variables:
       run_as_root() {
         if [ "$(id -u)" = "0" ]; then
           "$@"
-        elif command -v sudo >/dev/null 2>&1; then
-          sudo "$@"
+        elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+          sudo -n "$@"
         else
           echo "required system dependency is missing and this shell runner cannot elevate to install it" >&2
           return 127
         fi
+      }
+
+      can_install_packages() {
+        [ "$(id -u)" = "0" ] || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }
       }
 
       install_deb_packages() {
@@ -70,11 +74,11 @@ variables:
         fi
 
         if [ -n "$missing" ]; then
-          if command -v apt-get >/dev/null 2>&1; then
+          if command -v apt-get >/dev/null 2>&1 && can_install_packages; then
             install_deb_packages cmake build-essential pkg-config perl libssl-dev libclang-dev jq
           else
-            echo "missing rust build dependencies:$missing" >&2
-            return 127
+            echo "rust build dependencies not preinstalled and cannot be installed by this runner:$missing" >&2
+            echo "continuing so cargo reports the exact missing dependency if it is required" >&2
           fi
         fi
 
@@ -93,10 +97,10 @@ variables:
           return
         fi
 
-        if command -v apt-get >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1 && can_install_packages; then
           install_deb_packages buildah ca-certificates uidmap slirp4netns fuse-overlayfs
         else
-          echo "buildah is not installed and no supported package manager was found" >&2
+          echo "buildah is not installed and this runner cannot install packages non-interactively" >&2
           return 127
         fi
 
