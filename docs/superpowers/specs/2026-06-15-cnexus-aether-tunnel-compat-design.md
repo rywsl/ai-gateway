@@ -512,7 +512,7 @@ Aether proxy nodes have historically supported an upstream-egress proxy via the 
 **Architecture posture.**
 
 - `proxy_url` is **node-scoped operator configuration**, not a hub↔node wire-protocol concern. The hub does **not** push `proxy_url` to the proxy via a control channel: each proxy reads its own config from env / CLI / file at startup. Cnexus's tunnel-server inherits this same model (Phase 4, §7). For Aether nodes, `proxy_url` is consumed natively inside `aether-proxy`; the hub does not need to know its value.
-- The DB's `proxy_url` field is therefore **informational** from the hub's perspective: it shows in the admin UI so operators can see what the proxy *should* be running with, and `ops.go::probeProxy` can dial it for a reachability sanity check, but the hub never reaches into the proxy to set or change it.
+- The DB's `proxy_url` field is therefore **informational** from the hub's perspective (where "hub" = the `gw-gateway` business binary that does request routing; this is distinct from `gw-tunnel-server`, which is the proxy-node binary deployed elsewhere and which actually consumes the `--proxy-url` flag). The hub shows the value in the admin UI so operators can see what the proxy *should* be running with, and `ops.go::probeProxy` can dial it for a reachability sanity check, but the hub never reaches into the proxy to set or change it.
 - This is **distinct** from `TunnelProtocol`: protocol selects the hub↔node wire format (cnexus opaque-TCP-over-WS, or aether HTTP-over-WS); `proxy_url` selects the proxy's *own* upstream egress. Both protocols accept any of the supported `proxy_url` schemes.
 - `proxy_url` is **not** rendered as an additional `TunnelProtocol` variant. It is orthogonal node-config flavour, not a new connection mode.
 
@@ -1541,20 +1541,27 @@ Change set (Cnexus Rust):
 - `crates/gw-tunnel-server/src/main.rs`: add `--proxy-url` CLI flag + `PROXY_URL` env var.
 - `crates/gw-tunnel-server/src/lib.rs`: `EgressMode` enum + dispatch at the single `TcpStream::connect(&target)` site (currently line 261 inside `relay_stream`); `cfg.egress` config plumb-through.
 - Unit tests: cover `Direct` (regression: existing flow), `Socks5 { resolve_at_proxy: true }` (`socks5h`), `Socks5 { resolve_at_proxy: false }` (`socks5`), URL userinfo parsing (`socks5://user:pass@host:1080`).
-- `tests/tunnel-e2e/Dockerfile.socks5-egress` + `docker-compose.yml` addition: `socks5-egress` container (e.g. `serjs/go-socks5-proxy:latest`).
+- `tests/tunnel-e2e/Dockerfile.socks5-egress` + `docker-compose.yml` addition: `socks5-egress` container (e.g. `serjs/go-socks5-proxy:latest`). Both new compose services (`socks5-egress` + `cnexus-tunnel-server-socks5`) are gated behind `profiles: ["socks5"]`. The `cnexus-tunnel-server-socks5` service builds from `Dockerfile.tunnel-e2e` (NOT the root `Dockerfile`), reusing the existing `gw-tunnel-server` build pattern.
 - `tests/tunnel-e2e/scenarios/test_cnexus_socks5.py`: 2 scenarios (cnexus through socks5 reaches fake-upstream; aether-parity baseline confirming both protocols can use the same socks5-egress when the deployment config matches the DB value).
+- `Makefile`: new target `tunnel-e2e-socks5` activating the `socks5` profile + its own teardown wired to the same profile (default `tunnel-e2e-down` would leak profile-gated containers).
+- `crates/gw-tunnel-server/README.md`: new "Egress proxy" subsection — CLI/env usage, scheme set, `socks5` vs `socks5h` distinction, `--allow-target` invariant.
 - `docs/spec/09-tunnel.md`: as-built §Egress proxy section (full `proxy_url` table + scheme set + worked example).
 - `docs/issues/2026-06-15-socks5-egress-deployment-coupling.md` (new): operational gotcha — DB `proxy_url` is informational; the tunnel-server reads from CLI/env. Document the failure mode of a mismatch.
+- `docs/ROADMAP.md`: post-Phase-4 update — strike SOCKS5-egress as resolved; rename Phase 3's "Phase 4 candidates" section to "Future tunnel candidates"; add HTTP-CONNECT egress (`http://`, `https://` proxy schemes) as a new future candidate.
 
 PR breakdown:
 
 - **PR 4a** (Rust shared branch): code + unit tests + e2e + spec/issues update. Continues on the same shared feature branch as Phase 1+2+3.
 - **PR 4b** (`AILinkMax-Go` repo, real MR): `proxy_url` form-field exposure for both protocols + validation regression test.
 
-Verification:
+Verification (per-profile, since Phase 3's mixed-pool and Phase 4's socks5 scenarios are gated behind compose `--profile` flags):
 
 - `cargo test -p gw-tunnel-server` PASS, including new `socks5_dispatch_*` cases.
-- `make tunnel-e2e` reports **17 passed** (15 from Phase 1+2+3 + 2 from Phase 4).
+- `make tunnel-e2e` (default profile, no flags) reports **12 passed** = 3 cnexus from Phase 1 + 8 aether compat from Phase 2 + 1 aether baseline from Phase 2.
+- `make tunnel-e2e-baseline` reports **1 passed** (Phase 2 baseline; same file invoked separately).
+- `make tunnel-e2e-mixed` reports **11 passed** = 3 mixed-pool scenarios + 8 parameterized strategy-matrix cases (Phase 3).
+- `make tunnel-e2e-socks5` reports **2 passed** (Phase 4: cnexus-through-socks5 + protocol-parity).
+- Aggregate across all profile-gated targets: **26 passed**.
 - `make check-tunnel-deps` still clean (tokio-socks is a third-party dep, not a workspace crate, so dep-boundary script is unaffected).
 - The final integrated MR (originally Phase 3 Task F3) opens at the end of Phase 4 instead — it now carries Phase 1+2+3+4 commits.
 
@@ -1701,5 +1708,5 @@ No automation enforces this; it is a checklist item in the MR template (the repo
 - **`StreamTarget`** — request to the transport layer to open a stream. Two variants: `Tcp` (Cnexus) and `Http` (Aether).
 - **`AnyTransport`** — enum that holds either `cnexus::WsTransport` or `aether::WsTransport`; implements `trait Transport` via delegation.
 - **`cargo-remote-ctl`** — project-specific wrapper for remote-executed `cargo` operations (build / test / clippy). Local-only `cargo metadata` operations do not require it.
-- **`proxy_url`** — node-scoped upstream-egress proxy URL stored on the `ProxyNode` row. Accepted schemes: `socks5`, `socks5h`, `http`, `https`. Consumed by the proxy itself (Aether-proxy natively; Cnexus's `gw-tunnel-server` from Phase 4 — via `--proxy-url` CLI / `PROXY_URL` env). The hub does not push this value to the proxy; it is deployer-config. See §3.8.
+- **`proxy_url`** — node-scoped upstream-egress proxy URL stored on the `ProxyNode` row. Schemes accepted by the Go admin validation surface (across both protocols): `socks5`, `socks5h`, `http`, `https`. Schemes actually implemented on the consuming proxy: **Aether-proxy** — all four (`socks5`, `socks5h`, `http`, `https`); **Cnexus `gw-tunnel-server`** (Phase 4) — `socks5` and `socks5h` only; HTTP-CONNECT (`http://`, `https://`) deferred to a future phase. Consumed via `--proxy-url` CLI / `PROXY_URL` env on the proxy-node deployment; the hub does not push this value. See §3.8.
 - **`EgressMode`** — internal `gw-tunnel-server` enum (Phase 4). Variants: `Direct`, `Socks5 { proxy_addr, auth, resolve_at_proxy }`. Selects the dial path inside `relay_stream`.

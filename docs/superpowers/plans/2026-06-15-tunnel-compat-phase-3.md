@@ -2,7 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Phase 3 of the Cnexus ↔ Aether tunnel compatibility spec: cap the tunnel-compat work with a mixed-pool e2e suite that proves all 8 routing strategies behave sanely across protocols (and identifies which strategies are *legitimate* across cnexus+aether vs. which degrade gracefully); ship the `scripts/check-tunnel-deps.sh` dependency-boundary script that warns when tunnel crates pull in business crates; deliver Go G4 frontend UI in `AILinkMax-Go` (Protocol column + Aether status panel + Aether token management + Aether-node register history + GatewayControl gray-out per locked decisions); rewrite `docs/spec/09-tunnel.md` as the as-built reference superseding the design spec for ongoing maintenance; mark all tunnel ROADMAP items complete; open the **single final MR** to `main` that encompasses Phase 1 + Phase 2 + Phase 3 of the `ailinkmax-gateway` work.
+> **POST-AUDIT ERRATA (2026-06-15, applied after parallel-agent audit):**
+> 1. **Superseded by Phase 4.** Phase 4 (Cnexus SOCKS5 egress for `proxy_url` Aether-parity, file `docs/superpowers/plans/2026-06-15-tunnel-compat-phase-4.md`) extends this work. The "single final MR" language below now refers to **Phase 4 Task F1**, not Phase 3 Task F3. Phase 3 Task F3 is **deferred** — see the in-body errata at Task F3.
+> 2. **Frontend stack is Vue 3 + Vite at `frontend/`**, NOT React + Vite at `web/`. The original draft used `.tsx` paths under `web/src/` based on industry-default assumption; the actual codebase uses Vue Single-File Components (`.vue`) under `frontend/src/`. All `web/src/` paths in this plan have been rewritten to `frontend/src/` and all `.tsx` extensions changed to `.vue`. **The inline component code samples remain in React/TSX shape** as architectural placeholders — the implementing engineer translates them to Vue 3 Composition API (`<script setup>` + `<template>` + `<style>`) following the existing pattern at `/Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go/frontend/src/views/admin/ProxyNodes.vue`.
+> 3. **`proxy_url` UI is already protocol-agnostic.** The original draft assumed Phase 3 G4 would introduce an aether-only `proxy_url` form-field conditional that Phase 4 would later widen. Audit confirmed the live `frontend/src/views/admin/ProxyNodes.vue:473` already shows `proxy_url` unconditionally with no protocol gate. **Phase 3 G4 tasks must NOT add such a gate**; the field stays unconditional for both protocols (matches spec §3.8 contract). See Task G4.2 below.
+
+**Goal:** Phase 3 of the Cnexus ↔ Aether tunnel compatibility spec: cap the tunnel-compat work with a mixed-pool e2e suite that proves all 8 routing strategies behave sanely across protocols (and identifies which strategies are *legitimate* across cnexus+aether vs. which degrade gracefully); ship the `scripts/check-tunnel-deps.sh` dependency-boundary script that warns when tunnel crates pull in business crates; deliver Go G4 frontend UI in `AILinkMax-Go` (Protocol column + Aether status panel + Aether token management + Aether-node register history + GatewayControl gray-out per locked decisions); rewrite `docs/spec/09-tunnel.md` as the as-built reference superseding the design spec for ongoing maintenance; mark all tunnel ROADMAP items complete; the integrated MR to `main` was originally planned to open here at Task F3 — **per the post-audit errata above, this is deferred to Phase 4 Task F1** which will carry Phase 1+2+3+4 commits in a single MR.
 
 **Branch / MR model:**
 - **`ailinkmax-gateway` repo** — Phase 3 commits append to the **same single shared feature branch** that Phase 1 and Phase 2 live on. **At the end of Phase 3** (after Task F3 below), the integrated MR is opened against `main`. There is no Phase-3-only MR to `main`.
@@ -12,7 +17,7 @@
 - **PR 3a — Mixed-pool e2e + dep-boundary script + final docs** (Tasks M1-M7, S1-S4, F1-F4, this repo): mixed-pool docker-compose extension (1 cnexus + 1 aether), 3 mixed-pool scenarios + cross-protocol strategy compatibility matrix as a deliverable, `scripts/check-tunnel-deps.sh`, `docs/spec/09-tunnel.md` rewrite as as-built, ROADMAP closeout + Phase 4 candidates, final integrated MR to `main`.
 - **PR 3b — Go G4 frontend** (Tasks G4.1-G4.6 + Go-3-gate, `AILinkMax-Go` repo, **real MR**): Protocol column with badge, Protocol radio in create/edit form, Aether status panel (1m bucket aggregation from raw samples, 1h window default), Aether token management UI (generate / rotate with dual-token grace / revoke), Aether register history view, GatewayControl button gray-out + tooltip per spec §3.6.6, supporting Go admin API endpoints for the new UI surfaces.
 
-**Tech Stack:** Rust 1.88 (pinned), bash + jq (dep script), pytest 8.x, Docker Compose v2, Go 1.21+, whatever existing frontend framework `AILinkMax-Go` admin already uses (audit at Task G4.1 — likely React + Vite based on industry standard, but confirmed by inspection).
+**Tech Stack:** Rust 1.88 (pinned), bash + jq (dep script), pytest 8.x, Docker Compose v2, Go 1.21+, Vue 3 + Vite (`AILinkMax-Go/frontend/`, confirmed at audit time — original draft assumed React + Vite; Errata #2 corrected this).
 
 **Reference spec:** `docs/superpowers/specs/2026-06-15-cnexus-aether-tunnel-compat-design.md` (§3.6.6 GatewayControl semantics, §3.6.7 Frontend UI, §5 Decoupling Discipline, §6.5.D mixed-pool scenarios, §6.6 Makefile targets `check-tunnel-deps`, §7 Phase 3, §8 Testing & Verification).
 
@@ -82,12 +87,12 @@
 
 | Path | Responsibility |
 |---|---|
-| `web/src/components/ProxyNodes/ProtocolBadge.tsx` | `<ProtocolBadge protocol="cnexus" \| "aether" />` → blue or purple badge. |
-| `web/src/components/ProxyNodes/ProtocolRadio.tsx` | `<ProtocolRadio value=... onChange=... />` for create/edit form. Default `cnexus`. |
-| `web/src/components/ProxyNodes/AetherStatusPanel.tsx` | Detail panel: pulls `GET /api/admin/monitoring/aether/{node_id}?since=now-1h`, client-side buckets into 1m windows, renders 5 sparklines + active connections. |
-| `web/src/components/ProxyNodes/AetherTokenManager.tsx` | Three buttons + state: generate (only if no token), rotate (dual-token grace banner with countdown), revoke (immediate). |
-| `web/src/components/ProxyNodes/AetherRegisterHistory.tsx` | Table of recent `aether_register_events` rows (new audit log table, see Go modifications). |
-| `web/src/components/GatewayControl/CommandButton.tsx` (modify or create wrapper) | Wraps existing per-node command buttons. When protocol = aether: disables, shows tooltip "Aether nodes do not accept GatewayControl commands". |
+| `frontend/src/components/ProxyNodes/ProtocolBadge.vue` | `<ProtocolBadge protocol="cnexus" \| "aether" />` → blue or purple badge. |
+| `frontend/src/components/ProxyNodes/ProtocolRadio.vue` | `<ProtocolRadio value=... onChange=... />` for create/edit form. Default `cnexus`. |
+| `frontend/src/components/ProxyNodes/AetherStatusPanel.vue` | Detail panel: pulls `GET /api/admin/monitoring/aether/{node_id}?since=now-1h`, client-side buckets into 1m windows, renders 5 sparklines + active connections. |
+| `frontend/src/components/ProxyNodes/AetherTokenManager.vue` | Three buttons + state: generate (only if no token), rotate (dual-token grace banner with countdown), revoke (immediate). |
+| `frontend/src/components/ProxyNodes/AetherRegisterHistory.vue` | Table of recent `aether_register_events` rows (new audit log table, see Go modifications). |
+| `frontend/src/components/GatewayControl/CommandButton.vue` (modify or create wrapper) | Wraps existing per-node command buttons. When protocol = aether: disables, shows tooltip "Aether nodes do not accept GatewayControl commands". |
 | `modules/proxynode/api/aether_token_rotate_handler.go` | `POST /api/admin/proxy-nodes/{id}/aether-token/rotate` returns new `ae_*` token + grace TTL. |
 | `modules/proxynode/api/aether_token_revoke_handler.go` | `DELETE /api/admin/proxy-nodes/{id}/aether-token/grace` — immediate revoke of old token (cancels dual-token grace). |
 | `modules/proxynode/business/aether_token_lifecycle.go` | Generate / rotate / revoke logic. Token format `ae_<32-byte hex>` (matches Aether convention). |
@@ -100,7 +105,7 @@
 
 | Path | Change |
 |---|---|
-| `web/src/pages/ProxyNodes/index.tsx` (or local equivalent) | Add Protocol column to the table; integrate `ProtocolRadio` into the create/edit form; wire `AetherStatusPanel` + `AetherTokenManager` + `AetherRegisterHistory` into the per-node detail drawer; conditionally render `GatewayControl` buttons in gray for aether nodes. |
+| `frontend/src/pages/ProxyNodes/index.vue (or sibling component)` (or local equivalent) | Add Protocol column to the table; integrate `ProtocolRadio` into the create/edit form; wire `AetherStatusPanel` + `AetherTokenManager` + `AetherRegisterHistory` into the per-node detail drawer; conditionally render `GatewayControl` buttons in gray for aether nodes. |
 | `modules/proxynode/api/routes.go` | Mount the new admin token-management and register-events routes. |
 | `modules/proxynode/business/aether_register.go` | Call `RecordRegisterAttempt` from inside `AetherRegister` for every code path (success, unknown-token, auto-provision). |
 | `modules/monitoring/api/routes.go` (Phase 2 added base route) | No change; the existing `GET /api/admin/monitoring/aether/{node_id}` is what the panel calls. |
@@ -921,21 +926,26 @@ Commit.
 
 ### Task F3: Final integrated MR to `main`
 
-> **DEFERRED if Phase 4 is in scope** (added 2026-06-15 after the SOCKS5-egress requirement was identified). When Phase 4 (Cnexus SOCKS5 egress for Aether `proxy_url` migration continuity, per `docs/superpowers/plans/2026-06-15-tunnel-compat-phase-4.md` and spec §3.8 / §7 Phase 4) is included in this shared-branch work, **skip Task F3 here** and let Phase 4's final task (`F1`) open the integrated MR instead — it will carry Phase 1+2+3+4 commits.
+> ## 🛑 STOP — DO NOT EXECUTE THIS TASK IF PHASE 4 IS IN SCOPE
 >
-> If Phase 4 is **not** in scope (e.g. SOCKS5 deemed deferrable), run Task F3 here as written and Phase 4 becomes a separate future branch.
+> **Default assumption (since 2026-06-15 audit): Phase 4 IS in scope.** The integrated MR opens at **Phase 4 Task F1** instead of here. If you're following the 4-phase plan in order, **skip this task entirely** and proceed directly to Phase 4. The execution steps below remain only as a fallback for the (unlikely) case that the operator explicitly decides to ship Phase 1+2+3 without Phase 4.
 >
-> Below assumes the Phase-3-as-final case. Adjust the title and contents only if Phase 4 is excluded.
+> **Decision rule:** if `docs/superpowers/plans/2026-06-15-tunnel-compat-phase-4.md` exists and the operator has not explicitly stated "Phase 4 is excluded", treat this entire task as `[~] skipped — see Phase 4 F1`. Mark its checkboxes as not-applicable.
 >
+> The wrapper `<details>` block below is intentional: it keeps F3's original execution steps available for the rare exclusion case while making it visually impossible for a reader skimming the plan to accidentally start the MR-opening sequence here.
+
+<details>
+<summary>F3 execution steps (ONLY if Phase 4 is excluded — click to expand)</summary>
+
 > This is the **only** MR opened against `main` in the `ailinkmax-gateway` repo for the entire tunnel-compat work. It carries Phase 1 + Phase 2 + Phase 3 commits.
 
-- [ ] **Step 1: Push the shared branch**
+- [ ] **Step F3.1 (skip-unless-Phase-4-excluded): Push the shared branch**
 
 ```bash
 git push origin feature/tunnel-compat
 ```
 
-- [ ] **Step 2: Open the MR**
+- [ ] **Step F3.2 (skip-unless-Phase-4-excluded): Open the MR**
 
 MR title: `feat(tunnel): Cnexus ↔ Aether compatibility (Phase 1 + 2 + 3, full)`
 
@@ -946,7 +956,8 @@ MR description must include:
   - `cargo-remote-ctl test --workspace` final 5 lines.
   - `cargo-remote-ctl clippy --workspace --all-targets -- -D warnings` clean.
   - `bash scripts/check-invariants.sh` clean.
-  - `make tunnel-e2e` summary (Phase 1 3 + Phase 2 8 + Phase 2 baseline 1 = 12 passed).
+  - `make tunnel-e2e` summary (Phase 1 3 + Phase 2 8 + Phase 2 baseline 1 = 12 passed). Note: mixed-pool and matrix scenarios are profile-gated under `make tunnel-e2e-mixed`, not counted in `make tunnel-e2e` default.
+  - `make tunnel-e2e-baseline` summary (1 passed — Phase 2 baseline).
   - `make tunnel-e2e-mixed` summary (Phase 3 3 + 8 matrix params = 11 passed).
   - `make e2e` summary (25 scenarios, unchanged from main).
 - Captured `bash scripts/check-tunnel-deps.sh` output (informational; flagged edges enumerated).
@@ -957,13 +968,15 @@ MR description must include:
   - Phase 3 G4 Go MR (PR 3b, see below) — landed first.
 - ADR pointer: `docs/design/2026-06-15-tunnel-default-compile-decision.md`.
 
-- [ ] **Step 3: After MR review feedback**
+- [ ] **Step F3.3 (skip-unless-Phase-4-excluded): After MR review feedback**
 
 Address each comment by adding new commits on the branch (per Phase 1 §Git Safety Protocol — no rebases / no force-push during review unless explicitly requested by reviewer).
 
-- [ ] **Step 4: Merge**
+- [ ] **Step F3.4 (skip-unless-Phase-4-excluded): Merge**
 
 After approval, merge via the project's standard merge mechanism. Do **not** squash unless the reviewer explicitly asks — the commit history is the audit trail of the work breakdown.
+
+</details>
 
 ---
 
@@ -1002,8 +1015,8 @@ Both expected clean. If anything fails, file a hotfix immediately — the MR rev
 
 ```bash
 cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
-ls web/ 2>/dev/null || ls frontend/ || find . -maxdepth 2 -name 'package.json' -not -path './node_modules/*'
-cat web/package.json 2>/dev/null || true
+ls frontend/ 2>/dev/null || find . -maxdepth 2 -name 'package.json' -not -path './node_modules/*'
+cat frontend/package.json 2>/dev/null || true
 ```
 
 Record findings in the MR description draft:
@@ -1016,7 +1029,7 @@ Record findings in the MR description draft:
 - [ ] **Step 2: Identify the per-node detail drawer/page**
 
 ```bash
-grep -rn "proxy.*node.*detail\|ProxyNodeDetail\|NodeDetail" web/ src/ 2>/dev/null | head -10
+grep -rn "proxy.*node.*detail\|ProxyNodeDetail\|NodeDetail\|ProxyNodes" frontend/src/ 2>/dev/null | head -10
 ```
 
 Locate the existing component that renders per-node detail. This is where the new `AetherStatusPanel`, `AetherTokenManager`, and `AetherRegisterHistory` will mount.
@@ -1028,8 +1041,8 @@ Locate the existing component that renders per-node detail. This is where the ne
 ### Task G4.2: `ProtocolBadge` + `ProtocolRadio` + table column
 
 **Files:**
-- Create: `web/src/components/ProxyNodes/ProtocolBadge.{tsx|vue}`
-- Create: `web/src/components/ProxyNodes/ProtocolRadio.{tsx|vue}`
+- Create: `frontend/src/components/ProxyNodes/ProtocolBadge.vue`
+- Create: `frontend/src/components/ProxyNodes/ProtocolRadio.vue`
 - Modify: existing proxy-nodes table component + create/edit form
 
 - [ ] **Step 1: ProtocolBadge component**
@@ -1048,8 +1061,8 @@ Add a `Protocol` column to the per-node table using `ProtocolBadge`. Insert `Pro
 
 ```bash
 cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
-git add web/src/components/ProxyNodes/{ProtocolBadge,ProtocolRadio}.* \
-        web/src/pages/ProxyNodes/...
+git add frontend/src/components/ProxyNodes/{ProtocolBadge,ProtocolRadio}.* \
+        frontend/src/pages/ProxyNodes/...
 git commit -m "feat(web): protocol badge + radio in proxy-nodes table and form"
 ```
 
@@ -1058,7 +1071,7 @@ git commit -m "feat(web): protocol badge + radio in proxy-nodes table and form"
 ### Task G4.3: `AetherStatusPanel` (1m bucket aggregation, 1h default)
 
 **Files:**
-- Create: `web/src/components/ProxyNodes/AetherStatusPanel.{tsx|vue}`
+- Create: `frontend/src/components/ProxyNodes/AetherStatusPanel.vue`
 
 - [ ] **Step 1: Component logic**
 
@@ -1143,7 +1156,7 @@ function Stat({ label, data }: { label: string; data: number[] }) {
 - [ ] **Step 2: Commit**
 
 ```bash
-git add web/src/components/ProxyNodes/AetherStatusPanel.*
+git add frontend/src/components/ProxyNodes/AetherStatusPanel.*
 git commit -m "feat(web): Aether status panel (1m buckets over 1h window)"
 ```
 
@@ -1152,7 +1165,7 @@ git commit -m "feat(web): Aether status panel (1m buckets over 1h window)"
 ### Task G4.4: `AetherTokenManager` with dual-token grace
 
 **Files:**
-- Create: `web/src/components/ProxyNodes/AetherTokenManager.{tsx|vue}`
+- Create: `frontend/src/components/ProxyNodes/AetherTokenManager.vue`
 - Create: `modules/proxynode/api/aether_token_rotate_handler.go`
 - Create: `modules/proxynode/api/aether_token_revoke_handler.go`
 - Create: `modules/proxynode/business/aether_token_lifecycle.go`
@@ -1314,7 +1327,7 @@ cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
 git add modules/proxynode/api/aether_token_*_handler.go \
         modules/proxynode/business/aether_token_lifecycle.go \
         modules/proxynode/api/routes.go \
-        web/src/components/ProxyNodes/AetherTokenManager.*
+        frontend/src/components/ProxyNodes/AetherTokenManager.*
 git commit -m "feat(proxynode,web): Aether token rotate/revoke with 1h dual-token grace"
 
 # Rust side — on shared branch, separate commit
@@ -1331,7 +1344,7 @@ git commit -m "feat(gw-proxy): verify_auth_token walks aether_config.auth_token_
 - Create: `modules/proxynode/business/aether_register_events.go` (audit log)
 - Create: `modules/proxynode/api/aether_register_events_handler.go`
 - Create: `modules/proxynode/clickhouse/aether_register_events.sql` (or Postgres DDL — Go team's call)
-- Create: `web/src/components/ProxyNodes/AetherRegisterHistory.{tsx|vue}`
+- Create: `frontend/src/components/ProxyNodes/AetherRegisterHistory.vue`
 - Modify: `modules/proxynode/business/aether_register.go` (call `RecordRegisterAttempt`)
 
 - [ ] **Step 1: Audit log schema**
@@ -1366,7 +1379,7 @@ git add modules/proxynode/business/aether_register_events.go \
         modules/proxynode/business/aether_register.go \
         modules/proxynode/api/aether_register_events_handler.go \
         modules/proxynode/postgres/aether_register_events.sql \
-        web/src/components/ProxyNodes/AetherRegisterHistory.*
+        frontend/src/components/ProxyNodes/AetherRegisterHistory.*
 git commit -m "feat(proxynode,web): Aether register-event audit log + history UI"
 ```
 
@@ -1375,7 +1388,7 @@ git commit -m "feat(proxynode,web): Aether register-event audit log + history UI
 ### Task G4.6: GatewayControl gray-out + tooltip per spec §3.6.6
 
 **Files:**
-- Modify: `web/src/components/GatewayControl/CommandButton.{tsx|vue}` (or whatever wraps the per-node command buttons)
+- Modify: `frontend/src/components/GatewayControl/CommandButton.vue` (or whatever wraps the per-node command buttons)
 - Modify: `crates/gw-proxy/src/filters/upstream.rs` (Rust side: cmd dispatcher returns skipped) — on the shared branch
 
 - [ ] **Step 1: Rust-side cmd short-circuit**
@@ -1417,7 +1430,7 @@ git add crates/gw-proxy/src/filters/upstream.rs
 git commit -m "feat(gw-proxy): GatewayControl skips aether nodes with {status: skipped, reason: ...}"
 
 cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
-git add web/src/components/GatewayControl/CommandButton.*
+git add frontend/src/components/GatewayControl/CommandButton.*
 git commit -m "feat(web): gray out GatewayControl buttons for aether nodes with tooltip"
 ```
 
@@ -1500,4 +1513,4 @@ After PR 3a (mixed-pool + dep script + final docs) + PR 3b (Go G4) are complete,
 
 Plan complete and saved to `docs/superpowers/plans/2026-06-15-tunnel-compat-phase-3.md`. Execution model continues from the Phase 1/2 chosen approach (Subagent-Driven or Inline).
 
-**This is the final implementation plan for the Cnexus ↔ Aether tunnel compatibility work.** After Task F3 merges, the work is complete. Phase 4 candidates are filed in `docs/ROADMAP.md` for future scheduling.
+> **Superseded by Phase 4 (2026-06-15 post-audit).** The original draft of this paragraph said "this is the final implementation plan" and "after Task F3 merges, the work is complete." Both statements are no longer accurate: Phase 4 (`docs/superpowers/plans/2026-06-15-tunnel-compat-phase-4.md`) extends this work with Cnexus SOCKS5 egress for Aether-parity, and the integrated MR opens at Phase 4 Task F1 rather than Phase 3 Task F3. The ROADMAP "Phase 4 candidates" section from Task F2 stays — Phase 4 then strikes the SOCKS5-egress candidate and renames the section to "Future tunnel candidates" (see Phase 4 Task 4a.10).

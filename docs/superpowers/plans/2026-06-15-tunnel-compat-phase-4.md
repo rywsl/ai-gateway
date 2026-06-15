@@ -2,9 +2,33 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **POST-AUDIT ERRATA (2026-06-15, applied after parallel-agent audit). 21 fixes applied; the most impactful:**
+>
+> 1. **Frontend stack is Vue 3 + Vite at `frontend/`**, NOT React + Vite at `web/`. All `web/src/` paths rewritten to `frontend/src/`. React/TSX code snippets remain as architectural placeholders; the implementing engineer translates to Vue 3 Composition API (`<script setup>`) following the existing pattern at `/Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go/frontend/src/views/admin/ProxyNodes.vue`.
+> 2. **The `proxy_url` UI is ALREADY protocol-agnostic in the live codebase** — `frontend/src/views/admin/ProxyNodes.vue:473` renders it unconditionally for all protocols today. Phase 3 G4 was originally believed to introduce an aether-only conditional that Phase 4 would widen — that assumption was wrong; Phase 3 G4 tasks do not touch `proxy_url`. Phase 4 PR 4b reframed: it is a **coordination + regression guard**, NOT a "widen the conditional" task. See Task 4b.2 below.
+> 3. **Go `proxy_url` scheme validation does NOT exist** — `service.go::CreateManual` / `UpdateManual` / `Register` perform zero scheme validation on `ProxyURL`; the only place `socks5`/`socks5h` strings appear in the Go code is `ops.go:38-46::defaultPort` for the reachability probe. The original draft's `TestService_RejectsUnknownProxyURLScheme` test was wrong by construction. Task 4b.1 has been redesigned to **add a small `validateProxyURL` helper** (whitelisting `socks5`, `socks5h`, `http`, `https`) and gate `Create`/`Update` on it, then assert both accept and reject cases.
+> 4. **Go test struct is `ManualCreateRequest{Name, ProxyURL, Protocol, ...}`, NOT `CreateInput{NodeName, WsURL, Protocol, ProxyURL}`.** All Go test code in Task 4b.1 has been rewritten to use the real DTO shape (verified against `modules/proxynode/business/entity.go:193-199`).
+> 5. **Compose service `cnexus-tunnel-server-socks5` builds from `Dockerfile.tunnel-e2e` (NOT root `Dockerfile`).** The original draft used `dockerfile: Dockerfile` + `args: BIN: gw-tunnel-server` which is the spec's idealized form; the live `Dockerfile.tunnel-e2e` already builds all e2e binaries and has no `BIN` arg. Task 4a.4 corrected.
+> 6. **`--allow-target example.com:9000` (NOT `fake-upstream:9000`).** The gateway sends the network alias `example.com:9000` over the wire-protocol target string; `validate_target` is a string match, not IP resolution. The fake-upstream container is aliased to `example.com` in the existing compose (Phase 1).
+> 7. **`gw-tunnel-server` `parse_egress_url` uses async `tokio::net::lookup_host` (NOT blocking `std::net::ToSocketAddrs::to_socket_addrs`)**, AND stores `EgressMode::Socks5 { proxy_host: String, proxy_port: u16, ... }` (resolved at dial-time, not parse-time) so a proxy-container restart with a new IP does not produce a stale cached address. Task 4a.1/4a.2/4a.3 rewritten accordingly.
+> 8. **Reachability probe runs in `tokio::spawn` (NOT serially before `spawn(cfg)`)** so a slow/dead proxy does not delay listener bind. Task 4a.3 Step 4 corrected.
+> 9. **URL userinfo is percent-decoded** before passing to SOCKS5 (`url::Url::username()`/`.password()` return percent-encoded ASCII; passwords like `p@ss` round-trip as `p%40ss` if not decoded). Task 4a.3 Step 2 implementation now uses `percent_encoding::percent_decode_str(...).decode_utf8_lossy()`.
+> 10. **HEALTHCHECK in `Dockerfile.socks5-egress` does not use `nc`** (the upstream `serjs/go-socks5-proxy` is distroless and has no shell or coreutils). Replaced with a Docker Compose-level `healthcheck:` block using `test: ["CMD-SHELL", ...]` that requires a shell, so the Dockerfile uses a slim Alpine base; the SOCKS5 binary is copied in from the distroless upstream's bin.
+> 11. **`seed/04_socks5.sql` removed.** The Python `seed_nodes_socks5_only` fixture (Task 4a.5) is the sole seeding path; the SQL file was orphaned because the existing `schema-applier` does not auto-load it. Documentation comment about the seeding path added.
+> 12. **`seed_aether_node_via_socks5` fixture is `yield`-style with try/finally cleanup** so a test failure does not leak the named container. Pre-test `docker rm -f` defensively clears any leftover from prior runs.
+> 13. **Parity test (`test_protocol_parity_through_same_socks5`) polls `/healthz/tunnel` for the new node's `present=true` AND the old node's absence** before issuing the second request, eliminating the routing-cache staleness race.
+> 14. **`Makefile` target `tunnel-e2e-socks5` teardown uses `$(TUNNEL_E2E_COMPOSE_SOCKS5) down -v --remove-orphans`** (NOT the default `tunnel-e2e-down` which lacks `--profile socks5` and would leak profile-gated containers).
+> 15. **New Task 4a.10 (ROADMAP update)** — Phase 4 now updates `docs/ROADMAP.md` to strike SOCKS5 egress as resolved and add HTTP-CONNECT as a future candidate. The original draft missed this.
+> 16. **Cold-start time estimate corrected** in Task 4a.7: cold first run takes ~10-15 min (Aether + tunnel-server image builds); warm cache ~3 min.
+> 17. **Self-Review section 5 narrowed** — Phase 4 introduces no Phase-4-internal add-then-remove; the cross-phase audit acknowledges Phase 3 G4 + Phase 4 4b.2 coordination is "ensure no gate is added" rather than "remove a gate that was added".
+> 18. **Placeholder hint includes all four schemes per spec §3.8 contract** — `http://proxy:port 或 socks5://proxy:port 或 socks5h://proxy:port` — not narrowed to SOCKS5-only (would contradict spec §3.8 "both protocols accept the same set").
+> 19. **`relay_stream` plumb-through shown concretely** — the existing `tokio::spawn(relay_stream(...))` call site at lib.rs:210 area is extended with `cfg.egress.clone()` and `relay_stream`'s signature gains `egress: EgressMode`. Task 4a.2 Step 4 has the concrete diff.
+> 20. **Memory file `tunnel-compat-cnexus-aether.md` line 22 corrected** — said "only one MR to main at end of Phase 3"; now reads "end of Phase 4".
+> 21. **Spec §7 Phase 4 verification scenario count corrected** — was a flat "17 passed via make tunnel-e2e" conflating profile-gated counts; now broken into `tunnel-e2e` (12), `tunnel-e2e-baseline` (1), `tunnel-e2e-mixed` (11), `tunnel-e2e-socks5` (2) = 26 aggregate.
+
 **Goal:** Phase 4 of the Cnexus ↔ Aether tunnel compatibility spec: give `gw-tunnel-server` SOCKS5/SOCKS5h egress dial support behind a `--proxy-url` CLI flag / `PROXY_URL` env, so an Aether-era deployment using `proxy_nodes.proxy_url = socks5://...` can be replaced 1:1 by a Cnexus tunnel-server with the same `proxy_url` value at deployment time and continue to function identically. Phase 4 closes the migration-continuity gap surfaced after Phase 3 was already drafted — SOCKS5 egress is the only Aether capability the Cnexus tunnel-server cannot match today, and replacing Aether-era nodes without it would require operators to reinstrument upstream egress (proxychains, sidecar, etc.) and break the Aether→Cnexus seamless-migration story.
 
-**Why this is a phase, not a ROADMAP item:** the work is small (~10 tasks, ~600-900 lines of plan) but it's load-bearing for the migration. Folding it into Phase 4 *before* the integrated MR opens means the migration story ships complete in one merge rather than as a follow-up that operators have to track. Per the user-locked 2026-06-15 review decision, Phase 4 also defers Phase 3's Task F3 (final MR) to Phase 4's final task — the integrated MR now carries Phase 1+2+3+4 commits.
+**Why this is a phase, not a ROADMAP item:** the work is mid-sized (14 tasks across PR 4a / 4b / F1 / F2 after post-audit additions — see errata above) but it's load-bearing for the migration. Folding it into Phase 4 *before* the integrated MR opens means the migration story ships complete in one merge rather than as a follow-up that operators have to track. Per the user-locked 2026-06-15 review decision, Phase 4 also defers Phase 3's Task F3 (final MR) to Phase 4's final task — the integrated MR now carries Phase 1+2+3+4 commits.
 
 **Branch / MR model:**
 - **`ailinkmax-gateway` repo** — Phase 4 commits append to the **same single shared feature branch** as Phase 1+2+3. Phase 3 Task F3 (the originally-planned final integrated MR) is **deferred**: instead, Phase 4 Task F1 below opens the integrated MR that carries Phase 1+2+3+4 commits.
@@ -56,7 +80,7 @@
 | `crates/gw-tunnel-server/src/lib.rs` (cont.) | (f) Optional startup-time reachability probe: connect to the SOCKS5 endpoint with a 5s timeout. Failure logs `tracing::warn!`, does NOT refuse startup — per spec §3.8 operational contract, the operator may be staging the proxy. |
 | `crates/gw-tunnel-server/tests/socks5_dispatch.rs` (new file or extend existing) | Unit tests: `direct_dial_unchanged`, `socks5_parses_userinfo`, `socks5h_resolves_at_proxy`, `socks5_resolves_locally`, `unsupported_scheme_rejected`. |
 | `tests/tunnel-e2e/docker-compose.yml` | Add `socks5-egress` service (built from `Dockerfile.socks5-egress`). Add `cnexus-tunnel-server-socks5` service (built from same Dockerfile as the existing `cnexus-tunnel-server`, but with `--proxy-url socks5h://socks5-egress:1080` appended to the command). Wire the new tunnel-server with `depends_on: [socks5-egress: service_started]`. Both new services are under a `profiles: ["socks5"]` flag so `make tunnel-e2e` keeps the existing default scope and `make tunnel-e2e-socks5` opts into the SOCKS5 cases. |
-| `tests/tunnel-e2e/seed/04_socks5.sql` (new) | Seeds a fourth proxy node `cn-socks5` (tunnel_protocol=cnexus, ws_url=wss://cnexus-tunnel-server-socks5:7000/tunnel, proxy_url=socks5h://socks5-egress:1080) so the scenario can route through it. |
+| ~~`tests/tunnel-e2e/seed/04_socks5.sql`~~ | **Removed per Errata #11.** Schema-applier doesn't auto-discover extra SQL files; the Python `seed_nodes_socks5_only` fixture is the sole seeding path. |
 | `Makefile` | New target `tunnel-e2e-socks5`: brings up the `socks5` compose profile, runs `pytest scenarios/test_cnexus_socks5.py`, tears down. |
 | `docs/spec/09-tunnel.md` | Append an "Egress proxy" section with the full `proxy_url` table from spec §3.8, the `EgressMode` enum, the URL parsing rules, and a worked example (Aether-era node → Cnexus replacement with matching `--proxy-url`). |
 | `crates/gw-tunnel-server/README.md` | Add a short "Egress proxy" subsection: how to use `--proxy-url` / `PROXY_URL`, the scheme set, the userinfo form, the `socks5` vs `socks5h` distinction. Reference `docs/spec/09-tunnel.md` for the full contract. |
@@ -69,8 +93,8 @@
 |---|---|
 | `modules/proxynode/business/service.go` | Verify (do not edit unless needed) that `CreateInput` / `UpdateInput` accept `proxy_url` for both protocols. The existing comments at `service.go:151,186` warn against confusing `proxy_url` with `ws_url`; that guardrail is correct and stays. If a `tunnel_protocol == cnexus`-only gate exists on `proxy_url`, REMOVE it (the SOCKS5 path is meant for both protocols). Cross-check with `modules/proxynode/business/entity.go:108` comments. |
 | `modules/proxynode/business/service_test.go` | New table-driven case: `TestService_AcceptsProxyURLOnCnexusNode` covering `socks5://` and `socks5h://` schemes for a cnexus node. |
-| `web/src/components/ProxyNodes/<form-component>` | Where the create/edit form is defined: show the `proxy_url` field for **all** protocols (Phase 3 PR 3b had conditioned it on `protocol === 'aether'`). The hint text mentions both schemes. Placeholder: `socks5://user:pass@proxy.host:1080` (matches Aether reference UI). |
-| `web/src/pages/ProxyNodes/<table>` | Optional column addition (low priority): a `proxy_url`-presence indicator (badge: ⚠️ "via proxy" if set, blank if direct). Implementing engineer's call. |
+| `frontend/src/components/ProxyNodes/<form-component>` | Where the create/edit form is defined: show the `proxy_url` field for **all** protocols (Phase 3 PR 3b had conditioned it on `protocol === 'aether'`). The hint text mentions both schemes. Placeholder: `socks5://user:pass@proxy.host:1080` (matches Aether reference UI). |
+| `frontend/src/pages/ProxyNodes/<table>` | Optional column addition (low priority): a `proxy_url`-presence indicator (badge: ⚠️ "via proxy" if set, blank if direct). Implementing engineer's call. |
 
 ---
 
@@ -111,8 +135,12 @@ fn config_defaults_to_direct_egress() {
 
 #[test]
 fn egress_mode_socks5_constructs() {
+    // Errata #7: proxy host stored as String + u16, NOT pre-resolved SocketAddr,
+    // so a proxy container restart with a different IP does not produce a stale
+    // cached address (e2e + prod robustness).
     let m = EgressMode::Socks5 {
-        proxy_addr: "127.0.0.1:1080".parse().unwrap(),
+        proxy_host: "127.0.0.1".to_string(),
+        proxy_port: 1080,
         auth: None,
         resolve_at_proxy: true,
     };
@@ -125,7 +153,8 @@ fn egress_mode_socks5_constructs() {
 #[test]
 fn egress_mode_socks5_with_auth() {
     let m = EgressMode::Socks5 {
-        proxy_addr: "127.0.0.1:1080".parse().unwrap(),
+        proxy_host: "127.0.0.1".to_string(),
+        proxy_port: 1080,
         auth: Some(("user".into(), "pass".into())),
         resolve_at_proxy: false,
     };
@@ -152,16 +181,26 @@ use std::net::SocketAddr;
 
 /// Upstream-egress mode for `gw-tunnel-server`'s outbound dials from `relay_stream`.
 /// See `docs/spec/09-tunnel.md` §Egress proxy.
+///
+/// **Errata #7 (2026-06-15):** `proxy_host`/`proxy_port` are stored as String+u16
+/// rather than a pre-resolved `SocketAddr`. DNS resolution happens at dial time
+/// via `tokio::net::lookup_host` (async). This:
+///  - avoids blocking the tokio runtime at parse time (the prior `std::net::ToSocketAddrs`
+///    impl was synchronous);
+///  - allows the proxy container to restart with a new IP without invalidating
+///    the cached address;
+///  - keeps `EgressMode` cheap to Clone.
 #[derive(Clone, Debug)]
 pub enum EgressMode {
     /// Direct TCP dial to the target. Default; current behaviour.
     Direct,
 
     /// Dial via a SOCKS5 proxy. `resolve_at_proxy = true` implements `socks5h`
-    /// semantics (send hostname); `false` implements plain `socks5` (resolve
-    /// locally then send the resolved IP).
+    /// semantics (send hostname to proxy, proxy resolves); `false` implements
+    /// plain `socks5` (resolve locally then send the resolved IP).
     Socks5 {
-        proxy_addr: SocketAddr,
+        proxy_host: String,
+        proxy_port: u16,
         auth: Option<(String, String)>,
         resolve_at_proxy: bool,
     },
@@ -272,26 +311,36 @@ use tokio::net::TcpStream;
 /// then asks the proxy to connect to the final target.
 ///
 /// `socks5h` (resolve_at_proxy=true): the hostname is sent to the proxy as-is;
-/// the proxy is responsible for DNS resolution. Suited for environments where
-/// the tunnel-server cannot reach the target's DNS but the proxy can.
-///
+/// the proxy is responsible for DNS resolution.
 /// `socks5` (resolve_at_proxy=false): resolves the hostname locally, then asks
-/// the proxy to connect to the resolved IP. Matches RFC 1928 §4 with
-/// ATYP=0x01 (IPv4) or ATYP=0x04 (IPv6).
+/// the proxy to connect to the resolved IP.
+///
+/// **Errata #7 (2026-06-15):** the SOCKS5 proxy address is resolved **here**
+/// at dial time (not cached from parse time). Each call performs one DNS
+/// lookup for the proxy host. This avoids stale-IP issues when the proxy
+/// container restarts.
 pub async fn dial_via_egress(egress: &EgressMode, target: &str) -> Result<TcpStream> {
     match egress {
         EgressMode::Direct => {
             TcpStream::connect(target).await
                 .with_context(|| format!("direct connect to {target}"))
         }
-        EgressMode::Socks5 { proxy_addr, auth, resolve_at_proxy } => {
+        EgressMode::Socks5 { proxy_host, proxy_port, auth, resolve_at_proxy } => {
             use tokio_socks::tcp::Socks5Stream;
+
+            // Resolve the proxy address at dial time (Errata #7).
+            let proxy_addr = tokio::net::lookup_host((proxy_host.as_str(), *proxy_port))
+                .await
+                .with_context(|| format!("resolving proxy host {proxy_host}:{proxy_port}"))?
+                .next()
+                .ok_or_else(|| anyhow!("DNS yielded no addresses for proxy {proxy_host}:{proxy_port}"))?;
+
             if *resolve_at_proxy {
                 let stream = match auth {
                     Some((u, p)) => Socks5Stream::connect_with_password(
-                        *proxy_addr, target, u.as_str(), p.as_str()
+                        proxy_addr, target, u.as_str(), p.as_str()
                     ).await,
-                    None => Socks5Stream::connect(*proxy_addr, target).await,
+                    None => Socks5Stream::connect(proxy_addr, target).await,
                 }.with_context(|| format!("socks5h dial to {target} via {proxy_addr}"))?;
                 Ok(stream.into_inner())
             } else {
@@ -302,9 +351,9 @@ pub async fn dial_via_egress(egress: &EgressMode, target: &str) -> Result<TcpStr
                     .ok_or_else(|| anyhow!("DNS yielded no addresses for {target}"))?;
                 let stream = match auth {
                     Some((u, p)) => Socks5Stream::connect_with_password(
-                        *proxy_addr, resolved, u.as_str(), p.as_str()
+                        proxy_addr, resolved, u.as_str(), p.as_str()
                     ).await,
-                    None => Socks5Stream::connect(*proxy_addr, resolved).await,
+                    None => Socks5Stream::connect(proxy_addr, resolved).await,
                 }.with_context(|| format!("socks5 dial to {resolved} via {proxy_addr}"))?;
                 Ok(stream.into_inner())
             }
@@ -318,31 +367,67 @@ pub mod testing {
 }
 ```
 
-- [ ] **Step 4: Replace the dial site in `relay_stream`**
+- [ ] **Step 4: Replace the dial site in `relay_stream` AND plumb `cfg.egress` through (Errata #19)**
 
-Find:
+First locate the dial site:
 ```bash
 grep -n 'TcpStream::connect(&target)' crates/gw-tunnel-server/src/lib.rs
 ```
+Expected: one hit at ~line 261 inside `relay_stream`.
 
-Expected: one hit at ~line 261 inside `relay_stream`. Replace:
+Concrete diff (use the existing `cfg.egress` since `handle_ws_conn` already has `cfg: Arc<TunnelServerConfig>` per the audit):
 
 ```rust
-// Before:
-let tcp = match TcpStream::connect(&target).await { ... };
+// crates/gw-tunnel-server/src/lib.rs
 
-// After (assuming `cfg` is in scope as the TunnelServerConfig; if not, plumb it through
-// from `spawn` → `handle_connection` → `relay_stream`):
-let tcp = match dial_via_egress(&cfg.egress, &target).await {
-    Ok(s) => s,
-    Err(e) => {
-        sink.send_error(frame.stream_id, Bytes::from(format!("dial: {e}"))).await;
-        return;
-    }
-};
+// (1) Extend relay_stream's signature with `egress: EgressMode`.
+// Existing:
+//   async fn relay_stream(
+//       stream_id: u32,
+//       target: String,
+//       mut rx: mpsc::Receiver<Bytes>,
+//       sink: ProtocolSink,
+//       streams: Arc<Mutex<HashMap<u32, mpsc::Sender<Bytes>>>>,
+//       _permit: OwnedSemaphorePermit,
+//   ) { ... }
+async fn relay_stream(
+    stream_id: u32,
+    target: String,
+    egress: EgressMode,          // <-- new parameter (Errata #19)
+    mut rx: mpsc::Receiver<Bytes>,
+    sink: ProtocolSink,
+    streams: Arc<Mutex<HashMap<u32, mpsc::Sender<Bytes>>>>,
+    _permit: OwnedSemaphorePermit,
+) {
+    // (2) Replace the dial site (was: TcpStream::connect(&target).await).
+    let tcp = match dial_via_egress(&egress, &target).await {
+        Ok(s) => s,
+        Err(e) => {
+            sink.send_error(stream_id, Bytes::from(format!("dial: {e}"))).await;
+            return;
+        }
+    };
+    // ... rest of relay_stream unchanged ...
+}
+
+// (3) Update the tokio::spawn(relay_stream(...)) call site at ~line 210.
+// Existing call:
+//   tokio::spawn(relay_stream(
+//       frame.stream_id, target, rx, sink.clone(), streams.clone(), permit,
+//   ));
+// Becomes:
+tokio::spawn(relay_stream(
+    frame.stream_id,
+    target,
+    cfg.egress.clone(),           // <-- Clone is cheap (Errata #7: only Strings, no SocketAddr)
+    rx,
+    sink.clone(),
+    streams.clone(),
+    permit,
+));
 ```
 
-> Plumb `cfg.egress` into `relay_stream` by extending the spawn signature or by capturing an `Arc<TunnelServerConfig>` in the closure. Match the existing argument-passing style of the crate — do NOT introduce a global / lazy_static.
+`EgressMode: Clone` (derived at Task 4a.1), so `cfg.egress.clone()` is cheap. There is no other call site to `relay_stream` — verify with `grep -n 'relay_stream(' crates/gw-tunnel-server/src/lib.rs`.
 
 - [ ] **Step 5: Run tests**
 
@@ -383,8 +468,9 @@ fn parse_egress_url_none_yields_direct() {
 fn parse_egress_url_socks5_basic() {
     let m = parse_egress_url(Some("socks5://127.0.0.1:1080")).expect("parse");
     match m {
-        EgressMode::Socks5 { proxy_addr, auth, resolve_at_proxy } => {
-            assert_eq!(proxy_addr.to_string(), "127.0.0.1:1080");
+        EgressMode::Socks5 { proxy_host, proxy_port, auth, resolve_at_proxy } => {
+            assert_eq!(proxy_host, "127.0.0.1");
+            assert_eq!(proxy_port, 1080);
             assert!(auth.is_none());
             assert!(!resolve_at_proxy, "scheme 'socks5' = local DNS");
         }
@@ -414,10 +500,24 @@ fn parse_egress_url_with_userinfo() {
 }
 
 #[test]
+fn parse_egress_url_percent_decodes_userinfo() {
+    // Errata #3: passwords with @ or : in them are percent-encoded in URLs.
+    // `p%40ss` (= "p@ss") and `s%3Acrt` (= "s:crt") must round-trip.
+    let m = parse_egress_url(Some("socks5h://user:p%40ss@10.0.0.5:1080")).expect("parse");
+    if let EgressMode::Socks5 { auth: Some((_, p)), .. } = m {
+        assert_eq!(p, "p@ss", "password '@' character must be percent-decoded");
+    } else {
+        panic!("expected Some auth");
+    }
+}
+
+#[test]
 fn parse_egress_url_default_port_socks5() {
+    // Note: no DNS lookup at parse time (Errata #2), so hostnames are stored verbatim.
     let m = parse_egress_url(Some("socks5://proxy.local")).expect("parse");
-    if let EgressMode::Socks5 { proxy_addr, .. } = m {
-        assert_eq!(proxy_addr.port(), 1080, "RFC 1928 default port");
+    if let EgressMode::Socks5 { proxy_host, proxy_port, .. } = m {
+        assert_eq!(proxy_host, "proxy.local");
+        assert_eq!(proxy_port, 1080, "RFC 1928 default port");
     } else {
         panic!();
     }
@@ -432,22 +532,42 @@ fn parse_egress_url_rejects_unsupported_scheme() {
 }
 
 #[test]
-fn parse_egress_url_rejects_missing_port_resolution() {
-    let r = parse_egress_url(Some("socks5h://invalid-host-no-dns.example/"));
-    // DNS resolution may succeed (default IP) or fail; in either case the
-    // parser must not panic. If you can't reach DNS in CI, this test may be
-    // flaky — mark it as #[ignore] and run locally.
-    let _ = r;
+fn parse_egress_url_pure_function_no_dns_at_parse() {
+    // Errata #2: hostnames are stored verbatim and resolved at dial time.
+    // This test guarantees parse_egress_url is a pure function with no DNS
+    // side effects, by passing a host that cannot resolve and observing
+    // that parsing still succeeds.
+    let r = parse_egress_url(Some("socks5h://invalid-host-no-dns.example:9050"));
+    let m = r.expect("parse must not perform DNS, so must succeed even with invalid host");
+    if let EgressMode::Socks5 { proxy_host, proxy_port, .. } = m {
+        assert_eq!(proxy_host, "invalid-host-no-dns.example");
+        assert_eq!(proxy_port, 9050);
+    } else {
+        panic!();
+    }
 }
 ```
 
-- [ ] **Step 2: Implement `parse_egress_url` in `lib.rs`**
+- [ ] **Step 2: Implement `parse_egress_url` in `lib.rs` (Errata #2 + #3 + #9)**
 
 ```rust
+use anyhow::{anyhow, Context, Result};
+use percent_encoding::percent_decode_str;
+
 /// Parse a `proxy_url` string into an `EgressMode`. None or empty → Direct.
 /// Scheme set: `socks5`, `socks5h`. Unknown scheme → error.
 /// Default port: 1080 (RFC 1928).
-pub fn parse_egress_url(s: Option<&str>) -> anyhow::Result<EgressMode> {
+///
+/// **Errata #2 (2026-06-15):** does **not** resolve DNS at parse time.
+/// The host string is stored verbatim and resolved at dial time by
+/// `dial_via_egress`. This keeps `parse_egress_url` a pure / synchronous
+/// function safe to call from `main()` without blocking the tokio runtime.
+///
+/// **Errata #3 (2026-06-15):** percent-decodes URL userinfo (`u%40ser` → `u@ser`)
+/// because `url::Url::username()`/`.password()` return percent-encoded ASCII
+/// per RFC 3986; passing raw to SOCKS5 server would fail authentication for
+/// any password containing `@`, `:`, or other reserved characters.
+pub fn parse_egress_url(s: Option<&str>) -> Result<EgressMode> {
     let Some(raw) = s else { return Ok(EgressMode::Direct) };
     let raw = raw.trim();
     if raw.is_empty() { return Ok(EgressMode::Direct); }
@@ -458,36 +578,38 @@ pub fn parse_egress_url(s: Option<&str>) -> anyhow::Result<EgressMode> {
         "socks5" => false,
         "socks5h" => true,
         other => return Err(anyhow!(
-            "proxy_url scheme {other:?} not supported by gw-tunnel-server (Phase 4 ships SOCKS5 only; HTTP-CONNECT is a future ROADMAP item)"
+            "proxy_url scheme {other:?} not supported by gw-tunnel-server \
+             (Phase 4 ships SOCKS5 only; HTTP-CONNECT (http/https) is a future ROADMAP item)"
         )),
     };
 
-    let host = u.host_str().ok_or_else(|| anyhow!("proxy_url missing host"))?;
-    let port = u.port().unwrap_or(1080);
+    let proxy_host = u.host_str().ok_or_else(|| anyhow!("proxy_url missing host"))?.to_string();
+    let proxy_port = u.port().unwrap_or(1080);
 
-    // Resolve the proxy host. SOCKS5 client needs a SocketAddr.
-    let proxy_addr: std::net::SocketAddr = {
-        let mut iter = (host, port).to_socket_addrs()
-            .with_context(|| format!("resolving proxy host {host}:{port}"))?;
-        iter.next().ok_or_else(|| anyhow!("no addresses for {host}:{port}"))?
-    };
-
+    // Errata #3: percent-decode userinfo.
     let auth = if !u.username().is_empty() {
-        let user = u.username().to_string();
-        let pass = u.password().unwrap_or("").to_string();
+        let user_raw = u.username();
+        let user = percent_decode_str(user_raw).decode_utf8_lossy().into_owned();
+        let pass = match u.password() {
+            Some(p) => percent_decode_str(p).decode_utf8_lossy().into_owned(),
+            None => String::new(),  // username without password → empty password (SOCKS5 user/pass auth)
+        };
         Some((user, pass))
     } else {
         None
     };
 
-    Ok(EgressMode::Socks5 { proxy_addr, auth, resolve_at_proxy })
+    Ok(EgressMode::Socks5 { proxy_host, proxy_port, auth, resolve_at_proxy })
 }
 ```
 
-Add `url` dep to `gw-tunnel-server/Cargo.toml` if not already present:
+Add `url` and `percent-encoding` deps if not already present:
 ```bash
 grep '^url' crates/gw-tunnel-server/Cargo.toml || cargo-remote-ctl add -p gw-tunnel-server url
+grep '^percent-encoding' crates/gw-tunnel-server/Cargo.toml || cargo-remote-ctl add -p gw-tunnel-server percent-encoding
 ```
+
+> **Errata #3 note**: `percent_decode_str(...).decode_utf8_lossy()` returns `Cow<str>` which we then `into_owned()` for storage. Lossy decoding (vs strict) is the right choice here because operator credentials are typed by humans into config; a malformed UTF-8 sequence should not refuse startup, but the SOCKS5 server may still reject the auth.
 
 - [ ] **Step 3: Wire the CLI flag + env var in `main.rs`**
 
@@ -545,22 +667,39 @@ match &cfg.egress {
 }
 ```
 
-- [ ] **Step 4: Optional reachability probe**
+- [ ] **Step 4: Reachability probe — non-blocking (Errata #12)**
 
-Right before `spawn(cfg).await?`:
+The probe must NOT delay listener bind. Run it inside `tokio::spawn` so it executes concurrently with (or after) `spawn(cfg).await?`:
 
 ```rust
-if let EgressMode::Socks5 { proxy_addr, .. } = &cfg.egress {
-    use tokio::time::{timeout, Duration};
-    match timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(proxy_addr)).await {
-        Ok(Ok(_)) => tracing::info!("proxy reachable: {proxy_addr}"),
-        Ok(Err(e)) => tracing::warn!("proxy unreachable at startup: {e} — relays will fail until proxy is up"),
-        Err(_) => tracing::warn!("proxy probe timed out (5s) — relays will fail until proxy is up"),
-    }
+// AFTER cfg has been constructed and BEFORE spawn(cfg).await?:
+if let EgressMode::Socks5 { proxy_host, proxy_port, .. } = &cfg.egress {
+    let host = proxy_host.clone();
+    let port = *proxy_port;
+    tokio::spawn(async move {
+        use tokio::time::{timeout, Duration};
+        let resolved_attempt = tokio::net::lookup_host((host.as_str(), port)).await
+            .ok().and_then(|mut a| a.next());
+        let probe_result = match resolved_attempt {
+            Some(addr) => timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr)).await,
+            None => {
+                tracing::warn!("proxy probe: DNS resolution failed for {host}:{port}");
+                return;
+            }
+        };
+        match probe_result {
+            Ok(Ok(_)) => tracing::info!("proxy reachable: {host}:{port}"),
+            Ok(Err(e)) => tracing::warn!("proxy unreachable at startup: {e} — relays will fail until proxy is up"),
+            Err(_) => tracing::warn!("proxy probe timed out (5s) — relays will fail until proxy is up"),
+        }
+    });
 }
+
+// Listener bind proceeds immediately; the probe runs concurrently.
+spawn(cfg).await?;
 ```
 
-Per spec §3.8 the probe failure does NOT refuse startup. Operators may be staging the proxy.
+> Per spec §3.8 the probe failure does NOT refuse startup. Operators may be staging the proxy. Errata #12 corrected an earlier design where the probe ran serially before `spawn` and could delay listener bind by up to 5s.
 
 - [ ] **Step 5: Run tests + smoke-check CLI**
 
@@ -590,18 +729,25 @@ git commit -m "feat(gw-tunnel-server): --proxy-url CLI + PROXY_URL env (socks5/s
 - Modify: `tests/tunnel-e2e/docker-compose.yml`
 - Create: `tests/tunnel-e2e/seed/04_socks5.sql`
 
-- [ ] **Step 1: Write the Dockerfile**
+- [ ] **Step 1: Write the Dockerfile (Errata #10 — distroless upstream has no shell)**
+
+The upstream `serjs/go-socks5-proxy` final stage is **distroless**, with no `nc`, no `sh`, and no other utilities. A `HEALTHCHECK CMD nc -z ...` written inside that image fails permanently and blocks any `depends_on: service_healthy` chain. Fix by wrapping in an Alpine base that contains `nc`:
 
 ```dockerfile
 # tests/tunnel-e2e/Dockerfile.socks5-egress
-FROM serjs/go-socks5-proxy:latest
-# serjs/go-socks5-proxy listens on :1080 by default.
-# No auth in the e2e default; add PROXY_USER / PROXY_PASSWORD env vars to enable.
+FROM serjs/go-socks5-proxy:latest AS sock
+FROM alpine:3.20
+RUN apk add --no-cache busybox-extras  # provides nc
+COPY --from=sock /socks5 /usr/local/bin/socks5
+ENV REQUIRE_AUTH=false
+ENTRYPOINT ["/usr/local/bin/socks5"]
 HEALTHCHECK --interval=5s --timeout=2s --retries=5 \
   CMD nc -z 127.0.0.1 1080 || exit 1
 ```
 
-> If `serjs/go-socks5-proxy` is unavailable in your registry, swap for `wernight/dante:latest` (different SOCKS5 impl) or build from `golang:1.21` + `armon/go-socks5`. Adjust the listen-port matching if you swap.
+> `REQUIRE_AUTH=false` is set explicitly so a future image-default flip to `true` does not silently reject the e2e's unauthenticated `Socks5Stream::connect` calls.
+>
+> If the path to the SOCKS5 binary inside `serjs/go-socks5-proxy` is different from `/socks5` (verify with `docker inspect`), adjust the `COPY --from=sock <src> /usr/local/bin/socks5` line. As a fallback if `serjs/go-socks5-proxy` is unavailable, use `wernight/dante:latest` (Dante SOCKS5 server) or build from `golang:1.21-alpine` + `github.com/armon/go-socks5`. Adjust port matching if the listen port is not 1080.
 
 - [ ] **Step 2: Add services + seed file**
 
@@ -616,20 +762,24 @@ In `tests/tunnel-e2e/docker-compose.yml`, append (under `services:`):
     networks: [tunnel-net]
     expose: ["1080"]
 
+  # Errata #5 + #6: build context + dockerfile match the existing
+  # `cnexus-tunnel-server` service exactly (Dockerfile.tunnel-e2e, no BIN arg).
+  # The root `Dockerfile` only builds gw-gateway and rejects unknown BIN args.
+  # Allow-targets use `example.com` (the network alias set on fake-upstream
+  # in the existing compose), NOT `fake-upstream`, because validate_target is
+  # a string match against the over-the-wire target hostname.
   cnexus-tunnel-server-socks5:
     profiles: ["socks5"]
     build:
       context: ../../
-      dockerfile: Dockerfile
-      args:
-        BIN: gw-tunnel-server
+      dockerfile: tests/tunnel-e2e/Dockerfile.tunnel-e2e
     command: >
       gw-tunnel-server
       --bind 0.0.0.0:7000
       --auth-token e2e-socks5-token
       --max-streams 64
-      --allow-target fake-upstream:9000
-      --allow-target fake-upstream:9443
+      --allow-target example.com:9000
+      --allow-target example.com:9443
       --proxy-url socks5h://socks5-egress:1080
     networks: [tunnel-net]
     expose: ["7000"]
@@ -640,38 +790,14 @@ In `tests/tunnel-e2e/docker-compose.yml`, append (under `services:`):
         condition: service_healthy
 ```
 
-Create `tests/tunnel-e2e/seed/04_socks5.sql`:
-
-```sql
--- tests/tunnel-e2e/seed/04_socks5.sql — Phase 4 SOCKS5 egress fixtures.
--- Loaded ONLY by the `socks5` compose profile via the schema-applier container.
--- Idempotent: drops first.
-
-DELETE FROM proxy_nodes WHERE id LIKE 'cn-socks5%' OR id LIKE 'ae-socks5%';
-
-INSERT INTO proxy_nodes (id, payload, version, deleted_at) VALUES
-('cn-socks5', jsonb_build_object(
-    'tunnel_protocol', 'cnexus',
-    'node_name', 'cnexus-via-socks5',
-    'ws_url', 'wss://cnexus-tunnel-server-socks5:7000/tunnel',
-    'auth_token', 'e2e-socks5-token',
-    'proxy_url', 'socks5h://socks5-egress:1080',
-    'enabled', true
-), 1, NULL);
-
--- The aether-parity case reuses an existing aether-proxy + its own proxy_url
--- env: it doesn't get a dedicated row here because the existing aether seed
--- (Phase 2) already provides `ae1`, and the parity test starts the matching
--- aether-proxy with PROXY_URL=socks5h://socks5-egress:1080.
-```
+**Errata #11: no SQL seed file.** The original draft proposed `tests/tunnel-e2e/seed/04_socks5.sql`, but the existing `schema-applier` container's `entrypoint: ["/seed/01_schema.sh"]` does not auto-discover additional `*.sql` files in the seed directory — the file would orphan. The Python `seed_nodes_socks5_only` fixture (Task 4a.5) is the sole seeding path; it goes via `psycopg` + Redis XADD invalidation, matching the existing Phase 1 pattern. **Do NOT create `seed/04_socks5.sql`.**
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add tests/tunnel-e2e/Dockerfile.socks5-egress \
-        tests/tunnel-e2e/docker-compose.yml \
-        tests/tunnel-e2e/seed/04_socks5.sql
-git commit -m "test(tunnel-e2e): add socks5-egress service + cnexus-via-socks5 + seed"
+        tests/tunnel-e2e/docker-compose.yml
+git commit -m "test(tunnel-e2e): add socks5-egress service + cnexus-via-socks5 (socks5 profile)"
 ```
 
 ---
@@ -748,36 +874,43 @@ def test_cnexus_through_socks5_reaches_upstream(seed_nodes_socks5_only, gateway_
 
 
 def test_protocol_parity_through_same_socks5(
-    seed_aether_node_via_socks5, seed_nodes_socks5_only, gateway_client
+    seed_aether_node_via_socks5, seed_nodes_socks5_only,
+    wait_for_tunnel_snapshot, gateway_client
 ):
     """The migration claim: an aether-proxy and a cnexus tunnel-server, BOTH
     configured to egress via the same SOCKS5, MUST yield byte-identical
     response bodies for the same request.
+
+    Errata #13: between the cnexus and aether request we explicitly poll
+    /healthz/tunnel to confirm the gateway has torn down the cnexus
+    transport and attached the aether one. Eliminates routing-cache
+    staleness flakes.
     """
     # 1. Drive the request through the cnexus-via-socks5 node.
     seed_nodes_socks5_only("cn-socks5")
+    wait_for_tunnel_snapshot("cn-socks5", want_present=True)
     cnexus_resp = gateway_client.post(
         "/v1/echo",
-        headers={"X-Api-Key": "test-key", "X-Api-Key-Id": "test-kid-socks5"},
+        headers={"X-Api-Key": "test-key", "X-Api-Key-Id": "test-kid-socks5-cn"},
         json={"q": "parity-check"},
         timeout=15.0,
     )
 
-    # 2. Drive the SAME request through the aether-via-socks5 node.
-    # Note: `seed_aether_node_via_socks5` is a fixture that ensures an
-    # aether-proxy has been started with PROXY_URL=socks5h://socks5-egress:1080
-    # and that its row is `ae-socks5` in the registry.
+    # 2. Switch the pool to the aether-via-socks5 node. Wait for the gateway's
+    # tunnel snapshot to reflect this BEFORE issuing the second request — both
+    # cn-socks5 must be gone AND ae-socks5 must be present+alive.
     seed_aether_node_via_socks5("ae-socks5")
-    seed_nodes_socks5_only("ae-socks5")
+    seed_nodes_socks5_only("ae-socks5")  # wipes cn-socks5, inserts ae-socks5
+    wait_for_tunnel_snapshot("cn-socks5", want_present=False)
+    wait_for_tunnel_snapshot("ae-socks5", want_present=True)
     aether_resp = gateway_client.post(
         "/v1/echo",
-        headers={"X-Api-Key": "test-key", "X-Api-Key-Id": "test-kid-socks5"},
+        headers={"X-Api-Key": "test-key", "X-Api-Key-Id": "test-kid-socks5-ae"},  # distinct kid → no sticky carryover
         json={"q": "parity-check"},
         timeout=15.0,
     )
 
-    # 3. Byte-identical bodies (modulo response order if upstream is non-
-    # deterministic — `fake-upstream` returns deterministic echo).
+    # 3. Byte-identical bodies (fake-upstream returns deterministic echo).
     assert cnexus_resp.status_code == aether_resp.status_code == 200
     assert cnexus_resp.content == aether_resp.content, (
         f"protocol parity broken via shared SOCKS5\n"
@@ -823,24 +956,77 @@ def seed_nodes_socks5_only(seed_nodes):
 @pytest.fixture
 def seed_aether_node_via_socks5(aether_admin):
     """Start an additional aether-proxy container with PROXY_URL set, register
-    it under the given node_id. Docker-managed via `docker compose run`."""
+    it under the given node_id.
+
+    Errata #12: yield-style fixture with try/finally cleanup so a test failure
+    does not leak the named container. Pre-test `docker rm -f` defensively
+    clears any leftover from prior runs (name collision otherwise blocks
+    `docker compose run`).
+    """
+    started_nodes: list[str] = []
+
     def _seed(node_id: str):
-        # The base Phase-2 aether-proxy is the `aether-proxy` service.
-        # Phase 4 we shell out to start a second one with PROXY_URL injected.
         import subprocess
+        # Defensive cleanup of stale container with the same name.
+        subprocess.run(
+            ["docker", "rm", "-f", "aether-proxy-socks5"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         subprocess.run([
             "docker", "compose",
             "-f", "tests/tunnel-e2e/docker-compose.yml",
             "--profile", "socks5",
-            "run", "-d", "--rm",
+            "run", "-d",                  # detached
+            # NOTE: no --rm — explicit teardown below catches it.
             "-e", "AETHER_PROXY_AUTH_TOKEN=ae_e2e_socks5",
             "-e", "AETHER_PROXY_NODE_NAME=aether-via-socks5",
             "-e", "PROXY_URL=socks5h://socks5-egress:1080",
             "--name", "aether-proxy-socks5",
             "aether-proxy",
         ], check=True)
+        started_nodes.append(node_id)
         aether_admin.await_aether_attach(node_id, timeout_s=30)
-    return _seed
+
+    yield _seed
+
+    # Teardown: stop + remove the container regardless of test outcome.
+    if started_nodes:
+        import subprocess
+        subprocess.run(
+            ["docker", "rm", "-f", "aether-proxy-socks5"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+
+@pytest.fixture
+def wait_for_tunnel_snapshot():
+    """Errata #13: poll /healthz/tunnel until the named node is present-and-alive
+    (or absent). Used by the parity test between successive seed swaps to
+    eliminate routing-cache staleness."""
+    import os, time, httpx
+    def _wait(node_id: str, *, want_present: bool, timeout_s: float = 15.0):
+        deadline = time.time() + timeout_s
+        last_state = None
+        while time.time() < deadline:
+            r = httpx.get(
+                f"{os.environ['ALI_GATEWAY_URL']}/healthz/tunnel",
+                headers={"Authorization": f"Bearer {os.environ['ADMIN_TOKEN']}"},
+                timeout=2.0,
+            )
+            nodes = r.json().get("nodes", [])
+            entry = next((n for n in nodes if n.get("node_id") == node_id), None)
+            if want_present:
+                if entry and entry.get("present") and entry.get("alive"):
+                    return entry
+            else:
+                if entry is None:
+                    return None
+            last_state = entry
+            time.sleep(0.5)
+        raise AssertionError(
+            f"timeout waiting for node {node_id} (want_present={want_present}); last state: {last_state}"
+        )
+    return _wait
 ```
 
 - [ ] **Step 3: Commit**
@@ -864,13 +1050,19 @@ git commit -m "test(tunnel-e2e): 2 SOCKS5 egress scenarios (cnexus path + protoc
 TUNNEL_E2E_COMPOSE_SOCKS5 := -f tests/tunnel-e2e/docker-compose.yml \
     --project-directory tests/tunnel-e2e --profile socks5
 
-.PHONY: tunnel-e2e-socks5
+.PHONY: tunnel-e2e-socks5 tunnel-e2e-socks5-down
 
+# Errata #14: teardown uses TUNNEL_E2E_COMPOSE_SOCKS5 (with --profile socks5).
+# The plain `tunnel-e2e-down` lacks the profile flag and would leak
+# socks5-egress + cnexus-tunnel-server-socks5 containers.
 tunnel-e2e-socks5: tunnel-e2e-deps
 	docker compose $(TUNNEL_E2E_COMPOSE_SOCKS5) build
 	docker compose $(TUNNEL_E2E_COMPOSE_SOCKS5) run --rm \
 	  pytest-runner pytest scenarios/test_cnexus_socks5.py -v
-	$(MAKE) tunnel-e2e-down
+	$(MAKE) tunnel-e2e-socks5-down
+
+tunnel-e2e-socks5-down:
+	docker compose $(TUNNEL_E2E_COMPOSE_SOCKS5) down -v --remove-orphans
 ```
 
 Commit.
@@ -886,7 +1078,7 @@ make tunnel-e2e-down
 make tunnel-e2e-socks5
 ```
 
-Expected: `2 passed`. The `protocol parity` scenario takes longer because it boots a second aether-proxy mid-test; allow up to ~3 min on a cold cache.
+Expected: `2 passed`. **Errata #16 (cold-start time):** on a fully-cold Docker cache, expect ~10-15 min total — Aether-proxy image build is 5-10 min (Phase 2 finding), the tunnel-e2e Rust build adds 2-4 min, and the new socks5-egress image is trivially fast (<10s). On warm cache (Phase 1-3 already built), the protocol-parity scenario adds ~3 min for the second aether-proxy bring-up.
 
 - [ ] **Step 2: Inspect logs if anything fails**
 
@@ -1040,34 +1232,139 @@ bash scripts/check-invariants.sh
 
 ---
 
+### Task 4a.10: ROADMAP closeout for SOCKS5 (Errata #15)
+
+> Added 2026-06-15 post-audit. Phase 3 Task F2 created a "Phase 4 candidates" section in `docs/ROADMAP.md` listing `remote_config`, perf baseline, and double-Aether — but did NOT include SOCKS5 egress (Phase 4 was not yet conceived at that time). Phase 4 now needs to: (a) acknowledge SOCKS5 egress as resolved (just landed in PR 4a), (b) rename the section since "Phase 4 candidates" is now stale, and (c) add HTTP-CONNECT as a new candidate.
+
+**Files:**
+- Modify: `docs/ROADMAP.md`
+
+- [ ] **Step 1: Patch `docs/ROADMAP.md`**
+
+Find the section header that Phase 3 Task F2 inserted:
+
+```bash
+grep -n "Phase 4 candidates\|Tunnel — Phase 4" docs/ROADMAP.md
+```
+
+Rename `Tunnel — Phase 4 candidates (priority: nice-to-have)` to `Tunnel — Future candidates (priority: nice-to-have)`.
+
+Within that section, the original Phase 3 F2 wording must be updated:
+
+- The line "Aether `remote_config` reverse-push" — keep, no change.
+- The line "Cross-protocol performance baseline" — keep, no change.
+- The line "Double-Aether multi-tenant tunnel-server" — keep, no change.
+- **Add** a line at the end:
+
+```markdown
+- **HTTP-CONNECT egress (`http://`, `https://` proxy schemes)**: The Go admin
+  validation accepts these schemes; Aether-proxy supports them natively.
+  Cnexus `gw-tunnel-server` (Phase 4) implements `socks5` / `socks5h` only.
+  A future phase could add HTTP-CONNECT to `dial_via_egress` via the
+  `tokio-http-connect` crate or equivalent. Estimated effort: small —
+  the dispatcher is already in place.
+```
+
+Add a new "Resolved" subsection above the candidates (or wherever the file's resolved/closed entries live):
+
+```markdown
+## Tunnel — Resolved by Phase 4 (2026-06-15)
+
+- **Cnexus SOCKS5 egress (`proxy_url` Aether-parity)**: `gw-tunnel-server` now accepts
+  `--proxy-url socks5[h]://...` / `PROXY_URL` env. See `docs/spec/09-tunnel.md` §Egress proxy.
+```
+
+- [ ] **Step 2: Verify the rename was clean**
+
+```bash
+grep -c "Phase 4 candidates" docs/ROADMAP.md
+```
+
+Expected: `0` (zero remaining mentions of the old section name).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/ROADMAP.md
+git commit -m "docs(roadmap): SOCKS5 egress resolved in Phase 4; add HTTP-CONNECT as future candidate"
+```
+
+---
+
 ## PR 4b · Go frontend widening (AILinkMax-Go)
 
 > **Repo**: `AILinkMax-Go`. **Branch**: `feature/tunnel-compat-phase-4-go`. Lands as a real MR before Phase 4 Task F1 opens the Rust integrated MR.
 
-### Task 4b.1: Verify no aether-only gate on `proxy_url` validation
+### Task 4b.1: Add `proxy_url` scheme validation + cnexus-acceptance regression test
+
+> **Errata #3 + #4** (post-audit redesign): the original draft had two bugs. (a) The proposed `TestService_RejectsUnknownProxyURLScheme` test expected `ftp://` to be rejected, but the live Go code has **no scheme validation at all** — `service.go::CreateManual`/`UpdateManual` accept any string as `ProxyURL` (verified at `service.go:136-165`). (b) The test code used `CreateInput{NodeName, WsURL, Protocol, ProxyURL}` which is not a real DTO — the actual DTO is `business.ManualCreateRequest{Name, ProxyURL, Protocol, Username, Password, Region}` at `entity.go:193-199`. Both are corrected below. The redesign **adds** a small `validateProxyURL` helper to close the gap (spec §3.8 says unknown schemes → 400; the Go side did not enforce this).
 
 **Files:**
-- Read-only: `modules/proxynode/business/{entity,service,ops}.go`
-- Modify (only if a gate exists): same files
-- Modify: `modules/proxynode/business/service_test.go`
+- Modify: `modules/proxynode/business/service.go` (add `validateProxyURL` helper + call sites in `CreateManual` / `UpdateManual` / `Register`)
+- Modify: `modules/proxynode/business/service_test.go` (new test cases using the real DTO shape)
 
-- [ ] **Step 1: Audit existing `proxy_url` handling**
+- [ ] **Step 1: Audit existing `proxy_url` handling (confirms the pre-condition for the fix)**
 
 ```bash
 cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
 grep -n 'proxy_url\|ProxyURL\|tunnel_protocol\|Protocol' modules/proxynode/business/*.go
 ```
 
-Expected findings:
-- `entity.go` defines `ProxyURL string` field with a JSON tag.
-- `service.go` validates `proxy_url` scheme via the existing helper.
-- `ops.go:42` has `case "socks5", "socks5h"` for `defaultPort`.
+Expected findings (verified at audit time):
+- `entity.go:193-199`: `type ManualCreateRequest struct { Name, ProxyURL, Protocol, Username, Password, Region string }`.
+- `entity.go:163`: DTO `ProxyNode` has `ProxyURL string \`json:"proxy_url,omitempty"\``.
+- `service.go:136-165`: `CreateManual` validates `Protocol` via `validateProtocol()` but performs **zero** scheme validation on `ProxyURL`.
+- `service.go:150-153,186-188`: comments warn against confusing `proxy_url` with `ws_url`. Keep this guard; it is orthogonal to scheme validation.
+- `ops.go:38-46`: `defaultPort` matches `socks5`/`socks5h`/`https`/(default 80) for the reachability probe.
+- No `if Protocol != "aether"` gate exists on `proxy_url` anywhere → the field is already accepted for both protocols. The fix is purely additive (scheme validation).
 
-If **no** branch is conditional on `Protocol == "aether"`, the validation is already protocol-agnostic and **no Go code change is needed** for the validation path. Document this finding in the MR description.
+- [ ] **Step 2: Add `validateProxyURL` helper**
 
-If a gate exists (`if e.Protocol != "aether" { return errors.New("proxy_url only for aether") }`), remove it. The Phase 4 design explicitly makes `proxy_url` valid for both protocols.
+In `modules/proxynode/business/service.go`:
 
-- [ ] **Step 2: Write a regression test**
+```go
+import "net/url"
+
+// validateProxyURL enforces the spec §3.8 contract: proxy_url must be empty
+// or use one of the four supported schemes. Errata #3 (2026-06-15): closes
+// the gap where the Go service previously accepted any string.
+//
+// Implementation note: the WS-vs-proxy guardrail at service.go:150-153 is
+// orthogonal — it prevents misuse of proxy_url AS a ws_url alias. This
+// validator runs first; if proxy_url passes here it then flows through
+// wsSchemeOnly for the ws_url-derivation guard.
+func validateProxyURL(s string) error {
+    if s == "" {
+        return nil  // empty is valid: direct egress
+    }
+    u, err := url.Parse(s)
+    if err != nil {
+        return fmt.Errorf("proxynode: proxy_url is not a valid URL: %w", err)
+    }
+    switch u.Scheme {
+    case "socks5", "socks5h", "http", "https":
+        return nil
+    default:
+        return fmt.Errorf("proxynode: proxy_url scheme %q is not supported (allowed: socks5, socks5h, http, https)", u.Scheme)
+    }
+}
+```
+
+Wire it into `CreateManual` and `UpdateManual` (and `Register` if it accepts a `proxy_url`):
+
+```go
+func (s *Service) CreateManual(ctx context.Context, req ManualCreateRequest) (*ProxyNode, error) {
+    // ... existing protocol validation ...
+    if err := validateProxyURL(req.ProxyURL); err != nil {
+        return nil, err
+    }
+    // ... rest unchanged ...
+}
+```
+
+> If `UpdateManual` has its own DTO shape distinct from `ManualCreateRequest`, mirror the call there. Same for `Register`.
+
+- [ ] **Step 3: Write the regression tests using the real DTO shape**
 
 In `modules/proxynode/business/service_test.go`:
 
@@ -1081,11 +1378,14 @@ func TestService_AcceptsProxyURLOnCnexusNode(t *testing.T) {
         {"socks5", "socks5://proxy.example.com:1080"},
         {"socks5h", "socks5h://proxy.example.com:1080"},
         {"socks5_with_auth", "socks5h://user:pass@proxy.example.com:1080"},
+        {"http_proxy", "http://corp-proxy.example.com:3128"},
+        {"https_proxy", "https://corp-proxy.example.com:443"},
+        {"empty_means_direct", ""},
     }
     for _, tc := range cases {
         t.Run(tc.name, func(t *testing.T) {
-            n, err := svc.Create(context.Background(), CreateInput{
-                NodeName: "cn-with-proxy", WsURL: "wss://x/tunnel",
+            n, err := svc.CreateManual(context.Background(), ManualCreateRequest{
+                Name:     "cn-with-proxy-" + tc.name,
                 Protocol: "cnexus",
                 ProxyURL: tc.url,
             })
@@ -1101,74 +1401,114 @@ func TestService_AcceptsProxyURLOnCnexusNode(t *testing.T) {
 
 func TestService_RejectsUnknownProxyURLScheme(t *testing.T) {
     svc := newServiceForTest(t)
-    _, err := svc.Create(context.Background(), CreateInput{
-        NodeName: "cn-bad", WsURL: "wss://x/tunnel",
+    bad := []string{
+        "ftp://x.example.com:21",
+        "tcp://x.example.com:80",
+        "ssh://x.example.com:22",
+    }
+    for _, u := range bad {
+        t.Run(u, func(t *testing.T) {
+            _, err := svc.CreateManual(context.Background(), ManualCreateRequest{
+                Name:     "cn-bad",
+                Protocol: "cnexus",
+                ProxyURL: u,
+            })
+            if err == nil {
+                t.Fatalf("unknown scheme %q must be rejected", u)
+            }
+        })
+    }
+}
+
+func TestService_RejectsMalformedProxyURL(t *testing.T) {
+    svc := newServiceForTest(t)
+    _, err := svc.CreateManual(context.Background(), ManualCreateRequest{
+        Name:     "cn-malformed",
         Protocol: "cnexus",
-        ProxyURL: "ftp://x.example.com:21",
+        ProxyURL: "::::not a url",
     })
     if err == nil {
-        t.Fatal("unknown scheme must be rejected")
+        t.Fatal("malformed URL must be rejected by validateProxyURL")
     }
 }
 ```
 
-- [ ] **Step 3: Run tests**
+> The `newServiceForTest` helper exists per existing test conventions; mirror its setup. The `ManualCreateRequest` does NOT have `NodeName` or `WsURL` fields — those were a mis-recollection in the original draft.
+
+- [ ] **Step 4: Run tests**
 
 ```bash
-go test ./modules/proxynode/business -run 'TestService_(Accepts|Rejects)ProxyURL' -v
+go test ./modules/proxynode/business -run 'TestService_(Accepts|Rejects)ProxyURL\|RejectsMalformedProxyURL' -v
 ```
 
-Expected: PASS. If the `Accepts` test fails, the gate exists — remove it per Step 1 and re-run.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add modules/proxynode/business/service_test.go
-# Plus any service.go / entity.go gate-removal edits from Step 1.
-git commit -m "feat(proxynode): accept proxy_url on cnexus nodes (parity with aether)"
-```
-
----
-
-### Task 4b.2: Frontend `proxy_url` form-field exposure for both protocols
-
-**Files:**
-- Modify: `web/src/components/ProxyNodes/<form-component>` (Phase 3 PR 3b had the aether-only conditional)
-- Optional: `web/src/pages/ProxyNodes/<table-component>` (proxy_url presence indicator)
-
-- [ ] **Step 1: Locate the conditional render added in Phase 3 PR 3b**
-
-```bash
-cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
-grep -rn "protocol === 'aether'\|protocol === \"aether\"\|proxy_url" web/src/ 2>/dev/null | head -20
-```
-
-Find the line that renders `proxy_url` only when `protocol === 'aether'`. Remove the condition; render unconditionally.
-
-- [ ] **Step 2: Update the placeholder text**
-
-The Aether reference UI placeholder is `http://proxy:port 或 socks5://proxy:port`. For Cnexus's Phase 4, the supported schemes are SOCKS5 only (HTTP-CONNECT is ROADMAP), so use `socks5://proxy:port 或 socks5h://user:pass@proxy:port` to set correct expectations.
-
-> If the form is shared across protocols, the placeholder hint can mention all four schemes (`socks5`, `socks5h`, `http`, `https`) with a note that HTTP-CONNECT is supported by Aether only at the moment. Match the protocol of the currently-selected radio.
-
-- [ ] **Step 3: Optional `proxy_url`-presence column on the proxy-nodes table**
-
-Per the locked decision (engineer's call, no design review), this is opt-in. If implementing, render a small badge `⚠️ via proxy` when `proxy_url` is set, blank otherwise. Tooltip shows the value.
-
-- [ ] **Step 4: Smoke-test**
-
-```bash
-npm run dev   # or whatever the existing dev-server command is
-```
-
-Open the admin UI; create a cnexus node; confirm the `proxy_url` field is now visible. Enter `socks5h://proxy.example.com:1080`; submit; verify the value persists across page reloads.
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add web/src/components/ProxyNodes/<form-component-file> \
-        web/src/pages/ProxyNodes/<table-component-file>   # if changed
-git commit -m "feat(web): expose proxy_url form-field for both cnexus and aether nodes"
+git add modules/proxynode/business/service.go \
+        modules/proxynode/business/service_test.go
+git commit -m "feat(proxynode): validateProxyURL helper + cnexus proxy_url acceptance tests"
+```
+
+---
+
+### Task 4b.2: `proxy_url` form-field stays unconditional for both protocols (coordination + smoke-test)
+
+> **Errata #2 + #18 (post-audit redesign):** the original draft assumed Phase 3 PR 3b had introduced an aether-only `proxy_url` form-field conditional that Phase 4 would now widen. Audit revealed this assumption was wrong: the live `frontend/src/views/admin/ProxyNodes.vue:473` already shows `proxy_url` unconditionally (Vue template, no `v-if`-on-protocol). Phase 3 G4 tasks (G4.2-G4.6 in the Phase 3 plan) do not touch `proxy_url` — they add ProtocolBadge, ProtocolRadio, AetherStatusPanel, AetherTokenManager, AetherRegisterHistory, and GatewayControl gray-out, none of which conditionalize `proxy_url`. **Phase 4 PR 4b is therefore a coordination + regression guard, not a "remove an aether-only conditional" task.**
+>
+> The task's job:
+> 1. Verify the current state at the time of execution (the unconditional render at `frontend/src/views/admin/ProxyNodes.vue:473` must still be unconditional).
+> 2. Verify that Phase 3 G4 (if it has already landed on the shared branch) did NOT accidentally introduce a protocol gate while adding the new components.
+> 3. Update the placeholder hint to mention all four schemes per spec §3.8 contract.
+> 4. Smoke-test that the cnexus + proxy_url path works in the UI.
+
+**Files:**
+- Read-only verify: `frontend/src/views/admin/ProxyNodes.vue` (or wherever ProxyNodes is rendered after Phase 3 G4 lands)
+- Modify: same file (placeholder hint widening only; no `v-if`-on-protocol changes)
+
+- [ ] **Step 1: Audit the current `proxy_url` render shape**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
+grep -n "proxy_url\|v-if.*protocol\|v-show.*protocol" frontend/src/views/admin/ProxyNodes.vue | head -20
+```
+
+Expected: `proxy_url` input renders unconditionally, no `v-if`/`v-show` keyed on `protocol`. **If you find a protocol gate, that is a Phase 3 G4 regression — file it and remove the gate as part of this commit, citing spec §3.8 "both protocols accept the same set."**
+
+- [ ] **Step 2: Update placeholder hint to include all four schemes (Errata #18)**
+
+The Aether reference UI placeholder is `http://proxy:port 或 socks5://proxy:port` (verified at `/Users/whereslow/Desktop/work/Aether/frontend/src/views/admin/ProxyNodes.vue:460`). The current AILinkMax-Go placeholder is the same. Phase 4 widens to **all four schemes** per spec §3.8 contract:
+
+```vue
+<el-input
+  v-model="addForm.proxy_url"
+  placeholder="http://proxy:port 或 socks5://proxy:port 或 socks5h://user:pass@proxy:port"
+  clearable
+/>
+```
+
+> Schema set in placeholder follows the spec §3.8 contract: `socks5`, `socks5h`, `http`, `https`. The implementing engineer matches Element Plus / Naive UI / whatever component library the existing form uses. Do NOT narrow to SOCKS5-only — that would contradict spec §3.8 "no protocol-conditioned hiding".
+
+- [ ] **Step 3: (Optional, engineer's call) `proxy_url`-presence column on the proxy-nodes table**
+
+If the existing nodes table doesn't already show `proxy_url`, an opt-in column can be added. **Caveat (Errata: post-audit nit):** all manual-created nodes have `proxy_url` set (it's required on `ManualCreateRequest` per `entity.go:195-196`), so a "⚠️ via proxy" badge would appear on nearly all rows. Only worth adding if you can distinguish "egress proxy" from "ws transport" (the validator-allowed schemes split: `socks5*` / `http*` → egress; `ws*` would be a legacy alias prevented by the existing guardrail). Skip if uncertain.
+
+- [ ] **Step 4: Smoke-test**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go/frontend
+npm run dev    # vite dev-server (package.json confirms: "dev": "vite")
+```
+
+Open the admin UI; create a cnexus node with `proxy_url = socks5h://proxy.example.com:1080`; submit; reload the page; verify the value persists and the form shows it on subsequent edit.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
+git add frontend/src/views/admin/ProxyNodes.vue
+git commit -m "feat(web): widen proxy_url placeholder hint to all four schemes (Phase 4 §3.8 contract)"
 ```
 
 ---
@@ -1211,7 +1551,7 @@ MR description must include:
   - Phase 1: Stage 0 (`--features tunnel` removal), Stage 1 (TunnelProtocol enum + cnexus reorg + Transport trait + migration), Stage tunnel-e2e (3 cnexus scenarios).
   - Phase 2: 2a (Aether wire), 2b (InboundListener + integration), 2c (e2e Aether activation + 9 scenarios).
   - Phase 3: 3a (mixed-pool e2e + dep script + final docs).
-  - Phase 4: 4a (gw-tunnel-server SOCKS5 egress + 2 scenarios + spec/issues + README).
+  - Phase 4: 4a (gw-tunnel-server SOCKS5 egress + 2 scenarios + spec/issues + README + ROADMAP closeout via 4a.10).
 - Captured test summaries:
   - `cargo-remote-ctl test --workspace` final 5 lines.
   - `cargo-remote-ctl clippy --workspace --all-targets -- -D warnings` clean.
@@ -1301,10 +1641,12 @@ After PR 4a (SOCKS5 egress) + PR 4b (Go frontend widening) are complete, then Ta
 
 5. **Single-branch / single-MR consistency check:**
    - Phase 4 commits append to the shared `feature/tunnel-compat` branch alongside Phases 1+2+3.
-   - Phase 3 Task F3 (the originally-planned final MR) is **deferred** by an inline note added in this plan's preamble; the new final task is Phase 4 Task F1.
-   - Phase 4 introduces **no** "add then remove" — `EgressMode::Direct` default preserves existing behaviour; the dispatcher replaces the single dial site without changing any other path; the `tokio-socks` dep is permanent; the `socks5-egress` compose service is profile-gated (default off).
+   - Phase 3 Task F3 (the originally-planned final MR) is **deferred** via the in-body errata at Phase 3 F3 (wrapped in a `<details>` block + "STOP — DO NOT EXECUTE" header so a linear reader cannot accidentally run it). The new final task is Phase 4 Task F1.
+   - **Within Phase 4's own scope, no code is added then removed.** `EgressMode::Direct` default preserves existing behaviour; the dispatcher replaces the single dial site without changing any other path; the `tokio-socks` dep is permanent; the `socks5-egress` compose service is profile-gated (default off).
+   - Cross-phase coordination (Errata #2 acknowledgment, post-audit): the original draft framed Task 4b.2 as "remove the aether-only conditional Phase 3 PR 3b added". Audit revealed Phase 3 G4 never added such a conditional. Task 4b.2 was reframed as a **regression guard + placeholder-hint widening**, NOT an add-then-remove. There is therefore no cross-phase add-then-remove pattern; the work is purely cumulative.
    - Phase 1's `--features tunnel` removal, Phase 2's `aether/` submodule + `StreamTarget::Http`, Phase 3's mixed-pool e2e + dep script + as-built docs — all stay in effect through Phase 4.
    - Control-plane JSON `features.tunnel` field stays `true` (per Phase 1 decision A). Phase 4 does not add or remove any control-plane fields; `proxy_url` is a node-row payload key, not a control-plane feature.
+   - ROADMAP closeout: Phase 4 Task 4a.10 strikes the original SOCKS5 candidate (added by Phase 3 Task F2) as resolved and adds HTTP-CONNECT as a new future candidate — this is a section update, not an add-then-remove.
 
 ---
 
