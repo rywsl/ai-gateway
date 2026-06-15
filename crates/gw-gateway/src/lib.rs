@@ -1211,7 +1211,7 @@ async fn bootstrap(
         use gw_tunnel_client::cnexus::pool::PoolConfig;
         use gw_tunnel_client::cnexus::transport::TransportConfig;
         use gw_tunnel_client::resolver::ProxyNodeView;
-        use gw_tunnel_client::safe_dns::SafeDnsResolver;
+        use gw_tunnel_client::safe_dns::{set_override, SafeDnsResolver};
         use gw_tunnel_client::target_filter;
 
         // Whitelist mapping: "host:port" strings → Vec<(String, u16)>.
@@ -1229,6 +1229,9 @@ async fn bootstrap(
             wl.push((h.to_string(), port));
         }
         target_filter::set_whitelist(wl);
+        for (host, ips) in &cfg.tunnel.dns_overrides {
+            set_override(host, ips.clone());
+        }
 
         let pool_cfg = PoolConfig {
             heartbeat_interval: Duration::from_secs(cfg.tunnel.heartbeat_interval_secs as u64),

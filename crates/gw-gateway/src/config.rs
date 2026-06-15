@@ -19,6 +19,7 @@ use gw_routing::reservation_gate::ReservationGate;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -577,6 +578,11 @@ pub struct TunnelCfg {
     /// into `gw_tunnel_client::target_filter::set_whitelist` at boot.
     #[serde(default)]
     pub target_whitelist: Vec<String>,
+    /// Optional host -> IP override map for controlled environments where
+    /// public DoH cannot resolve the test/service name. Values are still
+    /// validated by the same SafeDnsResolver blocklist as runtime lookups.
+    #[serde(default)]
+    pub dns_overrides: HashMap<String, Vec<IpAddr>>,
     #[serde(default = "default_heartbeat_secs")]
     pub heartbeat_interval_secs: u32,
     #[serde(default = "default_missed_pong")]
@@ -618,6 +624,7 @@ impl Default for TunnelCfg {
             doh: default_doh(),
             dns_cache_ttl_secs: default_dns_cache_ttl_secs(),
             target_whitelist: Vec::new(),
+            dns_overrides: HashMap::new(),
             heartbeat_interval_secs: default_heartbeat_secs(),
             missed_pong_threshold: default_missed_pong(),
             backoff_min_secs: default_backoff_min_secs(),
@@ -1492,6 +1499,18 @@ impl Config {
             if self.tunnel.missed_pong_threshold == 0 {
                 anyhow::bail!("invalid config: tunnel.missed_pong_threshold must be > 0");
             }
+            for (host, ips) in &self.tunnel.dns_overrides {
+                if ips.is_empty() {
+                    anyhow::bail!("invalid config: tunnel.dns_overrides.{host} must not be empty");
+                }
+                for ip in ips {
+                    if gw_tunnel_client::safe_dns::is_ip_blocked(*ip) {
+                        anyhow::bail!(
+                            "invalid config: tunnel.dns_overrides.{host} contains blocked ip {ip}"
+                        );
+                    }
+                }
+            }
         }
 
         if self.auth.hard_cap_max_input_tokens == 0 {
@@ -1833,6 +1852,33 @@ mod tunnel_cfg_tests {
             .extract()
             .unwrap();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn tunnel_rejects_blocked_dns_override_ip() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides =
+            "[tunnel]\nenabled = true\n[tunnel.dns_overrides]\nexample_com = [\"127.0.0.1\"]\n";
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_accepts_quoted_dotted_dns_override_host() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides =
+            "[tunnel]\nenabled = true\ndns_overrides = { \"example.com\" = [\"93.184.216.34\"] }\n";
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .unwrap();
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.tunnel.dns_overrides.contains_key("example.com"));
     }
 }
 
