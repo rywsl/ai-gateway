@@ -1304,7 +1304,7 @@ async fn bootstrap(
             transport_for_node: Arc::new(move |node_id: &str| {
                 weak_stack
                     .upgrade()
-                    .and_then(|stack| stack.current_transport(node_id))
+                    .and_then(|stack| stack.current_dyn_transport(node_id))
             }),
         })
         .await?;

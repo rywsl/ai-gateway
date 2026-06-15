@@ -2099,6 +2099,7 @@ dependencies = [
  "gw-tunnel-server",
  "hex",
  "hmac",
+ "http",
  "insta",
  "metrics",
  "once_cell",
