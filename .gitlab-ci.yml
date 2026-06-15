@@ -15,6 +15,10 @@ variables:
   STORAGE_DRIVER: "vfs"
   BUILDAH_FORMAT: "docker"
   BUILDAH_ISOLATION: "chroot"
+  APT_MIRROR: "http://mirrors.aliyun.com/debian"
+  APT_SECURITY_MIRROR: "http://mirrors.aliyun.com/debian-security"
+  APT_RETRIES: "5"
+  APT_HTTP_TIMEOUT_SECONDS: "20"
 
 .retry:
   before_script:
@@ -55,9 +59,43 @@ variables:
         [ "$(id -u)" = "0" ] || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }
       }
 
+      configure_apt_sources() {
+        mirror="${APT_MIRROR:-http://mirrors.aliyun.com/debian}"
+        security_mirror="${APT_SECURITY_MIRROR:-http://mirrors.aliyun.com/debian-security}"
+
+        for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
+          [ -f "$source_file" ] || continue
+          run_as_root sed -i \
+            -e "s|http://deb.debian.org/debian-security|${security_mirror}|g" \
+            -e "s|https://deb.debian.org/debian-security|${security_mirror}|g" \
+            -e "s|http://security.debian.org/debian-security|${security_mirror}|g" \
+            -e "s|https://security.debian.org/debian-security|${security_mirror}|g" \
+            -e "s|http://deb.debian.org/debian|${mirror}|g" \
+            -e "s|https://deb.debian.org/debian|${mirror}|g" \
+            "$source_file"
+        done
+      }
+
+      apt_get_root() {
+        run_as_root apt-get \
+          -o Acquire::Retries="${APT_RETRIES:-5}" \
+          -o Acquire::http::Timeout="${APT_HTTP_TIMEOUT_SECONDS:-20}" \
+          -o Acquire::https::Timeout="${APT_HTTP_TIMEOUT_SECONDS:-20}" \
+          "$@"
+      }
+
+      apt_get_install_root() {
+        run_as_root env DEBIAN_FRONTEND=noninteractive apt-get \
+          -o Acquire::Retries="${APT_RETRIES:-5}" \
+          -o Acquire::http::Timeout="${APT_HTTP_TIMEOUT_SECONDS:-20}" \
+          -o Acquire::https::Timeout="${APT_HTTP_TIMEOUT_SECONDS:-20}" \
+          "$@"
+      }
+
       install_deb_packages() {
-        retry run_as_root apt-get update
-        retry run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+        configure_apt_sources
+        retry apt_get_root update
+        retry apt_get_install_root install -y --no-install-recommends "$@"
       }
 
 .setup-rust-deps:
@@ -65,6 +103,46 @@ variables:
     - !reference [.setup-tools, before_script]
     - |
       rust_deps_packages="cmake build-essential pkg-config perl libssl-dev libclang-dev jq"
+
+      rust_container_script() {
+        cat <<'RUST_CONTAINER_SCRIPT'
+      set -eu
+
+      export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
+
+      configure_apt_sources() {
+        mirror="${APT_MIRROR:-http://mirrors.aliyun.com/debian}"
+        security_mirror="${APT_SECURITY_MIRROR:-http://mirrors.aliyun.com/debian-security}"
+
+        for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
+          [ -f "$source_file" ] || continue
+          sed -i \
+            -e "s|http://deb.debian.org/debian-security|${security_mirror}|g" \
+            -e "s|https://deb.debian.org/debian-security|${security_mirror}|g" \
+            -e "s|http://security.debian.org/debian-security|${security_mirror}|g" \
+            -e "s|https://security.debian.org/debian-security|${security_mirror}|g" \
+            -e "s|http://deb.debian.org/debian|${mirror}|g" \
+            -e "s|https://deb.debian.org/debian|${mirror}|g" \
+            "$source_file"
+        done
+      }
+
+      apt_get() {
+        apt-get \
+          -o Acquire::Retries="${APT_RETRIES:-5}" \
+          -o Acquire::http::Timeout="${APT_HTTP_TIMEOUT_SECONDS:-20}" \
+          -o Acquire::https::Timeout="${APT_HTTP_TIMEOUT_SECONDS:-20}" \
+          "$@"
+      }
+
+      configure_apt_sources
+      export DEBIAN_FRONTEND=noninteractive
+      apt_get update
+      apt_get install -y --no-install-recommends "$@"
+      rustup component add rustfmt clippy
+      bash -lc "$CI_RUST_COMMAND"
+      RUST_CONTAINER_SCRIPT
+      }
 
       ensure_native_rust_deps() {
         missing=""
@@ -104,8 +182,13 @@ variables:
             -v "$CI_PROJECT_DIR:/work" \
             -w /work \
             -e CARGO_TERM_COLOR=always \
+            -e APT_MIRROR="${APT_MIRROR:-}" \
+            -e APT_SECURITY_MIRROR="${APT_SECURITY_MIRROR:-}" \
+            -e APT_RETRIES="${APT_RETRIES:-}" \
+            -e APT_HTTP_TIMEOUT_SECONDS="${APT_HTTP_TIMEOUT_SECONDS:-}" \
+            -e CI_RUST_COMMAND="$command" \
             rust:1.88-bookworm \
-            bash -c "export PATH=/usr/local/cargo/bin:\$HOME/.cargo/bin:\$PATH && apt-get update && apt-get install -y --no-install-recommends $rust_deps_packages && rustup component add rustfmt clippy && $command"
+            bash -lc "$(rust_container_script)" -- $rust_deps_packages
           return
         fi
 
@@ -114,8 +197,13 @@ variables:
             -v "$CI_PROJECT_DIR:/work" \
             -w /work \
             -e CARGO_TERM_COLOR=always \
+            -e APT_MIRROR="${APT_MIRROR:-}" \
+            -e APT_SECURITY_MIRROR="${APT_SECURITY_MIRROR:-}" \
+            -e APT_RETRIES="${APT_RETRIES:-}" \
+            -e APT_HTTP_TIMEOUT_SECONDS="${APT_HTTP_TIMEOUT_SECONDS:-}" \
+            -e CI_RUST_COMMAND="$command" \
             rust:1.88-bookworm \
-            bash -c "export PATH=/usr/local/cargo/bin:\$HOME/.cargo/bin:\$PATH && apt-get update && apt-get install -y --no-install-recommends $rust_deps_packages && rustup component add rustfmt clippy && $command"
+            bash -lc "$(rust_container_script)" -- $rust_deps_packages
           return
         fi
 
