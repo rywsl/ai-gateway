@@ -230,6 +230,8 @@ pub async fn run(
         api_key_hdr.as_deref(),
         api_key_id_hdr.as_deref(),
     );
+    let mut auth_is_jwt = false;
+    let mut jwt_token_version: Option<u64> = None;
 
     let user_id_res: Result<(UserId, Option<ApiKeyId>, Option<Vec<String>>)> = if let Some(akey) =
         single_api_key
@@ -252,9 +254,10 @@ pub async fn run(
         // with HS256 / static_pem_rs256 fallbacks). Otherwise fall through to
         // the legacy `verify_jwt` so deployments without AuthConfig keep
         // working with v1 semantics (exp-only, JWKS-by-kid).
-        let (jwt_uid, jwt_jti): (UserId, Option<String>) = match jwt_validator {
+        let (jwt_uid, jwt_jti, jwt_tv): (UserId, Option<String>, Option<u64>) = match jwt_validator
+        {
             Some(v) => match v.validate_sub(bearer).await {
-                Ok(pair) => pair,
+                Ok(triple) => triple,
                 Err(jerr) => {
                     let (code, msg) = match jerr {
                         JwtError::InvalidIss => {
@@ -284,12 +287,14 @@ pub async fn run(
                 }
             },
             None => match verify_jwt(bearer, store).await {
-                Ok(pair) => pair,
+                Ok(triple) => triple,
                 Err(err) => {
                     bail!(session, ctx, &err, &request_id)
                 }
             },
         };
+        auth_is_jwt = true;
+        jwt_token_version = jwt_tv;
         // Revocation gate (audit 2026-05-30): a client JWT carrying a `jti`
         // present in the `jwt:blacklist:` namespace (written by Go on
         // logout/admin-revoke) is rejected even though it is still within `exp`.
@@ -399,6 +404,22 @@ pub async fn run(
             upstream_status: None,
             code: Cow::Borrowed(codes::GW_AUTH_USER_BANNED),
             message: Cow::Borrowed("user banned"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        };
+        bail!(session, ctx, &err, &request_id)
+    }
+    if auth_is_jwt
+        && check_token_version(jwt_token_version, user_entry.value.token_version).is_err()
+    {
+        let err = ErrorIR {
+            category: ErrorCategory::ClientAuth,
+            status: 401,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_AUTH_JWT_REVOKED),
+            message: Cow::Borrowed("jwt revoked"),
             retryable: false,
             upstream_raw: None,
             request_id: "",
@@ -1467,6 +1488,15 @@ pub fn check_user_status(entry: &gw_core::entity::UserEntry) -> std::result::Res
     }
 }
 
+#[allow(clippy::result_unit_err)]
+pub fn check_token_version(jwt_tv: Option<u64>, user_tv: u64) -> std::result::Result<(), ()> {
+    match jwt_tv {
+        Some(tv) if tv >= user_tv => Ok(()),
+        None if user_tv == 0 => Ok(()),
+        _ => Err(()),
+    }
+}
+
 /// G2 — per-key IP allowlist gate. Pure (no async, no I/O) so a test can pin
 /// both inputs. `None` and an empty allowlist mean unrestricted; otherwise
 /// `client_ip` must match at least one CIDR in the list. Malformed entries
@@ -2030,5 +2060,35 @@ mod model_whitelist_regex_tests {
         );
 
         assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod token_version_gate_tests {
+    use super::check_token_version;
+
+    #[test]
+    fn current_token_version_is_accepted() {
+        assert!(check_token_version(Some(2), 2).is_ok());
+    }
+
+    #[test]
+    fn newer_token_version_is_accepted() {
+        assert!(check_token_version(Some(3), 2).is_ok());
+    }
+
+    #[test]
+    fn stale_token_version_is_rejected() {
+        assert!(check_token_version(Some(1), 2).is_err());
+    }
+
+    #[test]
+    fn missing_tv_accepted_when_user_never_rotated() {
+        assert!(check_token_version(None, 0).is_ok());
+    }
+
+    #[test]
+    fn missing_tv_rejected_after_user_rotated() {
+        assert!(check_token_version(None, 1).is_err());
     }
 }
