@@ -16,6 +16,14 @@ struct Claims {
     nbf: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct TvClaims {
+    sub: String,
+    exp: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tv: Option<u64>,
+}
+
 fn now() -> usize {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -102,4 +110,58 @@ async fn reason_does_not_contain_token() {
         "reason format leaks token: {dbg}"
     );
     assert!(!disp.contains(secret_token), "display leaks token: {disp}");
+}
+
+#[tokio::test]
+async fn validate_sub_extracts_token_version() {
+    let secret = b"secret";
+    let token = encode(
+        &Header::default(),
+        &TvClaims {
+            sub: "u1".into(),
+            exp: now() + 600,
+            tv: Some(4),
+        },
+        &EncodingKey::from_secret(secret),
+    )
+    .unwrap();
+    let v = JwtValidator::new(JwtValidatorConfig {
+        static_secret_hs256: Some(secret.to_vec()),
+        static_pem_rs256: None,
+        expected_iss: smallvec![],
+        expected_aud: smallvec![],
+        leeway_secs: 0,
+        require_nbf: false,
+    });
+
+    let (uid, jti, tv) = v.validate_sub(&token).await.unwrap();
+    assert_eq!(uid.as_ref(), "u1");
+    assert_eq!(jti, None);
+    assert_eq!(tv, Some(4));
+}
+
+#[tokio::test]
+async fn validate_sub_missing_token_version_is_none() {
+    let secret = b"secret";
+    let token = encode(
+        &Header::default(),
+        &TvClaims {
+            sub: "u1".into(),
+            exp: now() + 600,
+            tv: None,
+        },
+        &EncodingKey::from_secret(secret),
+    )
+    .unwrap();
+    let v = JwtValidator::new(JwtValidatorConfig {
+        static_secret_hs256: Some(secret.to_vec()),
+        static_pem_rs256: None,
+        expected_iss: smallvec![],
+        expected_aud: smallvec![],
+        leeway_secs: 0,
+        require_nbf: false,
+    });
+
+    let (_, _, tv) = v.validate_sub(&token).await.unwrap();
+    assert_eq!(tv, None);
 }

@@ -29,6 +29,7 @@ fn make_user(id: &str, groups: &[&str]) -> Arc<Versioned<UserEntry>> {
             parent_id: None,
             tier: "standard".into(),
             status: UserStatus::Active,
+            token_version: 0,
             allowed_models: vec![
                 ModelName::from("gpt-4"),
                 ModelName::from("gpt-3.5"),

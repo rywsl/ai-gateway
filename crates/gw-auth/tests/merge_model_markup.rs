@@ -22,6 +22,7 @@ fn user_no_markup() -> Arc<Versioned<UserEntry>> {
             parent_id: None,
             tier: "standard".into(),
             status: UserStatus::Active,
+            token_version: 0,
             allowed_models: vec![],
             allowed_channels: vec![],
             allowed_groups: vec![],

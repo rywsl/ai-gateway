@@ -30,14 +30,16 @@ struct Claims {
     /// fail policy).
     #[serde(default)]
     jti: Option<String>,
+    #[serde(default)]
+    tv: Option<u64>,
 }
 
-/// Verify a legacy (JWKS-by-kid, exp-only) JWT and return `(user_id, jti)`.
-/// `jti` is `None` when the token carries no `jti` claim.
+/// Verify a legacy (JWKS-by-kid, exp-only) JWT and return `(user_id, jti, tv)`.
+/// `jti`/`tv` are `None` when the token carries no such claim.
 pub async fn verify_jwt(
     token: &str,
     store: &EntityStore,
-) -> Result<(UserId, Option<String>), ErrorIR<'static>> {
+) -> Result<(UserId, Option<String>, Option<u64>), ErrorIR<'static>> {
     let hdr = decode_header(token).map_err(|_| auth_err())?;
     let kid = hdr.kid.ok_or_else(auth_err)?;
     let jwk = store
@@ -48,7 +50,11 @@ pub async fn verify_jwt(
     let mut val = Validation::new(Algorithm::RS256);
     val.validate_exp = true;
     let data = decode::<Claims>(token, &key, &val).map_err(|_| auth_err())?;
-    Ok((UserId::from(data.claims.sub), data.claims.jti))
+    Ok((
+        UserId::from(data.claims.sub),
+        data.claims.jti,
+        data.claims.tv,
+    ))
 }
 
 fn auth_err() -> ErrorIR<'static> {
@@ -247,18 +253,24 @@ impl JwtValidator {
     }
 
     /// Convenience: validate and extract the `sub` claim as a [`UserId`]
-    /// together with the optional `jti` (for revocation-blacklist lookup).
-    /// Used by the proxy `request_filter` JWT branch. `jti` is `None` when the
-    /// token carries no `jti` claim.
-    pub async fn validate_sub(&self, token: &str) -> Result<(UserId, Option<String>), JwtError> {
+    /// together with the optional `jti` (for revocation-blacklist lookup) and
+    /// optional `tv` (token version for user-level revocation).
+    /// Used by the proxy `request_filter` JWT branch. `jti`/`tv` are `None`
+    /// when the token carries no such claim.
+    pub async fn validate_sub(
+        &self,
+        token: &str,
+    ) -> Result<(UserId, Option<String>, Option<u64>), JwtError> {
         #[derive(Deserialize)]
         struct SubJti {
             sub: String,
             #[serde(default)]
             jti: Option<String>,
+            #[serde(default)]
+            tv: Option<u64>,
         }
         let c: SubJti = self.validate(token).await?;
-        Ok((UserId::from(c.sub), c.jti))
+        Ok((UserId::from(c.sub), c.jti, c.tv))
     }
 }
 

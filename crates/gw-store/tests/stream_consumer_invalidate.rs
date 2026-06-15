@@ -35,6 +35,7 @@ async fn entity_event_invalidates_cache_entry() {
                     parent_id: None,
                     tier: "free".into(),
                     status: UserStatus::Active,
+                    token_version: 0,
                     allowed_models: vec![],
                     allowed_channels: vec![],
                     allowed_groups: vec![],
