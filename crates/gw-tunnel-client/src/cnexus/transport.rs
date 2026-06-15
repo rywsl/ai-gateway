@@ -520,6 +520,7 @@ impl Transport for WsTransport {
         Box::pin(async move {
             let target = match target {
                 StreamTarget::Tcp { host, port, .. } => format!("{host}:{port}"),
+                StreamTarget::Http { .. } => return Err(TransportError::UnsupportedTarget),
             };
             let stream = WsTransport::open_stream(self, &target)
                 .await

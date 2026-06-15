@@ -2281,6 +2281,8 @@ dependencies = [
  "gw-core",
  "gw-store",
  "hickory-resolver",
+ "http",
+ "httparse",
  "metrics",
  "once_cell",
  "parking_lot",
@@ -2290,6 +2292,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-test",
  "tokio-tungstenite",
  "url",
 ]
