@@ -96,6 +96,18 @@ impl OverflowGate {
         Ok(OverflowDecision::Allow)
     }
 
+    pub async fn record_actual(
+        &self,
+        user_id: &str,
+        reserved_credits: i64,
+        actual_credits: i64,
+    ) -> Result<(), OverflowError> {
+        let Some(delta) = record_actual_delta(reserved_credits, actual_credits) else {
+            return Ok(());
+        };
+        self.incr_consumed(user_id, delta).await
+    }
+
     async fn balance_for(&self, user_id: &str) -> Result<i64, OverflowError> {
         let key = balance_cache_key(user_id);
         match self.redis.get::<Option<i64>, _>(&key).await {
@@ -211,6 +223,11 @@ pub fn decide_overflow(balance: i64, consumed: i64, estimate: i64) -> OverflowDe
     }
 }
 
+pub fn record_actual_delta(reserved_credits: i64, actual_credits: i64) -> Option<i64> {
+    let delta = actual_credits.saturating_sub(reserved_credits);
+    (delta > 0).then_some(delta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +267,13 @@ mod tests {
         assert!(OVERFLOW_INCR_LUA.contains("INCRBY', KEYS[1], ARGV[1]"));
         assert!(OVERFLOW_INCR_LUA.contains("EXPIRE', KEYS[1], ARGV[2]"));
         assert!(OVERFLOW_INCR_LUA.contains("new_value) == tonumber(ARGV[1])"));
+    }
+
+    #[test]
+    fn record_actual_delta_only_counts_actual_over_reserved() {
+        assert_eq!(record_actual_delta(1000, 1500), Some(500));
+        assert_eq!(record_actual_delta(1000, 1000), None);
+        assert_eq!(record_actual_delta(1000, 500), None);
+        assert_eq!(record_actual_delta(-10, 5), Some(15));
     }
 }

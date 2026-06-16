@@ -1913,6 +1913,7 @@ impl ProxyHttp for LlmGateway {
             self.affinity.as_ref(),
             &self.ratelimit,
             self.quota_state_updates.as_ref(),
+            &self.overflow_gate,
         )
         .await;
 
