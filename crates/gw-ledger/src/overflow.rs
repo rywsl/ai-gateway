@@ -5,8 +5,13 @@ use fred::interfaces::{KeysInterface, LuaInterface};
 use fred::types::Expiration;
 use gw_runtime::redis_retry::{retry, RetryConfig};
 use sqlx::PgPool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
+
+use crate::metrics::{
+    CREDIT_OVERFLOW_CONSUMED_WINDOW, CREDIT_OVERFLOW_GATE_TOTAL, CREDIT_OVERFLOW_LATENCY_MS,
+    PG_FALLBACK_TOTAL,
+};
 
 pub const BALANCE_CACHE_PREFIX: &str = "credit:balance_cache";
 pub const OVERFLOW_CONSUMED_PREFIX: &str = "credit:overflow_consumed";
@@ -83,16 +88,41 @@ impl OverflowGate {
         user_id: &str,
         estimate_credits: i64,
     ) -> Result<OverflowDecision, OverflowError> {
-        let balance = self.balance_for(user_id).await?;
-        let consumed = self.consumed_for(user_id).await?;
+        let start = Instant::now();
+        let (balance, path) = match self.balance_for(user_id).await {
+            Ok(v) => v,
+            Err(err) => {
+                record_overflow_latency(start, "error");
+                metrics::counter!(CREDIT_OVERFLOW_GATE_TOTAL, "result" => "cache_unavail")
+                    .increment(1);
+                return Err(err);
+            }
+        };
+        let consumed = match self.consumed_for(user_id).await {
+            Ok(v) => v,
+            Err(err) => {
+                record_overflow_latency(start, "error");
+                metrics::counter!(CREDIT_OVERFLOW_GATE_TOTAL, "result" => "cache_unavail")
+                    .increment(1);
+                return Err(err);
+            }
+        };
 
         if decide_overflow(balance, consumed, estimate_credits)
             == OverflowDecision::BalanceInsufficient
         {
+            record_overflow_latency(start, path);
+            metrics::counter!(CREDIT_OVERFLOW_GATE_TOTAL, "result" => "balance_insuf").increment(1);
             return Ok(OverflowDecision::BalanceInsufficient);
         }
 
-        self.incr_consumed(user_id, estimate_credits).await?;
+        if let Err(err) = self.incr_consumed(user_id, estimate_credits).await {
+            record_overflow_latency(start, "error");
+            metrics::counter!(CREDIT_OVERFLOW_GATE_TOTAL, "result" => "cache_unavail").increment(1);
+            return Err(err);
+        }
+        record_overflow_latency(start, path);
+        metrics::counter!(CREDIT_OVERFLOW_GATE_TOTAL, "result" => "pass").increment(1);
         Ok(OverflowDecision::Allow)
     }
 
@@ -108,10 +138,10 @@ impl OverflowGate {
         self.incr_consumed(user_id, delta).await
     }
 
-    async fn balance_for(&self, user_id: &str) -> Result<i64, OverflowError> {
+    async fn balance_for(&self, user_id: &str) -> Result<(i64, &'static str), OverflowError> {
         let key = balance_cache_key(user_id);
         match self.redis.get::<Option<i64>, _>(&key).await {
-            Ok(Some(balance)) => return Ok(balance),
+            Ok(Some(balance)) => return Ok((balance, "cache")),
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!(
@@ -123,6 +153,7 @@ impl OverflowGate {
             }
         }
 
+        metrics::counter!(PG_FALLBACK_TOTAL, "op" => "balance_read").increment(1);
         let balance = retry(&self.cfg.retry, || {
             let pg = self.pg.clone();
             let user_id = user_id.to_string();
@@ -145,7 +176,7 @@ impl OverflowGate {
             );
         }
 
-        Ok(balance)
+        Ok((balance, "pg_fallback"))
     }
 
     async fn consumed_for(&self, user_id: &str) -> Result<i64, OverflowError> {
@@ -176,13 +207,14 @@ impl OverflowGate {
             let redis = self.redis.clone();
             let key = key.clone();
             async move {
-                let _: i64 = redis
+                let new_value: i64 = redis
                     .eval(
                         OVERFLOW_INCR_LUA,
                         vec![key.as_str()],
                         vec![estimate_credits, ttl_secs],
                     )
                     .await?;
+                metrics::gauge!(CREDIT_OVERFLOW_CONSUMED_WINDOW).set(new_value as f64);
                 Ok::<(), fred::error::RedisError>(())
             }
         })
@@ -197,6 +229,11 @@ impl OverflowGate {
             OverflowError::CacheUnavailable
         })
     }
+}
+
+fn record_overflow_latency(start: Instant, path: &'static str) {
+    metrics::histogram!(CREDIT_OVERFLOW_LATENCY_MS, "path" => path)
+        .record(start.elapsed().as_millis() as f64);
 }
 
 pub async fn fetch_balance_micro(pool: &PgPool, user_id: &str) -> Result<i64, sqlx::Error> {

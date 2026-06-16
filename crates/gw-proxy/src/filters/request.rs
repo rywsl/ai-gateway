@@ -1287,6 +1287,11 @@ pub async fn run(
                     // protected mode without coef data cannot safely admit
                     // requests.
                     metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "no_coefs"
+                    )
+                    .increment(1);
+                    metrics::counter!(
                         "gw_credit_lease_acquire_total",
                         "result" => "no_coefs"
                     )
@@ -1307,6 +1312,11 @@ pub async fn run(
                     bail!(session, ctx, &err, &request_id)
                 }
             };
+            metrics::histogram!(
+                gw_ledger::metrics::CREDIT_LEASE_ESTIMATE_CREDITS,
+                "model_id" => model_id_str.clone()
+            )
+            .record(credits as f64);
 
             let now = gw_ledger::now_ms();
             match gw_ledger::LeaseGuard::try_acquire(
@@ -1316,6 +1326,11 @@ pub async fn run(
                 protection_cfg.lease_grace_ms,
             ) {
                 Ok(guard) => {
+                    metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "success"
+                    )
+                    .increment(1);
                     metrics::counter!(
                         "gw_credit_lease_acquire_total",
                         "result" => "ok"
@@ -1327,6 +1342,11 @@ pub async fn run(
                     return Ok(false);
                 }
                 Err(gw_ledger::LeaseError::Expired) => {
+                    metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "expired"
+                    )
+                    .increment(1);
                     metrics::counter!("gw_credit_lease_expired_total").increment(1);
                     if let Err(err) = run_overflow_gate(
                         overflow_gate,
@@ -1345,6 +1365,11 @@ pub async fn run(
                     }
                 }
                 Err(gw_ledger::LeaseError::Insufficient { .. }) => {
+                    metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "insufficient"
+                    )
+                    .increment(1);
                     metrics::counter!(
                         "gw_credit_lease_acquire_total",
                         "result" => "insufficient"
@@ -1370,6 +1395,11 @@ pub async fn run(
                     // Race: in_protected was true at the get, but state was
                     // wiped between then and try_acquire. Hard mode routes
                     // this to overflow before any legacy soft-defense path.
+                    metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "nolease"
+                    )
+                    .increment(1);
                     metrics::counter!("gw_credit_lease_warmup_pending_total").increment(1);
                     if let Err(err) = run_overflow_gate(
                         overflow_gate,

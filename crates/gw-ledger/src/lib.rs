@@ -15,6 +15,7 @@ pub mod inflight_reaper;
 pub mod inflight_reconciler;
 pub mod instance_id;
 pub mod ledger_sweep;
+pub mod metrics;
 pub mod overflow;
 pub mod usage;
 

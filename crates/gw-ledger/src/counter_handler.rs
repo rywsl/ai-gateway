@@ -4,6 +4,7 @@
 
 use crate::coef::{apply_coef_commit, apply_coef_entry, CommitOutcome, Dim};
 use crate::lease::{upsert_protected, Mode};
+use crate::metrics::COEF_TABLE_ACTIVE_VERSION;
 use gw_core::ids::UserId;
 use gw_store::counter_dispatch::{register_handler, CounterHandler, DispatchOutcome};
 use gw_store::deduction::{DeductionState, DEDUCT};
@@ -173,6 +174,7 @@ fn handle_coef_table_commit(fields: &HashMap<String, String>) -> DispatchOutcome
             );
         }
         CommitOutcome::Activated => {
+            metrics::gauge!(COEF_TABLE_ACTIVE_VERSION).set(version as f64);
             tracing::info!(
                 target: "gw_ledger::counter_handler",
                 version,

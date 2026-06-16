@@ -6,6 +6,8 @@ use gw_runtime::{redis_retry, RestartPolicy, ShutdownToken, Supervisor};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
+use crate::metrics::HEARTBEAT_SADD_TOTAL;
+
 pub const ACTIVE_PODS_KEY: &str = "gw:active_pods";
 pub const ACTIVE_POD_KEY_PREFIX: &str = "gw:active_pod";
 pub const ACTIVE_POD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -111,13 +113,19 @@ async fn run_active_pod_heartbeat(
                     let instance_id = instance_id.clone();
                     async move { renew_active_pod(&pool, &instance_id, cfg.ttl_secs).await }
                 }).await;
-                if let Err(err) = result {
-                    tracing::warn!(
-                        target: "gw_ledger::heartbeat",
-                        instance_id = %instance_id,
-                        error = ?err,
-                        "active pod heartbeat renewal failed"
-                    );
+                match result {
+                    Ok(()) => {
+                        metrics::counter!(HEARTBEAT_SADD_TOTAL, "result" => "success").increment(1);
+                    }
+                    Err(err) => {
+                        metrics::counter!(HEARTBEAT_SADD_TOTAL, "result" => "failed").increment(1);
+                        tracing::warn!(
+                            target: "gw_ledger::heartbeat",
+                            instance_id = %instance_id,
+                            error = ?err,
+                            "active pod heartbeat renewal failed"
+                        );
+                    }
                 }
             }
         }
