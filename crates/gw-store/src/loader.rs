@@ -304,6 +304,7 @@ const PROXY_NODE_LIST_SQL: &str =
     "SELECT payload, version FROM proxy_nodes WHERE deleted_at IS NULL ORDER BY id";
 const MGMT_TOKEN_SQL: &str =
     "SELECT payload, version FROM management_tokens WHERE id = $1 AND deleted_at IS NULL";
+const MODULE_ENABLED_SQL: &str = "SELECT value::text FROM system_configs WHERE key = $1";
 // `auth_configs` is created by `migrations/0006_auth_configs.sql` (G2,
 // go-onboarding-gaps T1-A). When the `global` row is absent the SQL returns
 // no rows; `with_cold_load_timeout` collapses other errors into `None`; the
@@ -468,6 +469,31 @@ pub async fn load_auth_config(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versi
     .await
 }
 
+pub fn module_enabled_from_value(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed)
+        .trim();
+    !matches!(
+        unquoted.to_ascii_lowercase().as_str(),
+        "false" | "f" | "0" | "no" | "off" | "disabled"
+    )
+}
+
+pub async fn load_module_enabled(ctx: &LoaderCtx, name: &str) -> anyhow::Result<bool> {
+    let key = format!("module.{name}.enabled");
+    let row: Option<(Option<String>,)> = sqlx::query_as(MODULE_ENABLED_SQL)
+        .bind(key)
+        .fetch_optional(&ctx.pg)
+        .await?;
+    Ok(row
+        .and_then(|(raw,)| raw)
+        .map(|raw| module_enabled_from_value(&raw))
+        .unwrap_or(true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +531,38 @@ mod tests {
                 source: Some("vendor".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn module_enabled_parser_defaults_enabled() {
+        for raw in [
+            "true", "\"true\"", "1", "t", "yes", "on", "enabled", "", "nonsense", " null ",
+        ] {
+            assert!(
+                module_enabled_from_value(raw),
+                "expected {raw:?} to leave module enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn module_enabled_parser_recognizes_disabled_tokens() {
+        for raw in [
+            "false",
+            "\"false\"",
+            " f ",
+            "\"0\"",
+            "0",
+            "no",
+            "off",
+            "disabled",
+            "\"disabled\"",
+        ] {
+            assert!(
+                !module_enabled_from_value(raw),
+                "expected {raw:?} to disable module"
+            );
+        }
     }
 }
 

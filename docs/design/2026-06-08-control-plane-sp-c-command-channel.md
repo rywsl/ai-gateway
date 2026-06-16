@@ -11,7 +11,7 @@
 | `reload-config` | ← SP-A reload 机制 | 调 SP-A `ConfigReloadRegistry` |
 | `drain` / `undrain` | ❌ `run_forever()` 无 drain(`lib.rs:345`) | 复用 SP-A 引入的 graceful-upgrade drain |
 | `restart-component` | ← SP-A `Reconfigurable` | 用当前配置强制重建子系统 |
-| `rotate-kek` | ✅ `encrypt.rs` DualRead 轮换已有 | 触发轮换流程 |
+| `rotate-kek` | ✅ `encrypt.rs` DualRead + 命令驱动 finalize | `status`/`mark-reencrypting`/`drop-old`（不引入 KEK 材料；见 go-contracts parts/08 §8.4.3） |
 | `set-log-level` | ⚠️ 需 wire `tracing` reload handle | 运行时调日志级别 |
 | `clear-cache` | ✅ `events:entity` invalidate 机制已有 | 复用失效逻辑 |
 | (先例)`task.cancel` | ✅ `task.cancel_stream`(`config.rs:757`) | Go→Rust 命令流先例,验证模式可行 |
@@ -88,7 +88,7 @@ tick:  XREADGROUP group:<instance_id> COUNT n
 | `restart-component` | SP-A `Reconfigurable::reconfigure`(当前配置) | all/instance | component |
 | `drain` / `undrain` | `GracefulDrain`(SP-A graceful-upgrade 引入) | instance | — |
 | `restart-instance` | graceful upgrade 触发 | instance | — |
-| `rotate-kek` | `KekCache` 轮换(已有 DualRead) | all | new_kid |
+| `rotate-kek` | `KekCache` 双读 finalize（`command_consumer::rotate_kek`） | all | `step`（`status`\|`mark-reencrypting`\|`drop-old`）, `old_kid` |
 | `set-log-level` | `tracing` reload handle(需 wire) | all/instance | level |
 | `clear-cache` | `EntityStore` invalidate(已有) | all | ns, id |
 

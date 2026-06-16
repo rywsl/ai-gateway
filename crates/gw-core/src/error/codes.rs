@@ -74,6 +74,8 @@ pub const GW_AUTH_SIGNATURE_NOT_CONFIGURED: &str = "GW_AUTH_SIGNATURE_NOT_CONFIG
 // Distinct from GW_AUTH_INVALID_APIKEY (hash mismatch / not found) so ops can
 // tell a disabled-but-present key from a bad one.
 pub const GW_AUTH_KEY_DISABLED: &str = "GW_AUTH_KEY_DISABLED";
+// Auth: API-key module is administratively disabled. HTTP 403.
+pub const GW_AUTH_MODULE_DISABLED: &str = "GW_AUTH_MODULE_DISABLED";
 // Auth: UserEntry.status == Banned (resolved user or its parent). HTTP 403.
 pub const GW_AUTH_USER_BANNED: &str = "GW_AUTH_USER_BANNED";
 // Auth: the API key authenticated but its owning user (or a sub-account's

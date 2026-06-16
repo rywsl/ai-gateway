@@ -113,8 +113,7 @@ fn capability_snapshot_wire_paths_are_locked() {
                 },
                 {
                     "action": "rotate-kek",
-                    "enabled": false,
-                    "reason": "kek_rotation_command_hook_missing"
+                    "enabled": true
                 }
             ],
             "config_namespaces": [

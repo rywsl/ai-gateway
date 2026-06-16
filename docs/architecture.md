@@ -180,7 +180,9 @@ Healthy(K_new)
 
 Invariants: max 2 KEKs concurrent; never drop only KEK; cannot drop active KEK; cannot enter dual-read twice.
 
-Bootstrap supports the same two-KEK read window: when `previous_kek_hex` and `previous_key_id` are configured, the gateway loads the previous KEK first and then enters dual-read with `kms.key_id` as active. This protects restarts during a rotation. The `rotate-kek` control-plane command is still advertised disabled until a re-encryption worker and runtime command hook are implemented end to end.
+Bootstrap supports the same two-KEK read window: when `previous_kek_hex` and `previous_key_id` are configured, the gateway loads the previous KEK first and then enters dual-read with `kms.key_id` as active. This protects restarts during a rotation. KEK material is env-seeded and in-process only — there is no durable `kek_keys` table by design (persisting KEK material would be a security regression and collide with Go migration ownership).
+
+The `rotate-kek` control-plane command is now **enabled** but deliberately scoped to *finalize/observe* an in-flight rotation, never to introduce key material: `status` (read-only state report), `mark-reencrypting` (set the dual-read flag), and `drop-old` (drive `drop_old_kek` to return to `Healthy` without a rolling restart, fail-closed via the state-machine guards). It refuses `enter-dual-read`/any new KEK material over the command channel (`kek_enter_dual_read_requires_bootstrap`) — new KEKs arrive only via `GW_KMS__*` at boot. The command does not perform at-rest re-encryption; the Go/ops re-encryption batch remains the prerequisite for `drop-old`. Handler: `crates/gw-gateway/src/control_plane/command_consumer.rs::rotate_kek`; choreography in [`docs/go-contracts/parts/03`](go-contracts/parts/03-shared-schema.md) §3.5.3 + [`parts/08`](go-contracts/parts/08-control-plane.md) §8.4.3.
 
 ## 5. Persistence
 

@@ -11,8 +11,9 @@
 
 use crate::loader::{
     load_apikey, load_apikey_by_hash, load_auth_config, load_estimate_pricing, load_ipblock,
-    load_jwks, load_mgmt_token, load_model, load_model_group, load_pricing, load_proxy_node,
-    load_proxy_nodes_list, load_user, load_user_group, load_vendor, load_vendor_key, LoaderCtx,
+    load_jwks, load_mgmt_token, load_model, load_model_group, load_module_enabled, load_pricing,
+    load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
+    load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -137,6 +138,9 @@ pub struct EntityStore {
     /// [`EntityStore::mgmt_token_or_load`]; invalidated by the stream consumer
     /// on `management_token` namespace events (T1-D).
     pub mgmt_token: Cache<String, Arc<Versioned<ManagementTokenEntry>>>,
+    /// Go-owned module toggles keyed by bare module name (`apikey` for
+    /// `module.apikey.enabled`). Missing/unreadable rows are treated as enabled.
+    pub module_enabled: Cache<String, bool>,
     /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
     /// `None` for unit tests that pre-populate caches by hand.
     loader: Option<Arc<LoaderCtx>>,
@@ -227,6 +231,10 @@ impl EntityStore {
                 .build(),
             mgmt_token: Cache::builder()
                 .max_capacity(100_000)
+                .time_to_live(Duration::from_secs(300))
+                .build(),
+            module_enabled: Cache::builder()
+                .max_capacity(100)
                 .time_to_live(Duration::from_secs(300))
                 .build(),
             loader,
@@ -598,6 +606,31 @@ impl EntityStore {
     /// (T1-D). Next `mgmt_token_or_load` will cold-load the new version.
     pub async fn invalidate_mgmt_token(&self, token_id: &str) {
         self.mgmt_token.invalidate(token_id).await;
+    }
+
+    pub async fn module_enabled_or_load(&self, name: &str) -> bool {
+        if let Some(hit) = self.module_enabled.get(name).await {
+            return hit;
+        }
+        let Some(loader) = self.loader.as_ref().cloned() else {
+            return true;
+        };
+        let name2 = name.to_owned();
+        let deadline = self.cold_load_timeout;
+        self.module_enabled
+            .try_get_with_by_ref(name, async move {
+                with_cold_load_timeout("module_enabled", deadline, async move {
+                    load_module_enabled(&loader, &name2).await
+                })
+                .await
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .unwrap_or(true)
+    }
+
+    pub async fn invalidate_module_enabled(&self, name: &str) {
+        self.module_enabled.invalidate(name).await;
     }
 
     /// G6/T1-C: handle to the optional loader's Redis pool, used by the

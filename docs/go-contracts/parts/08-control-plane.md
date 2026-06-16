@@ -63,6 +63,21 @@ XADD events:entity * ns config id <table> v <new_version> op upsert
 
 Rust `StreamConsumer` 收到 → DEL `entity:config:<table>` L1 → `ConfigReloadRegistry` 按表分发到 A(ArcSwap)/B(rebuild)/C(graceful upgrade)路径(详见 SP-A design §3/§4)。
 
+#### Module enablement rows
+
+Go persists module switches in `system_configs` with `key = module.<name>.enabled`
+and a JSON boolean `value`. Rust reads `module.apikey.enabled` directly from
+`system_configs` and keeps a short in-process cache. Go must emit:
+
+```
+XADD events:entity * ns config id module.<name>.enabled op upsert
+```
+
+Rust treats a missing row as enabled. An explicit disabled value for
+`module.apikey.enabled` causes API-key authenticated gateway traffic to fail
+closed with `GW_AUTH_MODULE_DISABLED`; JWT and management-token paths are not
+blocked by this switch.
+
 ### 8.2.3 写顺序(遵循 main §3.4)
 
 Go 写配置:① `UPDATE config_<table> SET payload=…, version=version+1`;②(可选)`HSET entity:config:<table>`;③ `XADD events:entity ns=config`。三步失败由 `version` 单调 + Rust 冷加载兜底。
@@ -213,9 +228,18 @@ Go 不自动删除 durable delivery entity;durable 超时未消费由 Go 标记 
 | `refresh-oauth` | `key_id` | all(leader 单飞) | disabled + reason | F2 K-C Rust `OAuthRuntime` 尚未暴露 force-refresh hook |
 | `drain` / `undrain` | — | instance | disabled + reason | graceful-upgrade `GracefulDrain` 尚未接入命令面 |
 | `restart-instance` | — | instance | disabled + reason | Pingora graceful upgrade 尚未接入命令面 |
-| `rotate-kek` | `new_kid` | all | disabled + reason | `KekCache` 轮换尚未接入命令面 |
+| `rotate-kek` | `step`（`status`\|`mark-reencrypting`\|`drop-old`）, `old_kid`（仅 `drop-old`） | all | executable | `command_consumer::rotate_kek` 驱动 `KekCache` 双读状态机 |
 
 禁用命令可以在 capability 中可见,但必须带 `enabled=false` 和 `reason`;Go/前端不得把 disabled 命令作为可执行动作开放。
+
+**`rotate-kek` 语义（CNxus-Rust #20）**:命令只**驱动进程内 `KekCache` 双读状态机的 finalize / 观测**,**绝不**通过命令通道传输 KEK 材料。
+
+- `status` — 只读:返回 `state`（`healthy`\|`dual_read`\|`dual_read_reencrypting`）、`active_kid`、`resident`(驻留 KEK 数);不含任何密钥材料。
+- `mark-reencrypting` — 置双读 `reencrypting` 标志(要求当前已处于 dual-read,否则 `failed:kek_mark_reencrypting_requires_dual_read`)。
+- `drop-old` — 需 `old_kid`,drop 非 active 的旧 KEK 回到 `Healthy(K_new)`;经 `KekCache::drop_old_kek` 守卫 fail-closed(非 dual-read / drop active / drop 唯一 KEK 均拒绝)。这让运维**无需滚动重启**即可 finalize 一次轮换。
+- `enter-dual-read` / 携带新 KEK 材料 — 一律拒绝(`failed:kek_enter_dual_read_requires_bootstrap`)。新 KEK 必须经 `GW_KMS__KEK_HEX` / `GW_KMS__PREVIOUS_KEK_HEX` 在 **boot** 注入(§3.5.3)。
+
+命令不执行 at-rest 重加密——重加密 batch 仍由 Go/运维负责(§3.5.3 step 4);`drop-old` 与重启式 drop 风险等价且幂等(drop 不驻留的 kid 被拒绝,非破坏性)。
 
 ### 8.4.4 ACK(`gateway:instance:<id>:cmd_ack`)
 
