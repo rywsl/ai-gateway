@@ -1,8 +1,12 @@
 //! First-party `ailinkmax-tunnel` server.
 
+use anyhow::{anyhow, Context};
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
-use gw_tunnel_client::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
+use gw_tunnel_client::cnexus::frame::{
+    decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN,
+};
+use percent_encoding::percent_decode_str;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -15,6 +19,29 @@ use tokio_tungstenite::tungstenite::Message;
 const PROTOCOL_NAME: &str = "ailinkmax-tunnel";
 const PROTOCOL_VERSION: &str = "1.0.0";
 
+/// Upstream egress mode for tunnel-server outbound target dials.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EgressMode {
+    /// Dial targets directly.
+    Direct,
+    /// Dial targets through a SOCKS5 proxy.
+    ///
+    /// `resolve_at_proxy = true` is `socks5h`; hostnames are sent to the
+    /// proxy. `false` is `socks5`; hostnames are resolved locally first.
+    Socks5 {
+        proxy_host: String,
+        proxy_port: u16,
+        auth: Option<(String, String)>,
+        resolve_at_proxy: bool,
+    },
+}
+
+impl Default for EgressMode {
+    fn default() -> Self {
+        Self::Direct
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TunnelServerConfig {
     pub bind: SocketAddr,
@@ -23,6 +50,7 @@ pub struct TunnelServerConfig {
     pub node_id: String,
     pub allowed_targets: Vec<(String, u16)>,
     pub allow_private_targets: bool,
+    pub egress: EgressMode,
 }
 
 impl Default for TunnelServerConfig {
@@ -34,8 +62,63 @@ impl Default for TunnelServerConfig {
             node_id: "gw-tunnel-server".to_owned(),
             allowed_targets: Vec::new(),
             allow_private_targets: false,
+            egress: EgressMode::Direct,
         }
     }
+}
+
+/// Parse deployment-level SOCKS5 egress configuration.
+///
+/// `None` and empty strings keep direct egress. Supported URL schemes are
+/// `socks5` and `socks5h`; `http`/`https` proxying is intentionally out of
+/// scope for Phase 4.
+pub fn parse_egress_url(value: Option<&str>) -> anyhow::Result<EgressMode> {
+    let Some(raw) = value else {
+        return Ok(EgressMode::Direct);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(EgressMode::Direct);
+    }
+
+    let parsed = url::Url::parse(raw).with_context(|| format!("invalid proxy_url {raw:?}"))?;
+    let resolve_at_proxy = match parsed.scheme() {
+        "socks5" => false,
+        "socks5h" => true,
+        other => {
+            return Err(anyhow!(
+                "proxy_url scheme {other:?} is not supported by gw-tunnel-server"
+            ))
+        }
+    };
+    let proxy_host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("proxy_url missing host"))?
+        .to_owned();
+    let proxy_port = parsed.port().unwrap_or(1080);
+    let auth = if parsed.username().is_empty() {
+        None
+    } else {
+        let username = percent_decode_str(parsed.username())
+            .decode_utf8_lossy()
+            .into_owned();
+        let password = parsed
+            .password()
+            .map(|password| {
+                percent_decode_str(password)
+                    .decode_utf8_lossy()
+                    .into_owned()
+            })
+            .unwrap_or_default();
+        Some((username, password))
+    };
+
+    Ok(EgressMode::Socks5 {
+        proxy_host,
+        proxy_port,
+        auth,
+        resolve_at_proxy,
+    })
 }
 
 pub struct TunnelServerHandle {
@@ -208,6 +291,7 @@ async fn handle_ws_conn(stream: TcpStream, cfg: Arc<TunnelServerConfig>) -> anyh
                 tokio::spawn(relay_stream(
                     frame.stream_id,
                     target,
+                    cfg.egress.clone(),
                     rx,
                     sink.clone(),
                     streams.clone(),
@@ -251,12 +335,13 @@ async fn next_frame(
 async fn relay_stream(
     stream_id: u32,
     target: String,
+    egress: EgressMode,
     mut rx: mpsc::Receiver<Bytes>,
     sink: SharedSink,
     streams: Arc<Mutex<HashMap<u32, mpsc::Sender<Bytes>>>>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
-    let tcp = match TcpStream::connect(&target).await {
+    let tcp = match dial_via_egress(&egress, &target).await {
         Ok(tcp) => tcp,
         Err(err) => {
             sink.send_error(stream_id, Bytes::from(format!("connect failed: {err}")))
@@ -316,6 +401,74 @@ async fn relay_stream(
     let _ = writer.shutdown().await;
     read_task.abort();
     streams.lock().await.remove(&stream_id);
+}
+
+/// Dial `target` through the configured egress mode.
+#[doc(hidden)]
+pub async fn dial_via_egress(egress: &EgressMode, target: &str) -> anyhow::Result<TcpStream> {
+    match egress {
+        EgressMode::Direct => TcpStream::connect(target)
+            .await
+            .with_context(|| format!("direct connect to {target}")),
+        EgressMode::Socks5 {
+            proxy_host,
+            proxy_port,
+            auth,
+            resolve_at_proxy,
+        } => {
+            use tokio_socks::tcp::Socks5Stream;
+
+            let proxy_addr = tokio::net::lookup_host((proxy_host.as_str(), *proxy_port))
+                .await
+                .with_context(|| format!("resolving proxy host {proxy_host}:{proxy_port}"))?
+                .next()
+                .ok_or_else(|| {
+                    anyhow!("DNS yielded no addresses for proxy {proxy_host}:{proxy_port}")
+                })?;
+
+            if *resolve_at_proxy {
+                let stream = match auth {
+                    Some((username, password)) => {
+                        Socks5Stream::connect_with_password(
+                            proxy_addr,
+                            target,
+                            username.as_str(),
+                            password.as_str(),
+                        )
+                        .await
+                    }
+                    None => Socks5Stream::connect(proxy_addr, target).await,
+                }
+                .with_context(|| format!("socks5h dial to {target} via {proxy_addr}"))?;
+                Ok(stream.into_inner())
+            } else {
+                let resolved = tokio::net::lookup_host(target)
+                    .await
+                    .with_context(|| format!("local DNS resolve of {target}"))?
+                    .next()
+                    .ok_or_else(|| anyhow!("DNS yielded no addresses for {target}"))?;
+                let stream = match auth {
+                    Some((username, password)) => {
+                        Socks5Stream::connect_with_password(
+                            proxy_addr,
+                            resolved,
+                            username.as_str(),
+                            password.as_str(),
+                        )
+                        .await
+                    }
+                    None => Socks5Stream::connect(proxy_addr, resolved).await,
+                }
+                .with_context(|| format!("socks5 dial to {resolved} via {proxy_addr}"))?;
+                Ok(stream.into_inner())
+            }
+        }
+    }
+}
+
+#[doc(hidden)]
+pub mod testing {
+    pub use super::dial_via_egress;
 }
 
 #[derive(Debug, thiserror::Error)]

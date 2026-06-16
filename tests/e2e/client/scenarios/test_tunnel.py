@@ -5,10 +5,9 @@ The current docker e2e gateway image is built by the repository root
 
     cargo build --release --locked -p gw-gateway
 
-and ``tests/e2e/docker-compose.yml`` does not override that with
-``--features tunnel`` or start a tunnel-node service. Keep these scenarios in
-the suite as executable documentation, but skip them until the e2e Docker infra
-builds the gateway with tunnel support and supplies a live tunnel node.
+and ``tests/e2e/docker-compose.yml`` does not start a tunnel-node service.
+Keep these scenarios in the suite as executable documentation, but skip them
+until the e2e Docker infra supplies a live tunnel node.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ from conftest import (
 
 pytestmark = pytest.mark.skip(
     reason=(
-        "requires --features tunnel build — see "
+        "requires live tunnel-node e2e service — see "
         "docs/superpowers/specs/2026-05-22-tunnel-t-design.md"
     )
 )

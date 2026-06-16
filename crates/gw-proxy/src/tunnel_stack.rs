@@ -14,12 +14,12 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use gw_core::entity::TunnelPreference;
 use gw_runtime::ShutdownToken;
-use gw_tunnel_client::pool::{PoolConfig, ReconnectingTransport};
+use gw_tunnel_client::cnexus::pool::{PoolConfig, ReconnectingTransport};
+use gw_tunnel_client::cnexus::transport::{TransportConfig, WsTransport};
 use gw_tunnel_client::resolver::{
     resolve_tunnel, ProxyNodeView, TunnelResolution, TunnelResolveCtx,
 };
 use gw_tunnel_client::safe_dns::SafeDnsResolver;
-use gw_tunnel_client::transport::{TransportConfig, WsTransport};
 use pingora::upstreams::peer::HttpPeer;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -305,6 +305,7 @@ mod tests {
             latency_ms: latency,
             allowed_provider_ids: providers.iter().map(|s| (*s).to_string()).collect(),
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         }
     }
 

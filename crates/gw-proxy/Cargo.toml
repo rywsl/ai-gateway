@@ -5,10 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[features]
-default = []
-tunnel = ["dep:gw-tunnel-client", "dep:tokio-rustls", "dep:webpki-roots"]
-
 [dependencies]
 gw-core = { path = "../gw-core" }
 gw-codec = { path = "../gw-codec" }
@@ -21,9 +17,9 @@ gw-capability = { path = "../gw-capability" }
 gw-billing = { path = "../gw-billing" }
 gw-task = { path = "../gw-task" }
 gw-adapter = { path = "../gw-adapter" }
-gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
-tokio-rustls = { workspace = true, optional = true }
-webpki-roots = { workspace = true, optional = true }
+gw-tunnel-client = { path = "../gw-tunnel-client" }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
 gw-egress-impersonate = { path = "../gw-egress-impersonate" }
 gw-runtime = { path = "../gw-runtime" }
 async-trait.workspace = true

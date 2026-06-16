@@ -16,6 +16,7 @@ fn nodes() -> Vec<ProxyNodeView> {
             latency_ms: 30,
             allowed_provider_ids: vec!["openai".into()],
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         },
         ProxyNodeView {
             id: "n2".into(),
@@ -25,6 +26,7 @@ fn nodes() -> Vec<ProxyNodeView> {
             latency_ms: 10,
             allowed_provider_ids: vec!["anthropic".into()],
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         },
         ProxyNodeView {
             id: "n3".into(),
@@ -34,6 +36,7 @@ fn nodes() -> Vec<ProxyNodeView> {
             latency_ms: 5,
             allowed_provider_ids: vec!["openai".into()],
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         },
     ]
 }
@@ -76,6 +79,7 @@ fn disabled_nodes_skipped() {
         latency_ms: 1,
         allowed_provider_ids: vec!["openai".into()],
         allowed_vendor_key_ids: vec![],
+        tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
     }];
     let pref = TunnelPreference::default();
     let r = resolve_tunnel(
@@ -99,6 +103,7 @@ fn vendor_key_whitelist_filters() {
         latency_ms: 10,
         allowed_provider_ids: vec!["openai".into()],
         allowed_vendor_key_ids: vec!["vk-special".into()],
+        tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
     }];
     let pref = TunnelPreference::default();
     let r = resolve_tunnel(
@@ -124,6 +129,7 @@ fn prefer_low_latency_sorts_nodes() {
             latency_ms: 30,
             allowed_provider_ids: vec!["openai".into()],
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         },
         ProxyNodeView {
             id: "n4".into(),
@@ -133,6 +139,7 @@ fn prefer_low_latency_sorts_nodes() {
             latency_ms: 5,
             allowed_provider_ids: vec!["openai".into()],
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         },
     ];
     let pref = TunnelPreference {
@@ -183,4 +190,22 @@ fn preferred_node_ids_none_match_returns_direct() {
         &nodes(),
     );
     assert_eq!(r, TunnelResolution::Direct);
+}
+
+#[test]
+fn proxy_node_view_carries_tunnel_protocol() {
+    use gw_core::tunnel_protocol::TunnelProtocol;
+
+    let v = ProxyNodeView {
+        id: "n".into(),
+        ws_url: dummy_url(),
+        auth_token: None,
+        enabled: true,
+        latency_ms: 10,
+        allowed_provider_ids: vec!["p".into()],
+        allowed_vendor_key_ids: vec![],
+        tunnel_protocol: TunnelProtocol::Aether,
+    };
+
+    assert_eq!(v.tunnel_protocol, TunnelProtocol::Aether);
 }

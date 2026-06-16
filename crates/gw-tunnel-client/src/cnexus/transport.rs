@@ -1,9 +1,12 @@
 //! WebSocket transport — heartbeat + alive-tracking layer over the frame
-//! protocol. Reconnect orchestration lives in `pool::ReconnectingTransport`.
+//! protocol. Reconnect orchestration lives in `cnexus::pool::ReconnectingTransport`.
 
-use crate::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
+use crate::cnexus::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
+use crate::core::{StreamHandle, Transport, TransportError, TransportFuture};
+use crate::target::StreamTarget;
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
+use gw_core::tunnel_protocol::TunnelProtocol;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -87,6 +90,11 @@ pub struct TunnelStreamReader {
 pub struct TunnelStreamWriter {
     stream_id: u32,
     out_tx: mpsc::Sender<Frame>,
+}
+
+struct TunnelStreamIo {
+    reader: TunnelStreamReader,
+    writer: TunnelStreamWriter,
 }
 
 impl std::fmt::Debug for TunnelStream {
@@ -191,6 +199,34 @@ impl TunnelStreamWriter {
             })
             .await
             .map_err(|e| TunnelError::Send(e.to_string()))
+    }
+}
+
+impl AsyncRead for TunnelStreamIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.reader).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TunnelStreamIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.writer).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.writer).poll_shutdown(cx)
     }
 }
 
@@ -476,6 +512,49 @@ impl WsTransport {
         send_data_frames(&self.out_tx, stream_id, payload)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+
+impl Transport for WsTransport {
+    fn open_stream<'a>(&'a self, target: StreamTarget) -> TransportFuture<'a> {
+        Box::pin(async move {
+            let target = match target {
+                StreamTarget::Tcp { host, port, .. } => format!("{host}:{port}"),
+            };
+            let stream = WsTransport::open_stream(self, &target)
+                .await
+                .map_err(TransportError::from)?;
+            let (reader, writer) = stream.split();
+            Ok(Box::new(TunnelStreamIo { reader, writer }) as StreamHandle)
+        })
+    }
+
+    fn alive(&self) -> bool {
+        self.is_alive()
+    }
+
+    fn last_heartbeat_age(&self) -> Duration {
+        self.last_pong_age()
+    }
+
+    fn tunnel_protocol(&self) -> TunnelProtocol {
+        TunnelProtocol::Cnexus
+    }
+
+    fn close(&self) {
+        self.alive.store(false, Ordering::Release);
+    }
+}
+
+impl From<TunnelError> for TransportError {
+    fn from(value: TunnelError) -> Self {
+        match value {
+            TunnelError::NotAlive => Self::NotAlive,
+            TunnelError::StreamCapExceeded => Self::StreamCapExceeded,
+            TunnelError::Closed => Self::Closed,
+            TunnelError::Remote(err) => Self::Remote(err),
+            TunnelError::Send(err) => Self::Send(err),
+        }
     }
 }
 

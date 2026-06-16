@@ -13,10 +13,6 @@ path = "src/main.rs"
 name = "gw_gateway"
 path = "src/lib.rs"
 
-[features]
-default = []
-tunnel = ["dep:gw-tunnel-client", "gw-proxy/tunnel"]
-
 [dependencies]
 gw-core = { path = "../gw-core" }
 gw-health = { path = "../gw-health" }
@@ -31,7 +27,7 @@ gw-codec = { path = "../gw-codec" }
 gw-billing = { path = "../gw-billing" }
 gw-task = { path = "../gw-task" }
 gw-adapter = { path = "../gw-adapter" }
-gw-tunnel-client = { path = "../gw-tunnel-client", optional = true }
+gw-tunnel-client = { path = "../gw-tunnel-client" }
 gw-runtime = { path = "../gw-runtime" }
 anyhow.workspace = true
 serde.workspace = true

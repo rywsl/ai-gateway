@@ -4,6 +4,7 @@
 //! `docs/architecture.md`.
 
 use gw_core::protocol::{ApiShape, ProtocolKind};
+use gw_core::tunnel_protocol::TunnelProtocol;
 
 #[test]
 fn protocol_kind_serde_wire_form_locked() {
@@ -93,4 +94,25 @@ fn api_shape_format_id_wire_form_locked() {
              Aether FORMAT_ID interop (events stream + capability resolver) depends on this — do NOT change.",
         );
     }
+}
+
+#[test]
+fn tunnel_protocol_serde_wire_form_locked() {
+    let cases: &[(TunnelProtocol, &str)] = &[
+        (TunnelProtocol::Cnexus, "cnexus"),
+        (TunnelProtocol::Aether, "aether"),
+    ];
+    for (v, expected) in cases {
+        let got = serde_json::to_value(v).unwrap();
+        let got_str = got.as_str().expect("TunnelProtocol serializes as string");
+        assert_eq!(
+            got_str, *expected,
+            "{v:?}: TunnelProtocol serde wire form drift; proxy_nodes JSONB depends on this.",
+        );
+    }
+}
+
+#[test]
+fn tunnel_protocol_defaults_to_cnexus() {
+    assert_eq!(TunnelProtocol::default(), TunnelProtocol::Cnexus);
 }

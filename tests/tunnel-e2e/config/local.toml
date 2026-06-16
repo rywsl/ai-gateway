@@ -1,0 +1,3 @@
+[tunnel]
+target_whitelist = ["example.com:9000"]
+dns_overrides = { "example.com" = ["93.184.216.34"] }

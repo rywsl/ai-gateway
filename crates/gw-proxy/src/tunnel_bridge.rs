@@ -1,7 +1,7 @@
 //! Loopback HTTP/1 bridge for owned tunnel traffic.
 
 use bytes::{Bytes, BytesMut};
-use gw_tunnel_client::transport::{TunnelStreamReader, TunnelStreamWriter, WsTransport};
+use gw_tunnel_client::cnexus::transport::{TunnelStreamReader, TunnelStreamWriter, WsTransport};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,6 +15,8 @@ pub const HDR_TARGET: &str = "X-Gateway-Tunnel-Target";
 pub const HDR_TARGET_TLS: &str = "X-Gateway-Tunnel-Target-Tls";
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
+
+pub type TransportForNode = Arc<dyn Fn(&str) -> Option<Arc<WsTransport>> + Send + Sync>;
 
 pub struct TunnelBridgeHandle {
     pub local_addr: SocketAddr,
@@ -46,7 +48,7 @@ impl Drop for TunnelBridgeHandle {
 
 pub struct TunnelBridgeConfig {
     pub bind: SocketAddr,
-    pub transport_for_node: Arc<dyn Fn(&str) -> Option<Arc<WsTransport>> + Send + Sync>,
+    pub transport_for_node: TransportForNode,
 }
 
 pub async fn spawn(config: TunnelBridgeConfig) -> anyhow::Result<TunnelBridgeHandle> {
@@ -82,7 +84,7 @@ pub async fn spawn(config: TunnelBridgeConfig) -> anyhow::Result<TunnelBridgeHan
 
 async fn handle_conn(
     mut client: TcpStream,
-    transport_for_node: Arc<dyn Fn(&str) -> Option<Arc<WsTransport>> + Send + Sync>,
+    transport_for_node: TransportForNode,
 ) -> anyhow::Result<()> {
     let mut head = BytesMut::new();
     let header_end = loop {
@@ -336,8 +338,8 @@ async fn write_error(client: &mut TcpStream, status: u16, message: &str) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gw_tunnel_client::cnexus::transport::{TransportConfig, WsTransport};
     use gw_tunnel_client::target_filter::{set_whitelist, ResetGuard};
-    use gw_tunnel_client::transport::{TransportConfig, WsTransport};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
@@ -403,8 +405,7 @@ mod tests {
         .unwrap();
         let mut client = TcpStream::connect(bridge.local_addr).await.unwrap();
         let request = format!(
-            "GET /plain HTTP/1.1\r\nHost: bridge\r\n{}: node-a\r\n{}: 127.0.0.1:{}\r\n{}: false\r\nX-Gateway-Tunnel-Other: secret\r\nConnection: close\r\n\r\n",
-            HDR_NODE_ID, HDR_TARGET, upstream_port, HDR_TARGET_TLS
+            "GET /plain HTTP/1.1\r\nHost: bridge\r\n{HDR_NODE_ID}: node-a\r\n{HDR_TARGET}: 127.0.0.1:{upstream_port}\r\n{HDR_TARGET_TLS}: false\r\nX-Gateway-Tunnel-Other: secret\r\nConnection: close\r\n\r\n",
         );
         client.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();

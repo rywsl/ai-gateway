@@ -564,6 +564,9 @@ pub struct ProxyNode {
     /// Empty = unrestricted across keys for the allowed providers.
     #[serde(default)]
     pub allowed_vendor_key_ids: Vec<String>,
+    /// Wire protocol this proxy node speaks. Existing rows default to Cnexus.
+    #[serde(default)]
+    pub tunnel_protocol: crate::tunnel_protocol::TunnelProtocol,
     /// AES-256-GCM ciphertext of the node-auth bearer token (encrypted
     /// under the active KEK). `None` means the node accepts unauthenticated
     /// CONNECT frames.

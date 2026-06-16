@@ -56,7 +56,6 @@ pub struct HealthState {
     pub resilience: Arc<gw_proxy::resilience::ResilienceState>,
     pub latency_tracker: Arc<gw_routing::LatencyTracker>,
     pub tunnel_enabled: bool,
-    #[cfg(feature = "tunnel")]
     pub tunnel_stack: Option<Arc<gw_proxy::tunnel_stack::TunnelStack>>,
 }
 
@@ -315,7 +314,6 @@ fn build_tunnel_healthz_body(state: &HealthState) -> String {
         return String::from(r#"{"enabled":false,"nodes":[]}"#);
     }
 
-    #[cfg(feature = "tunnel")]
     {
         if let Some(ref stack) = state.tunnel_stack {
             let nodes = stack.health_snapshot();
@@ -366,7 +364,6 @@ fn build_strategies_body(state: &HealthState) -> String {
     buf
 }
 
-#[cfg(feature = "tunnel")]
 fn escape_json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

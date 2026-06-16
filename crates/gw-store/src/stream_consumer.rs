@@ -406,6 +406,7 @@ mod proxy_node_tests {
             latency_ms: 0,
             allowed_provider_ids: vec![],
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
             auth_token_enc: None,
         }
     }

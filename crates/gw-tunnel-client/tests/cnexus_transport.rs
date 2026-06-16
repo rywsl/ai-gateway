@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use gw_tunnel_client::frame::{decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN};
-use gw_tunnel_client::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
+use gw_tunnel_client::cnexus::frame::{
+    decode_frame, encode_frame, Frame, MsgType, MAX_PAYLOAD_LEN,
+};
+use gw_tunnel_client::cnexus::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
 use secrecy::SecretString;
 use std::time::Duration;
 use tokio::net::TcpListener;

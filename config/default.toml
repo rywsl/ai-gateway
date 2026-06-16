@@ -143,6 +143,7 @@ enabled = false
 doh = "cloudflare"
 dns_cache_ttl_secs = 600
 target_whitelist = []
+dns_overrides = {}
 heartbeat_interval_secs = 30
 missed_pong_threshold = 3
 backoff_min_secs = 1

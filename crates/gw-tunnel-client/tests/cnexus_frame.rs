@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use gw_tunnel_client::frame::{decode_frame, encode_frame, Frame, MsgType};
+use gw_tunnel_client::cnexus::frame::{decode_frame, encode_frame, Frame, MsgType};
 
 #[test]
 fn open_data_close_ping_roundtrip() {
@@ -101,7 +101,7 @@ fn empty_payload_roundtrip() {
 
 #[test]
 fn payload_length_check() {
-    use gw_tunnel_client::frame::MAX_PAYLOAD_LEN;
+    use gw_tunnel_client::cnexus::frame::MAX_PAYLOAD_LEN;
     // We don't actually allocate MAX+1 bytes; we craft a header claiming oversized length.
     let mut buf = vec![0xAEu8, 0x21, 1, MsgType::Data as u8]; // magic + version + msg_type
     buf.extend_from_slice(&0u16.to_be_bytes()); // flags

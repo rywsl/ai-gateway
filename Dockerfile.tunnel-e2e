@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+
+ARG RUST_IMAGE=rust:1.88-bookworm
+ARG DEBIAN_IMAGE=debian:bookworm-slim
+
+FROM ${RUST_IMAGE} AS builder
+WORKDIR /build
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        cmake \
+        make \
+        build-essential \
+        pkg-config \
+        perl \
+        libssl-dev \
+        libclang-dev \
+        ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY config ./config
+RUN sed -i '/^components = /d' rust-toolchain.toml
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --locked \
+      -p gw-gateway \
+      -p gw-tunnel-server \
+      -p e2e-fake-web \
+      -p e2e-fake-upstream
+
+FROM ${DEBIAN_IMAGE} AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libssl3 curl \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /build/target/debug/gw-gateway /usr/local/bin/gw-gateway
+COPY --from=builder /build/target/debug/gw-tunnel-server /usr/local/bin/gw-tunnel-server
+COPY --from=builder /build/target/debug/fake_web /usr/local/bin/fake_web
+COPY --from=builder /build/target/debug/fake_upstream /usr/local/bin/fake_upstream
+COPY --from=builder /build/config /app/config
+COPY crates/gw-store/migrations /app/migrations
+
+RUN useradd --system --create-home --shell /bin/false gateway \
+ && mkdir -p /data/cnexus/spill/archive \
+ && chown -R gateway:gateway /app /data/cnexus
+
+ENV RUST_LOG=info,gw=debug
+ENV RUST_BACKTRACE=1

@@ -1,17 +1,15 @@
 //! Ignored owned tunnel e2e tests.
 //!
 //! Run with:
-//! `cargo test -p gw-gateway --features tunnel --test e2e_tunnel -- --ignored --nocapture`
-
-#![cfg(feature = "tunnel")]
+//! `cargo test -p gw-gateway --test e2e_tunnel -- --ignored --nocapture`
 
 use bytes::Bytes;
 use gw_proxy::tunnel_stack::{TunnelPeerError, TunnelStack};
-use gw_tunnel_client::pool::PoolConfig;
+use gw_tunnel_client::cnexus::pool::PoolConfig;
+use gw_tunnel_client::cnexus::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
 use gw_tunnel_client::resolver::ProxyNodeView;
 use gw_tunnel_client::safe_dns::{set_override, OverrideGuard, SafeDnsResolver};
 use gw_tunnel_client::target_filter::{set_whitelist, ResetGuard};
-use gw_tunnel_client::transport::{TransportConfig, TunnelError, TunnelEvent, WsTransport};
 use gw_tunnel_server::{spawn, TunnelServerConfig};
 use secrecy::SecretString;
 use std::sync::Arc;
@@ -108,6 +106,7 @@ async fn e2e_tunnel_stack_reports_no_live_node() {
             latency_ms: 0,
             allowed_provider_ids: vec!["openai".to_owned()],
             allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
         }],
         Arc::new(SafeDnsResolver::cloudflare_default()),
         PoolConfig::default(),

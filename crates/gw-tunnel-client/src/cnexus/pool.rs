@@ -38,7 +38,10 @@ pub fn jittered_backoff(attempt: u32, cfg: &PoolConfig) -> Duration {
     Duration::from_millis(final_ms.max(0.0) as u64)
 }
 
-use crate::transport::{TransportConfig, WsTransport};
+use crate::cnexus::transport::{TransportConfig, WsTransport};
+use crate::core::{StreamHandle, Transport, TransportError, TransportFuture};
+use crate::target::StreamTarget;
+use gw_core::tunnel_protocol::TunnelProtocol;
 use std::sync::Arc;
 
 /// Reconnecting transport — supervises a `WsTransport`, recreates it on
@@ -92,5 +95,39 @@ impl ReconnectingTransport {
     /// Return the currently-alive transport, if any.
     pub fn current(&self) -> Option<Arc<WsTransport>> {
         self.inner.load_full()
+    }
+}
+
+impl Transport for ReconnectingTransport {
+    fn open_stream<'a>(&'a self, target: StreamTarget) -> TransportFuture<'a> {
+        Box::pin(async move {
+            let transport = self.current().ok_or(TransportError::NotAlive)?;
+            Transport::open_stream(transport.as_ref(), target)
+                .await
+                .map(|stream| stream as StreamHandle)
+        })
+    }
+
+    fn alive(&self) -> bool {
+        self.current()
+            .map(|transport| transport.is_alive())
+            .unwrap_or(false)
+    }
+
+    fn last_heartbeat_age(&self) -> std::time::Duration {
+        self.current()
+            .map(|transport| transport.last_pong_age())
+            .unwrap_or(std::time::Duration::MAX)
+    }
+
+    fn tunnel_protocol(&self) -> TunnelProtocol {
+        TunnelProtocol::Cnexus
+    }
+
+    fn close(&self) {
+        if let Some(transport) = self.current() {
+            Transport::close(transport.as_ref());
+        }
+        self.inner.store(None);
     }
 }

@@ -72,11 +72,6 @@ pub fn envelope_for(code: &'static str, message: &'static str, status: u16) -> E
     }
 }
 
-#[cfg(not(feature = "tunnel"))]
-fn default_build_requires_tunnel(pref: Option<&gw_core::entity::TunnelPreference>) -> bool {
-    pref.is_some_and(|p| p.require_tunnel)
-}
-
 /// Render an envelope to the client via the client codec, then return a
 /// short-circuit `Err` for pingora.
 async fn emit_envelope_and_bail<T>(
@@ -172,7 +167,7 @@ pub async fn pick_peer(
     ratelimit: &Arc<gw_auth::ratelimit::RateLimitGuard>,
     egress: &Arc<gw_egress_impersonate::EgressHandle>,
     egress_disabled: bool,
-    #[cfg(feature = "tunnel")] tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
+    tunnel: Option<&Arc<crate::tunnel_stack::TunnelStack>>,
 ) -> Result<Box<HttpPeer>> {
     // The remaining `ErrorType::Custom(...)` short-circuits in this function
     // stay as bare-500 errors (no JSON envelope) on purpose. They signal
@@ -439,8 +434,8 @@ pub async fn pick_peer(
     let scheme_tls = base.scheme().eq_ignore_ascii_case("https");
 
     // ADR-T-1: insert the tunnel decision between strategy.pick and HttpPeer
-    // construction. Without `feature = "tunnel"` or with `tunnel = None` the
-    // legacy Direct path is byte-identical.
+    // construction. With `tunnel = None`, the legacy Direct path is
+    // byte-identical.
     //
     // Phase 4 (egress impersonate): a vendor whose `egress_mode = Impersonate`
     // routes through the in-process boring egress instead of the rustls/tunnel
@@ -478,7 +473,6 @@ pub async fn pick_peer(
     // pick its peer. `TunnelStack::resolve` is pure today but could grow side
     // effects (counters, tracing) — keeping the call site singular avoids
     // double-firing on the impersonate path.
-    #[cfg(feature = "tunnel")]
     let (tunnel_resolution, tunnel_require) = {
         let default_pref = gw_core::entity::TunnelPreference::default();
         let pref = picked_arc
@@ -500,7 +494,6 @@ pub async fn pick_peer(
         // Hard exclusion: a vendor cannot tunnel AND impersonate. If the
         // resolver would route through a tunnel node, bail rather than
         // silently picking one.
-        #[cfg(feature = "tunnel")]
         if let gw_tunnel_client::resolver::TunnelResolution::Use(_) = &tunnel_resolution {
             return emit_envelope_and_bail(
                 session,
@@ -530,7 +523,6 @@ pub async fn pick_peer(
             }
         };
     } else {
-        #[cfg(feature = "tunnel")]
         {
             match tunnel_resolution {
                 gw_tunnel_client::resolver::TunnelResolution::Direct => {
@@ -610,20 +602,6 @@ pub async fn pick_peer(
                     }
                 }
             }
-        }
-        #[cfg(not(feature = "tunnel"))]
-        {
-            if default_build_requires_tunnel(picked_arc.tunnel_preference.as_ref()) {
-                metrics::counter!("gw_tunnel_resolve_total", "result" => "no_node").increment(1);
-                return emit_envelope_and_bail(
-                    session,
-                    ctx,
-                    envelope_for(codes::GW_TUNNEL_NO_NODE, "no tunnel node available", 502),
-                )
-                .await;
-            }
-            ctx.tunnel_resolution = Some("direct".into());
-            peer = HttpPeer::new(format!("{host}:{port}"), scheme_tls, host.clone());
         }
     }
 
@@ -1170,7 +1148,6 @@ fn archive_upstream_request(
     });
 }
 
-#[cfg(feature = "tunnel")]
 fn inject_tunnel_bridge_headers(ctx: &ReqCtx, upstream_request: &mut RequestHeader) {
     let Some(meta) = ctx.tunnel_bridge.as_ref() else {
         return;
@@ -1183,9 +1160,6 @@ fn inject_tunnel_bridge_headers(ctx: &ReqCtx, upstream_request: &mut RequestHead
         if meta.target_tls { "true" } else { "false" },
     );
 }
-
-#[cfg(not(feature = "tunnel"))]
-fn inject_tunnel_bridge_headers(_ctx: &ReqCtx, _upstream_request: &mut RequestHeader) {}
 
 struct ProxyHeadersAccessor<'a>(&'a mut RequestHeader);
 
@@ -2507,20 +2481,5 @@ mod egress_kill_switch_tests {
             }),
             "Impersonate must be filtered by the kill-switch"
         );
-    }
-}
-
-#[cfg(all(test, not(feature = "tunnel")))]
-mod tunnel_required_default_build_tests {
-    use gw_core::entity::TunnelPreference;
-
-    #[test]
-    fn default_build_honors_require_tunnel() {
-        let pref = TunnelPreference {
-            require_tunnel: true,
-            ..Default::default()
-        };
-        assert!(super::default_build_requires_tunnel(Some(&pref)));
-        assert!(!super::default_build_requires_tunnel(None));
     }
 }
