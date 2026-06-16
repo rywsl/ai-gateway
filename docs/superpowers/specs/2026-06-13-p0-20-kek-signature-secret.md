@@ -1,5 +1,10 @@
 # P0 #20 — KEK rotation single-point-of-failure + signature_secret contract lie
 
+> **Superseded in part (2026-06-15):** the D4 "keep rotate-kek disabled" decision below was
+> advanced by [`2026-06-15-rust-p0-unified.md`](2026-06-15-rust-p0-unified.md), which wires a
+> *finalize-only* `rotate-kek` command path (status / mark-reencrypting / drop-old) onto the same
+> dual-read state machine. The at-rest re-encryption worker remains out of scope.
+
 > Implementation spec. Source of truth: Codex analysis (CNxus-Rust #20 / CNexus-Go #31).
 > Scope: **Rust only**. Do **not** edit Go. Preserve the unrelated in-flight `ResetCost`
 > control-plane work already in the working tree.

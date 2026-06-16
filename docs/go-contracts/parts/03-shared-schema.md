@@ -57,6 +57,24 @@ deleted_at  TIMESTAMPTZ NULL
 - **`gemini_file_mapping`**（0002）：Gemini 文件去重映射。Writer：**Go**（`/api/admin/gemini-files/*` 端点接收上传 → 推送 Gemini File API → 写入）。Reader：Rust（多模态请求时按 `(sha256_hex, user_id)` PK 校验 `file_uri` 归属）。无 `events:entity` ns（非 entity 表）；Rust 直接查 PgSQL，命中即用。
 - **`model_mapping`**（0003）：用户 alias → 上游真实 model 名映射。Writer：Go（管理面 UI）。Reader：Rust `gw-codec` model alias 解析。详见 §3.2.11。
 
+### 3.1.3 `vendor_keys` 生产形态：可写 VIEW over `provider_keys`（CNxus-Rust #11）
+
+Rust migrations 把 `vendor_keys` 建成**真实 TABLE**（`0001` + `0009` `identity_snapshot` + `0010` `quota_*`），开发/测试期 `psql -f` 即可。**但 Go 生产** schema 把 `vendor_keys` 暴露为 `provider_keys` 之上的**可写 VIEW**（Go 迁移 `00060_vendor_keys_write_compat.sql`）。Rust 不感知底层是 TABLE 还是 VIEW——它只发出下列 UPDATE。因此 Go 生产的 VIEW（经 `INSTEAD OF` 触发器或 updatable-view 规则）**必须**保持以下列 / JSONB 路径可写，否则对应 Rust 运行时写路径静默失败：
+
+| Rust writer | 代码 | 必须可写的列 / JSONB 路径 |
+|---|---|---|
+| OAuth runtime refresh | `crates/gw-store/src/oauth_refresh.rs::update_sql` | `payload`（`jsonb_set '{oauth}'`）、`version`、`updated_at` |
+| Egress identity 快照 | `crates/gw-store/src/identity_persist.rs::update_sql` | `identity_snapshot`、`updated_at`（条件 `identity_snapshot IS NULL`） |
+| Quota 快照 | `crates/gw-store/src/quota_state.rs::update_sql` | `quota_availability`、`quota_remaining`、`quota_limit`、`quota_reset_at`、`quota_observed_at`、`payload`（`jsonb_set '{quota_state}'`）、`version`、`updated_at` |
+
+公共谓词：所有写均带 `WHERE id = $1 ... AND deleted_at IS NULL`，OAuth 额外带 `AND version = $2`（乐观 CAS）。Go 的 VIEW / 触发器必须把这些列映射回 `provider_keys` 对应列并保持 `version` 单调（§3.3.2）。该列集由契约测试 `crates/gw-store/tests/vendor_keys_write_contract.rs` 锁定；Rust 侧任何列面变更都会破坏该测试并强制同步本节。
+
+> **不变量**：Rust 只写本表既有列；新增任何列都属于跨进程改动，必须 Go+Rust 同 PR 并更新本 part。
+
+### 3.1.4 key-health / cooldown 不持久化（CNxus-Rust #12）
+
+Key-health 熔断 / cooldown 状态是 **per-replica、纯内存**的（`crates/gw-health/src/format_health.rs` 原子量；`crates/gw-health/src/lib.rs` "No persistence in v1"；`docs/spec/03-key-health.md`）。`vendor_keys`（及任何表）**没有**、也**不应**有 `cooldown_*` / `consecutive_failures` / `circuit` / `health_state` 等列。唯一例外是 §3.2.5「0010 quota_state 列」——quota-remaining 是结构化持久列，但它是 quota 可用性，不是熔断/cooldown。Go 不得假设可从 PG 读取 Rust 的熔断/cooldown 状态，也不得新增此类列期望 Rust 写入。该约束由 `vendor_keys_write_contract.rs::no_vendor_keys_writer_persists_cooldown_or_health_state` 锁定。
+
 ## 3.2 Entity payload JSONB schemas
 
 每个表的 `payload` JSONB 字段对应 Rust 端类型，权威定义在 `crates/gw-core/src/entity.rs`。Go 写入时**必须**保持字段名 / 类型与 Rust 端一致；新增字段必须在两边同 PR 落。
@@ -606,8 +624,12 @@ Healthy(K_new)
      XADD events:entity * ns vendor_key id <id> v <new_version> op upsert;
    ```
 5. 等待所有 `vendor_keys.kek_kid = 'kek_v1'` 重加密完 → 通知运维 drop K_old；
-6. Rust 滚动重启移除 previous KEK；运行时 `rotate-kek`/drop 端点仍未启用；
+6. finalize K_old 二选一：
+   - **命令式（推荐，无需重启）**：发 `rotate-kek` `step=drop-old` `old_kid=<K_old kid>`，Rust 在进程内 `KekCache::drop_old_kek` 回到 `Healthy(K_new)`（经状态机守卫 fail-closed）；可选先发 `step=mark-reencrypting` 标记、`step=status` 观测。命令通道**不传输** KEK 材料（详见 [parts/08 §8.4.3](08-control-plane.md#843-命令集--args--内部映射)）。
+   - **重启式**：Rust 滚动重启移除 `GW_KMS__PREVIOUS_KEK_HEX` / `GW_KMS__PREVIOUS_KEY_ID`。
 7. Rust 集群进入 Healthy(K_new)。
+
+> **KEK 持久化契约（CNxus-Rust #20）**：KEK 材料只经环境变量（`GW_KMS__KEK_HEX` / `GW_KMS__PREVIOUS_KEK_HEX`）在 **boot** 注入，装入进程内 `KekCache`（`Clone` 共享一个 `Arc`）。**没有** durable `kek_keys` 表、也不把 KEK 材料写入 PgSQL / Redis——这是刻意的安全设计，且避免与 Go 迁移所有权冲突。新 KEK 的引入（`enter_dual_read`）只能在 boot 发生；`rotate-kek` 命令只能 finalize / 观测既有轮换，不能引入新 KEK。
 
 ### 3.5.4 失败模式
 

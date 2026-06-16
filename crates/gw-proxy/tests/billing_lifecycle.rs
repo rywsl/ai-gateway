@@ -311,3 +311,47 @@ fn cli_failed_attempt_with_zero_cache_dimensions_without_estimate_keeps_raw_zero
     assert_eq!(record.usage.cache_read_input_tokens, Some(0));
     assert_eq!(record.usage.cache_creation_input_tokens, Some(0));
 }
+
+// --- P0-32: attempted_keys candidate chain ---
+
+/// A per-attempt failure record carries exactly its own current attempted key,
+/// stamped with the per-attempt error code and attempt_index.
+#[test]
+fn build_attempt_record_carries_single_current_attempted_key() {
+    let mut ctx = seeded_cli_ctx();
+    ctx.attempt_index = 0;
+    ctx.upstream_error_code = Some("GW_UPSTREAM_CONNECT_FAILED");
+
+    let record = build_attempt_record(&ctx).expect("attempt record");
+
+    assert_eq!(record.attempted_keys.len(), 1);
+    let k = &record.attempted_keys[0];
+    assert_eq!(k.vendor_key_id, "vk-1");
+    assert_eq!(k.vendor, "vendor-1");
+    assert_eq!(k.model, "gpt-4o");
+    assert_eq!(k.attempt_index, 0);
+    assert_eq!(k.error_code.as_deref(), Some("GW_UPSTREAM_CONNECT_FAILED"));
+}
+
+/// `on_retry_sync` appends each failed attempt's key into the persistent
+/// `ctx.attempted_keys` chain, and the chain survives the per-attempt reset.
+#[test]
+fn on_retry_sync_accumulates_candidate_chain() {
+    let mut ctx = seeded_cli_ctx();
+    ctx.attempt_index = 0;
+    ctx.upstream_error_code = Some("GW_UPSTREAM_CONNECT_FAILED");
+
+    let rec0 = on_retry_sync(&mut ctx).expect("attempt 0 record");
+    assert_eq!(rec0.attempt_index, 0);
+    assert_eq!(rec0.attempted_keys.len(), 1);
+
+    // Per-attempt state reset, but the candidate chain is preserved.
+    assert_eq!(ctx.attempt_index, 1);
+    assert_eq!(ctx.attempted_keys.len(), 1);
+    assert_eq!(ctx.attempted_keys[0].vendor_key_id, "vk-1");
+    assert_eq!(ctx.attempted_keys[0].attempt_index, 0);
+    assert_eq!(
+        ctx.attempted_keys[0].error_code.as_deref(),
+        Some("GW_UPSTREAM_CONNECT_FAILED")
+    );
+}

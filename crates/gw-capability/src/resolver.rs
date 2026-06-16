@@ -142,6 +142,9 @@ pub(crate) fn parse_capability(s: &str) -> Capability {
         "thinking" => Capability::Thinking,
         "tool_use" => Capability::ToolUse,
         "streaming_only" => Capability::StreamingOnly,
+        "extended_thinking" => Capability::Thinking,
+        "function_calling" => Capability::ToolUse,
+        "streaming" => Capability::StreamingOnly,
         "openai_responses_shape" => Capability::OpenAiResponsesShape,
         "vertex_ai_service_account" => Capability::VertexAiServiceAccount,
         other => Capability::Tagged(intern_tag(other)),
@@ -218,6 +221,11 @@ mod intern_tests {
             ("thinking", Capability::Thinking),
             ("tool_use", Capability::ToolUse),
             ("streaming_only", Capability::StreamingOnly),
+            // Go projection compatibility aliases. Old payloads and headers can
+            // still use these spellings, and they must match typed requirements.
+            ("extended_thinking", Capability::Thinking),
+            ("function_calling", Capability::ToolUse),
+            ("streaming", Capability::StreamingOnly),
             ("openai_responses_shape", Capability::OpenAiResponsesShape),
             (
                 "vertex_ai_service_account",

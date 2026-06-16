@@ -157,8 +157,9 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
             }
         }
         "config" => {
-            // Generic system config rows do not have a dedicated Moka cache in
-            // gw-store. The Redis L1 DEL above is the invalidation this ns needs.
+            if let Some(module_name) = module_name_from_config_id(id) {
+                store.invalidate_module_enabled(module_name).await;
+            }
         }
         "jwks" => store.jwks.invalidate(&Kid::from(id)).await,
         "ipblock" => store.ipblock.invalidate(&id.to_string()).await,
@@ -207,6 +208,11 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
             );
         }
     }
+}
+
+fn module_name_from_config_id(id: &str) -> Option<&str> {
+    let name = id.strip_prefix("module.")?.strip_suffix(".enabled")?;
+    (!name.is_empty()).then_some(name)
 }
 
 fn is_nogroup_error(e: &fred::error::RedisError) -> bool {
@@ -577,10 +583,56 @@ mod config_tests {
     use crate::entity_store::EntityStore;
     use std::sync::Arc;
 
+    #[test]
+    fn module_name_from_config_id_accepts_module_enabled_keys() {
+        assert_eq!(
+            module_name_from_config_id("module.apikey.enabled"),
+            Some("apikey")
+        );
+        assert_eq!(
+            module_name_from_config_id("module.billing.enabled"),
+            Some("billing")
+        );
+    }
+
+    #[test]
+    fn module_name_from_config_id_rejects_other_config_keys() {
+        assert_eq!(module_name_from_config_id("module..enabled"), None);
+        assert_eq!(module_name_from_config_id("module.apikey.disabled"), None);
+        assert_eq!(module_name_from_config_id("auth.global"), None);
+    }
+
     #[tokio::test]
     async fn config_namespace_is_accepted() {
         let store = Arc::new(EntityStore::new());
 
         apply_entity_event(&store, "config", "module.apikey.enabled").await;
+    }
+
+    #[tokio::test]
+    async fn config_event_invalidates_module_enabled_cache() {
+        let store = Arc::new(EntityStore::new());
+        store
+            .module_enabled
+            .insert("apikey".to_string(), false)
+            .await;
+        assert_eq!(store.module_enabled.get("apikey").await, Some(false));
+
+        apply_entity_event(&store, "config", "module.apikey.enabled").await;
+
+        assert_eq!(store.module_enabled.get("apikey").await, None);
+    }
+
+    #[tokio::test]
+    async fn non_module_config_event_leaves_module_enabled_cache() {
+        let store = Arc::new(EntityStore::new());
+        store
+            .module_enabled
+            .insert("apikey".to_string(), false)
+            .await;
+
+        apply_entity_event(&store, "config", "auth.global").await;
+
+        assert_eq!(store.module_enabled.get("apikey").await, Some(false));
     }
 }

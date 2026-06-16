@@ -701,6 +701,9 @@ async fn bootstrap(
         kek: kek_cache,
     };
     let oauth_kek = loader.kek.clone();
+    // Shared with the control-plane command consumer so `rotate-kek` drives the
+    // same in-process KekCache the loader/decrypt hot path observes.
+    let control_plane_kek = loader.kek.clone();
     let tunnel_kek = loader.kek.clone();
     let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
         &cfg.adaptive_rpm,
@@ -1154,6 +1157,7 @@ async fn bootstrap(
             in_flight.clone(),
             instance_id.clone(),
             &cfg.control_plane,
+            control_plane_kek,
         );
         tracing::info!(
             target: "gw_gateway",

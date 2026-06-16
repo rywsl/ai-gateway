@@ -399,7 +399,11 @@ pub fn default_gateway_command_capabilities() -> Vec<GatewayCommandCapability> {
         disabled_command(Drain, "graceful_drain_hook_missing"),
         disabled_command(Undrain, "graceful_drain_hook_missing"),
         disabled_command(RestartInstance, "graceful_restart_hook_missing"),
-        disabled_command(RotateKek, "kek_rotation_command_hook_missing"),
+        // rotate-kek drives the in-process KekCache dual-read state machine
+        // (status / mark-reencrypting / drop-old finalize). It deliberately
+        // does NOT accept new KEK material over the command channel — that
+        // stays env-seeded at boot. See command_consumer::rotate_kek.
+        enabled_command(RotateKek),
     ]
 }
 
