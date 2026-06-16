@@ -116,8 +116,13 @@ impl TunnelStack {
                     _ = ticker.tick() => {
                         let nodes = stack.nodes.load_full();
                         for node in nodes.iter() {
-                            let current = stack.transports.get(&node.id).and_then(|t| t.current());
-                            let present = current.as_ref().is_some_and(|t| t.is_alive());
+                            let socks5_present = node.has_socks5_backend();
+                            let current = if socks5_present {
+                                None
+                            } else {
+                                stack.transports.get(&node.id).and_then(|t| t.current())
+                            };
+                            let present = socks5_present || current.as_ref().is_some_and(|t| t.is_alive());
                             metrics::gauge!(
                                 "gw_tunnel_transport_present",
                                 "node_id" => node.id.clone()
@@ -144,8 +149,14 @@ impl TunnelStack {
         nodes
             .iter()
             .map(|n| {
-                let current = self.transports.get(&n.id).and_then(|t| t.current());
-                let transport_present = current.as_ref().is_some_and(|t| t.is_alive());
+                let socks5_present = n.has_socks5_backend();
+                let current = if socks5_present {
+                    None
+                } else {
+                    self.transports.get(&n.id).and_then(|t| t.current())
+                };
+                let transport_present =
+                    socks5_present || current.as_ref().is_some_and(|t| t.is_alive());
                 TunnelNodeHealth {
                     node_id: n.id.clone(),
                     transport_present,
@@ -157,6 +168,22 @@ impl TunnelStack {
 
     pub fn current_transport(&self, node_id: &str) -> Option<Arc<WsTransport>> {
         self.transports.get(node_id).and_then(|t| t.current())
+    }
+
+    pub fn bridge_backend(&self, node_id: &str) -> Option<crate::tunnel_bridge::BridgeBackend> {
+        let snapshot = self.nodes.load_full();
+        let node = snapshot.iter().find(|n| n.id == node_id)?;
+        if let Some(proxy_url) = node
+            .proxy_url
+            .as_ref()
+            .filter(|u| matches!(u.scheme(), "socks5" | "socks5h"))
+        {
+            return Some(crate::tunnel_bridge::BridgeBackend::Socks5(
+                proxy_url.clone(),
+            ));
+        }
+        self.current_transport(node_id)
+            .map(crate::tunnel_bridge::BridgeBackend::CnexusWs)
     }
 
     /// Decide Direct vs Tunnel for a given (provider, key, preference).
@@ -203,32 +230,32 @@ impl TunnelStack {
         // reload_nodes() cannot cause the two node-lookup sites to disagree.
         let snapshot = self.nodes.load_full();
 
-        // Lazily create the transport on first use.
-        let transport = if let Some(t) = self.transports.get(node_id) {
-            t.clone()
+        let node = match snapshot.iter().find(|n| n.id == node_id) {
+            Some(n) => n,
+            None => {
+                return Err(TunnelPeerError::NoLive {
+                    node_id: node_id.to_owned(),
+                });
+            }
+        };
+        let is_socks5_node = node.has_socks5_backend();
+        let transport = if is_socks5_node {
+            None
+        } else if let Some(t) = self.transports.get(node_id) {
+            Some(t.clone())
         } else {
-            // The node ws_url comes from the matching ProxyNodeView. If the
-            // node disappeared between resolve() and here, fall through to NoLive.
-            let node = match snapshot.iter().find(|n| n.id == node_id) {
-                Some(n) => n,
-                None => {
-                    return Err(TunnelPeerError::NoLive {
-                        node_id: node_id.to_owned(),
-                    });
-                }
-            };
             let mut cfg = self.transport_cfg_template.clone();
             cfg.url = node.ws_url.clone();
             cfg.auth_token = node.auth_token.clone();
             let t = ReconnectingTransport::start(cfg, self.pool_cfg.clone()).await;
             self.transports.insert(node_id.to_owned(), t.clone());
-            t
+            Some(t)
         };
 
         // Cold-start case: the ReconnectingTransport was just spawned and its
         // WS handshake has not completed yet. Flow into R-E failover via
         // GW_TUNNEL_NO_LIVE per spec §4.
-        if transport.current().is_none() {
+        if !is_socks5_node && transport.as_ref().is_none_or(|t| t.current().is_none()) {
             metrics::counter!(
                 "gw_tunnel_open_total",
                 "node_id" => node_id.to_owned(),
@@ -301,8 +328,23 @@ mod tests {
             id: id.into(),
             ws_url: dummy_url(),
             auth_token: None,
+            proxy_url: None,
             enabled: true,
             latency_ms: latency,
+            allowed_provider_ids: providers.iter().map(|s| (*s).to_string()).collect(),
+            allowed_vendor_key_ids: vec![],
+            tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
+        }
+    }
+
+    fn socks5_view(id: &str, providers: &[&str]) -> ProxyNodeView {
+        ProxyNodeView {
+            id: id.into(),
+            ws_url: dummy_url(),
+            auth_token: None,
+            proxy_url: Some("socks5h://proxy.example.com:1080".parse().unwrap()),
+            enabled: true,
+            latency_ms: 0,
             allowed_provider_ids: providers.iter().map(|s| (*s).to_string()).collect(),
             allowed_vendor_key_ids: vec![],
             tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol::Cnexus,
@@ -316,6 +358,31 @@ mod tests {
             PoolConfig::default(),
             TransportConfig::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn socks5_node_returns_bridge_peer_without_ws_transport() {
+        let _dns_guard = OverrideGuard::new();
+        let _target_guard = gw_tunnel_client::target_filter::ResetGuard::new();
+        set_override(
+            "api.example.com",
+            vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))],
+        );
+        gw_tunnel_client::target_filter::set_whitelist(vec![("api.example.com".to_owned(), 443)]);
+        let stack = empty_stack(vec![socks5_view("socks", &["openai"])]);
+        stack.set_bridge_addr("127.0.0.1:18080".parse().unwrap());
+
+        let peer = stack
+            .peer_for_node("socks", "api.example.com", 443)
+            .await
+            .expect("SOCKS5 nodes are live if the proxy_url is supported");
+
+        assert_eq!(peer._address.to_string(), "127.0.0.1:18080");
+        assert!(stack.current_transport("socks").is_none());
+        let health = stack.health_snapshot();
+        assert_eq!(health.len(), 1);
+        assert!(health[0].transport_present);
+        assert!(health[0].last_pong_age_secs.is_none());
     }
 
     #[test]

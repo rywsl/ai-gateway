@@ -553,7 +553,13 @@ pub mod entity_helpers {
 pub struct ProxyNode {
     pub id: String,
     /// `ws[s]://host:port/path` — base WebSocket URL the gateway dials.
+    #[serde(default = "proxy_node_default_ws_url")]
     pub ws_url: url::Url,
+    /// Optional SOCKS5/SOCKS5h proxy URL. A Cnexus proxy-node row with this
+    /// field can represent an Aether-era SOCKS5 deployment without requiring a
+    /// first-party WebSocket tunnel-server.
+    #[serde(default, deserialize_with = "deserialize_optional_url")]
+    pub proxy_url: Option<url::Url>,
     #[serde(default = "proxy_node_default_enabled")]
     pub enabled: bool,
     /// Most recent latency observation from the periodic health prober.
@@ -576,6 +582,21 @@ pub struct ProxyNode {
 
 fn proxy_node_default_enabled() -> bool {
     true
+}
+
+fn proxy_node_default_ws_url() -> url::Url {
+    "http://127.0.0.1:9/tunnel".parse().unwrap()
+}
+
+fn deserialize_optional_url<'de, D>(deserializer: D) -> Result<Option<url::Url>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.parse().map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 // --- Management-token persisted entity (B2 / ADR-B2-1) ---

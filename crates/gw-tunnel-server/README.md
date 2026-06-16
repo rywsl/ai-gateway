@@ -18,6 +18,8 @@ Supported schemes:
 
 `--proxy-url` takes precedence over `PROXY_URL`. Missing or empty config keeps direct egress. Userinfo is accepted in standard URL form and percent-decoded before SOCKS5 auth.
 
-The gateway database `proxy_url` value is informational for Cnexus tunnel nodes. The server process reads only its deployment config, so the deployment that writes or displays `proxy_url` should inject the same value into `--proxy-url` or `PROXY_URL`.
+For a first-party Cnexus WebSocket tunnel-server node, the server process reads only its deployment config, so deployers should still inject the desired egress proxy into `--proxy-url` or `PROXY_URL`.
+
+Separately, the gateway can also route selected proxy-node rows directly through `proxy_nodes.payload.proxy_url` when that value is `socks5://...` or `socks5h://...`. That compatibility path is for old SOCKS5 proxy links that should remain usable without deploying `gw-tunnel-server`.
 
 See `docs/spec/09-tunnel.md` for the full tunnel contract.
