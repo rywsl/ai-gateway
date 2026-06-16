@@ -8,6 +8,7 @@
 //! - [`health`] — `HealthHook` trait, `SystemHealthMonitor`, `BackpressureGate`.
 
 pub mod health;
+pub mod redis_retry;
 pub mod regex_cache;
 pub mod shutdown;
 pub mod spill_io;
