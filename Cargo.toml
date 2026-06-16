@@ -101,6 +101,8 @@ hyper = { version = "1.4", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
 http-body-util = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-socks = "0.5"
+percent-encoding = "2"
 
 # 可观测
 tracing = "0.1"

@@ -1277,11 +1277,36 @@ async fn bootstrap(
                 id: n.id,
                 ws_url: n.ws_url,
                 auth_token: node_auth_token(n.auth_token_enc, kek)?,
+                proxy_url: n.proxy_url,
                 enabled: n.enabled,
                 latency_ms: n.latency_ms,
                 allowed_provider_ids: n.allowed_provider_ids,
                 allowed_vendor_key_ids: n.allowed_vendor_key_ids,
                 tunnel_protocol: n.tunnel_protocol,
+            })
+        }
+
+        fn proxy_nodes_signature(nodes: &[gw_core::entity::ProxyNode]) -> u64 {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            nodes.iter().fold(0u64, |acc, n| {
+                let mut h = DefaultHasher::new();
+                n.id.hash(&mut h);
+                n.ws_url.as_str().hash(&mut h);
+                n.proxy_url.as_ref().map(url::Url::as_str).hash(&mut h);
+                n.enabled.hash(&mut h);
+                n.latency_ms.hash(&mut h);
+                n.allowed_provider_ids.hash(&mut h);
+                n.allowed_vendor_key_ids.hash(&mut h);
+                n.tunnel_protocol.hash(&mut h);
+                if let Some(enc) = &n.auth_token_enc {
+                    enc.ciphertext.hash(&mut h);
+                    enc.nonce.hash(&mut h);
+                    enc.auth_tag.hash(&mut h);
+                    enc.kek_kid.hash(&mut h);
+                }
+                acc ^ h.finish()
             })
         }
 
@@ -1305,10 +1330,10 @@ async fn bootstrap(
         let weak_stack = Arc::downgrade(&stack);
         let bridge = gw_proxy::tunnel_bridge::spawn(gw_proxy::tunnel_bridge::TunnelBridgeConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
-            transport_for_node: Arc::new(move |node_id: &str| {
+            backend_for_node: Arc::new(move |node_id: &str| {
                 weak_stack
                     .upgrade()
-                    .and_then(|stack| stack.current_transport(node_id))
+                    .and_then(|stack| stack.bridge_backend(node_id))
             }),
         })
         .await?;
@@ -1347,18 +1372,10 @@ async fn bootstrap(
                             _ = tok.cancelled() => return Ok(()),
                             _ = tick.tick() => {
                                 if let Some(nodes) = store.proxy_nodes_list_or_load().await {
-                                    use std::collections::hash_map::DefaultHasher;
-                                    use std::hash::{Hash, Hasher};
                                     // DefaultHasher uses a randomised per-process seed (since Rust 1.36), so
                                     // the signature is intra-process only — it'll spuriously reload once on
                                     // every restart, which is harmless.
-                                    let sig = nodes.iter().fold(0u64, |acc, n| {
-                                        let mut h = DefaultHasher::new();
-                                        n.id.hash(&mut h);
-                                        n.enabled.hash(&mut h);
-                                        n.latency_ms.hash(&mut h);
-                                        acc ^ h.finish()
-                                    });
+                                    let sig = proxy_nodes_signature(&nodes);
                                     if sig != last_signature {
                                         last_signature = sig;
                                         let view: Vec<gw_tunnel_client::resolver::ProxyNodeView> = nodes

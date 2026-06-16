@@ -102,6 +102,7 @@ async fn e2e_tunnel_stack_reports_no_live_node() {
             id: "node-no-live".to_owned(),
             ws_url: "ws://127.0.0.1:9/".parse().unwrap(),
             auth_token: None,
+            proxy_url: None,
             enabled: true,
             latency_ms: 0,
             allowed_provider_ids: vec!["openai".to_owned()],

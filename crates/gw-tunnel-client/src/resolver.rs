@@ -10,6 +10,9 @@ pub struct ProxyNodeView {
     /// dials when building the `HttpPeer`. Mirrors `gw_core::entity::ProxyNode::ws_url`.
     pub ws_url: url::Url,
     pub auth_token: Option<secrecy::SecretString>,
+    /// Optional SOCKS5/SOCKS5h proxy URL for old Aether-era proxy links that
+    /// should be runtime-usable without a first-party WebSocket tunnel-server.
+    pub proxy_url: Option<url::Url>,
     pub enabled: bool,
     pub latency_ms: u32,
     pub allowed_provider_ids: Vec<String>,
@@ -18,6 +21,23 @@ pub struct ProxyNodeView {
     /// this branch is Cnexus-only; non-Cnexus labels are retained for stored
     /// data compatibility and operator visibility.
     pub tunnel_protocol: gw_core::tunnel_protocol::TunnelProtocol,
+}
+
+impl ProxyNodeView {
+    pub fn has_socks5_backend(&self) -> bool {
+        self.proxy_url
+            .as_ref()
+            .is_some_and(|u| matches!(u.scheme(), "socks5" | "socks5h"))
+    }
+
+    pub fn has_cnexus_ws_backend(&self) -> bool {
+        self.tunnel_protocol == gw_core::tunnel_protocol::TunnelProtocol::Cnexus
+            && matches!(self.ws_url.scheme(), "ws" | "wss")
+    }
+
+    pub fn is_runtime_eligible(&self) -> bool {
+        self.has_socks5_backend() || self.has_cnexus_ws_backend()
+    }
 }
 
 pub struct TunnelResolveCtx<'a> {
@@ -36,6 +56,7 @@ pub fn resolve_tunnel(ctx: &TunnelResolveCtx<'_>, nodes: &[ProxyNodeView]) -> Tu
     let mut filtered: Vec<&ProxyNodeView> = nodes
         .iter()
         .filter(|n| n.enabled)
+        .filter(|n| n.is_runtime_eligible())
         .filter(|n| n.allowed_provider_ids.iter().any(|p| p == ctx.provider_id))
         .filter(|n| {
             n.allowed_vendor_key_ids.is_empty()

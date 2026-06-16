@@ -16,7 +16,13 @@ pub const HDR_TARGET_TLS: &str = "X-Gateway-Tunnel-Target-Tls";
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 
-pub type TransportForNode = Arc<dyn Fn(&str) -> Option<Arc<WsTransport>> + Send + Sync>;
+#[derive(Clone)]
+pub enum BridgeBackend {
+    CnexusWs(Arc<WsTransport>),
+    Socks5(url::Url),
+}
+
+pub type BackendForNode = Arc<dyn Fn(&str) -> Option<BridgeBackend> + Send + Sync>;
 
 pub struct TunnelBridgeHandle {
     pub local_addr: SocketAddr,
@@ -48,14 +54,14 @@ impl Drop for TunnelBridgeHandle {
 
 pub struct TunnelBridgeConfig {
     pub bind: SocketAddr,
-    pub transport_for_node: TransportForNode,
+    pub backend_for_node: BackendForNode,
 }
 
 pub async fn spawn(config: TunnelBridgeConfig) -> anyhow::Result<TunnelBridgeHandle> {
     let listener = TcpListener::bind(config.bind).await?;
     let local_addr = listener.local_addr()?;
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    let transport_for_node = config.transport_for_node;
+    let backend_for_node = config.backend_for_node;
     let task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -65,9 +71,9 @@ pub async fn spawn(config: TunnelBridgeConfig) -> anyhow::Result<TunnelBridgeHan
                     let Ok((stream, _)) = accepted else {
                         continue;
                     };
-                    let transport_for_node = transport_for_node.clone();
+                    let backend_for_node = backend_for_node.clone();
                     tokio::spawn(async move {
-                        if let Err(err) = handle_conn(stream, transport_for_node).await {
+                        if let Err(err) = handle_conn(stream, backend_for_node).await {
                             tracing::debug!(error = ?err, "tunnel bridge connection ended");
                         }
                     });
@@ -84,7 +90,7 @@ pub async fn spawn(config: TunnelBridgeConfig) -> anyhow::Result<TunnelBridgeHan
 
 async fn handle_conn(
     mut client: TcpStream,
-    transport_for_node: TransportForNode,
+    backend_for_node: BackendForNode,
 ) -> anyhow::Result<()> {
     let mut head = BytesMut::new();
     let header_end = loop {
@@ -110,43 +116,76 @@ async fn handle_conn(
             return Ok(());
         }
     };
-    let Some(transport) = (transport_for_node)(&parsed.node_id) else {
+    let Some(backend) = (backend_for_node)(&parsed.node_id) else {
         write_error(&mut client, 502, "tunnel node not live").await?;
         return Ok(());
     };
-    let stream = match transport.open_stream(&parsed.target).await {
-        Ok(stream) => stream,
-        Err(err) => {
-            write_error(&mut client, 502, &format!("tunnel open failed: {err}")).await?;
-            return Ok(());
-        }
-    };
     let mut initial = parsed.stripped_head;
     initial.extend_from_slice(&head[header_end..]);
-    let (tunnel_reader, tunnel_writer) = stream.split();
-    let (client_reader, client_writer) = tokio::io::split(client);
-
-    if parsed.target_tls {
-        relay_tls(
-            parsed.host,
-            initial.freeze(),
-            client_reader,
-            client_writer,
-            TunnelIo {
-                reader: tunnel_reader,
-                writer: tunnel_writer,
-            },
-        )
-        .await?;
-    } else {
-        relay_plain(
-            initial.freeze(),
-            client_reader,
-            client_writer,
-            tunnel_reader,
-            tunnel_writer,
-        )
-        .await?;
+    match backend {
+        BridgeBackend::CnexusWs(transport) => {
+            let stream = match transport.open_stream(&parsed.target).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    write_error(&mut client, 502, &format!("tunnel open failed: {err}")).await?;
+                    return Ok(());
+                }
+            };
+            let (client_reader, client_writer) = tokio::io::split(client);
+            let (tunnel_reader, tunnel_writer) = stream.split();
+            if parsed.target_tls {
+                relay_tls(
+                    parsed.host,
+                    initial.freeze(),
+                    client_reader,
+                    client_writer,
+                    TunnelIo {
+                        reader: tunnel_reader,
+                        writer: tunnel_writer,
+                    },
+                )
+                .await?;
+            } else {
+                relay_plain(
+                    initial.freeze(),
+                    client_reader,
+                    client_writer,
+                    tunnel_reader,
+                    tunnel_writer,
+                )
+                .await?;
+            }
+        }
+        BridgeBackend::Socks5(proxy_url) => {
+            let stream = match dial_socks5(&proxy_url, &parsed.target).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    write_error(&mut client, 502, &format!("socks5 open failed: {err}")).await?;
+                    return Ok(());
+                }
+            };
+            let (client_reader, client_writer) = tokio::io::split(client);
+            if parsed.target_tls {
+                relay_tls(
+                    parsed.host,
+                    initial.freeze(),
+                    client_reader,
+                    client_writer,
+                    stream,
+                )
+                .await?;
+            } else {
+                let (socks_reader, socks_writer) = tokio::io::split(stream);
+                relay_plain_generic(
+                    initial.freeze(),
+                    client_reader,
+                    client_writer,
+                    socks_reader,
+                    socks_writer,
+                )
+                .await?;
+            }
+        }
     }
     Ok(())
 }
@@ -173,6 +212,91 @@ where
     request_task.abort();
     response?;
     Ok(())
+}
+
+async fn relay_plain_generic<CR, CW, UR, UW>(
+    initial: Bytes,
+    mut client_reader: CR,
+    mut client_writer: CW,
+    mut upstream_reader: UR,
+    mut upstream_writer: UW,
+) -> anyhow::Result<()>
+where
+    CR: AsyncRead + Unpin + Send + 'static,
+    CW: AsyncWrite + Unpin,
+    UR: AsyncRead + Unpin,
+    UW: AsyncWrite + Unpin + Send + 'static,
+{
+    if !initial.is_empty() {
+        upstream_writer.write_all(&initial).await?;
+    }
+    let request_task = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut client_reader, &mut upstream_writer).await;
+        let _ = upstream_writer.shutdown().await;
+    });
+    let response = tokio::io::copy(&mut upstream_reader, &mut client_writer).await;
+    request_task.abort();
+    response?;
+    Ok(())
+}
+
+async fn dial_socks5(proxy_url: &url::Url, target: &str) -> anyhow::Result<TcpStream> {
+    use anyhow::{anyhow, Context};
+    use tokio_socks::tcp::Socks5Stream;
+
+    let proxy_host = proxy_url
+        .host_str()
+        .ok_or_else(|| anyhow!("proxy_url missing host"))?;
+    let proxy_port = proxy_url.port().unwrap_or(1080);
+    let proxy_addr = tokio::net::lookup_host((proxy_host, proxy_port))
+        .await
+        .with_context(|| format!("resolving proxy host {proxy_host}:{proxy_port}"))?
+        .next()
+        .ok_or_else(|| anyhow!("DNS yielded no addresses for proxy {proxy_host}:{proxy_port}"))?;
+    let auth = if proxy_url.username().is_empty() {
+        None
+    } else {
+        Some((
+            percent_decode(proxy_url.username()),
+            proxy_url.password().map(percent_decode).unwrap_or_default(),
+        ))
+    };
+
+    let stream = if proxy_url.scheme() == "socks5h" {
+        match auth {
+            Some((username, password)) => {
+                Socks5Stream::connect_with_password(proxy_addr, target, &username, &password).await
+            }
+            None => Socks5Stream::connect(proxy_addr, target).await,
+        }
+        .with_context(|| format!("socks5h dial to {target} via {proxy_addr}"))?
+    } else if proxy_url.scheme() == "socks5" {
+        let resolved = tokio::net::lookup_host(target)
+            .await
+            .with_context(|| format!("local DNS resolve of {target}"))?
+            .next()
+            .ok_or_else(|| anyhow!("DNS yielded no addresses for {target}"))?;
+        match auth {
+            Some((username, password)) => {
+                Socks5Stream::connect_with_password(proxy_addr, resolved, &username, &password)
+                    .await
+            }
+            None => Socks5Stream::connect(proxy_addr, resolved).await,
+        }
+        .with_context(|| format!("socks5 dial to {resolved} via {proxy_addr}"))?
+    } else {
+        return Err(anyhow!(
+            "proxy_url scheme {:?} is not supported by tunnel bridge",
+            proxy_url.scheme()
+        ));
+    };
+    Ok(stream.into_inner())
+}
+
+fn percent_decode(value: &str) -> String {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 async fn relay_tls<R, W, S>(
@@ -394,11 +518,11 @@ mod tests {
             .await
             .unwrap(),
         );
-        let transport_for_node = transport.clone();
+        let backend_for_node = transport.clone();
         let bridge = spawn(TunnelBridgeConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
-            transport_for_node: Arc::new(move |node_id| {
-                (node_id == "node-a").then_some(transport_for_node.clone())
+            backend_for_node: Arc::new(move |node_id| {
+                (node_id == "node-a").then_some(BridgeBackend::CnexusWs(backend_for_node.clone()))
             }),
         })
         .await
@@ -421,5 +545,97 @@ mod tests {
         assert!(!seen.to_ascii_lowercase().contains("x-gateway-tunnel-"));
         bridge.shutdown().await;
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bridge_relays_plain_http_through_socks5_backend() {
+        let upstream_seen = Arc::new(StdMutex::new(String::new()));
+        let upstream_seen_task = upstream_seen.clone();
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            *upstream_seen_task.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks_addr = socks.local_addr().unwrap();
+        let socks_task = tokio::spawn(async move {
+            let (mut client, _) = socks.accept().await.unwrap();
+            let mut greeting = [0u8; 2];
+            client.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting[0], 0x05);
+            let mut methods = vec![0u8; greeting[1] as usize];
+            client.read_exact(&mut methods).await.unwrap();
+            client.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut req = [0u8; 4];
+            client.read_exact(&mut req).await.unwrap();
+            assert_eq!(req[0], 0x05);
+            assert_eq!(req[1], 0x01);
+            let host = match req[3] {
+                0x01 => {
+                    let mut addr = [0u8; 4];
+                    client.read_exact(&mut addr).await.unwrap();
+                    std::net::Ipv4Addr::from(addr).to_string()
+                }
+                0x03 => {
+                    let mut len = [0u8; 1];
+                    client.read_exact(&mut len).await.unwrap();
+                    let mut host = vec![0u8; len[0] as usize];
+                    client.read_exact(&mut host).await.unwrap();
+                    String::from_utf8(host).unwrap()
+                }
+                other => panic!("unexpected socks5 address type {other}"),
+            };
+            let mut port = [0u8; 2];
+            client.read_exact(&mut port).await.unwrap();
+            let port = u16::from_be_bytes(port);
+            assert_eq!(
+                format!("{host}:{port}"),
+                format!("127.0.0.1:{upstream_port}")
+            );
+
+            let mut upstream = TcpStream::connect((host.as_str(), port)).await.unwrap();
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        });
+
+        let proxy_url: url::Url = format!("socks5h://{socks_addr}").parse().unwrap();
+        let bridge = spawn(TunnelBridgeConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            backend_for_node: Arc::new(move |node_id| {
+                (node_id == "node-socks").then_some(BridgeBackend::Socks5(proxy_url.clone()))
+            }),
+        })
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(bridge.local_addr).await.unwrap();
+        let request = format!(
+            "GET /plain HTTP/1.1\r\nHost: bridge\r\n{HDR_NODE_ID}: node-socks\r\n{HDR_TARGET}: 127.0.0.1:{upstream_port}\r\n{HDR_TARGET_TLS}: false\r\nX-Gateway-Tunnel-Other: secret\r\nConnection: close\r\n\r\n",
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let response_text = String::from_utf8_lossy(&response);
+        assert!(
+            response_text.contains("204 No Content"),
+            "unexpected bridge response: {response_text}"
+        );
+        upstream_task.await.unwrap();
+        socks_task.await.unwrap();
+        let seen = upstream_seen.lock().unwrap().clone();
+        assert!(seen.starts_with("GET /plain HTTP/1.1"));
+        assert!(!seen.to_ascii_lowercase().contains("x-gateway-tunnel-"));
+        bridge.shutdown().await;
     }
 }
