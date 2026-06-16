@@ -402,6 +402,7 @@ mod proxy_node_tests {
         ProxyNode {
             id: id.to_string(),
             ws_url: "ws://127.0.0.1:9999/tunnel".parse().unwrap(),
+            proxy_url: None,
             enabled: true,
             latency_ms: 0,
             allowed_provider_ids: vec![],
