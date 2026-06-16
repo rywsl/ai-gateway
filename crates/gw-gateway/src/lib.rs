@@ -1080,6 +1080,28 @@ async fn bootstrap(
     // 4d. InflightLedger + background tasks (W2-T6).
     // instance_id was resolved above (before Ledger::start) and is reused here.
     gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
+    match gw_ledger::load_latest_coef_snapshot(&redis.pool).await {
+        Ok(Some(outcome)) => {
+            tracing::info!(
+                target: "gw_gateway",
+                ?outcome,
+                "loaded latest credit coef snapshot before active pod heartbeat"
+            );
+        }
+        Ok(None) => {
+            tracing::warn!(
+                target: "gw_gateway",
+                "no latest credit coef snapshot found before active pod heartbeat"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "gw_gateway",
+                error = ?e,
+                "failed to load latest credit coef snapshot before active pod heartbeat"
+            );
+        }
+    }
     let active_pod_heartbeat = gw_ledger::heartbeat::spawn_active_pod_heartbeat(
         (*redis.pool).clone(),
         instance_id.clone(),

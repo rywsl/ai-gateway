@@ -35,6 +35,8 @@ pub use coef::{
     apply_coef_commit, apply_coef_entry, current_snapshot as current_coef_snapshot,
     lookup as lookup_coef, CoefSnapshot, CommitOutcome, Dim, ModelCoefs, COEF_CACHE, COEF_STAGING,
 };
+pub mod coef_snapshot;
+pub use coef_snapshot::load_latest_coef_snapshot;
 pub mod lease;
 pub use lease::{now_ms, upsert_protected, LeaseError, LeaseGuard, LeaseState, Mode, LEASE_POOL};
 pub mod credit_estimator;
