@@ -406,7 +406,6 @@ fn build_credit_lease_body(uid: &str) -> String {
         Some(state) => {
             let mode_str = match state.mode() {
                 gw_ledger::Mode::Protected => "protected",
-                gw_ledger::Mode::Unprotected => "unprotected",
             };
             let credits = state.credits();
             let expires_at_ms = state.expires_at_ms.load(Ordering::Acquire);

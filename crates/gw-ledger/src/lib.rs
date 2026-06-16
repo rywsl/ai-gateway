@@ -9,11 +9,13 @@ pub mod encoding;
 pub mod estimate_pricing;
 pub mod flusher;
 pub mod freeze;
+pub mod heartbeat;
 pub mod inflight;
 pub mod inflight_reaper;
 pub mod inflight_reconciler;
 pub mod instance_id;
 pub mod ledger_sweep;
+pub mod overflow;
 pub mod usage;
 
 pub use deduct_gc::DeductGc;

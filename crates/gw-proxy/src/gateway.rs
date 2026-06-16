@@ -406,6 +406,7 @@ pub struct LlmGateway {
     /// Read by `request_filter` step 8.5 to decide whether the request goes
     /// through the lease branch or the legacy soft-defense path.
     pub(crate) protection_cfg: gw_ledger::ProtectionConfig,
+    pub(crate) overflow_gate: std::sync::Arc<gw_ledger::overflow::OverflowGate>,
     pub(crate) classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     pub(crate) adapter_registry: Arc<gw_adapter::AdapterRegistry>,
     pub(crate) oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime>,
@@ -478,6 +479,7 @@ impl LlmGateway {
         cancel_grace_ms: u64,
         hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
         protection_cfg: gw_ledger::ProtectionConfig,
+        overflow_gate: std::sync::Arc<gw_ledger::overflow::OverflowGate>,
         classifier: Arc<dyn gw_core::error::ErrorClassifier>,
         adapter_registry: Arc<gw_adapter::AdapterRegistry>,
         oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime>,
@@ -536,6 +538,7 @@ impl LlmGateway {
             cancel_grace_ms,
             hard_cap_cfg,
             protection_cfg,
+            overflow_gate,
             classifier,
             adapter_registry,
             oauth_runtime,
@@ -867,6 +870,7 @@ impl ProxyHttp for LlmGateway {
             &self.mgmt_blacklist,
             &self.hard_cap_cfg,
             &self.protection_cfg,
+            &self.overflow_gate,
             self.files_gateway.as_ref(),
             Some(filters::request::GeminiFilesRoutingDeps {
                 store: &self.store,

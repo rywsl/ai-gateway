@@ -1,7 +1,8 @@
 //! Stream consumer (ADR-007) — XREADGROUP poll + invalidate-on-event.
 //!
-//! On boot we create two consumer groups (`events:entity` / `events:counter`)
-//! anchored at `$` so a fresh pod only sees events published after it started.
+//! On boot we create two consumer groups (`events:entity` /
+//! `events:counter:pod:<instance_id>`) anchored at `$` so a fresh pod only sees
+//! events published after it started.
 //! The cold-load chain in `EntityStore::*_or_load` covers the gap.
 //!
 //! Each event carries `{ns, id}` (entity stream) or `{ns, ...}` (counter
@@ -29,19 +30,24 @@ pub struct StreamConsumer {
 }
 
 const ENTITY_STREAM: &str = "events:entity";
-const COUNTER_STREAM: &str = "events:counter";
+const COUNTER_STREAM_PREFIX: &str = "events:counter:pod";
 const BLOCK_MS: u64 = 200;
 const COUNT_PER_POLL: u64 = 64;
+
+pub fn counter_stream_for_instance(instance_id: &str) -> String {
+    format!("{COUNTER_STREAM_PREFIX}:{instance_id}")
+}
 
 impl StreamConsumer {
     async fn ensure_groups(&self) -> Result<(), anyhow::Error> {
         let client = self.redis.pool.next();
+        let counter_stream = self.counter_stream();
         // mkstream=true so the stream is created if missing; tolerate BUSYGROUP.
         let _: Result<(), _> = client
             .xgroup_create(ENTITY_STREAM, &*self.instance_id, "$", true)
             .await;
         let _: Result<(), _> = client
-            .xgroup_create(COUNTER_STREAM, &*self.instance_id, "$", true)
+            .xgroup_create(counter_stream.as_str(), &*self.instance_id, "$", true)
             .await;
         Ok(())
     }
@@ -51,7 +57,7 @@ impl StreamConsumer {
     }
 
     async fn apply(&self, stream: &str, fields: &HashMap<String, String>) {
-        if stream == COUNTER_STREAM {
+        if stream == self.counter_stream() {
             let outcome = crate::counter_dispatch::dispatch(fields);
             match outcome {
                 crate::counter_dispatch::DispatchOutcome::UnknownNs => {
@@ -93,6 +99,10 @@ impl StreamConsumer {
             }
         };
         apply_entity_event(&self.store, ns, id).await;
+    }
+
+    fn counter_stream(&self) -> String {
+        counter_stream_for_instance(&self.instance_id)
     }
 }
 
@@ -215,6 +225,19 @@ fn module_name_from_config_id(id: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
+#[cfg(test)]
+mod counter_stream_tests {
+    use super::*;
+
+    #[test]
+    fn counter_stream_is_scoped_to_instance_id() {
+        assert_eq!(
+            counter_stream_for_instance("pod-a"),
+            "events:counter:pod:pod-a"
+        );
+    }
+}
+
 fn is_nogroup_error(e: &fred::error::RedisError) -> bool {
     e.to_string().contains("NOGROUP")
 }
@@ -234,6 +257,7 @@ impl ManagedLoop for StreamConsumer {
     async fn tick(&self) -> Outcome {
         let consumer_name = format!("{}-consumer", self.instance_id);
         let client = self.redis.pool.next();
+        let counter_stream = self.counter_stream();
         // Raw xreadgroup: RESP Null on BLOCK timeout is handled explicitly.
         let raw: Result<RedisValue, fred::error::RedisError> = client
             .xreadgroup(
@@ -242,7 +266,7 @@ impl ManagedLoop for StreamConsumer {
                 Some(COUNT_PER_POLL),
                 Some(BLOCK_MS),
                 false,
-                vec![ENTITY_STREAM, COUNTER_STREAM],
+                vec![ENTITY_STREAM, counter_stream.as_str()],
                 vec![">", ">"],
             )
             .await;

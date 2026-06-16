@@ -68,23 +68,46 @@ fn handle_protected_lease(fields: &HashMap<String, String>) -> DispatchOutcome {
         Some(s) => UserId::from(s.as_str()),
         None => return DispatchOutcome::InvalidFields,
     };
-    let mode_str = fields.get("mode").map(String::as_str).unwrap_or("");
-    if Mode::parse_str(mode_str).is_none() {
-        return DispatchOutcome::InvalidFields;
+    if let Some(mode_str) = fields.get("mode").map(String::as_str) {
+        if Mode::parse_str(mode_str) != Some(Mode::Protected) {
+            return DispatchOutcome::InvalidFields;
+        }
     }
-    let credits = fields
+    let credits = match fields
         .get("lease_credits")
         .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(0);
-    let expires = fields
+    {
+        Some(v) => v,
+        None => return DispatchOutcome::InvalidFields,
+    };
+    let expires = match fields
         .get("expires_at_ms")
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    let version = fields
-        .get("coef_table_version")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    let lease_id_str = fields.get("lease_id").cloned().unwrap_or_default();
+    {
+        Some(v) => v,
+        None => return DispatchOutcome::InvalidFields,
+    };
+    let lease_id_str = match fields.get("lease_id") {
+        Some(v) => v.clone(),
+        None => return DispatchOutcome::InvalidFields,
+    };
+    if fields.contains_key("coef_table_version") {
+        tracing::debug!(
+            target: "gw_ledger::counter_handler",
+            "protected_lease payload included legacy coef_table_version"
+        );
+    }
+    let version = crate::coef::current_snapshot().version;
+    if version == 0 {
+        tracing::warn!(
+            target: "gw_ledger::counter_handler",
+            user_id = %uid,
+            "protected_lease accepted before any coef_table_commit; acquisition will fail closed until coefs arrive"
+        );
+    }
+    if credits <= 0 || expires == 0 || lease_id_str.is_empty() {
+        return DispatchOutcome::InvalidFields;
+    }
     upsert_protected(&uid, credits, lease_id_str, version, expires);
     DispatchOutcome::Handled
 }
@@ -187,6 +210,34 @@ mod tests {
         COEF_STAGING.clear();
         // Note: LEASE_POOL is keyed by uid; tests use unique uids so no reset needed.
         guard
+    }
+
+    #[test]
+    fn protected_lease_handler_accepts_hard_mode_payload_without_mode() {
+        let uid_str = "u_handler_test_no_mode";
+        LEASE_POOL.remove(&UserId::from(uid_str));
+
+        let h = LedgerCounterHandler;
+        let f = fields(&[
+            ("ns", "protected_lease"),
+            ("user_id", uid_str),
+            ("lease_credits", "5000"),
+            ("lease_id", "lease-no-mode"),
+            ("expires_at_ms", "9999999999999"),
+            ("ttl_ms", "30000"),
+            ("policy_version", "11"),
+            ("ts_ms", "0"),
+        ]);
+        assert_eq!(h.handle("protected_lease", &f), DispatchOutcome::Handled);
+
+        let s = LEASE_POOL.get(&UserId::from(uid_str)).unwrap();
+        assert_eq!(s.mode(), Mode::Protected);
+        assert_eq!(s.credits(), 5000);
+        assert_eq!(
+            s.lease_id.load().as_str(),
+            "lease-no-mode",
+            "new Go producer no longer sends mode or coef_table_version"
+        );
     }
 
     #[test]
