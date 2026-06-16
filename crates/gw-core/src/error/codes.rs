@@ -6,19 +6,16 @@ pub const GW_AUTH_NO_KEY_PERMISSION: &str = "GW_AUTH_NO_KEY_PERMISSION";
 pub const GW_AUTH_IP_BLOCKED: &str = "GW_AUTH_IP_BLOCKED";
 pub const GW_AUTH_IP_NOT_ALLOWED: &str = "GW_AUTH_IP_NOT_ALLOWED";
 pub const GW_AUTH_SIGNATURE_INVALID: &str = "GW_AUTH_SIGNATURE_INVALID";
-pub const GW_QUOTA_BALANCE_ZERO: &str = "GW_QUOTA_BALANCE_ZERO";
+/// User balance or hard-mode overflow credit is insufficient. HTTP 402.
+pub const GW_QUOTA_BALANCE_INSUFFICIENT: &str = "GW_QUOTA_BALANCE_INSUFFICIENT";
+/// Balance cache and fallback balance source are unavailable. HTTP 503.
+pub const GW_QUOTA_BALANCE_CACHE_UNAVAILABLE: &str = "GW_QUOTA_BALANCE_CACHE_UNAVAILABLE";
+/// Credit coefficient table is unavailable for admission pricing. HTTP 503.
+pub const GW_QUOTA_COEF_TABLE_NOT_READY: &str = "GW_QUOTA_COEF_TABLE_NOT_READY";
 pub const GW_QUOTA_RPM_EXCEEDED: &str = "GW_QUOTA_RPM_EXCEEDED";
 pub const GW_QUOTA_RPM_KEY_EXCEEDED: &str = "GW_QUOTA_RPM_KEY_EXCEEDED";
 pub const GW_QUOTA_TPM_EXCEEDED: &str = "GW_QUOTA_TPM_EXCEEDED";
 pub const GW_QUOTA_CONCURRENT_EXCEEDED: &str = "GW_QUOTA_CONCURRENT_EXCEEDED";
-/// Protected-mode lease credits insufficient to cover the request's estimated cost.
-/// HTTP 402. Distinct from `GW_QUOTA_BALANCE_ZERO`: user may have non-zero balance
-/// but this Pod's lease share is exhausted; client may retry after next Go push.
-pub const GW_QUOTA_LEASE_INSUFFICIENT: &str = "GW_QUOTA_LEASE_INSUFFICIENT";
-/// Protected-mode lease has expired (now > expires_at_ms + lease_grace_ms) and
-/// Go has not pushed a renewal. HTTP 503 — this is an ops signal, not a user
-/// error. Triggers `gw_credit_lease_expired_total` for paging.
-pub const GW_QUOTA_LEASE_EXPIRED: &str = "GW_QUOTA_LEASE_EXPIRED";
 pub const GW_REQUEST_PROTOCOL_UNKNOWN: &str = "GW_REQUEST_PROTOCOL_UNKNOWN";
 pub const GW_REQUEST_INPUT_TOO_LARGE: &str = "GW_REQUEST_INPUT_TOO_LARGE";
 pub const GW_REQUEST_COST_TOO_HIGH: &str = "GW_REQUEST_COST_TOO_HIGH";

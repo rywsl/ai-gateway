@@ -3,7 +3,7 @@
 //! the global registry by `install_counter_handler()` at gateway boot.
 
 use crate::coef::{apply_coef_commit, apply_coef_entry, CommitOutcome, Dim};
-use crate::lease::{upsert_protected, upsert_unprotected, Mode};
+use crate::lease::{upsert_protected, Mode};
 use gw_core::ids::UserId;
 use gw_store::counter_dispatch::{register_handler, CounterHandler, DispatchOutcome};
 use gw_store::deduction::{DeductionState, DEDUCT};
@@ -69,33 +69,24 @@ fn handle_protected_lease(fields: &HashMap<String, String>) -> DispatchOutcome {
         None => return DispatchOutcome::InvalidFields,
     };
     let mode_str = fields.get("mode").map(String::as_str).unwrap_or("");
-    let mode = match Mode::parse_str(mode_str) {
-        Some(m) => m,
-        None => return DispatchOutcome::InvalidFields,
-    };
-    match mode {
-        Mode::Unprotected => {
-            upsert_unprotected(&uid);
-            DispatchOutcome::Handled
-        }
-        Mode::Protected => {
-            let credits = fields
-                .get("lease_credits")
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
-            let expires = fields
-                .get("expires_at_ms")
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let version = fields
-                .get("coef_table_version")
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let lease_id_str = fields.get("lease_id").cloned().unwrap_or_default();
-            upsert_protected(&uid, credits, lease_id_str, version, expires);
-            DispatchOutcome::Handled
-        }
+    if Mode::parse_str(mode_str).is_none() {
+        return DispatchOutcome::InvalidFields;
     }
+    let credits = fields
+        .get("lease_credits")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let expires = fields
+        .get("expires_at_ms")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let version = fields
+        .get("coef_table_version")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let lease_id_str = fields.get("lease_id").cloned().unwrap_or_default();
+    upsert_protected(&uid, credits, lease_id_str, version, expires);
+    DispatchOutcome::Handled
 }
 
 fn handle_coef_table(fields: &HashMap<String, String>) -> DispatchOutcome {
@@ -222,10 +213,9 @@ mod tests {
     }
 
     #[test]
-    fn protected_lease_handler_unprotected_clears_state() {
+    fn protected_lease_handler_rejects_unprotected_mode() {
         let uid_str = "u_handler_test_2";
         LEASE_POOL.remove(&UserId::from(uid_str));
-        // First seed protected state.
         upsert_protected(&UserId::from(uid_str), 1000, "l1".into(), 9, 9999999999999);
         assert_eq!(
             LEASE_POOL.get(&UserId::from(uid_str)).unwrap().mode(),
@@ -243,10 +233,13 @@ mod tests {
             ("coef_table_version", "0"),
             ("ts_ms", "0"),
         ]);
-        assert_eq!(h.handle("protected_lease", &f), DispatchOutcome::Handled);
+        assert_eq!(
+            h.handle("protected_lease", &f),
+            DispatchOutcome::InvalidFields
+        );
         assert_eq!(
             LEASE_POOL.get(&UserId::from(uid_str)).unwrap().mode(),
-            Mode::Unprotected
+            Mode::Protected
         );
     }
 

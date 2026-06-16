@@ -18,8 +18,8 @@ fn make_err() -> ErrorIR<'static> {
         category: ErrorCategory::ClientQuota,
         status: 402,
         upstream_status: None,
-        code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_ZERO),
-        message: Cow::Borrowed("balance zero"),
+        code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_INSUFFICIENT),
+        message: Cow::Borrowed("balance insufficient"),
         retryable: false,
         upstream_raw: None,
         request_id: "test-req-001",
@@ -38,7 +38,7 @@ fn openai_render_error_is_non_empty_json() {
     // OpenAI errors carry an `error` envelope; we only check the substring
     // here so codec internals can evolve without breaking this test.
     assert!(s.contains("error"));
-    assert!(s.contains(codes::GW_QUOTA_BALANCE_ZERO));
+    assert!(s.contains(codes::GW_QUOTA_BALANCE_INSUFFICIENT));
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn anthropic_render_error_is_non_empty_json() {
     let body = buf.freeze();
     assert!(!body.is_empty());
     let s = std::str::from_utf8(&body).expect("error body must be UTF-8");
-    assert!(s.contains(codes::GW_QUOTA_BALANCE_ZERO));
+    assert!(s.contains(codes::GW_QUOTA_BALANCE_INSUFFICIENT));
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn gemini_render_error_is_non_empty_json() {
     let body = buf.freeze();
     assert!(!body.is_empty());
     let s = std::str::from_utf8(&body).expect("error body must be UTF-8");
-    assert!(s.contains(codes::GW_QUOTA_BALANCE_ZERO));
+    assert!(s.contains(codes::GW_QUOTA_BALANCE_INSUFFICIENT));
 }
 
 #[test]

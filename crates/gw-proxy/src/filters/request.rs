@@ -880,7 +880,7 @@ pub async fn run(
             category: ErrorCategory::ClientQuota,
             status: 402,
             upstream_status: None,
-            code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_ZERO),
+            code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_INSUFFICIENT),
             message: Cow::Borrowed("user balance exhausted"),
             retryable: false,
             upstream_raw: None,
@@ -1187,7 +1187,7 @@ pub async fn run(
                     category: ErrorCategory::ClientQuota,
                     status: 402,
                     upstream_status: None,
-                    code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_ZERO),
+                    code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_INSUFFICIENT),
                     message: Cow::Borrowed("user circuit open"),
                     retryable: false,
                     upstream_raw: None,
@@ -1292,9 +1292,9 @@ pub async fn run(
                     .increment(1);
                     let err = ErrorIR {
                         category: ErrorCategory::ClientQuota,
-                        status: 402,
+                        status: 503,
                         upstream_status: None,
-                        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_INSUFFICIENT),
+                        code: Cow::Borrowed(codes::GW_QUOTA_COEF_TABLE_NOT_READY),
                         message: Cow::Borrowed(
                             "credit coefficients unavailable for protected mode",
                         ),
@@ -1340,7 +1340,7 @@ pub async fn run(
                         category: ErrorCategory::ClientQuota,
                         status: 402,
                         upstream_status: None,
-                        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_INSUFFICIENT),
+                        code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_INSUFFICIENT),
                         message: Cow::Borrowed("insufficient credits for this request"),
                         retryable: false,
                         upstream_raw: None,
@@ -1799,7 +1799,7 @@ fn lease_expired_error() -> ErrorIR<'static> {
         category: ErrorCategory::UpstreamError,
         status: 503,
         upstream_status: None,
-        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_EXPIRED),
+        code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_CACHE_UNAVAILABLE),
         message: Cow::Borrowed("lease expired; ops should investigate Go push pipeline"),
         retryable: false,
         upstream_raw: None,
@@ -1877,14 +1877,17 @@ mod lease_expired_tests {
     use gw_core::ids::ModelName;
 
     #[test]
-    fn lease_expired_error_is_503_ops_signal() {
+    fn lease_expired_error_is_503_cache_unavailable_signal() {
         let err = lease_expired_error();
 
         assert_eq!(
             err.status, 503,
             "lease-expired is an ops signal, codes.rs says 503"
         );
-        assert_eq!(err.code, Cow::Borrowed(codes::GW_QUOTA_LEASE_EXPIRED));
+        assert_eq!(
+            err.code,
+            Cow::Borrowed(codes::GW_QUOTA_BALANCE_CACHE_UNAVAILABLE)
+        );
         assert_eq!(err.category, ErrorCategory::UpstreamError);
     }
 

@@ -1,3 +1,4 @@
+use gw_core::error::codes;
 use gw_core::error::{AccountBlockReason, ClassifierOutcome, ErrorClass, Retryability};
 
 #[test]
@@ -25,4 +26,20 @@ fn error_class_account_blocked_carries_reason() {
 #[test]
 fn rate_limit_kind_use_only_no_redefine() {
     let _: ErrorClass = ErrorClass::RateLimitedUpstream(gw_core::ratelimit::RateLimitKind::Rpm);
+}
+
+#[test]
+fn phase2_quota_codes_are_balance_and_cache_or_coef_specific() {
+    assert_eq!(
+        codes::GW_QUOTA_BALANCE_INSUFFICIENT,
+        "GW_QUOTA_BALANCE_INSUFFICIENT"
+    );
+    assert_eq!(
+        codes::GW_QUOTA_BALANCE_CACHE_UNAVAILABLE,
+        "GW_QUOTA_BALANCE_CACHE_UNAVAILABLE"
+    );
+    assert_eq!(
+        codes::GW_QUOTA_COEF_TABLE_NOT_READY,
+        "GW_QUOTA_COEF_TABLE_NOT_READY"
+    );
 }
