@@ -255,7 +255,7 @@ impl TunnelStack {
         // Cold-start case: the ReconnectingTransport was just spawned and its
         // WS handshake has not completed yet. Flow into R-E failover via
         // GW_TUNNEL_NO_LIVE per spec §4.
-        if !is_socks5_node && transport.as_ref().map_or(true, |t| t.current().is_none()) {
+        if !is_socks5_node && transport.as_ref().is_none_or(|t| t.current().is_none()) {
             metrics::counter!(
                 "gw_tunnel_open_total",
                 "node_id" => node_id.to_owned(),
