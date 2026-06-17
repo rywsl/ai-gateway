@@ -265,3 +265,46 @@ fn runtime_operational_metrics_registered() {
         assert!(names.contains(&required), "missing metric: {required}");
     }
 }
+
+/// D3/D4 (#17): no catalog metric may advertise an unbounded per-identity label
+/// (`user_id` / `api_key_id`). These were removed from `gateway_tpm_consumed_total`
+/// and `gw_redos_timeout_total`; this test locks the cardinality contract so a
+/// future edit can't silently reintroduce a label-cardinality explosion. The
+/// bounded tunnel `node_id` label is intentionally allowed (see D5) and is not
+/// covered by this check.
+#[test]
+fn no_high_cardinality_id_labels_in_help() {
+    for m in METRICS {
+        for banned in ["user_id", "api_key_id"] {
+            assert!(
+                !m.help.contains(banned),
+                "metric {} help advertises high-cardinality label `{banned}`: {:?}",
+                m.name,
+                m.help
+            );
+        }
+    }
+}
+
+/// D9 (#17): the credit-lease observability gauges are part of the catalog and
+/// their HELP no longer carries the "sampler not yet wired" TODO. The sampler is
+/// in `gw_ledger::ledger_sweep`.
+#[test]
+fn credit_lease_gauges_registered() {
+    let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
+    for required in [
+        "gw_credit_lease_active_users",
+        "gw_credit_coef_table_version_active",
+    ] {
+        assert!(names.contains(&required), "missing metric: {required}");
+    }
+    for m in METRICS.iter().filter(|m| {
+        m.name == "gw_credit_lease_active_users" || m.name == "gw_credit_coef_table_version_active"
+    }) {
+        assert!(
+            !m.help.to_ascii_lowercase().contains("todo"),
+            "{} help should not advertise a TODO once the sampler is wired",
+            m.name
+        );
+    }
+}

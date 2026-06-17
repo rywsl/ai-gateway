@@ -157,7 +157,11 @@ impl BillingBacklog {
             .unwrap_or(0);
         let key = format!("backlog_shutdown_{ts}");
         let file = root
-            .create(&key, std::num::NonZeroUsize::new(1).unwrap())
+            .create_with_policy(
+                &key,
+                std::num::NonZeroUsize::new(1).unwrap(),
+                gw_runtime::SpillPolicy::KeepOnDrop,
+            )
             .await?;
         for env in &drained {
             let mut bytes = serde_json::to_vec(env)
