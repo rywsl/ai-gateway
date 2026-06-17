@@ -1,5 +1,5 @@
 //! Per-tick sweep loop for in-memory ledger maps:
-//! - `lease::sweep_unprotected` evicts idle Unprotected entries.
+//! - `lease::sweep_leases` owns lease-pool cleanup hooks.
 //! - `coef::sweep_orphans` evicts orphan staging versions.
 //!
 //! Supervised by `gw_runtime::Supervisor` (catch_unwind +
@@ -12,8 +12,7 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 
 /// Sweep cadence. 60 s matches DeductGc and is short enough that the
-/// LEASE_POOL_IDLE_TTL_MS / COEF_STAGING_SAFETY_MARGIN windows are
-/// honoured without unnecessary churn.
+/// COEF_STAGING_SAFETY_MARGIN windows are honoured without unnecessary churn.
 const LEDGER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Spawn the periodic ledger sweep. The Supervisor recovers from panics
@@ -32,7 +31,7 @@ pub fn spawn(shutdown: ShutdownToken) -> JoinHandle<()> {
                         return Ok(());
                     }
                     _ = tick.tick() => {
-                        let lease_removed = lease::sweep_unprotected();
+                        let lease_removed = lease::sweep_leases();
                         let coef_removed = coef::sweep_orphans();
                         if lease_removed > 0 || coef_removed > 0 {
                             debug!(

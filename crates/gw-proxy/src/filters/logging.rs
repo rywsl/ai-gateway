@@ -66,6 +66,7 @@ pub async fn run(
     affinity: &gw_routing::affinity::AffinityManager,
     ratelimit: &Arc<RateLimitGuard>,
     quota_state_updates: Option<&Arc<gw_store::quota_state::QuotaStateUpdateQueue>>,
+    overflow_gate: &Arc<gw_ledger::overflow::OverflowGate>,
 ) {
     // W2-T4: force Terminated on any request that reached Sent or Streaming
     // but didn't arrive at a terminal state (cancel, error, deadline, etc.).
@@ -157,6 +158,18 @@ pub async fn run(
                     .increment(1);
                 }
                 guard.settle_actual(actual);
+                if let Err(err) = overflow_gate
+                    .record_actual(guard.uid().as_ref(), guard.reserved(), actual)
+                    .await
+                {
+                    tracing::warn!(
+                        target: "gw_proxy::filters::logging",
+                        user_id = %guard.uid(),
+                        request_id = %ctx.request_id,
+                        error = ?err,
+                        "credit-lease overflow record_actual failed"
+                    );
+                }
                 ctx.credits_consumed = Some(actual);
                 ctx.coef_table_version_at_settle = Some(coef_version);
             }

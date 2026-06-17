@@ -11,8 +11,8 @@ use gw_core::ids::UserId;
 use gw_core::usage::UsageSnapshot;
 use gw_ledger::{
     actual_usage_credits, apply_coef_commit, apply_coef_entry, current_coef_snapshot,
-    estimate_request_credits, now_ms, upsert_protected, upsert_unprotected, CoefSnapshot,
-    CommitOutcome, Dim, LeaseError, LeaseGuard, Mode, COEF_CACHE, COEF_STAGING, LEASE_POOL,
+    estimate_request_credits, now_ms, upsert_protected, CoefSnapshot, CommitOutcome, Dim,
+    LeaseError, LeaseGuard, COEF_CACHE, COEF_STAGING, LEASE_POOL,
 };
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -115,25 +115,6 @@ fn lease_expiration_triggers_lease_error_expired() {
     );
     let err = LeaseGuard::try_acquire(&uid, 1000, now_ms(), 0).unwrap_err();
     assert!(matches!(err, LeaseError::Expired));
-}
-
-#[test]
-fn switching_back_to_unprotected_clears_state() {
-    let _coef_guard = reset_coef_state();
-    let version = 1_000_004u64;
-    let model_id = "credit-lease-int-model-4";
-    install_coefs(version, model_id, 10, 20);
-
-    let uid = UserId::from("u_credit_lease_int_4");
-    upsert_protected(
-        &uid,
-        10_000,
-        "lease-int-4".into(),
-        version,
-        now_ms() + 600_000,
-    );
-    upsert_unprotected(&uid);
-    assert_eq!(LEASE_POOL.get(&uid).unwrap().mode(), Mode::Unprotected);
 }
 
 #[test]
@@ -273,8 +254,6 @@ fn e2e_protected_user_request_uses_lease_path() {
     // 8. Read usage:records latest; assert pod_id non-empty,
     //    credits_consumed > 0, coef_table_version matches push.
     // 9. Pop another request that would overshoot lease; assert 402 with
-    //    GW_QUOTA_LEASE_INSUFFICIENT.
-    // 10. XADD ns=protected_lease mode=unprotected; assert next request 200
-    //     and credits_consumed = None in usage_records.
+    //    GW_QUOTA_BALANCE_INSUFFICIENT.
     panic!("e2e fixture not wired; see comment block");
 }
