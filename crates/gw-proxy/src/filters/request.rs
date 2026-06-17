@@ -73,6 +73,7 @@ pub async fn run(
     mgmt_blacklist: &Arc<RedisJwtBlacklist>,
     hard_cap_cfg: &gw_auth::hard_cap::HardCapCfg,
     protection_cfg: &gw_ledger::ProtectionConfig,
+    overflow_gate: &Arc<gw_ledger::overflow::OverflowGate>,
     files_gateway: &dyn GeminiFilesGateway,
     routing_deps: Option<GeminiFilesRoutingDeps<'_>>,
 ) -> Result<bool> {
@@ -880,7 +881,7 @@ pub async fn run(
             category: ErrorCategory::ClientQuota,
             status: 402,
             upstream_status: None,
-            code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_ZERO),
+            code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_INSUFFICIENT),
             message: Cow::Borrowed("user balance exhausted"),
             retryable: false,
             upstream_raw: None,
@@ -1187,7 +1188,7 @@ pub async fn run(
                     category: ErrorCategory::ClientQuota,
                     status: 402,
                     upstream_status: None,
-                    code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_ZERO),
+                    code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_INSUFFICIENT),
                     message: Cow::Borrowed("user circuit open"),
                     retryable: false,
                     upstream_raw: None,
@@ -1286,15 +1287,20 @@ pub async fn run(
                     // protected mode without coef data cannot safely admit
                     // requests.
                     metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "no_coefs"
+                    )
+                    .increment(1);
+                    metrics::counter!(
                         "gw_credit_lease_acquire_total",
                         "result" => "no_coefs"
                     )
                     .increment(1);
                     let err = ErrorIR {
                         category: ErrorCategory::ClientQuota,
-                        status: 402,
+                        status: 503,
                         upstream_status: None,
-                        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_INSUFFICIENT),
+                        code: Cow::Borrowed(codes::GW_QUOTA_COEF_TABLE_NOT_READY),
                         message: Cow::Borrowed(
                             "credit coefficients unavailable for protected mode",
                         ),
@@ -1306,6 +1312,11 @@ pub async fn run(
                     bail!(session, ctx, &err, &request_id)
                 }
             };
+            metrics::histogram!(
+                gw_ledger::metrics::CREDIT_LEASE_ESTIMATE_CREDITS,
+                "model_id" => model_id_str.clone()
+            )
+            .record(credits as f64);
 
             let now = gw_ledger::now_ms();
             match gw_ledger::LeaseGuard::try_acquire(
@@ -1315,6 +1326,11 @@ pub async fn run(
                 protection_cfg.lease_grace_ms,
             ) {
                 Ok(guard) => {
+                    metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "success"
+                    )
+                    .increment(1);
                     metrics::counter!(
                         "gw_credit_lease_acquire_total",
                         "result" => "ok"
@@ -1326,37 +1342,80 @@ pub async fn run(
                     return Ok(false);
                 }
                 Err(gw_ledger::LeaseError::Expired) => {
+                    metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "expired"
+                    )
+                    .increment(1);
                     metrics::counter!("gw_credit_lease_expired_total").increment(1);
-                    let err = lease_expired_error();
-                    bail!(session, ctx, &err, &request_id)
+                    if let Err(err) = run_overflow_gate(
+                        overflow_gate,
+                        &merged.effective_user_id,
+                        credits,
+                        "expired",
+                    )
+                    .await
+                    {
+                        bail!(session, ctx, &err, &request_id)
+                    }
+                    {
+                        ctx.merged_perm = Some(merged);
+                        ctx.phase_end();
+                        return Ok(false);
+                    }
                 }
                 Err(gw_ledger::LeaseError::Insufficient { .. }) => {
+                    metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "insufficient"
+                    )
+                    .increment(1);
                     metrics::counter!(
                         "gw_credit_lease_acquire_total",
                         "result" => "insufficient"
                     )
                     .increment(1);
-                    let err = ErrorIR {
-                        category: ErrorCategory::ClientQuota,
-                        status: 402,
-                        upstream_status: None,
-                        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_INSUFFICIENT),
-                        message: Cow::Borrowed("insufficient credits for this request"),
-                        retryable: false,
-                        upstream_raw: None,
-                        request_id: "",
-                        retry_after_secs: None,
-                    };
-                    bail!(session, ctx, &err, &request_id)
+                    if let Err(err) = run_overflow_gate(
+                        overflow_gate,
+                        &merged.effective_user_id,
+                        credits,
+                        "insufficient",
+                    )
+                    .await
+                    {
+                        bail!(session, ctx, &err, &request_id)
+                    }
+                    {
+                        ctx.merged_perm = Some(merged);
+                        ctx.phase_end();
+                        return Ok(false);
+                    }
                 }
                 Err(gw_ledger::LeaseError::NoLease) => {
                     // Race: in_protected was true at the get, but state was
-                    // wiped (e.g., concurrent unprotected push) between then
-                    // and try_acquire. Fall through to legacy soft-defense
-                    // path (step 9-10).
+                    // wiped between then and try_acquire. Hard mode routes
+                    // this to overflow before any legacy soft-defense path.
+                    metrics::counter!(
+                        gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
+                        "result" => "nolease"
+                    )
+                    .increment(1);
                     metrics::counter!("gw_credit_lease_warmup_pending_total").increment(1);
-                    // Note: do not return here. Let control flow continue to
-                    // step 9 (hard caps) and step 10 (RequestFreeze).
+                    if let Err(err) = run_overflow_gate(
+                        overflow_gate,
+                        &merged.effective_user_id,
+                        credits,
+                        "no_lease",
+                    )
+                    .await
+                    {
+                        bail!(session, ctx, &err, &request_id)
+                    }
+                    {
+                        ctx.merged_perm = Some(merged);
+                        ctx.phase_end();
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -1794,17 +1853,76 @@ pub fn apikey_module_blocks(api_key_id: Option<&ApiKeyId>, enabled: bool) -> boo
     api_key_id.is_some() && !enabled
 }
 
-fn lease_expired_error() -> ErrorIR<'static> {
+fn overflow_error_for_decision(
+    decision: gw_ledger::overflow::OverflowDecision,
+) -> Option<ErrorIR<'static>> {
+    match decision {
+        gw_ledger::overflow::OverflowDecision::Allow => None,
+        gw_ledger::overflow::OverflowDecision::BalanceInsufficient => Some(ErrorIR {
+            category: ErrorCategory::ClientQuota,
+            status: 402,
+            upstream_status: None,
+            code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_INSUFFICIENT),
+            message: Cow::Borrowed("insufficient credits for this request"),
+            retryable: false,
+            upstream_raw: None,
+            request_id: "",
+            retry_after_secs: None,
+        }),
+    }
+}
+
+fn overflow_error_for_failure(err: &gw_ledger::overflow::OverflowError) -> ErrorIR<'static> {
+    let message = match err {
+        gw_ledger::overflow::OverflowError::CacheUnavailable => "balance cache unavailable",
+        gw_ledger::overflow::OverflowError::Redis(_) => "balance cache unavailable",
+        gw_ledger::overflow::OverflowError::Pg(_) => "balance fallback unavailable",
+    };
     ErrorIR {
         category: ErrorCategory::UpstreamError,
         status: 503,
         upstream_status: None,
-        code: Cow::Borrowed(codes::GW_QUOTA_LEASE_EXPIRED),
-        message: Cow::Borrowed("lease expired; ops should investigate Go push pipeline"),
+        code: Cow::Borrowed(codes::GW_QUOTA_BALANCE_CACHE_UNAVAILABLE),
+        message: Cow::Borrowed(message),
         retryable: false,
         upstream_raw: None,
         request_id: "",
         retry_after_secs: None,
+    }
+}
+
+async fn run_overflow_gate(
+    overflow_gate: &Arc<gw_ledger::overflow::OverflowGate>,
+    user_id: &UserId,
+    estimate_credits: i64,
+    lease_result: &'static str,
+) -> std::result::Result<(), ErrorIR<'static>> {
+    match overflow_gate
+        .check(user_id.as_ref(), estimate_credits)
+        .await
+    {
+        Ok(decision) => {
+            if let Some(err) = overflow_error_for_decision(decision) {
+                return Err(err);
+            }
+            metrics::counter!(
+                "gw_credit_overflow_gate_total",
+                "result" => "allow",
+                "lease_result" => lease_result,
+            )
+            .increment(1);
+            Ok(())
+        }
+        Err(err) => {
+            tracing::error!(
+                target: "gw_proxy::request",
+                user_id = %user_id,
+                lease_result,
+                error = ?err,
+                "overflow gate failed"
+            );
+            Err(overflow_error_for_failure(&err))
+        }
     }
 }
 
@@ -1877,14 +1995,30 @@ mod lease_expired_tests {
     use gw_core::ids::ModelName;
 
     #[test]
-    fn lease_expired_error_is_503_ops_signal() {
-        let err = lease_expired_error();
-
-        assert_eq!(
-            err.status, 503,
-            "lease-expired is an ops signal, codes.rs says 503"
+    fn overflow_decision_error_mapping_keeps_quota_vs_system_codes_distinct() {
+        assert!(
+            overflow_error_for_decision(gw_ledger::overflow::OverflowDecision::Allow).is_none()
         );
-        assert_eq!(err.code, Cow::Borrowed(codes::GW_QUOTA_LEASE_EXPIRED));
+
+        let insufficient =
+            overflow_error_for_decision(gw_ledger::overflow::OverflowDecision::BalanceInsufficient)
+                .expect("insufficient maps to error");
+        assert_eq!(insufficient.status, 402);
+        assert_eq!(
+            insufficient.code,
+            Cow::Borrowed(codes::GW_QUOTA_BALANCE_INSUFFICIENT)
+        );
+        assert_eq!(insufficient.category, ErrorCategory::ClientQuota);
+    }
+
+    #[test]
+    fn overflow_failure_maps_to_503_cache_unavailable() {
+        let err = overflow_error_for_failure(&gw_ledger::overflow::OverflowError::CacheUnavailable);
+        assert_eq!(err.status, 503);
+        assert_eq!(
+            err.code,
+            Cow::Borrowed(codes::GW_QUOTA_BALANCE_CACHE_UNAVAILABLE)
+        );
         assert_eq!(err.category, ErrorCategory::UpstreamError);
     }
 

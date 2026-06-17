@@ -9,11 +9,14 @@ pub mod encoding;
 pub mod estimate_pricing;
 pub mod flusher;
 pub mod freeze;
+pub mod heartbeat;
 pub mod inflight;
 pub mod inflight_reaper;
 pub mod inflight_reconciler;
 pub mod instance_id;
 pub mod ledger_sweep;
+pub mod metrics;
+pub mod overflow;
 pub mod usage;
 
 pub use deduct_gc::DeductGc;
@@ -32,11 +35,10 @@ pub use coef::{
     apply_coef_commit, apply_coef_entry, current_snapshot as current_coef_snapshot,
     lookup as lookup_coef, CoefSnapshot, CommitOutcome, Dim, ModelCoefs, COEF_CACHE, COEF_STAGING,
 };
+pub mod coef_snapshot;
+pub use coef_snapshot::load_latest_coef_snapshot;
 pub mod lease;
-pub use lease::{
-    now_ms, upsert_protected, upsert_unprotected, LeaseError, LeaseGuard, LeaseState, Mode,
-    LEASE_POOL,
-};
+pub use lease::{now_ms, upsert_protected, LeaseError, LeaseGuard, LeaseState, Mode, LEASE_POOL};
 pub mod credit_estimator;
 pub use credit_estimator::{actual_usage_credits, estimate_request_credits, EstimatorError};
 pub mod counter_handler;

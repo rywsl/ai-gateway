@@ -6,8 +6,7 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ProtectionConfig {
-    /// Kill switch. When false, Rust does not subscribe to `protected_lease`
-    /// ns and all requests run the legacy `frozen_micro` soft-defense path.
+    /// Kill switch. Hard-mode protection is enabled by default.
     pub enabled: bool,
     /// Clock-skew tolerance window (ms) when checking `now > expires_at`.
     pub lease_grace_ms: u64,
@@ -20,8 +19,8 @@ pub struct ProtectionConfig {
 impl Default for ProtectionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            lease_grace_ms: 5_000,
+            enabled: true,
+            lease_grace_ms: 30_000,
             default_output_ceiling_tokens: 8192,
         }
     }
@@ -32,21 +31,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_disables_protection() {
+    fn default_enables_hard_mode_protection() {
         let cfg = ProtectionConfig::default();
-        assert!(!cfg.enabled);
-        assert_eq!(cfg.lease_grace_ms, 5_000);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.lease_grace_ms, 30_000);
         assert_eq!(cfg.default_output_ceiling_tokens, 8192);
     }
 
     #[test]
     fn deserialize_partial_overrides_keep_defaults() {
         let toml_text = r#"
-            enabled = true
+            default_output_ceiling_tokens = 4096
         "#;
         let cfg: ProtectionConfig = toml::from_str(toml_text).unwrap();
         assert!(cfg.enabled);
-        assert_eq!(cfg.lease_grace_ms, 5_000);
-        assert_eq!(cfg.default_output_ceiling_tokens, 8192);
+        assert_eq!(cfg.lease_grace_ms, 30_000);
+        assert_eq!(cfg.default_output_ceiling_tokens, 4096);
     }
 }

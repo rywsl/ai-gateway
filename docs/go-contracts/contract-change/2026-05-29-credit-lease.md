@@ -1,5 +1,7 @@
 # 2026-05-29 — Credit Lease 防透支硬保护契约
 
+> **Deprecated as of 2026-06-16.** This file is retained only as historical contract context. The implemented hard-mode contract removed protected/unprotected mode switching, removed `protected_lease.coef_table_version`, and moved credit-lease events from the global `events:counter` stream to per-pod `events:counter:pod:<pod_id>` streams with Rust heartbeat discovery through `gw:active_pods` + `gw:active_pod:<pod_id>`. Use `docs/superpowers/specs/2026-06-16-credit-lease-hard-mode-design.md` and current `docs/spec/06-billing-ledger.md` as the source of truth.
+
 > **Status**: 契约变更记录(Awaiting Go-side implementation)
 > **日期**: 2026-05-29
 > **触发来源**: Rust 侧 spec [`docs/spec/06-billing-ledger.md`](../../spec/06-billing-ledger.md)

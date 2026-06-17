@@ -125,6 +125,7 @@ struct Wired {
     /// Threaded into `request_filter` so step 8.5 can decide whether to admit
     /// via the lease branch or fall through to the legacy soft-defense path.
     protection_cfg: gw_ledger::ProtectionConfig,
+    overflow_gate: Arc<gw_ledger::overflow::OverflowGate>,
     classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     adapter_registry: Arc<gw_adapter::AdapterRegistry>,
     oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime>,
@@ -367,6 +368,7 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.cancel_grace_ms,
                 wired.hard_cap_cfg,
                 wired.protection_cfg.clone(),
+                wired.overflow_gate,
                 wired.classifier,
                 wired.adapter_registry,
                 wired.oauth_runtime,
@@ -1078,6 +1080,34 @@ async fn bootstrap(
     // 4d. InflightLedger + background tasks (W2-T6).
     // instance_id was resolved above (before Ledger::start) and is reused here.
     gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
+    match gw_ledger::load_latest_coef_snapshot(&redis.pool).await {
+        Ok(Some(outcome)) => {
+            tracing::info!(
+                target: "gw_gateway",
+                ?outcome,
+                "loaded latest credit coef snapshot before active pod heartbeat"
+            );
+        }
+        Ok(None) => {
+            tracing::warn!(
+                target: "gw_gateway",
+                "no latest credit coef snapshot found before active pod heartbeat"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "gw_gateway",
+                error = ?e,
+                "failed to load latest credit coef snapshot before active pod heartbeat"
+            );
+        }
+    }
+    let active_pod_heartbeat = gw_ledger::heartbeat::spawn_active_pod_heartbeat(
+        (*redis.pool).clone(),
+        instance_id.clone(),
+        shutdown_token.clone(),
+    );
+    shutdown.register(active_pod_heartbeat);
     let reaper_handle = gw_ledger::inflight_reaper::spawn(
         (*redis.pool).clone(),
         instance_id.clone(),
@@ -1089,6 +1119,11 @@ async fn bootstrap(
     let inflight = Arc::new(gw_ledger::inflight::InflightLedger::new(
         (*redis.pool).clone(),
         instance_id.clone(),
+    ));
+    let overflow_gate = Arc::new(gw_ledger::overflow::OverflowGate::new(
+        (*redis.pool).clone(),
+        pg.clone(),
+        gw_ledger::overflow::OverflowConfig::default(),
     ));
 
     // W4-T4 — Startup reconciler: scan billing:inflight:<instance_id>:* for
@@ -1139,14 +1174,14 @@ async fn bootstrap(
     let consumer = Arc::new(gw_store::stream_consumer::StreamConsumer {
         redis: redis.clone(),
         store: store.clone(),
-        instance_id: format!("gw-{}", std::process::id()),
+        instance_id: instance_id.clone(),
     });
     // start() is sync and infallible: Supervisor::spawn handles ensure() on boot
     // and automatically recreates groups on NOGROUP (e.g. after Redis FLUSHALL).
     let _consumer_handle = consumer.start();
     tracing::info!(
         target: "gw_gateway",
-        "stream consumer started (events:entity, events:counter) with XREADGROUP invalidate-on-event"
+        "stream consumer started (events:entity, events:counter:pod:<instance_id>) with XREADGROUP invalidate-on-event"
     );
 
     if cfg.control_plane.enabled {
@@ -1613,6 +1648,7 @@ async fn bootstrap(
                 max_cost_micro: cfg.auth.hard_cap_max_cost_micro,
             },
             protection_cfg: cfg.protection.clone(),
+            overflow_gate,
             classifier: Arc::new(gw_core::error::DefaultClassifier),
             adapter_registry,
             oauth_runtime,

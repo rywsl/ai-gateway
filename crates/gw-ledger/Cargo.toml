@@ -12,8 +12,10 @@ gw-runtime = { path = "../gw-runtime" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time", "macros"] }
 async-trait.workspace = true
+thiserror.workspace = true
 time.workspace = true
 fred.workspace = true
 futures.workspace = true

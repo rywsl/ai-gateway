@@ -116,20 +116,20 @@ Key design decisions:
 
 ### Step 8.5 — Credit lease (protected mode)
 
-When `[protection].enabled = true` and the user has been pushed into protected mode
-via `events:counter ns=protected_lease` (`mode=protected`):
+When `[protection].enabled = true` and the user has a protected lease entry from
+`events:counter ns=protected_lease` (`mode=protected`):
 
 1. Resolve `max_output_tokens` (request `max_tokens` → `default_output_ceiling_tokens` from config).
 2. Read the lease's `coef_table_version` and call `estimate_request_credits` to compute the
    reserved credits for this request (input + max_output, 2-dim).
 3. `LeaseGuard::try_acquire`:
-   - `Expired` → 503 `GW_QUOTA_LEASE_EXPIRED` (operator signal; the Go push pipeline is stalled).
-   - `Insufficient` → 402 `GW_QUOTA_LEASE_INSUFFICIENT` (client retries after next Go push).
-   - `NoLease` (race with mode flip) → fall through to legacy soft defense (step 9/10).
+   - `Expired` → 503 `GW_QUOTA_BALANCE_CACHE_UNAVAILABLE` (balance/lease cache unavailable).
+   - `Insufficient` → 402 `GW_QUOTA_BALANCE_INSUFFICIENT`.
+   - `NoLease` (warmup/race) → fall through to legacy soft defense (step 9/10).
    - `Ok(guard)` → store `lease_guard` on `ReqCtx` and **skip step 16** `RequestFreeze`.
 
 If `estimate_request_credits` fails (no coefs for the lease version), the request is
-fail-closed-rejected with `GW_QUOTA_LEASE_INSUFFICIENT`.
+fail-closed-rejected with `GW_QUOTA_COEF_TABLE_NOT_READY`.
 
 Spec: [`docs/spec/06-billing-ledger.md`](spec/06-billing-ledger.md).
 
@@ -137,7 +137,7 @@ Spec: [`docs/spec/06-billing-ledger.md`](spec/06-billing-ledger.md).
 10. **5-tier permission merge** — `merge_permissions(AuthCtx, store, global_rpm)` produces a `MarkupChainSnapshot`. Tier order: global → user-group → user → sub-account → api-key; intersection on lists, min-positive on `rpm`/`tpm`, product on markup. Sets `forced_model_group` + `effective_user_id` (parent on sub-accounts).
 11. **Model permission** — `merged.allowed_models.contains(&model_name)`; deny → `GW_REQUEST_MODEL_NOT_FOUND` 403. When the resolved `ApiKeyEntry` carries a `model_whitelist_regex`, `check_model_whitelist_regex()` runs after the static list check: the pattern is compiled into a `ModelPermission` via `ModelPermission::new(pattern, PermissionEffect::Allow)`, then evaluated with `check_with_budget(model_name)` under a 100 ms per-call ReDoS budget (`BUDGET_MS=100`). Outcomes: `None` regex → skip (static list governs). Compile error → `GW_REQUEST_MODEL_NOT_FOUND` 403. Match → allow. No match → `GW_REQUEST_MODEL_NOT_FOUND` 403. Budget timeout → counted by `RedosTracker` (per-key `OnceLock` singleton); after `TIMEOUT_THRESHOLD=10` consecutive timeouts the key's regex is auto-disabled and all subsequent requests are denied with 403 (fail-closed, not silently skipped).
 11b. **Capability resolve (G13, ADR-G13-2)** — when `LlmGateway.capability_resolver` is wired (always, in production bootstrap), `CapabilityResolver::resolve` collapses `ApiKeyEntry.force_capabilities` (key-forced) + `Model.capabilities` (model) + the comma-split `x-require-capability` header (header-require) into a single `RequiredCapabilities` set, with `MatchMode::Exclusive` when `ApiKeyEntry.match_mode_exclusive` is set. The result is stashed on `ctx.required_caps`. The backend (`EntityStoreResolveBackend`) reads all three inputs from the `EntityStore`, soft-failing to the non-restrictive default on a store miss; a resolver error is non-fatal (empty set → unconstrained route). Metric `gw_capability_resolve_total{match}`. Consumed in §2.3 `upstream_peer` candidate filtering.
-12. **Balance check** — read `counter:user:<uid>:base_micro`, `deducted_micro`, and `frozen_micro`, then compute `available = base - deducted - frozen`. `<= 0` → `GW_QUOTA_BALANCE_ZERO` 402.
+12. **Balance check** — read `counter:user:<uid>:base_micro`, `deducted_micro`, and `frozen_micro`, then compute `available = base - deducted - frozen`. `<= 0` → `GW_QUOTA_BALANCE_INSUFFICIENT` 402.
 12b. **Daily token quota (G3, ADR-G3-2)** — when `user.daily_quota_tokens > 0`, GET `counter:user:{effective_user_id}:daily_tokens:{YYYY-MM-DD}` (UTC) via `CounterStore::get_str_key`, then `check_daily_quota(consumed, estimated_tokens, quota)` rejects with `403 GW_QUOTA_DAILY_TOKENS_EXCEEDED` when `consumed + estimated_tokens > quota`. `estimated_tokens` is input plus the request/default output cap from `EstimatePricing` when available, never the micro-unit freeze estimate. `quota == 0` is unlimited and short-circuits before the Redis read. The post-increment of actual `input + output` tokens with a 48 h TTL lives in §2.8 `logging`.
 13. **User circuit** — `USER_CIRCUIT.get(&effective_user_id)`. `Open { until, .. }` and `now < until` → 402 short-circuit. The flusher (Phase 5) populates this when balance flips negative.
 14. **Rate limit** — `RateLimitGuard::check(&merged)` (governor RPM, per-user bucket). If streaming, `check_stream_slot()` returns a RAII ticket on `ctx.stream_slot`. The vendor key is not picked until `upstream_peer`, so per-vendor-key limits are applied there: `AdaptiveRpmManager::try_admit` diverts over-ceiling learned keys, then `RateLimitGuard::check_key(picked.key_id, picked.rpm_limit)` applies the hard local key RPM gate and can return `429 GW_QUOTA_RPM_KEY_EXCEEDED`.
