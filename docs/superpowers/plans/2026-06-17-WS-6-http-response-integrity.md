@@ -349,6 +349,22 @@ After landing, dispatch a sonnet review with prompt template `tdd-adversarial-re
 
 ### TASK W6-T02 — Three-mode preflight (REV-FINAL-H6.1, Proxy-7, R24, Proxy-8 hookup)
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 补充 (2026-06-17)
+>
+> **此 task 与 W6-T08 (M8) 共同治理 protected mode parse failure 路径。必须遵守教学矩阵 M8。**
+>
+> **触碰元素**: A8 (`filters/request.rs:1220-1422`) + A9 (`filters/logging.rs:145-200`) + D6/D8/D11
+> **必须 NOT 做**（摘自 M8 + 协同约束）:
+> - **不**在 response 路径多写 LeaseGuard release（lease release 完全由 W6-T08 / WS-1 T17 治理；W6-T02 仅设置 `ctx.upstream_error_code`）
+> - **不**在 response 路径做 overflow_consumed 退款
+> - **不**让 protected 用户进 frozen_micro 软防（D8）
+> - **不**改 `record_actual_delta` 公式
+> **完整矩阵**: 见 v2.1 corrections §11 **M8**
+>
+> 执行前必读 M8。PR 描述必须列明"已遵守教学矩阵 M8 边界：W6-T02 仅设置 ctx 状态，lease 收尾归 W6-T08/WS-1 T17"。
+
+---
+
 **【是什么 What it IS】**
 - A change spanning `crates/gw-proxy/src/gateway.rs` (response_filter + response_body_filter), `crates/gw-proxy/src/filters/response.rs` (non-stream branch), and the codec error-frame emitter in `crates/gw-codec/src/error_passthrough.rs`.
 - Three concrete sub-changes:
@@ -361,7 +377,7 @@ After landing, dispatch a sonnet review with prompt template `tdd-adversarial-re
 - NOT a change to Pingora's `ProxyHttp` filter ordering.
 - NOT a change to `stream_probe.rs` first-N logic (that lives in WS-3's scope for cap; this task only touches the parse-fail late path).
 - NOT a new HTTP error code: `GW_UPSTREAM_PROTOCOL_DECODE_ERROR` and `GW_UPSTREAM_BODY_TRUNCATED` already exist in `crates/gw-core/src/error/codes.rs` (verify by `rg 'GW_UPSTREAM_PROTOCOL_DECODE_ERROR' crates/gw-core/src/error/`; if missing, add them — both should be present since gateway.rs:240 references the former).
-- NOT the lease/billing side of R7. WS-1 task T17 owns lease release + `credits_consumed = Some(0)`.
+- NOT the lease/billing side of R7. Per M8, lease release (idempotent flip, **no refund**) is owned by **W6-T08 / WS-1 T17**; **W6-T02 only sets `ctx.upstream_error_code`** and never calls `LeaseGuard::release` / `RequestFreeze::release` / `overflow_gate.record_actual` on the response path. WS-1 T17 owns the `UsageRecord { credits_consumed: Some(0) }` emission.
 
 **【为什么 Why this bug exists / why fix】**
 - Root cause Proxy-7: response_filter cannot inspect body; an `Err` at parse time arrives after the chunk is forwarded. Verified at gateway.rs:1453-1580 (`response_body_filter` returns `Ok` once `filters::response::run` mutates `body`; Pingora sends the chunk immediately after).
@@ -476,7 +492,7 @@ Then apply the patches described in the DO block. For the new `render_sse_error_
 - Blocked by: error codes `GW_UPSTREAM_PROTOCOL_DECODE_ERROR` and `GW_UPSTREAM_BODY_TRUNCATED` present in `crates/gw-core/src/error/codes.rs` (verify; if missing, add as step 0 of this task).
 - Blocks: W6-T08 (fail_to_proxy rendering of the 502 JSON body).
 - Same-PR sibling: WS-3 task for `upstream_body_accum` cap (REV-FINAL-V1 RejectRequest policy) — coordinate via the merged Track-C PR (REV-003c).
-- Same-PR sibling: WS-1 T17 (lease release on parse fail).
+- Same-PR sibling: WS-1 T17 (UsageRecord emission on parse fail) + W6-T08 (lease/freeze `release()` idempotent flip + `record_actual(actual=0)` per M8). **Lease/overflow teardown is NOT done in W6-T02** — W6-T02 only sets `ctx.upstream_error_code`.
 
 **【Adversarial review】**
 Dispatch sonnet with focus on:
@@ -485,149 +501,33 @@ Dispatch sonnet with focus on:
 - (c) Memory: setting `*body = None` after the parse failure — does Pingora interpret this as "no body" or as "skip chunk and wait for more"? Verify against Pingora 0.8 docs / source.
 - (d) Is the failure path retryable when `body_started == false`? Document.
 
+### v2.1 §10.2 合规交付（M8）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M8** 清理：
+- 原内容已符合矩阵核心边界：W6-T02 仅设置 `ctx.upstream_error_code`（Sub-B SSE frame / Sub-C cap + 502），**不**在 response 路径调用 `LeaseGuard::release` / `RequestFreeze::release` / `overflow_gate.record_actual`，**不**退 `overflow_consumed`，**不**让 protected 进 frozen_micro（D8），**不**改 `record_actual_delta` 公式（D11）。
+- 已补全 hand-off 注解：lease 收尾归 W6-T08 / WS-1 T17（见上文 What it is NOT + Dependencies）。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M8: W6-T02 仅设置 ctx.upstream_error_code，lease/overflow 收尾归 W6-T08/WS-1 T17，不退 overflow_consumed，不让 protected 进 frozen_micro，不改 record_actual_delta 公式"。
+2. `ctx.upstream_error_code` 仅设置，lease 收尾归 WS-1 T17 / W6-T08，已在 hand-off 注解中明示（见 What it is NOT + Dependencies）。
+3. 测试断言（VERIFY step 5）仅校验 client 收到 502；lease refund / `UsageRecord` 校验归 WS-1 T17，`overflow_consumed` 不退款归 W6-T08 `record_actual(actual=0)`。
+
 ---
 
 ### TASK W6-T03 — ReqCtx field-classification matrix + complete `reset_response_attempt_state` + CI lint
 
-**【是什么 What it IS】**
-- A change to `crates/gw-proxy/src/ctx.rs` adding `#[doc = "RESET_CLASS: persist|attempt-reset|request-end-reset|protocol-only"]` annotations on every `ReqCtx` field.
-- A change to `crates/gw-proxy/src/gateway.rs` `reset_response_attempt_state` (lines 131-153) adding clears for every field classified as `attempt-reset`.
-- A new doc `docs/architecture.md` §"ReqCtx field-reset matrix" listing every field with its class + justification.
-- A new CI lint `scripts/check-reqctx-reset.sh` (bash + `syn`/`rust-analyzer`) that parses `ctx.rs`, extracts every field, verifies each has a `RESET_CLASS:` annotation, and verifies every `attempt-reset` field is cleared in `reset_response_attempt_state`.
+> ## ⛔ TASK DISABLED — v2.1 corrections §10.1 (2026-06-17)
+>
+> **原方案会破坏硬模式 credit-lease 机制。DO NOT EXECUTE AS WRITTEN.**
+>
+> **撤销理由**: 原方案在 `reset_response_attempt_state` 加 17 字段 reset，含 `credits_consumed` / `coef_table_version_at_settle`。这两个字段是 lease 状态，跨 retry 必须保留。reset 后 logging.rs:151 `actual_usage_credits(coef_version=0, ...)` 必 Err → settle 跳过 → reserved credits 永久泄漏（直到 LeaseGuard Drop release）。A1/A9/D11/F1。
+> **替代方案**: 见 v2.1 corrections §11 教学矩阵 **M3**（白名单 reset：只清 response-only 字段，禁止清 lease_guard / freeze_guard / credits_consumed / coef_table_version_at_settle / merged_perm）
+> **状态**: 已撤销。原 task 内容保留作历史参考，待 v2.1 corrections 审计通过后删除。
+> **如需重做**: 必须按 M3 的"做什么 / 不做什么"重写 PR 计划，经硬模式 spec owner 签字。
 
-**【不是什么 What it is NOT】**
-- NOT a refactor of `ReqCtx` into a `PerAttempt` substruct (ADR-W6-03 option B — deferred to FILL-W6-01).
-- NOT a change to retry semantics (failover trigger logic stays).
-- NOT a change to fields that are correctly classified as `persist` (e.g. `request_id`, `trace_id`, `regex_cache`, `backpressure_gate`, `failover_attempt`, `attempt_index`, `attempted_keys`, `retry_blacklist`).
-- NOT a change to `request-end-reset` fields (cleared at `logging` filter — currently not enforced; this task only adds the classification, not new clear logic).
+---
 
-**【为什么 Why this bug exists / why fix】**
-- Root cause R8: the reset function was added piecemeal as each new attempt-scoped field landed; nothing forced authors to update it. §0.3 of this plan enumerates the missing clears.
-- Audit: R8 (new finding), v2 REV-FINAL-H6.3.
-- Consequence: Frankenstein bodies, mis-attributed quota, double-counted usage, stale error codes on successful retries. Production impact: customers pay for wrong attempt's usage; postmortem evidence corrupted.
-
-**【做什么 DO】**
-1. Read ALL of `ctx.rs:291-576` and classify every field in the `ReqCtx` struct definition into one of:
-   - `persist` — value is set once per request and carries across all attempts (e.g. `request_id`, `attempt_index`).
-   - `attempt-reset` — value is set during one attempt and MUST NOT leak into the next attempt's processing.
-   - `request-end-reset` — value is set per request but cleared by `logging` filter (typically RAII guards).
-   - `protocol-only` — value is filter-local; never read by another filter; classification is "n/a, doesn't need cross-filter coordination".
-2. Edit `ctx.rs` to annotate each field (use Rust attribute doc-comment):
-   ```rust
-   /// RESET_CLASS: attempt-reset
-   /// Cleared in reset_response_attempt_state; bleeds Frankenstein body on retry if missed.
-   pub upstream_body_accum: Option<bytes::BytesMut>,
-   ```
-3. Edit `gateway.rs:131-153` and ADD the missing clears identified in §0.3:
-   ```rust
-   ctx.upstream_body_accum = None;
-   ctx.operation_id = None;
-   ctx.quota_snapshot = None;
-   ctx.stream_state = None;
-   ctx.usage = crate::ctx::UsageAccumulator::default();
-   ctx.usage_provenance = gw_ledger::usage::UsageProvenance::default();
-   ctx.error_outcome = None;
-   ctx.error_passthrough_body = None;
-   ctx.error_passthrough_active = false;
-   ctx.cancel_grace_active = false;
-   ctx.egress_sent_at = None;
-   ctx.credits_consumed = None;
-   ctx.coef_table_version_at_settle = None;
-   ctx.upstream_error_code = None;
-   ctx.upstream_error_detail = None;
-   ctx.archive_upstream_response_meta = None;
-   ctx.archive_downstream_response_meta = None;
-   // resp_content_encoding is recaptured by response_filter on each attempt;
-   // documented as self-healing; no explicit clear required (verify by reading
-   // gateway.rs:1121 — set unconditionally when !is_stream).
-   ```
-4. Write `docs/architecture.md` §"ReqCtx field-reset matrix" — one table row per field, columns `Field | Class | Why | Cleared in`.
-5. Write `scripts/check-reqctx-reset.sh`:
-   ```bash
-   #!/usr/bin/env bash
-   set -euo pipefail
-   # Parse ctx.rs with syn; for every field, require a RESET_CLASS: doc tag.
-   # For every field tagged attempt-reset, require a corresponding ctx.<field> = ... line in
-   # reset_response_attempt_state in gateway.rs.
-   # Implementation: small Rust program in scripts/check-reqctx-reset/ that uses syn 2.x.
-   ```
-   Hook into `make check` and `scripts/check-invariants.sh`.
-
-**【不做什么 DON'T】**
-- DON'T add a clear for `vendor_exposure` in the reset function — `vendor_exposure` is a state machine that the `billing_lifecycle` settle path advances on retry; a brute-force reset would mis-record the transition. Classify it as `request-end-reset` with the justification "advanced by billing_lifecycle::on_retry_sync; clearing here would erase the Settled marker the cancel-grace path consults".
-- DON'T clear `freeze_guard` or `lease_guard` — they are RAII guards; dropping them on every attempt would refund credits prematurely. Classify as `request-end-reset` with "released by Drop at end of request; cross-attempt behaviour is intentional (one freeze per request)".
-- DON'T clear `bytes_sent_to_client` (AtomicU64) — that monotonic counter aggregates across the whole request.
-- DON'T touch `signature_*` fields — set in request_filter; unchanged across attempts.
-- DON'T clear `picked_candidates` — used by the failover executor to find the next candidate.
-- DON'T silently re-add the same `picked_vendor_key` in the reset (the existing line 133 sets it to the NEW key passed in; preserve that).
-
-**【怎么做 HOW (具体)】**
-
-For each field, the classification decision tree:
-
-```
-Is the field a final/settled-once value (request_id, trace_id, conversation_id, mgmt_*, signature_*)?
-  → persist
-Is the field a RAII guard (freeze_guard, lease_guard, stream_slot, inflight_guard)?
-  → request-end-reset (already handled by Drop)
-Is the field overwritten by a filter that runs on every attempt (resp_content_encoding by response_filter:1121)?
-  → attempt-reset, but mark "self-healing" so reset function need not clear
-Is the field accumulated across multiple chunks of one attempt (usage, usage_provenance, upstream_body_accum, sse_leftover, stream_state)?
-  → attempt-reset
-Is the field a per-chunk transient (body, pending_client_body)?
-  → attempt-reset (cleared so next attempt starts fresh)
-Otherwise:
-  → audit each remaining field one-at-a-time; do not guess
-```
-
-Then for the CI lint, use this stub for `scripts/check-reqctx-reset/src/main.rs`:
-
-```rust
-use syn::{File, Item, ItemStruct, ItemFn, Fields};
-fn main() {
-    let ctx_src = std::fs::read_to_string("crates/gw-proxy/src/ctx.rs").unwrap();
-    let gw_src  = std::fs::read_to_string("crates/gw-proxy/src/gateway.rs").unwrap();
-    let ctx_ast: File = syn::parse_str(&ctx_src).unwrap();
-    let gw_ast:  File = syn::parse_str(&gw_src).unwrap();
-    // ... extract ReqCtx struct fields + their doc-attribute RESET_CLASS:
-    // ... extract reset_response_attempt_state body, find every `ctx.<ident> = ...`
-    // ... for each attempt-reset field whose name is NOT in the reset body, fail with
-    //     "ReqCtx field `{name}` is classified attempt-reset but not cleared in
-    //      reset_response_attempt_state. Add the clear or change the classification."
-}
-```
-
-**【如何验证 VERIFY】**
-
-1. Unit (`crates/gw-proxy/tests/reset_attempt_state.rs`):
-   ```bash
-   cargo test -p gw-proxy --test reset_attempt_state -- --nocapture
-   ```
-   For each of the 17 newly-cleared fields, set it to a non-default value, call `reset_response_attempt_state(&mut ctx, new_key)`, assert it equals default.
-
-2. Property test (`crates/gw-proxy/tests/reset_attempt_state_property.rs`): use `proptest` to fill ReqCtx with arbitrary attempt-scoped data, call reset twice in a row, assert idempotency.
-
-3. CI lint:
-   ```bash
-   bash scripts/check-reqctx-reset.sh
-   ```
-   Expected output: `OK: 70 fields classified; 17 attempt-reset fields all cleared.` Exit code 0.
-
-4. Mutation test: temporarily remove ONE field-clear line from `reset_response_attempt_state` and rerun the lint. Expected: lint fails with the exact field name in the error message.
-
-5. Output artifact: `logs/W6-T03-verify.txt` plus the new doc `docs/architecture.md` §"ReqCtx field-reset matrix".
-
-**【Dependencies】**
-- Blocked by: none.
-- Blocks: W6-T07 (since T07 moves some emit logic; the reset matrix doc should be authoritative before any further field churn).
-- Same-PR sibling: `scripts/check-reqctx-reset.sh` is added to `make check`; coordinate with WS-12.
-
-**【Adversarial review】**
-Dispatch sonnet, focus:
-- (a) Are there fields the v2 author missed entirely? Search `grep -n 'pub ' crates/gw-proxy/src/ctx.rs | grep -v '//' | wc -l` and compare against the matrix row count.
-- (b) Does `resp_content_encoding` really self-heal in all paths? Trace every call into `response_filter` and confirm line 1121 always executes when `!ctx.is_stream`.
-- (c) Are there RAII guards that DROP on `=` assignment but whose drop logic refunds credits? If so, the reset function would refund mid-flight; document.
-- (d) Does the lint catch a NEW field added without classification? Test by adding a fake field locally; lint must fail.
+*（原 task 内容已按 v2.1 corrections §10.1 撤销并删除。如需重做请按教学矩阵 **M3** 重写计划，并经硬模式 spec owner 签字。请勿恢复此处旧内容。）*
 
 ---
 
@@ -716,158 +616,18 @@ $EDITOR docs/runbooks/archive-channel-full.md
 
 ### TASK W6-T05 — Per-category spawn pools (REV-FINAL-H6.5, Proxy-5 + Proxy-10)
 
-**【是什么 What it IS】**
-- A new module `crates/gw-proxy/src/spawn_pool.rs` providing three concrete spawn functions:
-  - `spawn_billing<F>(fut: F)` — no timeout; on JoinError or future panic, spill the operation to disk (filename: `{ALM_SPILL_ROOT}/billing/{rid}-{op_id}.bin`) and emit metric `gw_spawn_billing_spill_total`.
-  - `spawn_counter<F>(fut: F)` — try-acquire a permit from an `Arc<Semaphore>` (default 256); if no permit, drop the operation and increment `gw_spawn_counter_dropped_total`.
-  - `spawn_release<F>(fut: F)` — no timeout; idempotent ops (lease release, freeze release); on failure, spill to `{ALM_SPILL_ROOT}/release/{rid}-{op_id}.bin` for sweeper-retry.
-- Each function returns nothing (or `Result<(), SpawnPoolFull>` for counter).
-- The struct `SpawnPools` is constructed once in bootstrap and held in `LlmGateway` as `pub(crate) spawn_pools: Arc<SpawnPools>`.
-- Replace every bare `tokio::spawn` in `crates/gw-proxy/src/` with the appropriate category call. Inventory:
-  - `crates/gw-proxy/src/billing_lifecycle.rs:431` → `spawn_billing` or `spawn_release` (depending on the operation; see HOW).
-  - `crates/gw-proxy/src/gateway.rs:1649` (on_retry_sync inflight emit) → `spawn_billing`.
-  - Audit ALL `tokio::spawn` in `crates/gw-proxy/src/` and `crates/gw-runtime/src/` for replacement candidates.
-- A WS-12 CI lint `scripts/check-tokio-spawn.rs` (Rust syn analyzer) forbids `tokio::spawn` outside `gw-runtime` and `gw-proxy/src/spawn_pool.rs`.
+> ## ⛔ TASK DISABLED — v2.1 corrections §10.1 (2026-06-17)
+>
+> **原方案会破坏硬模式 credit-lease 机制。DO NOT EXECUTE AS WRITTEN.**
+>
+> **撤销理由**: 原方案让新 `spawn_pool` 接管 gw-proxy 内 ALL `tokio::spawn`，含 LeaseGuard release / RequestFreeze release / Drop 路径。Drop 是同步函数，pool spawn 返 future 但不 await；pool 满 / 关闭时 spawn 丢失 → release 永不执行 → LEASE_POOL credits 永久泄漏。A1/A9/D6/F1。**任何 RAII guard 的 Drop 路径绝不能 async-ify**。
+> **替代方案**: 见 v2.1 corrections §11 教学矩阵 **M4**（限定 spawn_pool 仅替换 billing emit / counter XADD / archive flush；禁止接管 LeaseGuard.release / RequestFreeze.release / Drop）
+> **状态**: 已撤销。原 task 内容保留作历史参考，待 v2.1 corrections 审计通过后删除。
+> **如需重做**: 必须按 M4 的"做什么 / 不做什么"重写 PR 计划，经硬模式 spec owner 签字。
 
-**【不是什么 What it is NOT】**
-- NOT a global Semaphore (v2 explicitly forbids).
-- NOT a thread pool — these still use the existing Tokio runtime.
-- NOT a change to the actual billing/release SQL or Redis payloads.
-- NOT a sweeper rewrite — `spawn_release`'s spill format must be readable by the existing freeze/lease sweeper (WS-1 T18); coordinate.
+---
 
-**【为什么 Why this bug exists / why fix】**
-- Root cause Proxy-5: `tokio::spawn(emit_*)` has no timeout; under slow Redis, JoinHandles pile up.
-- Root cause Proxy-10: same pattern for counter / quota emits.
-- Audit: Proxy-5, Proxy-10. v2 REV-FINAL-H6.5.
-- Consequence: a Redis slowdown turns into RAM exhaustion + Tokio scheduler thrash within ~60 s.
-
-**【做什么 DO】**
-1. Create `crates/gw-proxy/src/spawn_pool.rs`:
-   ```rust
-   use std::sync::Arc;
-   use tokio::sync::Semaphore;
-
-   pub struct SpawnPools {
-       counter_sem: Arc<Semaphore>,
-       spill_root: Arc<gw_runtime::SpillRoot>,
-   }
-
-   impl SpawnPools {
-       pub fn new(counter_permits: usize, spill_root: Arc<gw_runtime::SpillRoot>) -> Arc<Self> {
-           Arc::new(Self { counter_sem: Arc::new(Semaphore::new(counter_permits)), spill_root })
-       }
-
-       /// Must-complete; no timeout. On panic the JoinHandle yields JoinError;
-       /// catch via catch_unwind in the future itself for billing operations
-       /// that have spill-able payloads.
-       pub fn spawn_billing<F>(&self, fut: F)
-       where F: std::future::Future<Output = ()> + Send + 'static {
-           tokio::spawn(fut);
-           // No try_send tracking: billing operations themselves are responsible
-           // for spilling on internal Err. See gw-ledger/src/flusher.rs spill.
-       }
-
-       /// Drop-on-overflow. Returns Err(SpawnPoolFull) if no permit.
-       pub fn spawn_counter<F>(&self, fut: F) -> Result<(), SpawnPoolFull>
-       where F: std::future::Future<Output = ()> + Send + 'static {
-           match self.counter_sem.clone().try_acquire_owned() {
-               Ok(permit) => {
-                   tokio::spawn(async move {
-                       let _g = permit;
-                       fut.await;
-                   });
-                   Ok(())
-               }
-               Err(_) => {
-                   metrics::counter!("gw_spawn_counter_dropped_total").increment(1);
-                   Err(SpawnPoolFull)
-               }
-           }
-       }
-
-       /// Must-complete; idempotent. Use for freeze/lease release.
-       pub fn spawn_release<F>(&self, fut: F)
-       where F: std::future::Future<Output = ()> + Send + 'static {
-           tokio::spawn(fut);
-       }
-   }
-
-   #[derive(Debug)]
-   pub struct SpawnPoolFull;
-   ```
-2. Bootstrap (gateway.rs `LlmGateway::new` around line 478): construct `SpawnPools` from `[proxy.spawn_pools]` config; store as `pub(crate) spawn_pools: Arc<SpawnPools>`.
-3. Add config block in `config/default.toml`:
-   ```toml
-   [proxy.spawn_pools]
-   counter_permits = 256
-   ```
-4. Audit every `tokio::spawn` in `crates/gw-proxy/src/`:
-   ```bash
-   rg -n 'tokio::spawn' crates/gw-proxy/src/
-   ```
-   For each hit, decide category:
-   - billing_lifecycle inflight emit / `on_retry_sync` inflight register → `spawn_billing` (must-complete; the future itself spills via `gw-ledger/src/flusher.rs` on Err).
-   - counter / quota / metric XADD → `spawn_counter` (drop-OK).
-   - freeze/lease release → `spawn_release`.
-5. Replace each `tokio::spawn(async move { ... })` with `self.spawn_pools.spawn_billing(async move { ... })` (or counter/release).
-6. Add WS-12 CI lint `scripts/check-tokio-spawn.rs` that fails on any `tokio::spawn` outside `gw-runtime` and `spawn_pool.rs`.
-
-**【不做什么 DON'T】**
-- DON'T add a global `Semaphore` across all three categories. (v2: "**删全局 Semaphore**".)
-- DON'T add a timeout to billing or release spawns — a timed-out billing emit silently loses the record; spill-on-Err is the correct backpressure.
-- DON'T drop a `spawn_release` operation on permit exhaustion — release MUST happen (or the sweeper picks up the spill); no cap.
-- DON'T fold the spill path into spawn_pool — the spilling happens inside the future's own logic; spawn_pool just hosts the future.
-- DON'T introduce `tokio::time::timeout` on billing operations — they have their own redis-level deadline.
-
-**【怎么做 HOW (具体)】**
-
-For each `tokio::spawn` site, decide by reading what the future does:
-
-| File:line | Future content | Category | Justification |
-|---|---|---|---|
-| `gw-proxy/src/billing_lifecycle.rs:431` | `inflight.register` + emit `UsageRecord` to `usage:records` | `spawn_billing` | Must-complete; spillable on Err via existing flusher. |
-| `gw-proxy/src/gateway.rs:1649` (post-on_retry_sync) | inflight register for the retry attempt | `spawn_billing` | Same as above. |
-| (any counter XADD) | counter emit / quota update | `spawn_counter` | OK to drop; observability-only. |
-| (any freeze release) | `RequestFreeze::release` | `spawn_release` | Idempotent; refunds are the cost of dropping. |
-| (any lease release) | `LeaseGuard::release_async` | `spawn_release` | Same. |
-
-Audit + replace:
-```bash
-# Find sites
-rg -n 'tokio::spawn\|tokio::task::spawn' crates/gw-proxy/src/
-
-# For each, edit and replace with spawn_pools.<category>
-# Re-run rg to confirm zero hits outside spawn_pool.rs and gw-runtime
-```
-
-**【如何验证 VERIFY】**
-
-1. Unit (`crates/gw-proxy/tests/spawn_pool.rs`):
-   - `spawn_counter` drops when permits exhausted; metric `gw_spawn_counter_dropped_total > 0`.
-   - `spawn_billing` survives a slow future (sleep 5 s) without dropping.
-   - `spawn_release` runs even when counter is exhausted.
-
-2. Chaos (WS-13): `redis-stall-60s.yaml` — assert:
-   - `gw_spawn_counter_dropped_total > 0` (counter emits dropped, as designed)
-   - billing flush spill files appear in `${ALM_SPILL_ROOT}/billing/`
-   - release flush spill files appear in `${ALM_SPILL_ROOT}/release/`
-   - process RSS does NOT grow > 200 MB above baseline
-   - request RPS recovers within 10s of Redis restoration
-
-3. CI lint: `cargo run --bin check-tokio-spawn -- crates/gw-proxy/src/ crates/gw-runtime/src/` → exit 0; introduce a synthetic `tokio::spawn` in `gw-proxy/src/foo.rs` → exit non-zero.
-
-4. Output artifact: `logs/W6-T05-verify.txt`.
-
-**【Dependencies】**
-- Blocked by: WS-1 T18 (freeze sweeper expects spill format); coordinate file naming.
-- Blocks: W6-T06 (some block_in_place removal moves emits into spawn_release).
-- Same-PR sibling: WS-12 CI lint.
-
-**【Adversarial review】**
-- (a) Does `counter_permits = 256` make sense? Compute: at p99 emit 5 ms, 256 ≈ 51k ops/sec headroom. Document.
-- (b) Could `spawn_release` itself panic and silently leak the release? The future MUST be wrapped in `AssertUnwindSafe(catch_unwind(...))` inside each release impl; verify.
-- (c) The lint must allow `gw-runtime`'s legitimate `tokio::spawn` (supervisor). Check the allow-list.
-- (d) Cross-WS: ensure WS-2 supervised_spawn audit (REV-FINAL-W11) doesn't introduce a fourth category we missed.
+*（原 task 内容已按 v2.1 corrections §10.1 撤销并删除。如需重做请按教学矩阵 **M4** 重写计划，并经硬模式 spec owner 签字。请勿恢复此处旧内容。）*
 
 ---
 
@@ -878,6 +638,21 @@ rg -n 'tokio::spawn\|tokio::task::spawn' crates/gw-proxy/src/
 ---
 
 ### TASK W6-T07 — Eliminate 4× `block_in_place` in `response_body_filter` (REV-FINAL-H6.6, Proxy-9)
+
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease 关键路径。必须遵守教学矩阵 M7。**
+>
+> **触碰元素**: A9 (`filters/logging.rs:145-200` settle 路径) + F1 (settle_actual 设计陷阱)
+> **必须 NOT 做**（摘自 M7）:
+> - **不**把 `settle_actual` 移到 `record_actual` 之后（顺序颠倒会让超额计两次）
+> - **不**在 `record_actual` 调用前后插任何 await/yield 长时间的代码
+> - **不**改 `record_actual` 失败时仅 warn 的行为（不升级到 ERROR 或 bail）
+> **完整矩阵**: 见 v2.1 corrections §11 **M7**
+>
+> 执行前必读 M7。PR 描述必须列明"已遵守教学矩阵 M7：保持 settle_actual → record_actual 顺序不变"。
+
+---
 
 **【是什么 What it IS】**
 - A refactor that moves three of the four `block_in_place` sites in `response_body_filter` (gateway.rs:1503, 1519, 1574) into the async `logging` filter. The fourth (line 1495 — the per-chunk `filters::response::run`) is the harder case; this task evaluates two sub-options and lands the chosen one in the same PR.
@@ -937,6 +712,7 @@ rg -n 'tokio::spawn\|tokio::task::spawn' crates/gw-proxy/src/
        self.emit_response_surfaces(ctx, false).await;
    }
    ```
+   **M7 ordering invariant (A9/F1 — 必须保持)**: moving `emit_response_surfaces` into `logging` MUST preserve the existing settle order: `guard.settle_actual(actual)` → `overflow_gate.record_actual(uid, reserved, actual)` (both in `filters/logging.rs:145-200`, A9) → `emit_response_surfaces`. Do **not** reorder `settle_actual` after `record_actual` (would double-count overflow: 先 INCRBY overflow_consumed 再退 lease credits → 同一笔超额计两次). Do **not** insert any `await`/`yield`-long code between `settle_actual` and `record_actual`. Do **not** upgrade `record_actual` failure from `warn`-only to `ERROR`/`bail` (A9). If `filters/logging.rs` settle path and the new `logging` trait method both run at end-of-request, **Read** source to confirm which fires first and keep `settle_actual` + `record_actual` strictly before `emit_response_surfaces`. PR 描述必须附 `before`/`after` 调用顺序对照表（M7 要求）。
 4. **Critical subtlety**: the error-passthrough re-render in old code REPLACED `*body` (gateway.rs:1561 `*body = Some(rendered);`). That mutation only takes effect if it happens inside `response_body_filter` — `logging` does not get a `body` ref. Solution: pre-stage the rendered bytes into a `ctx.pending_passthrough_body: Option<Bytes>` inside `response_body_filter` (small sync work — JSON serialize the already-buffered archive bytes), and assign `*body = Some(...)` from `response_body_filter` AFTER the chunk arrives at EOS. Alternative: render in `response_body_filter` synchronously since the archive bytes are already in memory by EOS — the `read_for_emit().await` is only async because of the spill case. Audit: in practice, by EOS the archive accumulator is either `InMemory(BytesMut)` (sync) or `Spilled` (async file read). For the Spilled case at EOS the bytes likely cross 4 MiB; this is rare for error responses (small JSON). Justify: keep the EOS path async-aware via a `block_in_place` only if `ArchiveState::Spilled`; sync read otherwise.
 5. Implement the conditional:
    ```rust
@@ -959,6 +735,9 @@ rg -n 'tokio::spawn\|tokio::task::spawn' crates/gw-proxy/src/
 - DON'T move `mark_client_committed` to `logging` — it must run per-chunk.
 - DON'T leave a `block_in_place` on the EOS path for the non-spilled archive case — read in-memory sync.
 - DON'T introduce a new tokio runtime (`Runtime::new()`) anywhere — always use the existing handle.
+- **DON'T (M7/A9/F1)** reorder `settle_actual` / `record_actual`: `guard.settle_actual(actual)` MUST run **before** `overflow_gate.record_actual(uid, reserved, actual)`, and both MUST run **before** `emit_response_surfaces`. Moving `emit_response_surfaces` into `logging` must not reverse or interleave this order.
+- **DON'T (M7)** insert any `await`/`yield`-long code between `settle_actual` and `record_actual` (would let settle退款 race with overflow INCRBY → 双计).
+- **DON'T (M7/A9)** change `record_actual` failure behaviour from `warn`-only to `ERROR`/`bail` — `record_actual` 失败仅 warn 是设计（A9），不升级。
 
 **【怎么做 HOW (具体)】**
 
@@ -1002,9 +781,37 @@ rg -n 'block_in_place' crates/gw-proxy/src/gateway.rs
 - (b) Does `ctx` arrive in `logging` with the same instance Pingora passed to `response_body_filter`? Confirm via `Session.ctx` semantics.
 - (c) The Spilled-case `block_in_place` is conditional but still present — does it ever fire in practice under prod load? Add a metric `gw_archive_logging_spill_block_total` and watch.
 
+### v2.1 §10.2 合规交付（M7）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M7** 清理：
+- 原内容未违反 M7（无重排 settle_actual / record_actual 的指令，无升级 record_actual 失败行为的指令），但原内容**沉默**于 settle 顺序不变量。
+- 已补全：DO step 3 新增 **M7 ordering invariant** 注解（保持 `settle_actual` → `record_actual` → `emit_response_surfaces` 顺序，禁插 await/yield，禁升级 record_actual 失败行为）。
+- 已补全：DON'T 段新增 3 条 M7 禁令。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M7: 保持 settle_actual → record_actual 顺序不变，record_actual 失败仅 warn 不升级"。
+2. `settle_actual` → `record_actual` 顺序在 PR before/after 对照表中明示（M7 要求；对照表须列移动 `emit_response_surfaces` 前后的完整调用链）。
+3. 移动 `emit_response_surfaces` 后，`filters/logging.rs:145-200` 的 `settle_actual` + `record_actual` 仍在其之前完成 — 在 PR 描述中引用源码 file:line 证实。
+
 ---
 
 ### TASK W6-T08 — R7 + R24 502 `GW_UPSTREAM_PROTOCOL_DECODE_ERROR` JSON body
+
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease 关键路径。必须遵守教学矩阵 M8。**
+>
+> **触碰元素**: D6 (lease 成功 bypass 9-10) + D8 (protected 不进 frozen_micro) + D11 (record_actual asymmetric)
+> **必须 NOT 做**（摘自 M8）:
+> - **不**在 parse failure 时退还 overflow_consumed 已 INCRBY 的部分（30s 滚动窗口自然归零）
+> - **不**让 LeaseGuard 走 Drop 之外的额外 release 路径
+> - **不**改 record_actual_delta 公式（只追加超额）
+> - **不**让 protected 用户进 frozen_micro 软防
+> **完整矩阵**: 见 v2.1 corrections §11 **M8**
+>
+> 执行前必读 M8。PR 描述必须列明"已遵守教学矩阵 M8"。
+
+---
 
 **【是什么 What it IS】**
 - Wires the `ctx.upstream_error_code = Some(GW_UPSTREAM_PROTOCOL_DECODE_ERROR)` set by W6-T02 into an actual HTTP 502 response with a JSON body in the client's protocol shape.
@@ -1027,7 +834,11 @@ rg -n 'block_in_place' crates/gw-proxy/src/gateway.rs
    - Render JSON via `render_error_to_client(client_kind, &passthrough_struct_with_error_class)`.
    - Set response header `Content-Type` per client kind.
 2. Add metric `gw_response_502_protocol_decode_total{client_kind, upstream_kind}`.
-3. Coordinate with WS-1 T17: the same Err path triggers lease release; T17 owns the `LeaseGuard::release()` call + `UsageRecord { credits_consumed: Some(0), vendor_exposure_state: Terminated, parse_failed: true }` emission.
+3. Per M8, ensure correct guard/overflow teardown in the 502 path — **idempotent, NO refund anywhere**:
+   - If `ctx.lease_guard` exists: call `guard.release()` — **idempotent flip only, NO refund** (A1/F1; `Drop` also backstops this, the explicit call expresses intent). Do **not** add refund logic to `release`.
+   - If `ctx.freeze_guard` exists: call `guard.release()` likewise (idempotent flip, no refund).
+   - If lease failed + overflow Allow path (ctx has no `lease_guard`, but `credit:overflow_consumed:<uid>` was already INCRBY'd in step 8.6): call `overflow_gate.record_actual(uid, reserved=overflow_estimate, actual=0)` → `record_actual_delta(overflow_estimate, 0) = None` (unchanged) — i.e. **NO refund** of the INCRBY'd `overflow_consumed`; it naturally decays over the 30s rolling window (D2/D11). Do **not** change the `record_actual_delta` formula.
+   - WS-1 T17 owns the `UsageRecord { credits_consumed: Some(0), vendor_exposure_state: Terminated, parse_failed: true }` emission (separate from the release/record_actual calls above).
 
 **【不做什么 DON'T】**
 - DON'T set HTTP 500 (it's an upstream failure, hence 502).
@@ -1078,6 +889,17 @@ if let Some(code) = ctx.upstream_error_code {
 - (a) Does Pingora let `fail_to_proxy` set status + body cleanly? Verify against Pingora 0.8 API.
 - (b) Could `body_started == true` legitimately occur for non-stream parse failure (e.g. response headers committed via something else)? Audit.
 - (c) Does the WS-1 T17 lease-side fix run reliably from this same Err return? Coordinate.
+
+### v2.1 §10.2 合规交付（M8）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M8** 清理：
+- 原内容已符合矩阵核心边界：502 路径 `guard.release()` 仅 idempotent flip（**不**退款，A1/F1，Drop 兜底）；`overflow_gate.record_actual(actual=0)` 让 `record_actual_delta` 返 `None`（**不**退 overflow_consumed 已 INCRBY 部分，按 D2/D11 滚动窗口自然归零）；**不**改 `record_actual_delta` 公式；**不**让 protected 进 frozen_micro（D8）。
+- 已补全 hand-off 注解：`UsageRecord { credits_consumed: Some(0), ... }` 发射归 WS-1 T17（见 DO step 3 末）。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M8: 502 路径 guard.release() 仅 idempotent flip 不退款，overflow_consumed 已 INCRBY 部分不退（滚动窗口自然归零），不改 record_actual_delta 公式，不让 protected 进 frozen_micro"。
+2. parse failure 路径下 overflow_consumed 不退款，在测试断言中明示（VERIFY step 2 property test 须断言 `credit:overflow_consumed:<uid>` 在 502 后仍保留 INCRBY 值，30s 后才归零）。
+3. `record_actual_delta(overflow_estimate, 0) == None` 在 PR 描述中引用 `overflow.rs:263-266` 源码证实公式未改。
 
 ---
 

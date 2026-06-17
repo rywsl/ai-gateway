@@ -196,6 +196,24 @@ Each task uses the v2 §3 7-section template plus a `[Dependencies / Adversarial
 
 ### TASK W8-T02: Extend `UsageSnapshot` and `Usage` with 8 new fields + `_pv`
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease 关键路径。必须遵守教学矩阵 M10。**
+>
+> **触碰元素**: B5 (`shared/rustpact/usage.go` — UsageRecord 是 Go billing settler 识别"硬模式 protected 请求"的唯一线索)
+> **必须 NOT 做**（摘自 M10）:
+> - **不**改 `UsageRecord.pod_id` 字段（B5）
+> - **不**改 `UsageRecord.credits_consumed` 字段（B5）
+> - **不**改 `UsageRecord.coef_table_version` 字段（B5）
+> - **不**改 JSON tag 中 `omitempty` 的现有标记（特别是 protected 模式字段）
+> - 仅给嵌套的 `Usage` struct 加新 token 字段
+> **完整矩阵**: 见 v2.1 corrections §11 **M10**
+>
+> 执行前必读 M10。PR 描述必须列明"已遵守教学矩阵 M10：UsageRecord 三个硬模式字段未动"。
+>
+> ---
+
+---
 **【是什么 What it IS】**
 - A code change on both sides of the cross-process contract. On Rust, extend `crates/gw-core/src/usage.rs` `UsageSnapshot` from 6 fields to 14 fields (existing 6 stay; 8 new `u64`). On Go, mirror the additions in `shared/rustpact/usage.go` `Usage` struct (matching `int64`).
 - Both sides gain a `_pv u32` (Rust) / `int32` (Go) versioning byte: emit `_pv: 2`. Old records (no `_pv` key) are treated as `_pv: 1`.
@@ -395,6 +413,17 @@ Each task uses the v2 §3 7-section template plus a `[Dependencies / Adversarial
 - Blocked by T01.
 - Blocks T03, T04, T06, T07, T09.
 - Adversarial review: ask sonnet to produce a record JSON that "looks like a future Rust version" (e.g. `{"_pv": 3, "input_tokens": 1, "tax_id": "abc"}`) and confirm Go behavior: it must Validate() → ErrUnsupportedProtocolVersion (because `3 > MaxSupportedPV=2`); confirm there is no panic or silent data loss. Also ask sonnet to design an attack where the field name collides with a Go reserved word; confirm rejected.
+
+### v2.1 §10.2 合规交付（M10）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M10** 清理：
+- 原内容已符合矩阵：HOW 仅给嵌套 `Usage` struct（Go）/ `UsageSnapshot`（Rust）加 8 个新 token 字段 + `_pv`；HOW §6.4 Step 3 用 grep 确认 `crates/gw-ledger/src/usage.rs` 未重定义这些字段；DON'T §6.5 显式禁止把 8 字段加到 `UsageRecord` 直接结构；现有 6 个字段的 `omitempty` tag 保持不变（新增 8 字段才用 `,omitempty`）。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M10: UsageRecord 三字段（pod_id / credits_consumed / coef_table_version）未动"
+2. PR 描述附 `git diff shared/rustpact/usage.go | grep -E "pod_id|credits_consumed|coef_table_version"` 结果为空
+3. PR 描述附 `git diff shared/rustpact/usage.go | grep -E 'omitempty'` 结果，确认现有 6 个字段的 omitempty 标记未被修改（仅新增 8 字段带 omitempty）
+4. PR 测试中显式 verify UsageRecord 三字段的 wire 兼容性（round-trip JSON 序列化测试断言三字段值不变）
 
 ---
 
@@ -861,6 +890,23 @@ Each task uses the v2 §3 7-section template plus a `[Dependencies / Adversarial
 
 ### TASK W8-T09: `model_pricing` two-phase nullable + settler NULL rejection
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease 关键路径。必须遵守教学矩阵 M11。**
+>
+> **触碰元素**: B3 (`shared/contracts/pricing.go` 中 CoefTableLatest*Key 常量 — 硬模式跨进程契约)
+> **必须 NOT 做**（摘自 M11）:
+> - **不**改 `CoefTableLatestEntriesKey = "credit:coef_table:latest:entries"`
+> - **不**改 `CoefTableLatestMetaKey = "credit:coef_table:latest:meta"`
+> - **不**改 Rust 端 `crates/gw-ledger/src/coef.rs` 或 `coef_snapshot.rs`（A4）
+> - 仅扩 ChargeInput / CostBreakdown
+> **完整矩阵**: 见 v2.1 corrections §11 **M11**
+>
+> 执行前必读 M11。PR 描述必须列明"已遵守教学矩阵 M11：CoefTableLatest*Key 常量未动"。
+>
+> ---
+
+---
 **【是什么 What it IS】**
 - Extend Go's pricing surface with 8 new per-token columns (nullable) for the new dimensions, and make the settler refuse to compute cost when ANY new dimension is non-null in the usage record but its price column is NULL.
 - Per REV-LOCAL-A (above), the real pricing surface is `global_models.default_tiered_pricing` (JSONB) + `modules/model/business/pricing.go` `BillingPricing` struct, not a non-existent `model_pricing.sql`. The 8 new fields go into `BillingPricing` as `*int64` (nullable per-1M-token price); the migration adds 8 nullable JSONB keys to `default_tiered_pricing.tier[0]`.
@@ -904,6 +950,17 @@ Each task uses the v2 §3 7-section template plus a `[Dependencies / Adversarial
 
 **【Dependencies / Adversarial review】**
 - Blocked by T02.
+
+### v2.1 §10.2 合规交付（M11）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M11** 清理：
+- 原内容已符合矩阵：HOW 仅扩 `shared/contracts/pricing.go` 的 `ChargeInput` / `CostBreakdown` 与 `modules/model/business/pricing.go` 的 `BillingPricing`；未提议改 `CoefTableLatestEntriesKey` / `CoefTableLatestMetaKey` 常量；未提议动 Rust 端 `crates/gw-ledger/src/coef.rs` / `coef_snapshot.rs`（A4）。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M11: CoefTableLatestEntriesKey / CoefTableLatestMetaKey 常量未动"
+2. PR 描述附 `git diff shared/contracts/pricing.go | grep -E "CoefTableLatestEntriesKey|CoefTableLatestMetaKey"` 结果为空
+3. PR 描述附 `git diff -- crates/gw-ledger/src/coef.rs crates/gw-ledger/src/coef_snapshot.rs | wc -l` 结果为 0
+4. PR 测试中显式 verify CoefTableLatest*Key 常量值未变（Go 端常量值断言测试）
 
 ---
 

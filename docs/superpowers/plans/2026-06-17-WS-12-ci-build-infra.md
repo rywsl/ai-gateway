@@ -762,6 +762,21 @@ echo "[check-prod-compose] OK — ${#PROD_FILES[@]} file(s) clean"
 
 ### TASK WS12-T-05：`check-money-as-cast.sh` 禁 money `as i64`
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 lint 扫描硬模式 credit-lease 文件。必须遵守教学矩阵 M14。**
+>
+> **触碰元素**: A1-A11 (lint 范围包含 lease.rs / overflow.rs / counter_handler.rs)
+> **必须 NOT 做**（摘自 M14）:
+> - **不**自动 patch 任何文件（lint 只报告）
+> - **不**让 lint 把 `lease.rs` / `overflow.rs` / `counter_handler.rs` 的合理 cast 误报为 fail（用 allowlist 处理）
+> - **不**重构 A1-A11 文件
+> **完整矩阵**: 见 v2.1 corrections §11 **M14**
+>
+> 执行前必读 M14。PR 描述必须列明"已遵守教学矩阵 M14：lint 只读，allowlist 已包含必要 cast"。
+
+---
+
 **【是什么 What it IS】**
 - `scripts/check-money-as-cast.sh`（Rust 仓主，Go 仓 mirror N/A 占位）。
 - 扫 Rust 仓 `crates/gw-billing/src/**/*.rs` + `crates/gw-ledger/src/**/*.rs` + `crates/gw-store/src/**/*.rs`：禁止 `<money_type> as i64` 直接转换。
@@ -806,12 +821,30 @@ CRATES=(crates/gw-billing/src crates/gw-ledger/src crates/gw-store/src)
 MONEY_RE='\b(amount|credits|micros|money|cost|balance|delta|fee|spend|charge)\b'
 ALLOW_RE='//[[:space:]]*allow:[[:space:]]*money-cast[[:space:]]+reason="[^"]{10,}"'
 
+# Pre-populated allowlist for known necessary casts in A1-A11 hard-defense files.
+# Per v2.1 corrections §11 M14: lease.rs / overflow.rs / counter_handler.rs 的合理 cast
+# 用 allowlist 处理，不让 lint 误报为 fail。
+# Format: "relative/path:line" — executor must Read each file and verify line still holds.
+# 已按 M14 加 placeholder：以下为已知必要 cast，lint 须跳过。
+ALLOWLIST=(
+  # M14 example: metrics histogram as f64 cast in lease.rs (A1 hard-defense file).
+  # 当前脚本只扫 `as i64`，此条在脚本扩展到 `as f64`（M14 要求扫 i64|u64|f64）后生效。
+  "crates/gw-ledger/src/lease.rs:175"
+  # TODO(executor): Read A1-A11 files (see v2.1 corrections §9) and add entries
+  # for any reasonable money-related cast that should not be flagged.
+  # Candidates to verify: overflow.rs, counter_handler.rs, heartbeat.rs, coef_snapshot.rs.
+)
+
 fail=0
 for d in "${CRATES[@]}"; do
   [[ ! -d "$d" ]] && continue
   while IFS=: read -r file line _; do
     # Skip allow-comments on same line.
     if sed -n "${line}p" "$file" | grep -qE "$ALLOW_RE"; then continue; fi
+    # Skip pre-populated allowlist entries (M14 A1-A11 known necessary casts).
+    for entry in "${ALLOWLIST[@]}"; do
+      if [[ "$file:$line" == "$entry" ]]; then continue 2; fi
+    done
     start=$((line - 5)); [[ $start -lt 1 ]] && start=1
     end=$((line + 1))
     ctx=$(sed -n "${start},${end}p" "$file")
@@ -844,6 +877,19 @@ Go 仓 mirror：`scripts/check-money-as-cast.sh` 内容仅 `echo "[check-money-a
 1. **遗漏类型**：`MicroUnits`/`Credits` 是否真存在？grep `pub struct (MicroUnits|Credits|Amount|Money)` 实测；若都不存在，本 lint 只靠变量名启发式 → 升级到 T-02 binary 后才能可靠。记入 INVESTIGATE-WS12-007 必结。
 2. **false positive 率**：跑 baseline，人工 review 每条命中是否真是 money；若 >30% 误报则提升到 syn binary（T-02 扩展）。
 3. **i128 中间步骤**：REV-FINAL-H7.5 要求 vendor_factor 走 i128；本 lint 不检 i128 用法；列入 INVESTIGATE-WS12-009：是否需要补 `\bas\s+i128\b` 反向规则（要求 final clamp 才落 i64）？
+
+### v2.1 §10.2 合规交付（M14）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M14** 清理：
+- 原内容 lint 仅报告（exit 1 + 打印命中行），未提议自动 patch 任何文件 —— 符合 M14 "lint 只读"。
+- 原内容未重构 A1-A11 文件 —— 符合 M14 "不重构"。
+- **allowlist 缺失已补 placeholder**：原 HOW 脚本仅有行级 `// allow: money-cast reason="..."` 注释机制，无预置 allowlist 条目。已按 M14 加 `ALLOWLIST` 数组 placeholder，列举 `crates/gw-ledger/src/lease.rs:175`（M14 明示的 metrics histogram `as f64` 已知必要 cast），并在循环中加跳过逻辑。executor 须 Read A1-A11 文件补全条目。
+- lint 范围当前仅 `as i64`（M14 要求 `as (i64|u64|f64)`）；allowlist placeholder 在脚本扩展到 `as f64` 后对 lease.rs:175 生效。此扩展属 "做什么" 范围，不在本清理 task 内。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M14: lint 只读，allowlist 已包含必要 cast"。
+2. PR 附 lint 在 `crates/gw-ledger/src/lease.rs` 上跑的样本输出（允许 allowlist），显示 lease.rs:175 未被误报。
+3. PR 附 `ALLOWLIST` 数组定义段，显示至少 1 条 placeholder 条目（lease.rs:175）。
 
 ---
 
@@ -1154,8 +1200,26 @@ Rust 仓 mirror `ailinkmax-gateway/scripts/check-deploy-order.sh`：对称，URL
 
 ### TASK WS12-T-08：`check-metric-labels.sh` metric label enum allowlist
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 metric label lint 必须保护硬模式 credit-lease 的有界枚举 label。必须遵守教学矩阵 M13。**
+>
+> **触碰元素**: E1-E8 (lint 会扫到所有硬模式 metric 声明)
+> **必须 NOT 做**（摘自 M13）:
+> - **不**加 `result` 进 banned（E1/E2/E8 用）
+> - **不**加 `op` 进 banned（E3 用）
+> - **不**加 `path` 进 banned（E5 用）
+> - **不**加 `attempt_index` / `model_id` 进 banned（有界枚举，合理用）
+> **完整矩阵**: 见 v2.1 corrections §11 **M13**
+>
+> 注意：WS-10 T08 与本 task 功能重叠，两个 lint 必须保持 banned 集合一致。
+>
+> 执行前必读 M13。PR 描述必须列明"已遵守教学矩阵 M13"。
+
+---
+
 **【是什么 What it IS】**
-- `scripts/check-metric-labels.sh`（两仓）：扫所有 `prometheus.NewCounterVec`/`.GaugeVec`/`.HistogramVec`（Go）与 `register_int_counter_vec!`/`register_gauge_vec!`/`register_histogram_vec!`（Rust）声明，要求 label name 不在 banned 集合 `{request_id, api_key_id, user_id, ip_address, email, token}`；可在 PR 描述列举 enum 值集合（例如 `attempt_index`、`disabled_now: bool`）作为豁免理由。
+- `scripts/check-metric-labels.sh`（两仓）：扫所有 `prometheus.NewCounterVec`/`.GaugeVec`/`.HistogramVec`（Go）与 `register_int_counter_vec!`/`register_gauge_vec!`/`register_histogram_vec!`（Rust）声明，要求 label name 不在 banned 集合 `{request_id, api_key_id, user_id, ip, ip_address, email, token, session_id, jti, refresh_token, access_token, hash}`（M13 canonical 12 标签）；**不**含 `result` / `op` / `path` / `attempt_index` / `model_id`（E1-E8 有界枚举，硬防自身用）；可在 PR 描述列举 enum 值集合（例如 `attempt_index`、`disabled_now: bool`）作为豁免理由。
 
 **【不是什么 What it is NOT】**
 - ❌ 不审 metric value（无界）。
@@ -1247,6 +1311,19 @@ echo "[check-metric-labels] OK"
 1. **`prometheus.Labels{"request_id": ...}`** vs `NewCounterVec` 声明：本 lint 只看声明，不看 call site；高基数 label 可能在 call site 注入 wildcards。fixture 验证 call site 高基数被声明 lint 捕获（因为 Vec 声明已知 label 集，不会有 call site 注入未声明 label）。
 2. **`request_id` 字符串变量**：`metricLabels := []string{requestIDName}; NewCounterVec(..., metricLabels)` —— 间接命名，lint 不见。列入 INVESTIGATE-WS12-013。
 3. **Rust macro 多行**：`register_int_counter_vec!("name", "help", &["request_id", "x"])?;` 多行可能超出 10 行窗口；测多行 fixture。
+
+### v2.1 §10.2 合规交付（M13）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M13** 清理：
+- 原内容 HOW 脚本 `BANNED` 数组已包含且仅包含 M13 canonical 12 标签 = `{request_id, api_key_id, user_id, ip, ip_address, email, token, session_id, jti, refresh_token, access_token, hash}`，未含 `result` / `op` / `path` / `attempt_index` / `model_id` —— 符合 M13。
+- 原内容【是什么】段 banned 集合描述仅列 6 标签（`{request_id, api_key_id, user_id, ip_address, email, token}`），与 HOW 脚本 12 标签不一致。已修正为 12 canonical 标签 + 显式标注 "不" 含 E1-E8 有界枚举。
+- lint 仅报告（exit 1 + 打印违例），未提议自动 patch —— 符合 M13。
+- 与 WS-10 T08 banned 集合保持一致（两 lint 功能重叠）。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M13: banned 集合未含 result/op/path/attempt_index/model_id；与 WS-10 T08 一致"。
+2. PR 附 lint 脚本 banned 集合定义段（BANNED 数组），显示 12 个 canonical 标签。
+3. PR 附 `diff -u <gateway>/scripts/check-metric-labels.sh <go-mirror>/scripts/check-metric-labels.sh`，BANNED 数组行一致。
 
 ---
 

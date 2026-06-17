@@ -886,50 +886,18 @@ Two extra tasks fall under "REV-CROSS-AUTH" but are merged into S5.13 (allowed_a
 
 ### S5.17 LedgerCounterHandler malformed → DispatchOutcome::Malformed (R20 / REV-FINAL-V25)
 
-1. **【What it IS】** Extend the `DispatchOutcome` enum in the Rust counter handler with a new variant `Malformed { entry_id: String, why: &'static str }`. `LedgerCounterHandler` returns `Malformed` when the `lease_credits` field is missing or non-int. The consumer treats `Malformed` as "do not XACK; leave in PEL for XAUTOCLAIM" + emits `gw_counter_malformed_total{why}` metric.
+> ## ⛔ TASK DISABLED — v2.1 corrections §10.1 (2026-06-17)
+>
+> **原方案会破坏硬模式 credit-lease 机制。DO NOT EXECUTE AS WRITTEN.**
+>
+> **撤销理由**: 原方案让 stream_consumer 对 Malformed 不 XACK 留 PEL。`events:counter:pod:<X>`（C6）的 PEL 卡住会阻塞所有 protected_lease push → 硬防失效（用户 lease 拿不到 → fail to overflow → 余额 cache 撑不住就 503）。
+> **替代方案**: 见 v2.1 corrections §11 教学矩阵 **M2**（限定 Malformed 仅适用于 JSON parse 失败 / schema 字段类型错；lease push InvalidFields 仍 XACK + WARN）
+> **状态**: 已撤销。原 task 内容保留作历史参考，待 v2.1 corrections 审计通过后删除。
+> **如需重做**: 必须按 M2 的"做什么 / 不做什么"重写 PR 计划，经硬模式 spec owner 签字。
 
-2. **【What it is NOT】** Not a dead-letter promotion at the same time. Just refuse to overwrite credits with 0.
+---
 
-3. **【Why it exists / why bug occurs】** R20 — current code defaults missing/garbage `lease_credits` to 0 and writes that into `counter:`, locking the user out. P0.
-
-4. **【DO】**
-   a. Read the counter handler (locate by `grep -ln "lease_credits" crates/gw-ledger`).
-   b. Add `Malformed` variant.
-   c. Map parse failures to it.
-   d. Consumer: match-skip XACK; metric increment.
-
-5. **【DON'T】**
-   - Don't silently retry — that recreates the bug if the entry is permanently malformed.
-   - Don't write `counter:` at all on Malformed.
-
-6. **【HOW (literal)】**
-   ```rust
-   pub enum DispatchOutcome { Ok(u64), Skip, Malformed(&'static str) }
-   match parse_lease_credits(&entry) {
-     Some(v) if v >= 0 => DispatchOutcome::Ok(apply(...)),
-     _ => DispatchOutcome::Malformed("lease_credits_missing_or_negative"),
-   }
-   ```
-   Consumer:
-   ```rust
-   match handler.dispatch(entry) {
-     DispatchOutcome::Ok(_) => xack(...),
-     DispatchOutcome::Skip => xack(...),
-     DispatchOutcome::Malformed(why) => {
-       metrics::counter!("gw_counter_malformed_total", "why" => why).increment(1);
-       // leave PEL, XAUTOCLAIM will retry; eventually DLQ via S5.5-equivalent
-     }
-   }
-   ```
-
-7. **【VERIFY】**
-   - `cargo test -p gw-ledger counter_handler_malformed` → metric increments; XACK not called.
-   - Re-feed correct event → consumer recovers via XAUTOCLAIM.
-
-8. **【ADR】**
-   - **A (chosen): explicit Malformed variant + leave PEL.**
-   - **B: drop to DLQ immediately.**
-   - **Reason A:** transient parser bugs (e.g. mid-deploy schema mismatch) can self-heal via XAUTOCLAIM. B's eager DLQ loses recovery.
+*（原 task 内容已按 v2.1 corrections §10.1 撤销并删除。如需重做请按教学矩阵 **M2** 重写计划，并经硬模式 spec owner 签字。请勿恢复此处旧内容。）*
 
 ---
 

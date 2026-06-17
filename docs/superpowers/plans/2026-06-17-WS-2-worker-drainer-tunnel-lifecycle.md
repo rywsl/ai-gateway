@@ -1353,6 +1353,21 @@ let exec = ExecLoop::new(contract.clone(), http_client.clone(), exec_cfg);
 
 ### TASK W2-T13：REV-FINAL-W6 + Task-Runtime-2 — SETTLE_LUA 幂等 + 外层 XACK + XAUTOCLAIM 兜底
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease 关键路径。必须遵守教学矩阵 M5。**
+>
+> **触碰元素**: C7（`SETTLE_LUA` 写 `counter:user:<uid>:deducted_micro`）；本 task 触的是 task-runtime SETTLE_LUA，**不是**硬防的 LeaseGuard.settle_actual
+> **必须 NOT 做**（摘自 M5）:
+> - **不**碰 `crates/gw-ledger/src/lease.rs`（A1，lease 路径独立）
+> - **不**碰 `crates/gw-proxy/src/filters/logging.rs:160` 的 `guard.settle_actual + overflow_gate.record_actual`（A9）
+> - **不**改 ledger 侧 settle 路径
+> **完整矩阵**: 见 v2.1 corrections §11 **M5**
+>
+> 执行前必读 M5。PR 描述必须列明"已遵守教学矩阵 M5"。
+
+---
+
 **【是什么 What it IS】**
 - 修改 `crates/gw-task/src/scripts.rs` `SETTLE_LUA`：在脚本顶部加 status='settled' 检查 → 'noop'。
 - `execute_claimed` settle 路径在 Lua 调用成功**之后**单独调 `client.xack("tasks:queue", "tasks-workers", stream_id)`（**不在 Lua 内**，避免 CROSSSLOT — INVESTIGATE-008 待定，但默认按 single shard 假设）。
@@ -1463,6 +1478,17 @@ impl<C: TaskContract> PendingReconciler<C> {
 4. 输出：`logs/W2-T13-verify.txt`。
 
 **【依赖】** 阻塞于 T11/T12；并行于 T14/T15。
+
+### v2.1 §10.2 合规交付（M5）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M5** 清理：
+- 已逐段对照 banner "必须 NOT 做" 清单（A1 `crates/gw-ledger/src/lease.rs` / A9 `crates/gw-proxy/src/filters/logging.rs:160` 的 `guard.settle_actual + overflow_gate.record_actual` / ledger 侧 settle 路径）与原内容（What / What-NOT / Why / DO / DON'T / HOW / ADR / SOURCE-CHECK / VERIFY / 依赖）。
+- 原内容仅触碰 task-runtime 侧 `SETTLE_LUA`：`crates/gw-task/src/scripts.rs` 顶部加 `status='settled'|'terminated'` 幂等 guard、`execute_claimed` 在 Lua 调用成功**之后**单独外层 `client.xack("tasks:queue", "tasks-workers", stream_id)`、新增 `crates/gw-task-runtime/src/pending_reconciler.rs` 30s 周期兜底 XACK。
+- **未**触 `crates/gw-ledger/src/lease.rs`、`crates/gw-proxy/src/filters/logging.rs:160`、ledger 侧 settle 路径。
+- 显式保留 SETTLE_LUA 内 INCRBY `counter:user:<uid>:deducted_micro` 写入语义不变（原内容「不做什么」段已声明："不删除 SETTLE_LUA 的 ZREM/INCRBY 等其他 mutation（仅在脚本顶部加幂等守卫）"）。
+- 未发现违反点，原内容已符合矩阵。
+
+**PR 描述必须包含**："已遵守教学矩阵 M5：仅触 task-runtime SETTLE_LUA（crates/gw-task/src/scripts.rs 顶部加 status guard）+ execute_claimed 外层 XACK + 新 pending_reconciler；不碰 A1 (lease.rs) / A9 (logging.rs:160 settle 路径) / ledger 侧 settle 路径；保留 SETTLE_LUA 内 INCRBY counter:user:<uid>:deducted_micro 写入语义不变"。
 
 ---
 

@@ -391,6 +391,22 @@ func TestLoadFlags_InvalidEnum(t *testing.T) {
 
 ## T15.3 — Rust `[flags]` 配置块 + `gw-gateway/config.rs` 解析
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰 Rust 配置文件，与硬防配置块相邻。必须遵守教学矩阵 M15。**
+>
+> **触碰元素**: A6 (`crates/gw-ledger/src/protection_config.rs` 是硬防开关源)；config.rs 同文件相邻 [protection] block
+> **必须 NOT 做**（摘自 M15）:
+> - **不**改 `[protection]` block 内任何字段（`enabled` / `lease_grace_ms` / `default_output_ceiling_tokens`）
+> - **不**改 `crates/gw-ledger/src/protection_config.rs`（A6）
+> - **不**加 `flags.credit_lease_enable` / `flags.overflow_gate_enable` 这种 flag（硬防永远开，禁止灰度）
+> - 仅追加 `[flags]` block + FlagsCfg struct + LicenseEnforceMode enum
+> **完整矩阵**: 见 v2.1 corrections §11 **M15**
+>
+> 执行前必读 M15。PR 描述必须列明"已遵守教学矩阵 M15：[protection] block / protection_config.rs 未动"。
+
+---
+
 ### 1. 【是什么】
 对应 Go T15.2 的 Rust 版本。**字面文件**：
 - 改 `crates/gw-gateway/src/config.rs`（在现有 `Config` struct 加 `pub flags: FlagsCfg` 字段）
@@ -558,6 +574,17 @@ mod flags_cfg_tests {
 - Revert 单 PR 即可；`FlagsCfg` 仅在 T15.4/T15.5/T15.7 才被消费。
 - 默认 = yaml ledger = warn/false 三个；T15.10 lint 强制 Rust default == yaml default。
 - Mixed-version：旧 Rust 进程不识别 `[flags]` → figment 忽略；新 Rust 进程读旧 TOML（无 `[flags]`）→ `Default` 触发，全部保守值。两侧都 fail-safe。
+
+### v2.1 §10.2 合规交付（M15）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M15** 清理：
+- 原内容已符合矩阵：HOW 仅追加 `[flags]` block + `FlagsCfg` struct + `LicenseEnforceMode` enum（4 个 flag：license_enforce / jwt_strict / payment_webhook_5xx / r7_502_on_parse_fail）；未提议改 `[protection]` block 任何字段（enabled / lease_grace_ms / default_output_ceiling_tokens）；未提议动 `crates/gw-ledger/src/protection_config.rs`（A6）；未提议加 `credit_lease_enable` / `overflow_gate_enable` flag；未在 wiring 中把 `[protection]` 加进 flag 解析路径。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M15: [protection] block / protection_config.rs 未动"
+2. PR 描述附 `git diff -- crates/gw-ledger/src/protection_config.rs crates/gw-gateway/src/config.rs | grep -c protection` 结果（仅 0 或仅现有 protection 块的注释引用，不应有 [protection] 字段改动）
+3. PR 描述附 `git diff config/default.toml | grep -E '^\[protection\]|credit_lease_enable|overflow_gate_enable'` 结果为空
+4. PR 测试中显式 verify `[protection].enabled` 默认仍为 true、`protection_config.rs` 内容未变
 
 ---
 

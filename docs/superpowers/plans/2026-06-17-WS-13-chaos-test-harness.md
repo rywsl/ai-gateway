@@ -413,6 +413,21 @@ class ProcessSignalInjector:
 
 ### TASK W13-T05：注入器 — Redis 故障（partition / failover / cluster CROSSSLOT）
 
+### W13-T05 INVARIANT
+
+> ## ⚡ HARD-MODE INVARIANT ASSERTIONS REQUIRED — v2.1 corrections §10.3 (2026-06-17)
+>
+> 此 chaos injector 触碰硬模式 credit-lease 关键路径。chaos scenario 编写时**必须**在 invariant assertion 中包含：
+>
+> - `OverflowGate.check` 在 sentinel 切换后 ≤ 5 秒内恢复 Allow / BalanceInsufficient 决策（**不卡** `result=cache_unavail > 5s`）
+> - INCRBY `credit:overflow_consumed` 失败必须 503（D9 fail-closed）
+> - GET `credit:overflow_consumed` 失败必须视为 0 + WARN（D10 fail-open per spec §4.2）
+> - lease_no_permanent_leak：sentinel 切换后所有未 settle 的 lease 在 Drop 后 credits 归还
+>
+> **完整断言列表**: 见 v2.1 corrections §10.3 + §9 §D 不变量表
+
+---
+
 **【是什么】**
 - `injectors/redis_fault.py`：kind `redis_fault`，子模式 `sentinel_partition | sentinel_failover | cluster_crossslot | down`。
 
@@ -458,6 +473,23 @@ class ProcessSignalInjector:
 
 **【依赖与并行】**
 - 阻塞于 T02；并行其它 injector tasks。
+
+### v2.1 §10.3 合规交付（硬防使用约束 — 注入器）
+
+本注入器 (`redis_fault`，sub-mode `sentinel_failover` / `sentinel_partition` / `cluster_crossslot` / `down`) 触碰硬模式 credit-lease 关键路径（OverflowGate / LeaseScheduler / lease push / consumed 滚动窗口）。**使用本注入器的 scenario 必须在 invariants 数组中包含下列硬防断言**（具体 invariant stub 实现由各 scenario task 落地，本注入器不加 stub）：
+
+**使用 `redis_fault` 的 scenario 必须断言**（对应 v2.1 corrections §9 §D + §10.3）：
+
+- `OverflowGate.check` 在 sentinel 切换后 ≤ 5 秒内恢复 Allow / BalanceInsufficient 决策（**不卡** `result=cache_unavail > 5s`）— 对应 invariant `hardmode_overflow_gate_recovers_within_5s`
+- INCRBY `credit:overflow_consumed` 失败必须 503（D9 fail-closed，§3.3 严禁 fall through）— 对应 invariant `hardmode_incrby_consumed_failure_returns_503`
+- GET `credit:overflow_consumed` 失败必须视为 0 + WARN（D10 fail-open per spec §4.2，§3.3 落地）— 对应 invariant `hardmode_get_consumed_failure_treated_as_zero_warn`
+- `lease_no_permanent_leak`：sentinel 切换后所有未 settle 的 lease 在 Drop 后 credits 归还（A1 LeaseGuard Drop → release idempotent flip）— 已在 T20 注册
+
+**Acceptance**:
+1. 引用 `redis_fault` 的 scenario yaml（如 `redis-sentinel-failover-during-lease`、`redis-sentinel-partition-30s`）的 invariants 数组必须显式列出上述 `hardmode_*` 项
+2. 任一硬防 invariant 在 chaos report 中 FAIL ⇒ 整 scenario FAIL
+3. 所有硬防断言在 chaos report 中以 `hardmode.` 前缀单独分组
+4. PR 描述必须包含 "硬防使用约束已声明（W13-T05）：[hardmode_overflow_gate_recovers_within_5s, hardmode_incrby_consumed_failure_returns_503, hardmode_get_consumed_failure_treated_as_zero_warn, lease_no_permanent_leak]"
 
 ---
 
@@ -731,6 +763,20 @@ class WalletConservationInvariant:
 
 ### TASK W13-T16：scenario — `pingora-sigkill-midflight`
 
+> ## ⚡ HARD-MODE INVARIANT ASSERTIONS REQUIRED — v2.1 corrections §10.3 补充 (2026-06-17)
+>
+> 此 chaos scenario 中点 SIGKILL Rust 网关，直接触碰 LeaseGuard Drop（A1）+ settle 路径（A9）+ F1。**必须**在 invariant assertion 中包含：
+>
+> - SIGKILL+重启后：in-flight LeaseGuard 在重启进程中**不再存在**（pod 死了，LEASE_POOL 内存清零）；Go LeaseScheduler 在 ≤ 1 tick (1s) 内重新推 lease 到新启动的 pod（D5：balance ≤ 0 才停推；balance > 0 时持续推）
+> - SIGKILL 前已 INCRBY 的 `credit:overflow_consumed:<uid>` 不被错误退还（D2：30s 滚动窗口自然归零）；不被双 INCRBY（重启后请求是新请求）
+> - 重启后旧 lease 不被错误延长（D1：lease ≤ balance × ttl/period）
+> - settle 不重复执行（F1：settle_actual 单 fire 设计；SIGKILL 期间的 settle 直接丢失，新请求重新 estimate→try_acquire）
+> - 新 pod 加入后 `gw:active_pods` SADD 在 ≤ 5s 内被 SMEMBERS 看到
+>
+> **完整断言列表**: 见 v2.1 corrections §10.3 + §9 §D 不变量表
+
+---
+
 **【是什么】**
 - `scenarios/pingora-sigkill-midflight.yaml`。
 
@@ -743,7 +789,7 @@ class WalletConservationInvariant:
 **【做什么】**
 - 配 injector `process_signal{service=gateway, signal=SIGKILL, delay_ms=2000, restart_after_ms=15000}`。
 - workload `aiohttp_concurrent{n=200, duration_s=30, endpoint=/v1/messages, body=anthropic_smoke}`。
-- invariants：`wallet_conservation`、`pel_drained{stream=usage:records, group=billing}`、`service_healthy{services=[gateway,web]}`、`settle_no_double`、`log_no_secret`、`panic_recovered_zero{exclude_metrics=[gw_pingora_killed_panic_total]}`。
+- invariants：`wallet_conservation`、`pel_drained{stream=usage:records, group=billing}`、`service_healthy{services=[gateway,web]}`、`settle_no_double`、`log_no_secret`、`panic_recovered_zero{exclude_metrics=[gw_pingora_killed_panic_total]}`、`hardmode_lease_pool_cleared_after_sigkill`、`hardmode_lease_scheduler_resume_within_1tick`、`hardmode_overflow_consumed_no_double_incrby`、`hardmode_no_stale_lease_extension`、`hardmode_active_pods_sadd_visible_within_5s`。
 
 **【不做什么】**
 - ❌ 不让 workload 在网关 down 期间没有错误重试（要打开 client 端 retry，否则得不到"重启后请求成功"的覆盖）。
@@ -757,9 +803,109 @@ class WalletConservationInvariant:
 
 **【依赖与并行】** 阻塞于 T03/T08/T10/T11/T12/T13/T14/T15；并行其它 scenario。
 
+### v2.1 §10.3 合规交付（硬防不变量接线）
+
+本 chaos scenario 已对照 v2.1 corrections §9 §D + §10.3 补充接入硬防不变量断言。
+
+**新加 invariants**（在 scenario yaml `invariants:` 数组）:
+- `hardmode_lease_pool_cleared_after_sigkill` — SIGKILL+重启后 in-flight LeaseGuard 不再存在，pod 重启后 LEASE_POOL 内存清零（A1 LeaseGuard 状态在进程内）
+- `hardmode_lease_scheduler_resume_within_1tick` — Go LeaseScheduler 在新 pod 加入后 ≤ 1 tick (1s) 内重新推 lease（D5：balance > 0 时持续推）
+- `hardmode_overflow_consumed_no_double_incrby` — SIGKILL 前已 INCRBY 的 `credit:overflow_consumed:<uid>` 不被错误退还（D2：30s 滚动窗口自然归零），重启后请求是新请求不双 INCRBY
+- `hardmode_no_stale_lease_extension` — 重启后旧 lease 不被错误延长（D1：lease ≤ balance × ttl/period，Go push 前 clamp）
+- `hardmode_active_pods_sadd_visible_within_5s` — 新 pod 加入后 `gw:active_pods` SADD 在 ≤ 5s 内被 SMEMBERS 看到（A3 heartbeat 5s 周期 + 15s TTL）
+
+**新加 invariant stub**（`tests/e2e/chaos/invariants/hardmode_*.py`，由 WS-13 执行 agent 实现）:
+
+```python
+# invariants/hardmode_lease_pool_cleared_after_sigkill.py (新加 stub)
+def check(harness):
+    """W13-T16 — v2.1 corrections §10.3 补充
+    After SIGKILL + restart, the gateway pod has empty LEASE_POOL on boot.
+    """
+    # 1. record pre-SIGKILL active_pods set
+    # 2. wait for gateway readyz=200 after restart
+    # 3. assert SMEMBERS gw:active_pods reflects new pod within 5s
+    # 4. assert metric gw_credit_lease_acquire_total{result="nolease"} spikes
+    #    momentarily on cold pod (expected — overflow gate covers)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_lease_scheduler_resume_within_1tick.py (新加 stub)
+def check(harness):
+    """W13-T16 — v2.1 corrections §10.3 补充
+    Go LeaseScheduler.Tick resumes pushing lease within 1 tick (1s) after new pod joins.
+    """
+    # 1. capture baseline credit_lease_xadd_fanout_total for new pod_id
+    # 2. wait for gateway readyz=200
+    # 3. poll credit_lease_xadd_fanout_total{pod_id=<new>} delta >= 1 within 1s
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_overflow_consumed_no_double_incrby.py (新加 stub)
+def check(harness):
+    """W13-T16 — v2.1 corrections §10.3 补充
+    SIGKILL 前已 INCRBY 的 credit:overflow_consumed:<uid> 不被错误退还，重启后不双 INCRBY。
+    """
+    # 1. capture pre-SIGKILL credit:overflow_consumed:<uid> value V_pre
+    # 2. capture post-restart value V_post (within 30s window of pre-SIGKILL)
+    # 3. assert V_post >= V_pre (no refund; D2 rolling window only decrements via TTL)
+    # 4. assert no double INCRBY on first post-restart request
+    #    (track via gw_credit_overflow_gate_total{result="pass"} delta == 1 per request)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_no_stale_lease_extension.py (新加 stub)
+def check(harness):
+    """W13-T16 — v2.1 corrections §10.3 补充
+    重启后旧 lease 不被错误延长（D1：lease ≤ balance × ttl/period）。
+    """
+    # 1. record pre-SIGKILL lease_id L_pre with expires_at T_pre
+    # 2. after restart, verify L_pre is NOT extended (Go pushes new lease_id L_new)
+    # 3. assert L_new.ttl <= 30s (Go push-time clamp per B1)
+    # 4. assert no lease in events:counter:pod:<new_pod> references L_pre
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_active_pods_sadd_visible_within_5s.py (新加 stub)
+def check(harness):
+    """W13-T16 — v2.1 corrections §10.3 补充
+    新 pod 加入后 gw:active_pods SADD 在 ≤ 5s 内被 SMEMBERS 看到（A3 heartbeat）。
+    """
+    # 1. record pre-SIGKILL active_pods = SMEMBERS gw:active_pods
+    # 2. SIGKILL + restart triggered by injector
+    # 3. poll SMEMBERS gw:active_pods every 500ms after restart
+    # 4. assert new pod_id appears within 5s (A3: heartbeat 5s SADD + 15s TTL)
+    # 5. assert old pod_id eventually ages out (within 15s + grace)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+**Acceptance**:
+1. chaos smoke 必须 PASS 所有新加 invariants
+2. 所有硬防断言在 chaos report 中以 `hardmode.` 前缀单独分组（如 `hardmode.lease_pool_cleared_after_sigkill`）
+3. PR 描述必须包含 "硬防不变量已接线：[hardmode_lease_pool_cleared_after_sigkill, hardmode_lease_scheduler_resume_within_1tick, hardmode_overflow_consumed_no_double_incrby, hardmode_no_stale_lease_extension, hardmode_active_pods_sadd_visible_within_5s]"
+
 ---
 
 ### TASK W13-T17：scenario — `pg-terminate-mid-tx-deduct`（REV-005 范例落地）
+
+### W13-T17 INVARIANT
+
+> ## ⚡ HARD-MODE INVARIANT ASSERTIONS REQUIRED — v2.1 corrections §10.3 (2026-06-17)
+>
+> 此 chaos scenario 触碰硬模式 credit-lease 关键路径。**必须**在 invariant assertion 中包含：
+>
+> - PG 闪断后 `OverflowGate.balance_for` retry 5 次内恢复（D4：Redis + PG 双断 → 503，重试 5 次后放弃）
+> - wallets 表 balance 在 chaos 后与 settler 累计 cost 守恒（D3：balance 唯一权威 = PG）
+> - 闪断期间 INCRBY consumed 失败必须返 503（D9）
+> - 闪断期间 GET consumed 失败必须视为 0 + WARN（D10）
+>
+> **完整断言列表**: 见 v2.1 corrections §10.3 + §9 §D 不变量表
+
+---
 
 **【是什么】**
 - `scenarios/pg-terminate-mid-tx-deduct.yaml`。
@@ -770,7 +916,7 @@ class WalletConservationInvariant:
 **【做什么】**
 - injector `pg_fault{kind=terminate_mid_op, match_query_regex="INSERT INTO idempotency_keys.*op='deduct'", after_n_matches=500}`。
 - workload `aiohttp_concurrent{n=1000, duration_s=60, endpoint=/v1/wallet/deduct, body=deduct_smoke, idempotency_key_per_request=true}`。
-- invariants：`wallet_conservation{tolerance_micros=0}`、`idem_key_uniqueness{op=deduct, expected_unique_count=auto}`、`service_healthy`。
+- invariants：`wallet_conservation{tolerance_micros=0}`、`idem_key_uniqueness{op=deduct, expected_unique_count=auto}`、`service_healthy`、`hardmode_balance_for_retry_recovers_within_5`、`hardmode_incrby_consumed_failure_returns_503`、`hardmode_get_consumed_failure_treated_as_zero_warn`。
 
 **【不做什么】**
 - ❌ 不让 1000 并发都用同一 idem key（那是 W13-T26）；本 scenario 每请求 unique key，测的是「中点 PG 闪断后 idem + tx 是否原子回滚」。
@@ -784,9 +930,85 @@ class WalletConservationInvariant:
 
 **【依赖与并行】** 阻塞于 T04/T08/T09/T15；并行。
 
+### v2.1 §10.3 合规交付（硬防不变量接线）
+
+本 chaos scenario 已对照 v2.1 corrections §9 §D + §10.3 接入硬防不变量断言。
+
+**新加 invariants**（在 scenario yaml `invariants:` 数组）:
+- `hardmode_balance_for_retry_recovers_within_5` — PG 闪断后 `OverflowGate.balance_for` retry 5 次内恢复（D4：Redis + PG 双断 → 503，重试 5 次后放弃；闪断后 PG 恢复时 retry 必 ≤ 5 次内拿到 balance）
+- `hardmode_incrby_consumed_failure_returns_503` — 闪断期间 INCRBY `credit:overflow_consumed` 失败必须返 503（D9 fail-closed，§3.3 严禁 fall through）
+- `hardmode_get_consumed_failure_treated_as_zero_warn` — 闪断期间 GET `credit:overflow_consumed` 失败必须视为 0 + WARN（D10 fail-open per spec §4.2，§3.3 落地）
+
+**已有 invariants 复用**（不新加 stub）:
+- `wallet_conservation{tolerance_micros=0}` — 已在 T08 注册；D3 balance 唯一权威 = PG 守恒
+
+**新加 invariant stub**（`tests/e2e/chaos/invariants/hardmode_*.py`，由 WS-13 执行 agent 实现）:
+
+```python
+# invariants/hardmode_balance_for_retry_recovers_within_5.py (新加 stub)
+def check(harness):
+    """W13-T17 — v2.1 corrections §10.3 补充
+    PG 闪断后 OverflowGate.balance_for retry 5 次内恢复（D4）。
+    """
+    # 1. trigger pg_fault{terminate_mid_op, after_n_matches=500}
+    # 2. capture gw_pg_fallback_total{op="balance_read"} delta during blip
+    # 3. capture gw_credit_overflow_gate_total{result="cache_unavail"} delta
+    # 4. after PG recovery, assert requests succeed within 5 retries
+    #    (track via response codes: no sustained 503 beyond 5 retries × retry budget)
+    # 5. assert D4: only Redis+PG both down → 503 (PG only → PG fallback OK)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_incrby_consumed_failure_returns_503.py (新加 stub)
+def check(harness):
+    """W13-T17 — v2.1 corrections §10.3 补充
+    闪断期间 INCRBY credit:overflow_consumed 失败必须返 503（D9 fail-closed）。
+    """
+    # 1. during PG blip, force Redis INCRBY to fail (via redis_fault or network partition)
+    # 2. assert response code == 503 for affected requests (NOT 200, NOT 402)
+    # 3. assert metric gw_credit_overflow_gate_total{result="cache_unavail"} increments
+    # 4. assert no fall-through to "leak" path (D9 严禁漏账)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_get_consumed_failure_treated_as_zero_warn.py (新加 stub)
+def check(harness):
+    """W13-T17 — v2.1 corrections §10.3 补充
+    闪断期间 GET credit:overflow_consumed 失败必须视为 0 + WARN（D10 fail-open）。
+    """
+    # 1. during PG blip, force Redis GET to fail (network partition on redis port)
+    # 2. assert response NOT 503 (fail-open per spec §4.2)
+    # 3. assert metric gw_credit_overflow_gate_total{result="consumed_read_failed_open"} increments
+    # 4. assert WARN log line "overflow consumed read failed; treating as 0" present
+    # 5. assert balance_micro (cache or PG fallback) still authoritative for decision
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+**Acceptance**:
+1. chaos smoke 必须 PASS 所有新加 invariants
+2. 所有硬防断言在 chaos report 中以 `hardmode.` 前缀单独分组
+3. PR 描述必须包含 "硬防不变量已接线：[hardmode_balance_for_retry_recovers_within_5, hardmode_incrby_consumed_failure_returns_503, hardmode_get_consumed_failure_treated_as_zero_warn]"
+
 ---
 
 ### TASK W13-T18：scenario — `redis-sentinel-failover-during-lease` + `redis-sentinel-partition-30s`
+
+### W13-T18 INVARIANT
+
+> ## ⚡ HARD-MODE INVARIANT ASSERTIONS REQUIRED — v2.1 corrections §10.3 (2026-06-17)
+>
+> 此 chaos scenario 触碰硬模式 credit-lease 关键路径。**必须**在 invariant assertion 中包含：
+>
+> - LeaseScheduler 在 sentinel 切换后 1 tick (≤ 1s) 内恢复推 lease
+> - 活跃 pod 在 ≤ 15s 内被 SMEMBERS `gw:active_pods` 看到
+> - 旧 lease 不被错误延长（D1：lease ≤ balance × ttl/period，Go push 前 clamp）
+> - settle 不重复执行（F1：settle_actual 单 fire 设计在 sentinel 切换下仍成立）
+>
+> **完整断言列表**: 见 v2.1 corrections §10.3 + §9 §D 不变量表
+
+---
 
 **【是什么】**
 - 两个 yaml：sentinel failover 中点 lease 操作；30s partition 无 quorum。
@@ -798,7 +1020,7 @@ class WalletConservationInvariant:
 - compose_overrides: [sentinel.yml]。
 - injector：`redis_fault{kind=sentinel_failover}` / `redis_fault{kind=sentinel_partition, duration_s=30, isolate=[sentinels]}`。
 - workload：连续发 settle 请求 100/s × 60s（触 EXTEND_LEASE_LUA、SETTLE_LUA）。
-- invariants：`wallet_conservation`、`settle_no_double`、`pel_drained`、`service_healthy`、`lease_no_permanent_leak`（新增，T20）。
+- invariants：`wallet_conservation`、`settle_no_double`、`pel_drained`、`service_healthy`、`lease_no_permanent_leak`（新增，T20）、`hardmode_lease_scheduler_resume_within_1s`、`hardmode_active_pods_smembers_visible_within_15s`、`hardmode_no_stale_lease_extension`。
 
 **【不做什么】**
 - ❌ 不让客户端 abort；保 retry-with-backoff，测重试路径。
@@ -806,6 +1028,68 @@ class WalletConservationInvariant:
 **【如何验证】** 报告 PASS；`gw_lease_redis_failover_recovered_total > 0`。
 
 **【依赖与并行】** 阻塞于 T05/T08/T10/T14/T15/T20。
+
+### v2.1 §10.3 合规交付（硬防不变量接线）
+
+本 chaos scenario 已对照 v2.1 corrections §9 §D + §10.3 接入硬防不变量断言。
+
+**新加 invariants**（在 scenario yaml `invariants:` 数组）:
+- `hardmode_lease_scheduler_resume_within_1s` — LeaseScheduler 在 sentinel 切换后 ≤ 1 tick (1s) 内恢复推 lease（B1 `LeaseScheduler.Tick` 1s 周期；切换后下个 tick 必恢复 XADD）
+- `hardmode_active_pods_smembers_visible_within_15s` — 活跃 pod 在 ≤ 15s 内被 SMEMBERS `gw:active_pods` 看到（A3 heartbeat 15s TTL，新 pod 必在 15s 内被 Go SMEMBERS 拉到）
+- `hardmode_no_stale_lease_extension` — 旧 lease 不被错误延长（D1：lease ≤ balance × ttl/period，Go push 前 clamp；sentinel 切换后 Go 必推新 lease_id，不复用旧 lease 的剩余 TTL）
+
+**已有 invariants 复用**（不新加 stub）:
+- `settle_no_double` — 已在 T14 注册；F1 settle_actual 单 fire 设计在 sentinel 切换下仍成立
+- `lease_no_permanent_leak` — 已在 T20 注册；A1 LeaseGuard Drop → release idempotent flip
+
+**新加 invariant stub**（`tests/e2e/chaos/invariants/hardmode_*.py`，由 WS-13 执行 agent 实现）:
+
+```python
+# invariants/hardmode_lease_scheduler_resume_within_1s.py (新加 stub)
+def check(harness):
+    """W13-T18 — v2.1 corrections §10.3 补充
+    LeaseScheduler 在 sentinel 切换后 1 tick (1s) 内恢复推 lease。
+    """
+    # 1. record sentinel master addr M_pre
+    # 2. trigger redis_fault{kind=sentinel_failover}
+    # 3. wait for new master M_post (poll SENTINEL get-master-addr-by-name)
+    # 4. capture baseline credit_lease_xadd_fanout_total at failover detection
+    # 5. assert delta >= 1 within 1s after new master is reachable
+    #    (B1: LeaseScheduler.Tick 1s period — D5 balance > 0 keeps pushing)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_active_pods_smembers_visible_within_15s.py (新加 stub)
+def check(harness):
+    """W13-T18 — v2.1 corrections §10.3 补充
+    活跃 pod 在 ≤ 15s 内被 SMEMBERS gw:active_pods 看到。
+    """
+    # 1. record active_pods = SMEMBERS gw:active_pods at scenario start
+    # 2. during sentinel failover, poll SMEMBERS every 1s from Go web side
+    # 3. assert all expected pod_ids visible within 15s (A3: 15s TTL heartbeat)
+    # 4. assert no spurious pod_ids (no leak across scenarios)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_no_stale_lease_extension.py (新加 stub)
+def check(harness):
+    """W13-T18 — v2.1 corrections §10.3 补充
+    旧 lease 不被错误延长（D1：lease ≤ balance × ttl/period，Go push 前 clamp）。
+    """
+    # 1. record pre-failover lease_ids L_pre[] with expires_at T_pre[]
+    # 2. after sentinel failover, capture post-failover lease_ids L_post[]
+    # 3. assert L_post entries have fresh expires_at (not reusing T_pre + extension)
+    # 4. assert Go-side clamp: each L_post.ttl <= 30s (B1: ttl=random(10s,30s) clamp)
+    # 5. assert no lease in events:counter:pod:<X> has expires_at > balance × ttl/period
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+**Acceptance**:
+1. chaos smoke 必须 PASS 所有新加 invariants
+2. 所有硬防断言在 chaos report 中以 `hardmode.` 前缀单独分组
+3. PR 描述必须包含 "硬防不变量已接线：[hardmode_lease_scheduler_resume_within_1s, hardmode_active_pods_smembers_visible_within_15s, hardmode_no_stale_lease_extension]"
 
 ---
 
@@ -869,6 +1153,20 @@ class WalletConservationInvariant:
 
 ### TASK W13-T22：scenario — `mixed-deploy-go-new-rust-old` + 反向 + 部署门禁验证
 
+> ## ⚡ HARD-MODE INVARIANT ASSERTIONS REQUIRED — v2.1 corrections §10.3 补充 (2026-06-17)
+>
+> 此 chaos scenario 测试跨版本部署（go-new-rust-old / go-old-rust-new），可能触 I1（mixed-version 下 [protection].enabled 不可 flag-off）+ D1（跨版本 lease clamp）。**必须**在 invariant assertion 中包含：
+>
+> - **`[protection].enabled` 在新旧版本中均为 true**（硬防永远开，禁止灰度；任一侧 flag-off → 整个测试失败）
+> - 跨版本 lease push 不中断（旧 Rust 仍能消费新 Go 推的 lease；新 Rust 仍能消费旧 Go 推的 lease）
+> - 跨版本 lease TTL clamp 公式一致（D1：lease ≤ balance × ttl/period 在双版本下成立）
+> - OverflowGate.check 在跨版本下行为一致（balance_cache / overflow_consumed Redis namespace 不被错版本误改 schema）
+> - `credits_consumed` / `coef_table_version` 字段（B5）在 mixed-version usage:records 流中可正确反序列化
+>
+> **完整断言列表**: 见 v2.1 corrections §10.3 + §9 §D 不变量表 + §9 §I 灰度禁区
+
+---
+
 **【是什么】**
 - `scenarios/mixed-deploy-go-new-rust-old.yaml`、`scenarios/mixed-deploy-go-old-rust-new.yaml`。
 - 配套 task：在 `fixtures/mixed-deploy/old/` 与 `fixtures/mixed-deploy/new/` 写两套 Dockerfile，从 git tag/branch checkout 不同代码版本。
@@ -878,7 +1176,7 @@ class WalletConservationInvariant:
 **【做什么】**
 - compose_overrides: [mixed-deploy.yml]。
 - workload：跨版本读写：发请求到 nginx LB（50/50 路由到 new/old gateway）；Go web 也 new/old 各 1。
-- `go-new-rust-old`：invariants `wallet_conservation` + `idem_key_uniqueness` + `mixed_version_consistency` + `service_healthy`。
+- `go-new-rust-old`：invariants `wallet_conservation` + `idem_key_uniqueness` + `mixed_version_consistency` + `service_healthy` + `hardmode_protection_enabled_both_versions` + `hardmode_cross_version_lease_push_no_interrupt` + `hardmode_cross_version_lease_ttl_clamp_consistent` + `hardmode_cross_version_overflow_gate_consistent` + `hardmode_cross_version_usage_record_deserializable`。
 - `go-old-rust-new`：harness 期望 CI lint 在 scenario 启动**前**就 abort；scenario 顶层有 `expect_pre_launch_block: true`；invariant 验 `pre_launch_block_triggered{rule=check-deploy-order}`。
 
 **【不做什么】**
@@ -887,6 +1185,92 @@ class WalletConservationInvariant:
 **【如何验证】** 报告 PASS；INVESTIGATE-CHAOS-005 闭合后 SHA 写入 `scenario.yaml` 注释。
 
 **【依赖与并行】** 阻塞于 T02 + WS-12 部署门禁 lint。
+
+### v2.1 §10.3 合规交付（硬防不变量接线）
+
+本 chaos scenario 已对照 v2.1 corrections §9 §D + §9 §I 灰度禁区 + §10.3 补充接入硬防不变量断言。
+
+**新加 invariants**（在 `go-new-rust-old` scenario yaml `invariants:` 数组）:
+- `hardmode_protection_enabled_both_versions` — `[protection].enabled` 在新旧 Rust 版本中均为 true（§9 §I I1：硬防永远开，禁止灰度；任一侧 flag-off → 测试失败）
+- `hardmode_cross_version_lease_push_no_interrupt` — 跨版本 lease push 不中断（旧 Rust 仍能消费新 Go 推的 lease；新 Rust 仍能消费旧 Go 推的 lease；events:counter:pod:<X> 流跨版本可读）
+- `hardmode_cross_version_lease_ttl_clamp_consistent` — 跨版本 lease TTL clamp 公式一致（D1：lease ≤ balance × ttl/period 在双版本下成立；Go LeaseScheduler 的 ttl=random(10s,30s) clamp 在两版本下行为一致）
+- `hardmode_cross_version_overflow_gate_consistent` — OverflowGate.check 在跨版本下行为一致（balance_cache / overflow_consumed Redis namespace C1/C2 不被错版本误改 schema；OVERFLOW_INCR_LUA 跨版本可执行）
+- `hardmode_cross_version_usage_record_deserializable` — `credits_consumed` / `coef_table_version` / `pod_id` 字段（B5）在 mixed-version usage:records 流中可正确反序列化
+
+**新加 invariant stub**（`tests/e2e/chaos/invariants/hardmode_*.py`，由 WS-13 执行 agent 实现）:
+
+```python
+# invariants/hardmode_protection_enabled_both_versions.py (新加 stub)
+def check(harness):
+    """W13-T22 — v2.1 corrections §10.3 + §9 §I I1 补充
+    [protection].enabled 在新旧版本中均为 true（硬防永远开，禁止灰度）。
+    """
+    # 1. read /healthz/protection (or /metrics gw_protection_enabled) on gateway-old
+    # 2. read same on gateway-new
+    # 3. assert both return enabled=true
+    # 4. FAIL scenario if either side has flag-off (I1 violation)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_cross_version_lease_push_no_interrupt.py (新加 stub)
+def check(harness):
+    """W13-T22 — v2.1 corrections §10.3 补充
+    跨版本 lease push 不中断（旧 Rust 消费新 Go lease；新 Rust 消费旧 Go lease）。
+    """
+    # 1. run mixed-deploy with new Go + old Rust (and vice versa)
+    # 2. capture credit_lease_xadd_fanout_total on Go side
+    # 3. capture gw_credit_lease_acquire_total{result="success"} on Rust side
+    # 4. assert delta(Rust success) >= 1 within 1 tick after Go XADD
+    # 5. assert no schema-related consumer errors (gw_counter_malformed_total == 0)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_cross_version_lease_ttl_clamp_consistent.py (新加 stub)
+def check(harness):
+    """W13-T22 — v2.1 corrections §10.3 补充
+    跨版本 lease TTL clamp 公式一致（D1：lease ≤ balance × ttl/period）。
+    """
+    # 1. capture lease payload from events:counter:pod:<X> for both versions
+    # 2. parse lease_credits + expires_at + balance_micro
+    # 3. assert lease_credits <= balance_micro * ttl/period (D1 clamp)
+    # 4. assert ttl in [10s, 30s] range (B1: random(10s,30s) clamp) for both versions
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_cross_version_overflow_gate_consistent.py (新加 stub)
+def check(harness):
+    """W13-T22 — v2.1 corrections §10.3 补充
+    OverflowGate.check 跨版本行为一致（C1/C2 namespace schema 不被错版本改）。
+    """
+    # 1. send same protected-uid request through gateway-old and gateway-new
+    # 2. capture credit:balance_cache:<uid> + credit:overflow_consumed:<uid> state
+    # 3. assert both versions read/write same key schema (no version-prefixed keys)
+    # 4. assert OVERFLOW_INCR_LUA returns same shape across versions
+    # 5. assert gw_credit_overflow_gate_total{result="pass"} increments on both
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_cross_version_usage_record_deserializable.py (新加 stub)
+def check(harness):
+    """W13-T22 — v2.1 corrections §10.3 补充 + B5
+    UsageRecord 三字段 (pod_id / credits_consumed / coef_table_version) 跨版本可反序列化。
+    """
+    # 1. capture usage:records stream entries produced by both versions
+    # 2. for each entry, JSON deserialize on both gateway-old and gateway-new
+    # 3. assert pod_id (string), credits_consumed (int64), coef_table_version (int64) all present
+    # 4. assert no deserialize errors (B5: these 3 fields are hard-mode protected contract)
+    # 5. cross-check Go settler can consume entries from both Rust versions
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+**Acceptance**:
+1. chaos smoke 必须 PASS 所有新加 invariants
+2. 所有硬防断言在 chaos report 中以 `hardmode.` 前缀单独分组
+3. PR 描述必须包含 "硬防不变量已接线：[hardmode_protection_enabled_both_versions, hardmode_cross_version_lease_push_no_interrupt, hardmode_cross_version_lease_ttl_clamp_consistent, hardmode_cross_version_overflow_gate_consistent, hardmode_cross_version_usage_record_deserializable]"
 
 ---
 
@@ -949,6 +1333,21 @@ class WalletConservationInvariant:
 
 ### TASK W13-T26：scenario — `concurrent-deduct-1000` + `concurrent-deduct-1000-pg-blip` + `outbox-processor-race-3replicas`
 
+### W13-T26 INVARIANT
+
+> ## ⚡ HARD-MODE INVARIANT ASSERTIONS REQUIRED — v2.1 corrections §10.3 (2026-06-17)
+>
+> 此 chaos scenario 触碰硬模式 credit-lease 关键路径。**必须**在 invariant assertion 中包含：
+>
+> - lease push 在 pg-blip 期间 skip（D5：balance ≤ 0 → Go 停推 lease；PG 不可读时 Go 应跳过本轮）
+> - balance 恢复后 LeaseScheduler 立即继续推（≤ 1 tick）
+> - idempotency_keys 表无重复（chaos 后 Idem 唯一性）
+> - 并发 deduct 1000 次后 wallets.balance_micros 守恒（≤ 1 micro 误差）
+>
+> **完整断言列表**: 见 v2.1 corrections §10.3 + §9 §D 不变量表
+
+---
+
 **【是什么】**
 - 三个 yaml。
 
@@ -956,7 +1355,7 @@ class WalletConservationInvariant:
 
 **【做什么】**
 - `concurrent-deduct-1000`：1000 并发**同 idem key**（验幂等）；invariant `wallet_conservation` + `idem_key_uniqueness{expected_unique_count=1}` + `successful_response_count==1000`（所有返同样 prior response shape）。
-- `concurrent-deduct-1000-pg-blip`：同 + injector `pg_fault{terminate_mid_op, after_n_matches=500}`。
+- `concurrent-deduct-1000-pg-blip`：同 + injector `pg_fault{terminate_mid_op, after_n_matches=500}`；追加硬防 invariants `hardmode_lease_push_skipped_during_pg_blip` + `hardmode_lease_scheduler_resume_after_balance_recovery`（`wallet_conservation` tolerance 改 1 micros 对应 D3 守恒 ≤1micro 误差；`idem_key_uniqueness` 仍验无重复）。
 - `outbox-processor-race-3replicas`：compose `--scale web=3`；workload 触发 outbox 写入 1000 行；invariant 抓 PG `payment_outbox` 历史：每行 `processed_by_replica` 唯一 + 总 processed == 1000；并断 `FOR UPDATE SKIP LOCKED` 真的生效（用 `pg_stat_activity` 在 chaos 中采样无 worker 等行锁）。
 
 **【不做什么】** ❌ 同 idem key 测不要让客户端各发不同 body；body 必须 byte-equal，否则 hash mismatch 触另一路径。
@@ -965,9 +1364,70 @@ class WalletConservationInvariant:
 
 **【依赖与并行】** 阻塞于 T04/T08/T09。
 
+### v2.1 §10.3 合规交付（硬防不变量接线）
+
+本 chaos scenario 已对照 v2.1 corrections §9 §D + §10.3 接入硬防不变量断言（仅 `concurrent-deduct-1000-pg-blip` 受影响；`concurrent-deduct-1000` 与 `outbox-processor-race-3replicas` 不触硬防）。
+
+**新加 invariants**（在 `concurrent-deduct-1000-pg-blip` scenario yaml `invariants:` 数组）:
+- `hardmode_lease_push_skipped_during_pg_blip` — lease push 在 pg-blip 期间 skip（D5：balance ≤ 0 → Go 停推 lease；PG 不可读时 Go 应跳过本轮 LeaseScheduler.Tick，不假推）
+- `hardmode_lease_scheduler_resume_after_balance_recovery` — balance 恢复后 LeaseScheduler ≤ 1 tick (1s) 继续（B1：下个 tick 必恢复推 lease；不卡死）
+
+**已有 invariants 复用**（不新加 stub，使用现有 invariant 增强 params）:
+- `idem_key_uniqueness{op=deduct, expected_unique_count=auto}` — 已在 T09 注册；chaos 后 Idem 唯一性，无重复
+- `wallet_conservation{tolerance_micros=1}` — 已在 T08 注册；并发 deduct 1000 次后 wallets.balance_micros 守恒 ≤ 1 micro 误差（D3：balance 唯一权威 = PG）
+
+**新加 invariant stub**（`tests/e2e/chaos/invariants/hardmode_*.py`，由 WS-13 执行 agent 实现）:
+
+```python
+# invariants/hardmode_lease_push_skipped_during_pg_blip.py (新加 stub)
+def check(harness):
+    """W13-T26 — v2.1 corrections §10.3 补充
+    lease push 在 pg-blip 期间 skip（D5：balance ≤ 0 → Go 停推 lease；PG 不可读时跳过本轮）。
+    """
+    # 1. trigger pg_fault{terminate_mid_op, after_n_matches=500}
+    # 2. during PG blip, poll LeaseScheduler logs / metrics
+    # 3. assert credit_lease_xadd_fanout_total delta == 0 during blip (skip)
+    # 4. assert no spurious lease push with stale/zero balance
+    # 5. assert Go logs "skip lease push: balance read failed" or similar
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_lease_scheduler_resume_after_balance_recovery.py (新加 stub)
+def check(harness):
+    """W13-T26 — v2.1 corrections §10.3 补充
+    balance 恢复后 LeaseScheduler ≤ 1 tick (1s) 继续（B1）。
+    """
+    # 1. after PG blip recovery, capture timestamp T_recovery
+    # 2. poll credit_lease_xadd_fanout_total for next lease push
+    # 3. assert delta >= 1 within 1s after T_recovery (B1: 1s tick period)
+    # 4. assert pushed lease has valid balance_micro > 0 (D5 unblock condition)
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+**Acceptance**:
+1. chaos smoke 必须 PASS 所有新加 invariants
+2. 所有硬防断言在 chaos report 中以 `hardmode.` 前缀单独分组
+3. PR 描述必须包含 "硬防不变量已接线：[hardmode_lease_push_skipped_during_pg_blip, hardmode_lease_scheduler_resume_after_balance_recovery]"
+
 ---
 
 ### TASK W13-T27：scenario — auth / jwt / hmac / apikey-cache 一组
+
+### W13-T27 INVARIANT
+
+> ## ⚡ HARD-MODE INVARIANT ASSERTIONS REQUIRED — v2.1 corrections §10.3 (2026-06-17)
+>
+> 此 chaos scenario 触碰硬模式 credit-lease 关键路径。**必须**在 invariant assertion 中包含：
+>
+> - 硬防 `[protection].enabled` 在 license flag 翻转过程中**不被影响**（license_enforce 与 protection 完全独立）
+> - 翻转前后 lease push 不中断
+> - 翻转前后 OverflowGate.check 行为不变
+> - 翻转过程不漏账、不假 503
+>
+> **完整断言列表**: 见 v2.1 corrections §10.3 + §9 §D 不变量表
+
+---
 
 **【是什么】**
 - 5 yaml：`jwt-alg-confusion`、`jwt-kid-static-pem-fallback`、`hmac-replay-window`、`apikey-cache-stale-after-revoke`、`license-warn-to-enforce-flip`。
@@ -979,13 +1439,88 @@ class WalletConservationInvariant:
 - `jwt-kid-static-pem-fallback`：JWT header.kid 设未知值；invariant 抓 metric `gw_jwt_kid_unknown_rejected_total > 0`（REV-FINAL-V20 fail-closed 后该计数必 >0）。
 - `hmac-replay-window`：先发签名请求 OK；3min 内同 nonce 重发；断 401；5min 后再发要 401（如启 nonce_redis）或 200（如默认 none，但 metric 计数 >0）；scenario yaml 同时 lock `signature_secret.replay_check` 配置矩阵。
 - `apikey-cache-stale-after-revoke`：用 apikey 发请求 OK；调 Admin Revoke；workload 立刻同 key 发请求；invariant 抓响应 401 在 1s 内（不是 60s 缓存窗口）+ `cache_invalidation_observed_within_1s`。
-- `license-warn-to-enforce-flip`：scenario 启动时 `license.enforce=warn`；workload 模拟 30 个 license 违例请求 + 30 个合法；invariant `warn_violations_logged_count == 30` + `requests_blocked == 0`；scenario 第二阶段切 `enforce`（用 control-plane API 或 ConfigReload）；workload 重发；invariant `requests_blocked == 30`。
+- `license-warn-to-enforce-flip`：scenario 启动时 `license.enforce=warn`；workload 模拟 30 个 license 违例请求 + 30 个合法；invariant `warn_violations_logged_count == 30` + `requests_blocked == 0`；scenario 第二阶段切 `enforce`（用 control-plane API 或 ConfigReload）；workload 重发；invariant `requests_blocked == 30`；追加硬防 invariants `hardmode_protection_enabled_unaffected_by_license_flip` + `hardmode_lease_push_uninterrupted_across_license_flip` + `hardmode_overflow_gate_behavior_invariant_across_license_flip` + `hardmode_no_leak_no_false_503_during_license_flip`。
 
 **【不做什么】** ❌ 不在测试里 hardcode 真实 RS256 key；用 ephemeral generated keypair（per-scenario）。
 
 **【如何验证】** PASS。
 
 **【依赖与并行】** 阻塞于 T02/T08/T25。
+
+### v2.1 §10.3 合规交付（硬防不变量接线）
+
+本 chaos scenario 已对照 v2.1 corrections §9 §D + §9 §I 灰度禁区 + §10.3 接入硬防不变量断言（仅 `license-warn-to-enforce-flip` 受影响；另 4 个 auth scenario `jwt-alg-confusion` / `jwt-kid-static-pem-fallback` / `hmac-replay-window` / `apikey-cache-stale-after-revoke` 不触硬防 license flag）。
+
+**新加 invariants**（在 `license-warn-to-enforce-flip` scenario yaml `invariants:` 数组）:
+- `hardmode_protection_enabled_unaffected_by_license_flip` — 硬防 `[protection].enabled` 在 license flag 翻转过程中**不被影响**（§9 §I I1：license_enforce 与 protection 完全独立；warn→enforce 翻转期间 `[protection].enabled` 恒 true）
+- `hardmode_lease_push_uninterrupted_across_license_flip` — 翻转前后 lease push 不中断（Go LeaseScheduler 不读 license_enforce；events:counter:pod:<X> 流持续）
+- `hardmode_overflow_gate_behavior_invariant_across_license_flip` — 翻转前后 OverflowGate.check 行为不变（balance_for / consumed_for / decide_overflow / incr_consumed 顺序与结果不依赖 license flag）
+- `hardmode_no_leak_no_false_503_during_license_flip` — 翻转过程不漏账、不假 503（D9 INCRBY 失败才 503，license flip 不引入假 503；D3 balance 守恒不破）
+
+**新加 invariant stub**（`tests/e2e/chaos/invariants/hardmode_*.py`，由 WS-13 执行 agent 实现）:
+
+```python
+# invariants/hardmode_protection_enabled_unaffected_by_license_flip.py (新加 stub)
+def check(harness):
+    """W13-T27 — v2.1 corrections §10.3 + §9 §I I1 补充
+    [protection].enabled 在 license flag 翻转中不被影响（license 与 protection 独立）。
+    """
+    # 1. read /metrics gw_protection_enabled gauge at scenario start (warn mode)
+    # 2. trigger license flag flip warn → enforce (via control-plane API)
+    # 3. read gauge again mid-flip and post-flip
+    # 4. assert gw_protection_enabled == 1 throughout (I1: 硬防永远开，禁止灰度)
+    # 5. FAIL if gauge ever drops to 0 during flip
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_lease_push_uninterrupted_across_license_flip.py (新加 stub)
+def check(harness):
+    """W13-T27 — v2.1 corrections §10.3 补充
+    翻转前后 lease push 不中断。
+    """
+    # 1. capture baseline credit_lease_xadd_fanout_total{pod_id=*}
+    # 2. trigger license flag flip
+    # 3. poll metric every 1s during flip
+    # 4. assert delta >= 1 every 2s window (B1: 1s tick, allow 1 missed tick)
+    # 5. assert no LeaseScheduler abort/error log correlated with flip event
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_overflow_gate_behavior_invariant_across_license_flip.py (新加 stub)
+def check(harness):
+    """W13-T27 — v2.1 corrections §10.3 补充
+    翻转前后 OverflowGate.check 行为不变。
+    """
+    # 1. send N protected-uid requests pre-flip; capture decision distribution
+    #    (Allow / BalanceInsufficient / CacheUnavail ratios)
+    # 2. flip license flag
+    # 3. send same N requests post-flip; capture decision distribution
+    # 4. assert decision distribution statistically identical (within ±5% tolerance)
+    # 5. assert gw_credit_overflow_gate_total{result="pass"} delta matches expected
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+```python
+# invariants/hardmode_no_leak_no_false_503_during_license_flip.py (新加 stub)
+def check(harness):
+    """W13-T27 — v2.1 corrections §10.3 补充
+    翻转过程不漏账、不假 503。
+    """
+    # 1. capture wallets.balance pre-flip
+    # 2. run workload through flip event
+    # 3. capture wallets.balance post-flip
+    # 4. assert wallet_conservation holds (D3: balance 唯一权威 = PG)
+    # 5. assert 503 responses only occur with INCRBY/consumed failures (D9 fail-closed)
+    #    — no 503 correlated with license flip event itself
+    raise NotImplementedError("stub — wire to chaos harness")
+```
+
+**Acceptance**:
+1. chaos smoke 必须 PASS 所有新加 invariants
+2. 所有硬防断言在 chaos report 中以 `hardmode.` 前缀单独分组
+3. PR 描述必须包含 "硬防不变量已接线：[hardmode_protection_enabled_unaffected_by_license_flip, hardmode_lease_push_uninterrupted_across_license_flip, hardmode_overflow_gate_behavior_invariant_across_license_flip, hardmode_no_leak_no_false_503_during_license_flip]"
 
 ---
 

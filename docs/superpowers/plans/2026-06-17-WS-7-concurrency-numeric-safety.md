@@ -603,6 +603,23 @@ func GetOrLoadSF[T any](ctx context.Context, c *Cache, key string, ttl time.Dura
 
 ## 6. TASK T5：Billing-7 — `RequestFreeze.freeze_amount` 由 `u64` 改 `i64` + 构造期 `try_from`，全路径含 release/drop
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease 关键路径。必须遵守教学矩阵 M9。**
+>
+> **触碰元素**: freeze.rs（A 系列同 crate）；间接影响 D8 (protected 不进 frozen_micro)
+> **必须 NOT 做**（摘自 M9）:
+> - **不**改 `crates/gw-ledger/src/lease.rs::LeaseGuard.reserved: i64`（已 i64，不要"统一类型"波及它）
+> - **不**改 `crates/gw-ledger/src/overflow.rs` 的 i64 类型
+> - **不**改 `frozen_micro: AtomicI64` 计数器的语义（D8 protected 不进，但仍服务非 protected 用户）
+> - **不**统一所有 micro 类型为 i64（保持范围在 RequestFreeze + TaskFreeze）
+> **完整矩阵**: 见 v2.1 corrections §11 **M9**
+>
+> 执行前必读 M9。PR 描述必须列明"已遵守教学矩阵 M9"。
+>
+> ---
+
+---
 ### 6.1 是什么 What it IS
 - 一个 Rust 代码改动，文件 `/Users/whereslow/Desktop/work/Cnewxus/ailinkmax-gateway/crates/gw-ledger/src/freeze.rs`：
   - `RequestFreeze.freeze_amount` 字段类型 `u64` → `i64`（line 68）。
@@ -737,6 +754,17 @@ rg 'TaskFreeze::new\('    /Users/whereslow/Desktop/work/Cnewxus/ailinkmax-gatewa
 - **C**：把 `frozen_micro` 改 AtomicU128（i128 替代）。无 std AtomicI128；要 third-party crate 或 Mutex 包；性能炸。
 - **D**：在 `as i64` 处加 `debug_assert!(amount <= i64::MAX as u64)`——release 模式失效，根因留存。
 - **选 A（边界 try_from + 内部 i64）的理由**：单点校验；类型简单；零运行时新依赖；与 v2 REV-FINAL-H7.8 一致；编译期强制 caller 处理 err（Result 不能忽略）。
+
+### v2.1 §10.2 合规交付（M9）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M9** 清理：
+- 原内容已符合矩阵：HOW 仅触 `crates/gw-ledger/src/freeze.rs`（RequestFreeze + TaskFreeze），未提议改 `lease.rs::LeaseGuard.reserved`、未提议改 `overflow.rs` i64 类型、未提议统一所有 micro 为 i64、未改 `frozen_micro: AtomicI64` 语义；§6.2 / §6.5 已显式排除这些禁令。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M9: 不改 LeaseGuard.reserved / overflow.rs i64 / frozen_micro 语义 / 不统一 micro 为 i64"
+2. PR 测试中显式 verify `crates/gw-ledger/src/lease.rs::LeaseGuard.reserved` 仍为 `i64`、`crates/gw-ledger/src/overflow.rs` 的 i64 类型未改
+3. PR 描述附 `git diff -- crates/gw-ledger/src/lease.rs crates/gw-ledger/src/overflow.rs | grep -E "reserved|OverflowConfig" | wc -l` 结果为 0
+4. PR 描述附 `rg "frozen_micro" crates/gw-ledger/src/freeze.rs` 结果，确认仍是 `AtomicI64` 类型未变
 
 ---
 

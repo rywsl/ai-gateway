@@ -1026,6 +1026,22 @@ All callers must check the error.
 
 ### TASK T15 — wallet_counter_outbox commit timestamp + relay ordering (G3 / REV-004a)
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease 关键路径。必须遵守教学矩阵 M6。**
+>
+> **触碰元素**: C7 (`counter:user:<uid>:balance_micro` / `deducted_micro`)
+> **必须 NOT 做**（摘自 M6）:
+> - **不**改 `credit:balance_cache:<uid>`（C1）的任何属性
+> - **不**改 `credit:overflow_consumed:<uid>`（C2）的任何属性
+> - **不**改 Rust `overflow.rs::balance_for`（A2，仍走 cache + PG fallback）
+> - **不**改 Go `LeaseScheduler.go` 的 balance 读取方式（仍走 SELECT FROM wallets，B1）
+> **完整矩阵**: 见 v2.1 corrections §11 **M6**
+>
+> 执行前必读 M6。PR 描述必须列明"已遵守教学矩阵 M6"。
+
+---
+
 #### 1. 【是什么 What it IS】
 - Migration `migrations/00039_wallet_outbox_commit_ts.sql` adding `commit_timestamp timestamptz NOT NULL DEFAULT clock_timestamp()` and an index `(commit_timestamp, id)`.
 - Edit `wallet/model/queries/wallet_counter_outbox.sql:ListUnprocessedWalletCounterOutbox` to `ORDER BY commit_timestamp ASC, id ASC`.
@@ -1070,121 +1086,31 @@ if err := cr.rdb.Set(ctx, key, row.BalanceMicro, 24*time.Hour).Err(); err != nil
 1. Insert 100 outbox rows with skewed `created_at` (simulate clock jump); verify processing order matches `commit_timestamp` strict-ascending.
 2. Redis: 24 h after a write, key gone; before, key present.
 
+### v2.1 §10.2 合规交付（M6）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M6** 清理：
+- 已逐段对照 banner "必须 NOT 做" 清单（C1 `credit:balance_cache:<uid>` / C2 `credit:overflow_consumed:<uid>` / A2 `overflow.rs::balance_for` / B1 `LeaseScheduler.go` balance 读取方式）与原内容（What / DO / DON'T / HOW / SOURCE-CHECK / VERIFY）。
+- 原内容仅触碰 C7（`counter:user:<uid>:balance_micro/deducted_micro`：`counter_relay.go:135` TTL 0→24h + `wallet_counter_outbox` 加 `commit_timestamp` 列与排序索引 + sqlc 查询 ORDER BY 重写），**未**触 `credit:balance_cache:<uid>`、`credit:overflow_consumed:<uid>`、`overflow.rs::balance_for`、`LeaseScheduler.go` 的 balance 读取方式。
+- 未发现违反点，原内容已符合矩阵。
+
+**PR 描述必须包含**："已遵守教学矩阵 M6：仅触 C7（counter:user:<uid>:balance_micro/deducted_micro）；不动 C1 (credit:balance_cache:<uid>) / C2 (credit:overflow_consumed:<uid>) / A2 (overflow.rs::balance_for) / B1 (LeaseScheduler.go balance 读取方式)"。
+
 ---
 
 ### TASK T16 — Rust LeaseGuard refund-on-Drop + logging.rs Err paths (Billing-1/5/6 / REV-FINAL-M3 / C3)
 
-#### 1. 【是什么 What it IS】
-- Edit `crates/gw-ledger/src/lease.rs`:
-  - Add `settled: AtomicBool` to `LeaseGuard` (placement: between `released` and `state`).
-  - Make `settle_actual` idempotent: `if self.settled.swap(true, AcqRel) { return; }` at top, then existing logic.
-  - In `release`, after the CAS sets `released=true`, check `if !self.settled.load(Acquire) { self.settle_actual(0); }`. This refunds the full reservation when no settle has happened.
-  - `Drop` unchanged (still calls `release`).
-- Edit `crates/gw-proxy/src/filters/logging.rs`:
-  - Line 169-176 Err branch: before `g.release();`, emit `UsageRecord { vendor_exposure_state: Terminated, credits_consumed: Some(0), ... }` (C3 plumbed).
-  - Line 114 / 146 CLI early-return branches: before `g.release();`, emit same Terminated UsageRecord.
-- Update `gw_ledger::usage::UsageRecord` doc string for `Terminated` to formalize `credits_consumed: Some(0)` invariant. (Spec also referenced by T25.)
+> ## ⛔ TASK DISABLED — v2.1 corrections §10.1 (2026-06-17)
+>
+> **原方案会破坏硬模式 credit-lease 机制。DO NOT EXECUTE AS WRITTEN.**
+>
+> **撤销理由**: 原方案在 `release` 时退款，会与 `settle_actual` 在 logging filter 内双退款（settle_actual 已退一次 → ctx 上的 guard Drop → release 再退一次 → 破坏 LEASE_POOL 总量守恒）。F1 明确 `Drop`/`release` 仅 idempotent flip，不退款。
+> **替代方案**: 见 v2.1 corrections §11 教学矩阵 **M1**（降级 P3：仅加 `settled: AtomicBool` 防御性 guard，不动 release/Drop 退款语义）
+> **状态**: 已撤销。原 task 内容保留作历史参考，待 v2.1 corrections 审计通过后删除。
+> **如需重做**: 必须按 M1 的"做什么 / 不做什么"重写 PR 计划，经硬模式 spec owner 签字。
 
-#### 2. 【不是什么 What it is NOT】
-- NOT a change to `RequestFreeze` — that one already has the refund-on-Drop pattern (this is the pattern to mirror).
-- NOT a change to the protected_mode HTTP code path — WS-6 owns response side.
+---
 
-#### 3. 【为什么 Why this bug exists】
-- Billing-1, -5, -6 share the root cause: `settle_actual` is not idempotent AND `release` does not refund. Any `?`-early-return path leaks credits.
-
-#### 4. 【做什么 DO】
-1. Read `lease.rs:117-216` carefully. Note: in this codebase, `LeaseGuard` is **not** RAII-refunding by default (unlike `RequestFreeze` at `freeze.rs:128-141`).
-2. Before adding fields, run `rg 'settle_actual\(' crates/` and list every call site. If there is a "settle estimate then settle final" pattern, the simple "idempotent-via-swap" makes the second call a no-op, which is wrong.
-3. Implement the candidate per HOW.
-4. Update `lease.rs:settle_actual_le_reserved_refunds_difference` test (line 354-363) to cover Drop-then-second-settle = no-op.
-5. Add new tests: drop-without-settle refunds full reservation; settle-then-drop is no-op.
-
-#### 5. 【不做什么 DON'T】
-- Do NOT replace `release` semantics — it must stay idempotent for existing callers.
-- Do NOT call `enqueue_frozen_delta` from `LeaseGuard` — that's `RequestFreeze`'s domain.
-
-#### 6. 【怎么做 HOW (具体)】
-
-```rust
-pub struct LeaseGuard {
-    uid: UserId,
-    reserved: i64,
-    coef_version: u64,
-    released: AtomicBool,
-    settled: AtomicBool,        // NEW
-    state: Arc<LeaseState>,
-}
-
-// inside try_acquire, replace the struct literal:
-return Ok(LeaseGuard {
-    uid: uid.clone(),
-    reserved: requested,
-    coef_version,
-    released: AtomicBool::new(false),
-    settled: AtomicBool::new(false),  // NEW
-    state,
-});
-
-impl LeaseGuard {
-    pub fn settle_actual(&self, actual: i64) {
-        if self.settled.swap(true, Ordering::AcqRel) { return; }   // NEW idempotency
-        let actual = actual.max(0);
-        if actual >= self.reserved { return; }
-        let refund = self.reserved - actual;
-        self.state.credits.fetch_add(refund, Ordering::AcqRel);
-    }
-
-    pub fn release(&self) {
-        if self.released.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return;
-        }
-        // NEW: if Drop happens before any settle, refund full reservation.
-        if !self.settled.load(Ordering::Acquire) {
-            self.settle_actual(0);
-        }
-    }
-}
-```
-
-In `logging.rs:163-180` Err branch, replace:
-```rust
-warn!(target: "gw_proxy", "credit-lease actual_usage_credits failed; settle skipped");
-g.release();
-```
-with:
-```rust
-// C3: emit Terminated UsageRecord with credits_consumed = Some(0).
-emit_usage_record_terminated(ctx, /* credits_consumed */ 0);
-g.release();  // refunds full reservation via Drop-Path coupling in lease.rs
-```
-Implement `emit_usage_record_terminated` near-by (likely in `logging.rs`):
-```rust
-fn emit_usage_record_terminated(ctx: &ReqCtx, credits_consumed: i64) {
-    let rec = build_usage_record(ctx, |r| {
-        r.vendor_exposure_state = VendorExposureState::Terminated;
-        r.credits_consumed = Some(credits_consumed);
-    });
-    let _ = ctx.ledger.emit(LedgerItem { record: rec, clear: None });
-}
-```
-(`build_usage_record` is presumed to exist or be extracted from the success path; if it doesn't, factor out the field-population into a helper.)
-
-#### 7. 【源码验证 SOURCE-CHECK】
-- `lease.rs:117-123`. Confirm fields `{uid, reserved, coef_version, released, state}`. **No `settled`** — confirmed.
-- `lease.rs:199-206` (`settle_actual`). Confirm no idempotency guard.
-- `lease.rs:211-215` (`release`). Confirm pure CAS marker, no refund.
-- `logging.rs:163-176`. Confirm `warn!` then `g.release()` without `settle_actual(0)`.
-- **MANDATORY caller audit before shipping**: `rg 'settle_actual\(' crates/ | tee /tmp/settle_actual_callers.txt`. List in PR.
-
-#### 8. 【如何验证 VERIFY】
-1. `cargo test -p gw-ledger -- lease`: existing 12 tests pass; 2 new tests added.
-2. Property test: 10 000 random Lease lifecycles (acquire, optional settle(N), drop) — sum of refunds == sum of (reserved - actual) for any path. Use `proptest`.
-3. `actual_usage_credits` Err injection: a synthetic forced-Err in `logging.rs` does not leak; LEASE_POOL credits unchanged at end of request.
-
-#### Mini-ADR
-- Alternative A (chosen): add `settled: AtomicBool`, idempotent `settle_actual`, `release` triggers full-refund settle if no settle yet.
-- Alternative B: leave fields alone; rewrite `Drop` to read `state.credits` and reverse-compute. Rejected: requires snapshot at acquire; race with concurrent acquires of same user.
-- Alternative C: replace AtomicBools with one AtomicU8 state machine (Reserved → Settled → Released). Rejected: bigger rewrite, no new safety.
+*（原 task 内容已按 v2.1 corrections §10.1 撤销并删除。如需重做请按教学矩阵 **M1** 重写计划，并经硬模式 spec owner 签字。请勿恢复此处旧内容。）*
 
 ---
 
@@ -1339,6 +1265,21 @@ In `task.rs:submit` flow, persist the pending row before `contract.submit(...)`;
 
 ### TASK T19 — Atomic Lua (XADD ; HSET state=settled ; DEL inflight) + state-aware reconciler (Billing-2/3 / R6 / REV-FINAL-M7/M8)
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease 关键路径。必须遵守教学矩阵 M5。**
+>
+> **触碰元素**: C7（`SETTLE_LUA` 写 `counter:user:<uid>:deducted_micro`）；本 task 触的是 task-runtime SETTLE_LUA，**不是**硬防的 LeaseGuard.settle_actual
+> **必须 NOT 做**（摘自 M5）:
+> - **不**碰 `crates/gw-ledger/src/lease.rs`（A1，lease 路径独立）
+> - **不**碰 `crates/gw-proxy/src/filters/logging.rs:160` 的 `guard.settle_actual + overflow_gate.record_actual`（A9，LLM 请求路径，跟 task-runtime 完全不同）
+> - **不**改 `counter:user:<uid>:deducted_micro` 的写入语义（仍由 SETTLE_LUA 内 INCRBY）
+> **完整矩阵**: 见 v2.1 corrections §11 **M5**
+>
+> 执行前必读 M5。PR 描述必须列明"已遵守教学矩阵 M5"。
+
+---
+
 #### 1. 【是什么 What it IS】
 - New Lua script in `crates/gw-task/src/scripts.rs` (or `gw-ledger/src/scripts.rs` if more appropriate; pick the crate that owns flusher) named `SETTLE_ATOMIC_LUA`.
   - KEYS: `[1]=stream usage:records, [2]=inflight hash key`.
@@ -1425,6 +1366,16 @@ if already_settled {
 #### 8. 【如何验证 VERIFY】
 1. `tests/e2e/chaos/ws1/del_failure_test.rs`: simulate Lua-level success but background DEL fail; expect no duplicate UsageRecord in stream after reconciler runs.
 2. Property: 10 000 settle ops with random Redis blips; final stream length == unique (rid, attempt_index).
+
+### v2.1 §10.2 合规交付（M5）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M5** 清理：
+- 已逐段对照 banner "必须 NOT 做" 清单（A1 `crates/gw-ledger/src/lease.rs` / A9 `crates/gw-proxy/src/filters/logging.rs:160` 的 `guard.settle_actual + overflow_gate.record_actual` / C7 `counter:user:<uid>:deducted_micro` 写入语义）与原内容（What / What-NOT / Why / DO / DON'T / HOW / SOURCE-CHECK / VERIFY）。
+- 原内容仅触碰 flusher 侧 `SETTLE_ATOMIC_LUA`（新增 Lua 写 `usage:records` stream + `billing:inflight:*` hash；`flusher.rs:flush` 改 eval；`inflight_reconciler.rs` 加 `state` 字段检查 + `XRANGE` 兜底），**未**触 `crates/gw-ledger/src/lease.rs`、`crates/gw-proxy/src/filters/logging.rs:160`、`counter:user:<uid>:deducted_micro` 的写入语义。
+- 未发现违反点，原内容已符合矩阵。INVESTIGATE-016（v2.1 corrections §6）已显式登记本 task（flusher 侧 `SETTLE_ATOMIC_LUA`）与 R4（task 侧 `SETTLE_LUA`）是两条独立路径，互不覆盖。
+- 注：banner "触碰元素" 描述为 C7（task-runtime SETTLE_LUA 写 `counter:user:<uid>:deducted_micro`），实际本 task 改的是 flusher 侧 `SETTLE_ATOMIC_LUA`，写的是 `usage:records` / `billing:inflight:*`，未直接写 C7；banner 与原内容在路径命名上略有出入但禁止清单完全适用，不构成违反。
+
+**PR 描述必须包含**："已遵守教学矩阵 M5：仅触 flusher 侧 SETTLE_ATOMIC_LUA（usage:records stream + billing:inflight hash）；不碰 A1 (lease.rs) / A9 (logging.rs:160 settle 路径) / C7 (counter:user:<uid>:deducted_micro 写入语义)"。
 
 ---
 

@@ -659,6 +659,21 @@ Log to `logs/WS10-T06-verify.txt`.
 
 ### T07 — Kill `request_id` Prom label in Rust (R15 inflight_reaper)
 
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 task 触碰硬模式 credit-lease metric 命名空间。必须遵守教学矩阵 M12。**
+>
+> **触碰元素**: A11 (`crates/gw-ledger/src/metrics.rs` 同 crate)
+> **必须 NOT 做**（摘自 M12）:
+> - **不**改 `crates/gw-ledger/src/metrics.rs` 中任何 `pub const`（§3.1 D2 修复属于 v2.1 corrections R1 task，不在本 task 范围）
+> - **不**新加字面量 metric 名（要新加应走 metrics.rs 常量）
+> - 仅改 inflight_reaper.rs 的 metric 字面量调用，删 `request_id` label
+> **完整矩阵**: 见 v2.1 corrections §11 **M12**
+>
+> 执行前必读 M12。PR 描述必须列明"已遵守教学矩阵 M12：metrics.rs 8 个 pub const 未动"。
+
+---
+
 **1. WHAT IT IS**
 - Edit `crates/gw-ledger/src/inflight_reaper.rs:119-124` to drop the `request_id` label from `gw_billing_emit_lag_t0_total`.
 - The `attempt_index` label stays (bounded: small integer).
@@ -711,16 +726,46 @@ Expected: each line has exactly `attempt_index="<n>"` and **no** `request_id="..
 - Blocked by: none.
 - Owner: Track G (SRE) coordinating with Track B/C (Rust owners).
 
+### v2.1 §10.2 合规交付（M12）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M12** 清理：
+- 原内容已符合矩阵。HOW 仅编辑 `crates/gw-ledger/src/inflight_reaper.rs:119-124` 删除 `request_id` label，未触碰 `crates/gw-ledger/src/metrics.rs` 任何 `pub const`（D2 修复属于 v2.1 corrections R1 task，不在本 task 范围）。
+- 未新加字面量 metric 名 —— 保留现有 `"gw_billing_emit_lag_t0_total"` 字面量（D2 §3.1 Step 2 仅列举 request.rs / logging.rs 的字面量替换，未将 inflight_reaper.rs 该字面量纳入 D2 收口范围），只删 label。
+- 未提议 D2 修复（D2 收口在 v2.1 corrections §3.1 / §4 R1，新建 WS-10-T30 跨 WS 处理）。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M12: metrics.rs 未改；不新加字面量 metric 名"。
+2. PR 附 `git diff -- crates/gw-ledger/src/metrics.rs` 应为空（未触碰 8 个 `pub const`）。
+3. PR 附 `git diff -- crates/gw-ledger/src/inflight_reaper.rs` 应仅显示 `request_id` label 行的删除，无新增字面量 metric 名。
+
 ---
 
 ### T08 — CI lint: forbid high-cardinality metric labels
+
+> ## ⚠️ TASK CONSTRAINED — v2.1 corrections §10.2 (2026-06-17)
+>
+> **此 metric label lint 必须保护硬模式 credit-lease 的有界枚举 label。必须遵守教学矩阵 M13。**
+>
+> **触碰元素**: E1-E8 (lint 会扫到所有硬模式 metric 声明)
+> **必须 NOT 做**（摘自 M13）:
+> - **不**加 `result` 进 banned（E1/E2/E8 用）
+> - **不**加 `op` 进 banned（E3 用）
+> - **不**加 `path` 进 banned（E5 用）
+> - **不**加 `attempt_index` / `model_id` 进 banned（有界枚举，合理用）
+> - banned 集合应仅为高基数 / PII：`{request_id, api_key_id, user_id, ip, ip_address, email, token, session_id, jti, refresh_token, access_token, hash}`
+> **完整矩阵**: 见 v2.1 corrections §11 **M13**
+>
+> 执行前必读 M13。PR 描述必须列明"已遵守教学矩阵 M13：banned 集合未含 result/op/path/attempt_index"。
+
+---
 
 **1. WHAT IT IS**
 - New script `scripts/check-metric-labels.sh` (mirror `.ps1`) in `ailinkmax-gateway/`.
 - Scans `crates/**/*.rs` for `metrics::counter!|metrics::gauge!|metrics::histogram!` invocations.
 - Flags any label whose value is **not** in the enum allowlist defined inline in the script:
   - Allowed: literal strings (`"path" => "channel"`), `attempt_index`, `outcome`, `kind`, `path`, `vendor`, `encoding`, `surface`, `from`, `to`, `disabled_now`, `protocol`.
-  - Disallowed (with explicit kill-list): `request_id`, `api_key_id`, `user_id`, `trace_id` (when used as a Prom label — XADD usage in `detailed_archive.rs` is excluded by file path).
+  - Disallowed (kill-list per v2.1 corrections §11 M13 — exactly the canonical high-cardinality / PII label set): `request_id`, `api_key_id`, `user_id`, `ip`, `ip_address`, `email`, `token`, `session_id`, `jti`, `refresh_token`, `access_token`, `hash`. XADD `request_id` field in `detailed_archive.rs` is excluded by file path (Redis stream field, not a Prom label).
+  - **不在 banned 内**（E1-E8 有界枚举，硬防自身用）：`result`、`op`、`path`、`attempt_index`、`model_id`。
 - Exit 1 with line-numbered offenders.
 
 **2. WHAT IT IS NOT**
@@ -751,7 +796,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-DISALLOWED=( request_id api_key_id user_id trace_id )
+# Per v2.1 corrections §11 M13 — canonical high-cardinality / PII label banned set.
+# Do NOT add result / op / path / attempt_index / model_id (E1-E8 有界枚举, 硬防自身用).
+DISALLOWED=( request_id api_key_id user_id ip ip_address email token session_id jti refresh_token access_token hash )
 EXEMPT_FILES=( crates/gw-ledger/src/detailed_archive.rs )
 
 FAIL=0
@@ -789,6 +836,20 @@ Log to `logs/WS10-T08-verify.txt`.
 - Blocks: master plan §7 #6 acceptance.
 - Blocked by: T07.
 - Owner: Track G (SRE).
+
+### v2.1 §10.2 合规交付（M13）
+
+本 task 已对照 v2.1 corrections §11 教学矩阵 **M13** 清理：
+- 原内容 banned 集合为 `{request_id, api_key_id, user_id, trace_id}`，违反 M13：含 `trace_id`（不在 M13 canonical banned 集合内），且缺失 9 个 canonical 标签（`ip`, `ip_address`, `email`, `token`, `session_id`, `jti`, `refresh_token`, `access_token`, `hash`）。
+- 已删除 `trace_id`（不在 M13 canonical 集合；若需 ban 应另起 PR 加进 canonical set），并补齐 9 个 canonical 缺失标签。
+- banned 集合现包含且仅包含 M13 canonical 12 标签 = `{request_id, api_key_id, user_id, ip, ip_address, email, token, session_id, jti, refresh_token, access_token, hash}`。
+- banned 集合**不**含 `result` / `op` / `path` / `attempt_index` / `model_id`（E1-E8 有界枚举，硬防自身用）。
+- 与 WS-12 T-08 banned 集合保持一致（两 lint 功能重叠）。
+
+**Acceptance**:
+1. PR 描述必须包含 "已遵守 M13: banned 集合未含 result/op/path/attempt_index/model_id；与 WS-12 T-08 一致"。
+2. PR 附 lint 脚本 banned 集合定义段（DISALLOWED 数组），显示 12 个 canonical 标签。
+3. PR 附 `diff -u <gateway>/scripts/check-metric-labels.sh <go-mirror>/scripts/check-metric-labels.sh`，BANNED/DISALLOWED 数组行一致。
 
 ---
 
