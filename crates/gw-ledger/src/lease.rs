@@ -381,7 +381,7 @@ mod tests {
         upsert_protected(&uid, 1000, "lease-pc".into(), 9, now_ms() + 60_000);
         let after = protected_user_count();
         assert!(
-            after >= before + 1,
+            after > before,
             "protected_user_count must include the freshly upserted protected user"
         );
         assert_eq!(LEASE_POOL.get(&uid).unwrap().mode(), Mode::Protected);
