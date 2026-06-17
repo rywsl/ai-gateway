@@ -6,10 +6,13 @@
 //! were inert v1 scaffolding; those were removed in Phase 1d per
 //! integration spec §2.1 A9.
 //!
-//! `wire_convert_matrix!` itself is a *framework* scaffold in Phase 1d —
-//! it parses its input syntax and emits an empty `TokenStream`. Phase 2
-//! (codec S1 v2 N² wire→wire codegen, §S1-v2-2) fills in the real
-//! generation.
+//! `wire_convert_matrix!` itself is a *framework* scaffold whose Phase 2 codegen
+//! (codec S1 v2 N² wire→wire generation, §S1-v2-2) is not implemented. D20/D21
+//! (#18): rather than silently expanding to an empty `TokenStream` — which traps
+//! a future developer who expects generated impls — both `wire_convert_matrix!`
+//! and `#[derive(DetectRequest)]` validate their surface syntax and then emit a
+//! `compile_error!`, so any invocation fails loudly at compile time until the
+//! codegen lands.
 
 use proc_macro::TokenStream;
 

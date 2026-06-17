@@ -73,6 +73,17 @@ pub fn sweep_leases() -> u64 {
     0
 }
 
+/// Count users currently in protected mode. Used by the ledger_sweep sampler to
+/// set the `gw_credit_lease_active_users` gauge (D9 #17). In hard mode every
+/// LEASE_POOL entry is `Mode::Protected`, but the explicit filter keeps the
+/// count correct should an unprotected mode ever be reintroduced.
+pub fn protected_user_count() -> u64 {
+    LEASE_POOL
+        .iter()
+        .filter(|e| e.value().mode() == Mode::Protected)
+        .count() as u64
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeaseError {
     Insufficient { requested: i64, available: i64 },
@@ -360,6 +371,21 @@ mod tests {
         guard.release();
         // release does not refund; only settle_actual does. credits stay at 900.
         assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 900);
+    }
+
+    #[test]
+    fn protected_user_count_counts_protected_entries() {
+        let _lock = SERIAL.lock().unwrap();
+        let uid = fresh_uid("protected_count");
+        let before = protected_user_count();
+        upsert_protected(&uid, 1000, "lease-pc".into(), 9, now_ms() + 60_000);
+        let after = protected_user_count();
+        assert!(
+            after >= before + 1,
+            "protected_user_count must include the freshly upserted protected user"
+        );
+        assert_eq!(LEASE_POOL.get(&uid).unwrap().mode(), Mode::Protected);
+        LEASE_POOL.remove(&uid);
     }
 
     #[test]

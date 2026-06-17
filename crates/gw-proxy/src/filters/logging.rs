@@ -371,11 +371,11 @@ pub async fn run(
         // -----------------------------------------------------------------
         let tpm_tokens = (ctx.usage.input_tokens as u64) + (ctx.usage.output_tokens as u64);
         if tpm_tokens > 0 {
-            metrics::counter!(
-                "gateway_tpm_consumed_total",
-                "user_id" => effective.to_string(),
-            )
-            .increment(tpm_tokens);
+            // D3 (#17): aggregate counter, no per-user label. Per-user TPM
+            // enforcement is owned by `ratelimit.deduct_tpm` below; the metric
+            // only needs aggregate throughput, so the high-cardinality
+            // `user_id` label is intentionally omitted.
+            metrics::counter!("gateway_tpm_consumed_total").increment(tpm_tokens);
 
             if let Some(perm) = ctx.merged_perm.as_ref() {
                 if let Err(e) = ratelimit.deduct_tpm(&effective, perm, tpm_tokens as u32) {

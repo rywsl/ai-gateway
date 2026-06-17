@@ -5,7 +5,6 @@
 //! trait derivation, and `WireAny` enum generation.
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
@@ -86,13 +85,18 @@ impl Parse for MatrixInput {
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let parsed = syn::parse_macro_input!(input as MatrixInput);
-    // Phase 1d: no codegen — the parsed schema / wires / stream values are
-    // consumed by Phase 2 §ADR-S1-v2-2 which generates the N² wire→wire
-    // conversions, semantic traits, and WireAny enum.
-    //
-    // We touch each parsed field once so it is exercised (rather than
-    // silently dead) when Phase 2 fills in the body.
+    // D20/D21 (#18): Phase 2 codegen (§ADR-S1-v2-2 N² wire→wire conversions,
+    // semantic traits, WireAny enum) is not implemented. Rather than expand to
+    // an empty TokenStream — which silently produces NOTHING and traps a future
+    // developer who expects generated impls — validate the surface syntax (done
+    // by the `parse_macro_input!` above) and then emit a `compile_error!` so any
+    // invocation fails loudly until the codegen lands.
     let _ = (&parsed.schema, &parsed.wires, parsed.stream);
-    let empty = TokenStream2::new();
-    quote!(#empty).into()
+    let msg = "`wire_convert_matrix!` codegen is not implemented yet (codec S1 v2 Phase 2, \
+               §ADR-S1-v2-2). The macro currently only validates its surface syntax; \
+               implement the N² wire→wire generation before invoking it.";
+    quote! {
+        ::core::compile_error!(#msg);
+    }
+    .into()
 }

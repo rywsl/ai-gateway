@@ -181,9 +181,11 @@ impl RedosTracker {
         if new_count >= TIMEOUT_THRESHOLD {
             entry.disabled.store(true, Ordering::Release);
         }
-        metrics::counter!("gw_redos_timeout_total",
-            "api_key_id" => ak.to_string())
-        .increment(1);
+        // D4 (#17): aggregate counter, no per-ApiKey label. Per-ApiKey
+        // auto-disable is owned by this `RedosTracker` (in-memory, keyed by
+        // `ak` above); the metric only needs an aggregate timeout rate, so the
+        // high-cardinality `api_key_id` label is intentionally omitted.
+        metrics::counter!("gw_redos_timeout_total").increment(1);
     }
 
     #[cfg(test)]
