@@ -2,6 +2,7 @@ stages:
   - test
   - build
   - push
+  - deploy
 
 workflow:
   rules:
@@ -10,8 +11,11 @@ workflow:
     - when: never
 
 variables:
+  K8S_NAMESPACE: "cnewxus-prod"
   REGISTRY_HOST: "gitlab.ailinkmax.com:5050"
   GATEWAY_IMAGE: "gitlab.ailinkmax.com:5050/ailinkmax/cnxus-rust"
+  GATEWAY_DEPLOYMENT: "rust-gateway"
+  GATEWAY_CONTAINER: "rust-gateway"
   STORAGE_DRIVER: "vfs"
   BUILDAH_FORMAT: "docker"
   BUILDAH_ISOLATION: "chroot"
@@ -265,3 +269,40 @@ push-image:
         buildah tag "$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA" "$GATEWAY_IMAGE:latest"
         buildah push "$GATEWAY_IMAGE:latest"
       fi
+
+sync-k3s-rust-gateway:
+  stage: deploy
+  image:
+    name: alpine:3.23
+    entrypoint: [""]
+  extends: .retry
+  needs:
+    - push-image
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+  before_script:
+    - !reference [.retry, before_script]
+    - retry apk add --no-cache kubectl
+    - kubectl config get-contexts
+    - kubectl config use-context ailinkmax/k8s-agents:xg1
+  script:
+    - |
+      desired_image="$GATEWAY_IMAGE:$CI_COMMIT_SHORT_SHA"
+      retry kubectl -n "$K8S_NAMESPACE" get deployment "$GATEWAY_DEPLOYMENT"
+
+      jsonpath="{.spec.template.spec.containers[?(@.name==\"$GATEWAY_CONTAINER\")].image}"
+      current_image="$(kubectl -n "$K8S_NAMESPACE" get deployment "$GATEWAY_DEPLOYMENT" -o "jsonpath=$jsonpath")"
+      if [ -z "$current_image" ]; then
+        echo "deployment/$GATEWAY_DEPLOYMENT container $GATEWAY_CONTAINER has no image" >&2
+        exit 1
+      fi
+
+      echo "current rust gateway image: $current_image"
+      echo "desired rust gateway image: $desired_image"
+      if [ "$current_image" = "$desired_image" ]; then
+        echo "rust gateway already matches Rust CI image; no rollout needed"
+        exit 0
+      fi
+
+      retry kubectl -n "$K8S_NAMESPACE" set image deployment/"$GATEWAY_DEPLOYMENT" "$GATEWAY_CONTAINER=$desired_image"
+      retry kubectl -n "$K8S_NAMESPACE" rollout status deployment/"$GATEWAY_DEPLOYMENT" --timeout=900s
