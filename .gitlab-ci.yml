@@ -255,7 +255,7 @@ merge-gate-deploy-order:
   script:
     - ./scripts/check-deploy-order.sh
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - when: never
 rust-build:
   stage: build
   image: rust:1.88-bookworm

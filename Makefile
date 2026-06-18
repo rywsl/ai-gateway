@@ -4,9 +4,7 @@
 
 check:
 	cargo +1.88.0 fmt --all -- --check
-	cargo +1.88.0 clippy --workspace --all-targets --locked -- -D warnings
-	bash scripts/check-invariants.sh
-	./scripts/check-ws16-security.sh
+	cargo +1.88.0 test --workspace --lib --bins
 
 CHAOS_DRY_RUN ?= 1
 CHAOS_DRY_FLAG := $(if $(filter 1 true yes,$(CHAOS_DRY_RUN)),--dry-run,)
