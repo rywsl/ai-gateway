@@ -281,12 +281,12 @@ impl QuotaStateUpdateQueue {
 
         let writer = Arc::clone(&self.writer);
         let pending = Arc::clone(&self.pending);
-        drop(gw_runtime::supervisor::one_shot_spawn("quota_state_update", move || {
-            async move {
+        drop(gw_runtime::supervisor::one_shot_spawn(
+            "quota_state_update",
+            move || async move {
                 match writer.write(&key_id, &state).await {
-                    Ok(()) => {
-                        metrics::counter!("gw_quota_state_update_total", "result" => "ok").increment(1)
-                    }
+                    Ok(()) => metrics::counter!("gw_quota_state_update_total", "result" => "ok")
+                        .increment(1),
                     Err(e) => {
                         tracing::warn!(
                             target: "gw_store::quota_state",
@@ -300,8 +300,8 @@ impl QuotaStateUpdateQueue {
                 }
                 pending.remove(&key_id);
                 Ok(())
-            }
-        }));
+            },
+        ));
     }
 }
 

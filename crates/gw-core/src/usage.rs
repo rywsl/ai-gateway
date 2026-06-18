@@ -125,7 +125,10 @@ mod tests {
         let s = r#"{"input_tokens":10,"output_tokens":5}"#;
         let u: UsageSnapshot = serde_json::from_str(s).unwrap();
         assert_eq!(u.input_tokens, 10);
-        assert_eq!(u.pv, 1, "legacy records without _pv must deserialize as pv=1");
+        assert_eq!(
+            u.pv, 1,
+            "legacy records without _pv must deserialize as pv=1"
+        );
     }
 
     #[test]
@@ -139,7 +142,10 @@ mod tests {
             ..Default::default()
         };
         let s = serde_json::to_string(&u).unwrap();
-        assert!(s.contains("\"_pv\":2"), "serialized JSON must tag _pv=2: {s}");
+        assert!(
+            s.contains("\"_pv\":2"),
+            "serialized JSON must tag _pv=2: {s}"
+        );
         assert!(s.contains("\"audio_input_tokens\":3"));
         // Some(0) is still emitted (not skipped) — billed-but-zero must survive.
         assert!(s.contains("\"audio_output_tokens\":0"));

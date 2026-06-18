@@ -78,16 +78,15 @@ impl CounterStore {
             total_deadline: Duration::from_secs(1),
         };
 
-        let expire_result: Result<bool, fred::error::RedisError> =
-            retry(&retry_cfg, || async {
-                // `KeysInterface::expire` returns `Result<bool, RedisError>`
-                // (true when the key existed and the TTL was set). A `false`
-                // return is expected when the key was concurrently evicted
-                // between INCRBY and EXPIRE; treat it as success. Only
-                // transport / protocol errors are retryable here.
-                client.expire(key, ttl_secs).await
-            })
-            .await;
+        let expire_result: Result<bool, fred::error::RedisError> = retry(&retry_cfg, || async {
+            // `KeysInterface::expire` returns `Result<bool, RedisError>`
+            // (true when the key existed and the TTL was set). A `false`
+            // return is expected when the key was concurrently evicted
+            // between INCRBY and EXPIRE; treat it as success. Only
+            // transport / protocol errors are retryable here.
+            client.expire(key, ttl_secs).await
+        })
+        .await;
 
         if let Err(err) = expire_result {
             // INCRBY already returned the authoritative counter value; do not
@@ -149,14 +148,8 @@ mod tests {
             key_prefix_label("counter:user:u-123:daily_tokens:2026-06-18"),
             "user_daily_tokens",
         );
-        assert_eq!(
-            key_prefix_label("counter:user:u-123:rpm:60s"),
-            "user_other",
-        );
-        assert_eq!(
-            key_prefix_label("counter:api_key:k-9:rpm:60s"),
-            "api_key",
-        );
+        assert_eq!(key_prefix_label("counter:user:u-123:rpm:60s"), "user_other",);
+        assert_eq!(key_prefix_label("counter:api_key:k-9:rpm:60s"), "api_key",);
         assert_eq!(key_prefix_label("counter:vendor:v-1:tpm"), "vendor");
         assert_eq!(key_prefix_label("counter:other:x:y"), "other");
         assert_eq!(key_prefix_label("not_a_counter_key"), "other");

@@ -87,9 +87,7 @@ pub fn push_bounded_bytes(
                 "action" => "reject",
             )
             .increment(1);
-            PushOutcome::Rejected {
-                attempted: new_len,
-            }
+            PushOutcome::Rejected { attempted: new_len }
         }
         OverflowPolicy::Truncate => {
             let room = cap.saturating_sub(buf.len());
@@ -114,9 +112,7 @@ pub fn push_bounded_bytes(
             .increment(1);
             // Spill backend is not wired for the proxy buffers; degrade
             // to Reject so the misconfiguration is loud.
-            PushOutcome::Rejected {
-                attempted: new_len,
-            }
+            PushOutcome::Rejected { attempted: new_len }
         }
     }
 }
@@ -144,9 +140,7 @@ pub fn push_bounded_vec(
                 "action" => "reject",
             )
             .increment(1);
-            PushOutcome::Rejected {
-                attempted: new_len,
-            }
+            PushOutcome::Rejected { attempted: new_len }
         }
         OverflowPolicy::Truncate => {
             let room = cap.saturating_sub(buf.len());
@@ -169,9 +163,7 @@ pub fn push_bounded_vec(
                 "action" => "spill",
             )
             .increment(1);
-            PushOutcome::Rejected {
-                attempted: new_len,
-            }
+            PushOutcome::Rejected { attempted: new_len }
         }
     }
 }
@@ -183,13 +175,7 @@ mod tests {
     #[test]
     fn appends_when_under_cap() {
         let mut b = BytesMut::new();
-        let outcome = push_bounded_bytes(
-            &mut b,
-            b"hello",
-            16,
-            "test",
-            OverflowPolicy::Reject,
-        );
+        let outcome = push_bounded_bytes(&mut b, b"hello", 16, "test", OverflowPolicy::Reject);
         assert_eq!(outcome, PushOutcome::Appended);
         assert_eq!(&b[..], b"hello");
     }

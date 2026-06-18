@@ -241,7 +241,9 @@ mod tests {
             let health = Arc::new(FormatHealth::new());
             health.circuit.store(state.as_u8(), Ordering::Release);
             if state == CircuitState::Open {
-                health.open_until_ms.store(now_ms() as u64 + 60_000, Ordering::Release);
+                health
+                    .open_until_ms
+                    .store(now_ms() as u64 + 60_000, Ordering::Release);
             }
             store
                 .by_key_format

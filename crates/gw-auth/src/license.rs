@@ -144,9 +144,7 @@ impl LicenseGate {
                 metric_tick("enforce", reason);
                 Err(match ctx.license_status {
                     LicenseStatus::Expired => LicenseError::Expired,
-                    LicenseStatus::FeatureMissing(f) => {
-                        LicenseError::FeatureMissing(f.clone())
-                    }
+                    LicenseStatus::FeatureMissing(f) => LicenseError::FeatureMissing(f.clone()),
                     LicenseStatus::NodeCountExceeded => LicenseError::NodeCountExceeded,
                     LicenseStatus::Valid => unreachable!("violation_reason returned Some"),
                 })
@@ -180,7 +178,10 @@ mod tests {
             LicenseEnforceMode::Enforce,
         ] {
             let gate = LicenseGate::new(mode);
-            assert!(gate.enforce(&ctx(&valid)).is_ok(), "mode {mode:?} should pass");
+            assert!(
+                gate.enforce(&ctx(&valid)).is_ok(),
+                "mode {mode:?} should pass"
+            );
         }
     }
 
@@ -203,7 +204,9 @@ mod tests {
     fn enforce_rejects_expired() {
         let gate = LicenseGate::new(LicenseEnforceMode::Enforce);
         let expired = LicenseStatus::Expired;
-        let err = gate.enforce(&ctx(&expired)).expect_err("enforce should reject");
+        let err = gate
+            .enforce(&ctx(&expired))
+            .expect_err("enforce should reject");
         assert!(matches!(err, LicenseError::Expired), "got {err:?}");
     }
 
@@ -211,7 +214,9 @@ mod tests {
     fn enforce_rejects_feature_missing() {
         let gate = LicenseGate::new(LicenseEnforceMode::Enforce);
         let status = LicenseStatus::FeatureMissing("anthropic_messages".to_string());
-        let err = gate.enforce(&ctx(&status)).expect_err("enforce should reject");
+        let err = gate
+            .enforce(&ctx(&status))
+            .expect_err("enforce should reject");
         match err {
             LicenseError::FeatureMissing(f) => assert_eq!(f, "anthropic_messages"),
             other => panic!("expected FeatureMissing, got {other:?}"),
@@ -222,8 +227,13 @@ mod tests {
     fn enforce_rejects_node_count_exceeded() {
         let gate = LicenseGate::new(LicenseEnforceMode::Enforce);
         let status = LicenseStatus::NodeCountExceeded;
-        let err = gate.enforce(&ctx(&status)).expect_err("enforce should reject");
-        assert!(matches!(err, LicenseError::NodeCountExceeded), "got {err:?}");
+        let err = gate
+            .enforce(&ctx(&status))
+            .expect_err("enforce should reject");
+        assert!(
+            matches!(err, LicenseError::NodeCountExceeded),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -242,10 +252,7 @@ mod tests {
     fn corrupted_atomic_collapses_to_warn() {
         // Simulate a corrupted store (e.g. memory corruption) — from_u8 must
         // never produce Enforce from an unknown value.
-        assert_eq!(
-            LicenseEnforceMode::from_u8(255),
-            LicenseEnforceMode::Warn
-        );
+        assert_eq!(LicenseEnforceMode::from_u8(255), LicenseEnforceMode::Warn);
         assert_eq!(LicenseEnforceMode::from_u8(99), LicenseEnforceMode::Warn);
     }
 

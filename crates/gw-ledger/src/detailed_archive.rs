@@ -123,7 +123,11 @@ pub struct DetailedArchive {
 }
 
 impl DetailedArchive {
-    pub fn start(redis: RedisPool, cfg: DetailedArchiveCfg, token: gw_runtime::ShutdownToken) -> Self {
+    pub fn start(
+        redis: RedisPool,
+        cfg: DetailedArchiveCfg,
+        token: gw_runtime::ShutdownToken,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<CapturedSurface>(cfg.channel_capacity);
         let workers = cfg.workers.max(1);
         let shared_rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
@@ -131,7 +135,8 @@ impl DetailedArchive {
             let rx = shared_rx.clone();
             let cfg = cfg.clone();
             let redis = redis.clone();
-            let name: &'static str = Box::leak(format!("detailed_archive_worker_{i}").into_boxed_str());
+            let name: &'static str =
+                Box::leak(format!("detailed_archive_worker_{i}").into_boxed_str());
             drop(gw_runtime::supervisor::supervised_spawn(
                 name,
                 gw_runtime::supervisor::policy_archive(),
@@ -328,12 +333,15 @@ impl DetailedArchive {
         let (tx, mut rx) = mpsc::channel::<CapturedSurface>(cfg.channel_capacity);
         // Drain the channel slowly so the second `try_send` lands on a full
         // queue.
-        drop(gw_runtime::supervisor::one_shot_spawn("detailed_archive_test_drain", || async move {
-            while let Some(_s) = rx.recv().await {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            Ok(())
-        }));
+        drop(gw_runtime::supervisor::one_shot_spawn(
+            "detailed_archive_test_drain",
+            || async move {
+                while let Some(_s) = rx.recv().await {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Ok(())
+            },
+        ));
         Self { tx }
     }
 }

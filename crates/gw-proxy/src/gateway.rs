@@ -893,10 +893,13 @@ impl ProxyHttp for LlmGateway {
         // decision — mapping it to an HTTP 402 response lands alongside the
         // real status source (the rejection path is exercised by `license::tests`).
         let license_status = gw_auth::license::LicenseStatus::Valid;
-        if let Err(lic_err) = self.license_gate.enforce(&gw_auth::license::LicenseContext {
-            license_status: &license_status,
-            feature: None,
-        }) {
+        if let Err(lic_err) = self
+            .license_gate
+            .enforce(&gw_auth::license::LicenseContext {
+                license_status: &license_status,
+                feature: None,
+            })
+        {
             tracing::warn!(
                 target: "gw_gateway",
                 error = ?lic_err,
@@ -1586,26 +1589,24 @@ impl ProxyHttp for LlmGateway {
                 let accumulated = match &ctx.archive_upstream_response_body {
                     crate::ctx::ArchiveState::InMemory(b) => b.to_vec(),
                     crate::ctx::ArchiveState::Truncated { .. } => Vec::new(),
-                    crate::ctx::ArchiveState::Spilled { .. } => {
-                        tokio::task::block_in_place(|| {
-                            let rt = tokio::runtime::Handle::current();
-                            rt.block_on(async {
-                                match ctx.archive_upstream_response_body.read_for_emit().await {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            target: "gw_proxy::archive",
-                                            request_id = %ctx.request_id,
-                                            surface = "upstream",
-                                            error = %e,
-                                            "archive_emit_read_failed"
-                                        );
-                                        Vec::new()
-                                    }
+                    crate::ctx::ArchiveState::Spilled { .. } => tokio::task::block_in_place(|| {
+                        let rt = tokio::runtime::Handle::current();
+                        rt.block_on(async {
+                            match ctx.archive_upstream_response_body.read_for_emit().await {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "gw_proxy::archive",
+                                        request_id = %ctx.request_id,
+                                        surface = "upstream",
+                                        error = %e,
+                                        "archive_emit_read_failed"
+                                    );
+                                    Vec::new()
                                 }
-                            })
+                            }
                         })
-                    }
+                    }),
                 };
                 let is_html = accumulated.get(..100).is_some_and(|s| {
                     let start = std::str::from_utf8(s).unwrap_or("");
@@ -2002,8 +2003,7 @@ impl ProxyHttp for LlmGateway {
         // uniquely identifies the GraceStatus::Expired path (the Expired arm
         // is the only branch that clears cancel_grace_active while
         // cancel_observed_at_ms remains Some). No new ctx field needed.
-        let force_flush_partial =
-            ctx.cancel_observed_at_ms.is_some() && !ctx.cancel_grace_active;
+        let force_flush_partial = ctx.cancel_observed_at_ms.is_some() && !ctx.cancel_grace_active;
         self.emit_response_surfaces(ctx, force_flush_partial).await;
         if force_flush_partial {
             metrics::counter!(ARCHIVE_EMIT_GRACE_FLUSH_TOTAL).increment(1);

@@ -410,9 +410,7 @@ pub async fn run_cli_body_filter(
             // Reject policy. A truncated body would mis-parse JSON and
             // produce a wrong token count → wrong cost; we MUST refuse
             // rather than silently corrupt.
-            let buf = ctx
-                .upstream_body_accum
-                .get_or_insert_with(BytesMut::new);
+            let buf = ctx.upstream_body_accum.get_or_insert_with(BytesMut::new);
             let outcome = crate::bounded::push_bounded_bytes(
                 buf,
                 &passthrough,
@@ -1065,9 +1063,7 @@ pub(crate) fn handle_non_stream_chunk(
         // and stamp `upstream_error_code` so `logging` reports
         // `GW_UPSTREAM_BODY_TRUNCATED` instead of a misleading parse error.
         // The existing fail-to-proxy path will then surface a 502.
-        let buf = ctx
-            .upstream_body_accum
-            .get_or_insert_with(BytesMut::new);
+        let buf = ctx.upstream_body_accum.get_or_insert_with(BytesMut::new);
         let outcome = crate::bounded::push_bounded_bytes(
             buf,
             b,

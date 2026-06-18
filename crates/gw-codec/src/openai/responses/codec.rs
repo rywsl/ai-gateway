@@ -660,10 +660,7 @@ fn dispatch_event(
             // gw_codec_overflow_total{kind="args_buffer_cap"} on overflow.
             // On overflow we skip the ToolCallDelta so the downstream
             // doesn't observe a cap-truncated tail it cannot parse.
-            let index_for_delta = st
-                .pending_function_calls
-                .get(item_id)
-                .map(|b| b.index);
+            let index_for_delta = st.pending_function_calls.get(item_id).map(|b| b.index);
             if st.try_extend_function_arguments(item_id, delta).is_ok() {
                 if let Some(index) = index_for_delta {
                     events.push(StreamEventIR::ToolCallDelta {

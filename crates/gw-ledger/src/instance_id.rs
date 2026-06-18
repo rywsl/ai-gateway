@@ -96,7 +96,11 @@ pub async fn renew_heartbeat(pool: &RedisPool, instance_id: &str) -> anyhow::Res
     Ok(())
 }
 
-pub fn spawn_heartbeat_task(pool: RedisPool, instance_id: String, token: gw_runtime::ShutdownToken) {
+pub fn spawn_heartbeat_task(
+    pool: RedisPool,
+    instance_id: String,
+    token: gw_runtime::ShutdownToken,
+) {
     drop(gw_runtime::supervisor::supervised_spawn(
         "instance_heartbeat",
         gw_runtime::supervisor::policy_heartbeat(),

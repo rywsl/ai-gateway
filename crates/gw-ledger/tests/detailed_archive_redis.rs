@@ -55,7 +55,11 @@ fn cfg(stream: &str) -> DetailedArchiveCfg {
 async fn five_surfaces_round_trip_through_redis() {
     let pool = make_pool().await;
     let stream = format!("usage:detailed:test:{}", std::process::id());
-    let archive = DetailedArchive::start(pool.clone(), cfg(&stream), gw_runtime::ShutdownToken::default());
+    let archive = DetailedArchive::start(
+        pool.clone(),
+        cfg(&stream),
+        gw_runtime::ShutdownToken::default(),
+    );
 
     let req_id = RequestId::from("r_e2e");
     let trace = TraceId::from("t_e2e");

@@ -1172,7 +1172,11 @@ async fn bootstrap(
 
     // 4d. InflightLedger + background tasks (W2-T6).
     // instance_id was resolved above (before Ledger::start) and is reused here.
-    gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone(), shutdown_token.clone());
+    gw_ledger::instance_id::spawn_heartbeat_task(
+        (*redis.pool).clone(),
+        instance_id.clone(),
+        shutdown_token.clone(),
+    );
     match gw_ledger::load_latest_coef_snapshot(&redis.pool).await {
         Ok(Some(outcome)) => {
             tracing::info!(
