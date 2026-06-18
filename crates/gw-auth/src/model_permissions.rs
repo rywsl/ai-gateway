@@ -113,7 +113,7 @@ use std::time::{Duration, Instant};
 pub const BUDGET_MS: u128 = 100;
 
 /// Number of regex-match timeouts per ApiKey before that key is auto-disabled.
-const TIMEOUT_THRESHOLD: u32 = 10;
+const TIMEOUT_THRESHOLD: u32 = 1;
 
 /// Default cache capacity (api-key cardinality). 100_000 covers typical
 /// production loads; an LRU-evicted attacker key only loses its "disabled"
@@ -181,10 +181,6 @@ impl RedosTracker {
         if new_count >= TIMEOUT_THRESHOLD {
             entry.disabled.store(true, Ordering::Release);
         }
-        // D4 (#17): aggregate counter, no per-ApiKey label. Per-ApiKey
-        // auto-disable is owned by this `RedosTracker` (in-memory, keyed by
-        // `ak` above); the metric only needs an aggregate timeout rate, so the
-        // high-cardinality `api_key_id` label is intentionally omitted.
         metrics::counter!("gw_redos_timeout_total").increment(1);
     }
 
@@ -250,5 +246,15 @@ mod tests {
         // Moka may sync lazily; force pending tasks to settle before assertion.
         tracker.sync_for_test();
         assert!(tracker.len_for_test() <= 4);
+    }
+
+    #[test]
+    fn redos_tracker_disables_after_first_timeout() {
+        let tracker = RedosTracker::new();
+
+        tracker.record_timeout("ak-bad");
+
+        assert!(tracker.is_disabled("ak-bad"));
+        assert_eq!(check_with_budget("anything", &[], "ak-bad", &tracker), None);
     }
 }

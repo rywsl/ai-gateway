@@ -229,6 +229,7 @@ fn coefs_for_six_dim_actual_usage() {
         cache_creation_input_tokens: Some(30),
         thinking_tokens: Some(40),
         multimodal_input_tokens: Some(50),
+        ..Default::default()
     };
     let actual = actual_usage_credits(version, model_id, &usage).unwrap();
     // 10*1 + 100*2 + 20*3 + 30*4 + 40*5 + 50*6 = 10 + 200 + 60 + 120 + 200 + 300 = 890

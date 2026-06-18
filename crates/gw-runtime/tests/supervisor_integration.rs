@@ -1,5 +1,5 @@
 use gw_runtime::shutdown::ShutdownToken;
-use gw_runtime::supervisor::{RestartPolicy, Supervisor};
+use gw_runtime::supervisor::{one_shot_spawn, RestartPolicy, Supervisor};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,4 +146,34 @@ async fn restarts_on_panic_during_factory_construction() {
     assert!(unhealthy.load(Ordering::SeqCst));
     // max_restarts + 1 = 3 attempts before giving up.
     assert_eq!(counter.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn one_shot_spawn_catches_error_and_panic_without_restart() {
+    let err_counter = Arc::new(AtomicU32::new(0));
+    let err_counter_for_task = err_counter.clone();
+    let err_handle = one_shot_spawn("oneshot_error", move || {
+        let err_counter_for_task = err_counter_for_task.clone();
+        async move {
+            err_counter_for_task.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("expected one-shot error"))
+        }
+    });
+
+    err_handle.await.unwrap();
+    assert_eq!(err_counter.load(Ordering::SeqCst), 1);
+
+    let panic_counter = Arc::new(AtomicU32::new(0));
+    let panic_counter_for_task = panic_counter.clone();
+    let panic_handle = one_shot_spawn("oneshot_panic", move || {
+        panic_counter_for_task.fetch_add(1, Ordering::SeqCst);
+        panic!("expected one-shot panic");
+        #[allow(unreachable_code)]
+        async {
+            Ok(())
+        }
+    });
+
+    panic_handle.await.unwrap();
+    assert_eq!(panic_counter.load(Ordering::SeqCst), 1);
 }

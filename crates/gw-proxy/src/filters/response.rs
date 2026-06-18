@@ -257,7 +257,16 @@ pub async fn run(
     let client_kind = ctx.client_codec.as_ref().map(AnyCodec::kind);
 
     if let Some(chunk) = body.as_ref() {
-        ctx.sse_leftover.extend_from_slice(chunk);
+        // T-W3-06: cap sse_leftover at SSE_LEFTOVER_CAP_BYTES with the
+        // Truncate policy. Losing tail bytes only drops a partial event;
+        // the SSE framing recovers at the next `\n\n`.
+        let _ = crate::bounded::push_bounded_vec(
+            &mut ctx.sse_leftover,
+            chunk,
+            crate::bounded::SSE_LEFTOVER_CAP_BYTES,
+            crate::bounded::SSE_LEFTOVER_LABEL,
+            gw_core::bounded_buf::OverflowPolicy::Truncate,
+        );
     }
 
     // Drain complete `\n\n`- OR `\r\n\r\n`-terminated events. `find_event_boundary`
@@ -397,9 +406,28 @@ pub async fn run_cli_body_filter(
         if ctx.is_stream {
             scan_cli_stream_chunk(shape, &passthrough, ctx);
         } else {
-            ctx.upstream_body_accum
-                .get_or_insert_with(BytesMut::new)
-                .extend_from_slice(&passthrough);
+            // T-W3-05: cap at UPSTREAM_BODY_ACCUM_CAP_BYTES with the
+            // Reject policy. A truncated body would mis-parse JSON and
+            // produce a wrong token count → wrong cost; we MUST refuse
+            // rather than silently corrupt.
+            let buf = ctx.upstream_body_accum.get_or_insert_with(BytesMut::new);
+            let outcome = crate::bounded::push_bounded_bytes(
+                buf,
+                &passthrough,
+                crate::bounded::UPSTREAM_BODY_ACCUM_CAP_BYTES,
+                crate::bounded::UPSTREAM_BODY_ACCUM_LABEL,
+                gw_core::bounded_buf::OverflowPolicy::Reject,
+            );
+            if matches!(outcome, crate::bounded::PushOutcome::Rejected { .. }) {
+                return Err(pingora::Error::because(
+                    pingora::ErrorType::CustomCode("GW_UPSTREAM_BODY_TRUNCATED", 502),
+                    "upstream body exceeded bounded_buf cap",
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        "upstream_body_accum cap exceeded",
+                    )),
+                ));
+            }
         }
         if let Some(sr) = ctx.spill_root.clone() {
             ctx.archive_downstream_response_body
@@ -442,7 +470,14 @@ fn cli_passthrough_response_chunk(shape: ApiShape, chunk: &[u8]) -> std::borrow:
 }
 
 fn scan_cli_stream_chunk(shape: ApiShape, chunk: &[u8], ctx: &mut ReqCtx) {
-    ctx.sse_leftover.extend_from_slice(chunk);
+    // T-W3-06: same Truncate policy as the main response streaming path.
+    let _ = crate::bounded::push_bounded_vec(
+        &mut ctx.sse_leftover,
+        chunk,
+        crate::bounded::SSE_LEFTOVER_CAP_BYTES,
+        crate::bounded::SSE_LEFTOVER_LABEL,
+        gw_core::bounded_buf::OverflowPolicy::Truncate,
+    );
     loop {
         let Some((idx, sep_len)) = find_event_boundary(&ctx.sse_leftover) else {
             break;
@@ -1009,8 +1044,10 @@ fn is_cross_protocol(ctx: &ReqCtx) -> bool {
 /// bytes for the outbound body. The `gw_codec_cross_render_nonstream_total`
 /// counter is incremented per successful re-render; failures (parse or
 /// render) emit `GW_CODEC_PARSE_RESPONSE` / `GW_CODEC_CROSS_RENDER_FAILED`
-/// warn logs + counters and leave `pending_client_body = None` so the caller
-/// substitutes an empty body.
+/// warn logs + counters. Cross-protocol parse failures set
+/// `GW_UPSTREAM_PROTOCOL_DECODE_ERROR` and intentionally drop the raw upstream
+/// body so the fail-to-proxy path can render a 502 client-shaped error instead
+/// of forwarding wrong-protocol bytes.
 ///
 /// Failure semantics for usage extraction: any error from `parse_response`
 /// increments the counter `gw_codec_parse_response_failure_total{codec,
@@ -1021,9 +1058,23 @@ pub(crate) fn handle_non_stream_chunk(
     ctx: &mut ReqCtx,
 ) {
     if let Some(b) = chunk {
-        ctx.upstream_body_accum
-            .get_or_insert_with(BytesMut::new)
-            .extend_from_slice(b);
+        // T-W3-05: cap at UPSTREAM_BODY_ACCUM_CAP_BYTES with Reject policy.
+        // On overflow we drop the offending chunk (buffer stays at cap)
+        // and stamp `upstream_error_code` so `logging` reports
+        // `GW_UPSTREAM_BODY_TRUNCATED` instead of a misleading parse error.
+        // The existing fail-to-proxy path will then surface a 502.
+        let buf = ctx.upstream_body_accum.get_or_insert_with(BytesMut::new);
+        let outcome = crate::bounded::push_bounded_bytes(
+            buf,
+            b,
+            crate::bounded::UPSTREAM_BODY_ACCUM_CAP_BYTES,
+            crate::bounded::UPSTREAM_BODY_ACCUM_LABEL,
+            gw_core::bounded_buf::OverflowPolicy::Reject,
+        );
+        if matches!(outcome, crate::bounded::PushOutcome::Rejected { .. }) {
+            ctx.upstream_error_code
+                .get_or_insert("GW_UPSTREAM_BODY_TRUNCATED");
+        }
     }
 
     if !end_of_stream {
@@ -1182,12 +1233,17 @@ pub(crate) fn handle_non_stream_chunk(
                     trace_id: Some(ctx.trace_id.as_ref()),
                     extra: None,
                 });
-                // parse_response failed (e.g., vendor error JSON body, or a
-                // shape this codec can't decode). Forward the original
-                // upstream bytes verbatim — cross-protocol clients see
-                // upstream-shape bytes (best-effort vs an empty 200), and
-                // same-protocol clients see no change from pre-T6 behaviour.
-                return_body_to_accum = true;
+                // Same-protocol parse failures preserve historical vendor
+                // error pass-through while the WS-15 rollout flag is false.
+                // Cross-protocol callers cannot safely consume upstream-shaped
+                // bytes, and flag-on same-protocol traffic opts into the same
+                // deterministic 502 decode-error path.
+                if cross_protocol || ctx.r7_502_on_parse_fail {
+                    ctx.upstream_error_code =
+                        Some(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR);
+                } else {
+                    return_body_to_accum = true;
+                }
             }
         }
     }
@@ -1281,6 +1337,51 @@ mod non_stream_branch_tests {
         // cross-protocol branch; same-protocol callers ignore it.
         let accum = ctx.upstream_body_accum.as_ref().expect("body preserved");
         assert_eq!(accum.as_ref(), b"not json" as &[u8]);
+    }
+
+    #[test]
+    fn same_protocol_parse_failure_flag_on_sets_decode_error_and_drops_raw_body() {
+        let mut ctx = make_ctx_non_stream();
+        ctx.r7_502_on_parse_fail = true;
+        let body = Bytes::from_static(b"not json");
+
+        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+
+        assert_eq!(
+            ctx.upstream_error_code,
+            Some(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR)
+        );
+        assert!(
+            ctx.upstream_body_accum.is_none(),
+            "flag-on parse failure must not preserve raw upstream bytes for legacy 200 forwarding"
+        );
+    }
+
+    #[test]
+    fn cross_protocol_parse_failure_sets_decode_error_and_drops_raw_body() {
+        let mut ctx = ReqCtx {
+            is_stream: false,
+            client_codec: Some(AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)),
+            upstream_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            upstream_status: Some(200),
+            ..ReqCtx::default()
+        };
+        let upstream_bytes = Bytes::from_static(b"not json");
+
+        handle_non_stream_chunk(Some(&upstream_bytes), true, &mut ctx);
+
+        assert_eq!(
+            ctx.upstream_error_code,
+            Some(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR)
+        );
+        assert!(
+            ctx.pending_client_body.is_none(),
+            "parse failure must not synthesize a successful client body"
+        );
+        assert!(
+            ctx.upstream_body_accum.is_none(),
+            "cross-protocol parse failure must not preserve raw upstream bytes for forwarding"
+        );
     }
 
     #[test]

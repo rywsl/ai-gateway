@@ -88,7 +88,7 @@ fn hard_cap_input_tokens_passes_at_exact_cap() {
 #[test]
 fn freeze_guard_double_release_idempotent_no_deducted_write() {
     let uid = UserId::from("u-failmodes-double-release");
-    let g = RequestFreeze::new(uid.clone(), 1000);
+    let g = RequestFreeze::new(uid.clone(), 1000).expect("valid request freeze");
     g.release();
     g.release(); // no-op
     let state = DEDUCT.get(&uid).unwrap().clone();
@@ -100,7 +100,7 @@ fn freeze_guard_double_release_idempotent_no_deducted_write() {
 fn freeze_guard_drop_without_release_rolls_back() {
     let uid = UserId::from("u-failmodes-leak");
     {
-        let _g = RequestFreeze::new(uid.clone(), 500);
+        let _g = RequestFreeze::new(uid.clone(), 500).expect("valid request freeze");
     } // dropped without release
     let state = DEDUCT.get(&uid).unwrap().clone();
     assert_eq!(state.frozen_micro.load(Ordering::Relaxed), 0);

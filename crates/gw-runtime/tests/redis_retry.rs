@@ -1,7 +1,9 @@
-use gw_runtime::redis_retry::{retry, RetryConfig};
+use gw_runtime::redis_retry::{retry, retry_with_shutdown, RetryConfig, RetryError};
+use gw_runtime::ShutdownToken;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 fn test_config(op_name: &str) -> RetryConfig {
     RetryConfig {
@@ -90,4 +92,39 @@ async fn total_deadline_enforced() {
     assert_eq!(result, Err("transient"));
     assert!(start.elapsed() <= Duration::from_millis(300));
     assert!(calls.load(Ordering::SeqCst) <= 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_interrupts_backoff_sleep() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first_attempt = Arc::new(Notify::new());
+    let cfg = RetryConfig {
+        max_retries: 10,
+        initial_backoff: Duration::from_secs(5),
+        multipliers: vec![1.0],
+        jitter: 0.0,
+        total_deadline: Duration::from_secs(30),
+        ..test_config("cancelled")
+    };
+    let shutdown = ShutdownToken::new();
+    let shutdown_for_cancel = shutdown.clone();
+    let first_attempt_for_cancel = first_attempt.clone();
+    tokio::spawn(async move {
+        first_attempt_for_cancel.notified().await;
+        shutdown_for_cancel.cancel();
+    });
+
+    let result: Result<i32, RetryError<&str>> = retry_with_shutdown(&cfg, &shutdown, || {
+        let calls = calls.clone();
+        let first_attempt = first_attempt.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            first_attempt.notify_one();
+            Err("transient")
+        }
+    })
+    .await;
+
+    assert_eq!(result, Err(RetryError::Cancelled));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

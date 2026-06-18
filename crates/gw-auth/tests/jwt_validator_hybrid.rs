@@ -121,6 +121,7 @@ async fn hs256_static_secret_happy() {
         expected_aud: smallvec!["my-aud".into()],
         leeway_secs: 5,
         require_nbf: true,
+        ..JwtValidatorConfig::default()
     });
     let c: Claims = v.validate(&token).await.unwrap();
     assert_eq!(c.sub, "u1");
@@ -146,6 +147,7 @@ async fn iss_mismatch_rejects() {
         expected_aud: smallvec!["my-aud".into()],
         leeway_secs: 5,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
     assert!(matches!(
         v.validate::<Claims>(&token).await,
@@ -173,6 +175,7 @@ async fn aud_mismatch_rejects() {
         expected_aud: smallvec!["my-aud".into()],
         leeway_secs: 5,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
     assert!(matches!(
         v.validate::<Claims>(&token).await,
@@ -200,6 +203,7 @@ async fn nbf_future_rejects() {
         expected_aud: smallvec!["my-aud".into()],
         leeway_secs: 0,
         require_nbf: true,
+        ..JwtValidatorConfig::default()
     });
     assert!(matches!(
         v.validate::<Claims>(&token).await,
@@ -227,6 +231,7 @@ async fn nbf_within_leeway_passes() {
         expected_aud: smallvec!["my-aud".into()],
         leeway_secs: 30,
         require_nbf: true,
+        ..JwtValidatorConfig::default()
     });
     let c: Claims = v.validate(&token).await.unwrap();
     assert_eq!(c.sub, "u1");
@@ -252,6 +257,7 @@ async fn expired_rejects() {
         expected_aud: smallvec!["my-aud".into()],
         leeway_secs: 5,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
     assert!(matches!(
         v.validate::<Claims>(&token).await,
@@ -279,6 +285,7 @@ async fn hs256_no_static_secret_rejects() {
         expected_aud: smallvec![],
         leeway_secs: 0,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
     assert!(matches!(
         v.validate::<Claims>(&token).await,
@@ -302,6 +309,7 @@ async fn rs256_jwks_kid_lookup_happy() {
         expected_aud: smallvec!["my-aud".into()],
         leeway_secs: 5,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
     v.attach_jwks(resolver.clone());
     let token = make_rs256_token(
@@ -321,7 +329,7 @@ async fn rs256_jwks_kid_lookup_happy() {
 }
 
 #[tokio::test]
-async fn jwks_resolver_miss_falls_back_to_static_pem() {
+async fn jwks_resolver_miss_rejects_when_static_fallback_disabled() {
     let resolver = Arc::new(CountingJwks {
         kid_match: Some("different".into()),
         pem: vec![],
@@ -330,10 +338,53 @@ async fn jwks_resolver_miss_falls_back_to_static_pem() {
     let mut v = JwtValidator::new(JwtValidatorConfig {
         static_secret_hs256: None,
         static_pem_rs256: Some(TEST_RSA_PUBLIC_PEM.to_vec()),
+        allow_static_pem_fallback_for_unknown_kid: false,
         expected_iss: smallvec![],
         expected_aud: smallvec![],
         leeway_secs: 5,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
+    });
+    v.attach_jwks(resolver.clone());
+    let token = make_rs256_token(
+        TEST_RSA_PRIVATE_PEM,
+        Some("unknown"),
+        &Claims {
+            sub: "u1".into(),
+            iss: None,
+            aud: None,
+            exp: now_unix() + 60,
+            nbf: None,
+        },
+    );
+    assert!(matches!(
+        v.validate::<Claims>(&token).await,
+        Err(JwtError::InvalidSignature)
+    ));
+    assert_eq!(
+        resolver.calls.load(Ordering::SeqCst),
+        1,
+        "resolver was called before unknown-kid rejection"
+    );
+}
+
+#[tokio::test]
+async fn jwks_resolver_miss_falls_back_to_static_pem_when_explicitly_enabled() {
+    let resolver = Arc::new(CountingJwks {
+        kid_match: Some("different".into()),
+        pem: vec![],
+        calls: AtomicUsize::new(0),
+    });
+    let mut v = JwtValidator::new(JwtValidatorConfig {
+        static_secret_hs256: None,
+        static_pem_rs256: Some(TEST_RSA_PUBLIC_PEM.to_vec()),
+        allow_static_pem_fallback_for_unknown_kid: true,
+        expected_iss: smallvec![],
+        expected_aud: smallvec![],
+        leeway_secs: 5,
+        require_nbf: false,
+        allowed_algs: smallvec![jsonwebtoken::Algorithm::RS256],
+        ..JwtValidatorConfig::default()
     });
     v.attach_jwks(resolver.clone());
     let token = make_rs256_token(
@@ -357,6 +408,37 @@ async fn jwks_resolver_miss_falls_back_to_static_pem() {
 }
 
 #[tokio::test]
+async fn allowed_algs_rejects_hs256_when_only_rs256_is_configured() {
+    let secret = b"top-secret";
+    let token = make_hs256_token(
+        secret,
+        &Claims {
+            sub: "u1".into(),
+            iss: None,
+            aud: None,
+            exp: now_unix() + 60,
+            nbf: None,
+        },
+    );
+    let v = JwtValidator::new(JwtValidatorConfig {
+        static_secret_hs256: Some(secret.to_vec()),
+        static_pem_rs256: Some(TEST_RSA_PUBLIC_PEM.to_vec()),
+        allow_static_pem_fallback_for_unknown_kid: false,
+        expected_iss: smallvec![],
+        expected_aud: smallvec![],
+        leeway_secs: 0,
+        require_nbf: false,
+        allowed_algs: smallvec![jsonwebtoken::Algorithm::RS256],
+        ..JwtValidatorConfig::default()
+    });
+
+    assert!(matches!(
+        v.validate::<Claims>(&token).await,
+        Err(JwtError::InvalidSignature)
+    ));
+}
+
+#[tokio::test]
 async fn rs256_no_jwks_no_static_pem_rejects() {
     let v = JwtValidator::new(JwtValidatorConfig {
         static_secret_hs256: None,
@@ -365,6 +447,7 @@ async fn rs256_no_jwks_no_static_pem_rejects() {
         expected_aud: smallvec![],
         leeway_secs: 5,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
     let token = make_rs256_token(
         TEST_RSA_PRIVATE_PEM,
@@ -392,6 +475,7 @@ async fn rs256_no_kid_uses_static_pem() {
         expected_aud: smallvec![],
         leeway_secs: 5,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
     let token = make_rs256_token(
         TEST_RSA_PRIVATE_PEM,
@@ -418,6 +502,7 @@ async fn reason_does_not_leak_token() {
         expected_aud: smallvec![],
         leeway_secs: 0,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
     let err = v.validate::<Claims>(token).await.unwrap_err();
     assert_eq!(err.reason(), "sig");

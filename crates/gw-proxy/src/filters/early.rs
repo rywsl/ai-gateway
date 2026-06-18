@@ -29,6 +29,7 @@ use gw_core::debug::DebugTrigger;
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_runtime::Admit;
 use gw_store::EntityStore;
+use ipnet::IpNet;
 use pingora::http::ResponseHeader;
 use pingora::{Error, ErrorType, Result};
 use pingora_proxy::Session;
@@ -60,6 +61,7 @@ pub struct EarlyFilterDeps<'a> {
     pub ip_ratelimit: &'a Arc<IpRateLimitGuard>,
     pub ip_allowlist_mode: IpAllowlistMode,
     pub trust_xff: bool,
+    pub trusted_proxies: &'a Arc<Vec<IpNet>>,
 }
 
 pub async fn run(session: &mut Session, ctx: &mut ReqCtx, deps: EarlyFilterDeps<'_>) -> Result<()> {
@@ -112,7 +114,7 @@ async fn run_impl(
         return Err(short_circuit(503));
     }
 
-    if let Some(ip) = client_ip_from_session(session, deps.trust_xff) {
+    if let Some(ip) = client_ip_from_session(session, deps.trust_xff, deps.trusted_proxies) {
         if let Err(err) = check_ip(
             ip,
             None,
@@ -224,10 +226,10 @@ async fn run_impl(
 /// Resolve the client IP for blocklist / permission checks.
 ///
 /// When `trust_xff` is `true`, prefer the first (left-most) entry of the
-/// `X-Forwarded-For` header, which per RFC 7239 convention is the original
-/// client as seen by the trusted L7 load balancer. Operators MUST only
-/// enable this flag behind a load balancer they own end-to-end, otherwise
-/// clients can forge the header and trivially bypass the IP blocklist.
+/// `X-Forwarded-For` header only when the immediate L4 peer is in
+/// `trusted_proxies`. Operators MUST list the load-balancer/sidecar CIDRs
+/// they own end-to-end, otherwise clients can forge the header and trivially
+/// bypass the IP blocklist.
 ///
 /// When `trust_xff` is `false` (the default), use Pingora's `client_addr()`
 /// — i.e. the L4 socket peer. Behind a reverse proxy this returns the
@@ -237,22 +239,42 @@ async fn run_impl(
 ///
 /// Returns `None` for non-Inet sockets (e.g. Unix domain sockets in tests)
 /// or unparseable XFF values.
-pub(crate) fn client_ip_from_session(session: &Session, trust_xff: bool) -> Option<IpAddr> {
-    if trust_xff {
-        if let Some(xff) = session.req_header().headers.get("x-forwarded-for") {
-            if let Ok(s) = xff.to_str() {
-                if let Some(first) = s.split(',').next() {
-                    if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                        return Some(ip);
-                    }
-                }
+pub(crate) fn client_ip_from_session(
+    session: &Session,
+    trust_xff: bool,
+    trusted_proxies: &[IpNet],
+) -> Option<IpAddr> {
+    session.client_addr().and_then(|sa| match sa {
+        pingora::protocols::l4::socket::SocketAddr::Inet(addr) => {
+            let xff = session
+                .req_header()
+                .headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok());
+            Some(client_ip(addr.ip(), xff, trust_xff, trusted_proxies))
+        }
+        _ => None,
+    })
+}
+
+pub(crate) fn client_ip(
+    peer: IpAddr,
+    xff: Option<&str>,
+    trust_xff: bool,
+    trusted_proxies: &[IpNet],
+) -> IpAddr {
+    if trust_xff && trusted_proxies.iter().any(|net| net.contains(&peer)) {
+        if let Some(first) = xff
+            .and_then(|header| header.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Ok(ip) = first.parse::<IpAddr>() {
+                return ip;
             }
         }
     }
-    session.client_addr().and_then(|sa| match sa {
-        pingora::protocols::l4::socket::SocketAddr::Inet(addr) => Some(addr.ip()),
-        _ => None,
-    })
+    peer
 }
 
 fn header_lookup<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -277,6 +299,66 @@ fn codec_for_shape(shape: gw_core::protocol::ApiShape) -> AnyCodec {
         }
         gw_core::protocol::ProtocolKind::Gemini => AnyCodec::Gemini(gw_codec::gemini::Gemini),
         gw_core::protocol::ProtocolKind::Kiro => AnyCodec::Kiro(gw_codec::kiro::Kiro),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod trusted_proxies_tests {
+    use super::*;
+
+    fn net(cidr: &str) -> IpNet {
+        cidr.parse().expect("valid test CIDR")
+    }
+
+    #[test]
+    fn trusted_proxies_empty_ignores_xff() {
+        let peer: IpAddr = "198.51.100.10".parse().unwrap();
+
+        let got = client_ip(peer, Some("203.0.113.9"), true, &[]);
+
+        assert_eq!(got, peer);
+    }
+
+    #[test]
+    fn trust_xff_false_ignores_xff_even_for_trusted_peer() {
+        let peer: IpAddr = "10.1.2.3".parse().unwrap();
+
+        let got = client_ip(peer, Some("203.0.113.9"), false, &[net("10.0.0.0/8")]);
+
+        assert_eq!(got, peer);
+    }
+
+    #[test]
+    fn trusted_proxy_uses_left_most_xff() {
+        let peer: IpAddr = "10.1.2.3".parse().unwrap();
+
+        let got = client_ip(
+            peer,
+            Some("203.0.113.9, 198.51.100.11"),
+            true,
+            &[net("10.0.0.0/8")],
+        );
+
+        assert_eq!(got, "203.0.113.9".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn untrusted_proxy_ignores_xff() {
+        let peer: IpAddr = "198.51.100.10".parse().unwrap();
+
+        let got = client_ip(peer, Some("203.0.113.9"), true, &[net("10.0.0.0/8")]);
+
+        assert_eq!(got, peer);
+    }
+
+    #[test]
+    fn malformed_xff_falls_back_to_peer() {
+        let peer: IpAddr = "10.1.2.3".parse().unwrap();
+
+        let got = client_ip(peer, Some("not-an-ip"), true, &[net("10.0.0.0/8")]);
+
+        assert_eq!(got, peer);
     }
 }
 

@@ -19,6 +19,7 @@ pub mod error_passthrough;
 pub mod gemini;
 pub mod kiro;
 pub mod openai;
+pub mod overflow;
 pub mod passthrough;
 pub mod stream_accumulator;
 pub mod stream_policy;
@@ -27,5 +28,8 @@ pub mod usage_extractor;
 pub mod wire;
 
 pub use any::AnyCodec;
+pub use overflow::{
+    CodecOverflowError, DEFAULT_MAX_ACCUMULATED_BYTES, DEFAULT_MAX_PENDING_FUNCTION_CALLS,
+};
 pub use trait_def::{Headers, ProtocolCodec};
 pub use wire::WireAnyRequest;

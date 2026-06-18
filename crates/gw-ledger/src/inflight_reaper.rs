@@ -100,7 +100,7 @@ async fn check_key(pool: &RedisPool, key: &str, emit_lag_t0_secs: u64) -> anyhow
     let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
     let lag_ms = now_ms.saturating_sub(ts_settled);
     if lag_ms > (emit_lag_t0_secs * 1000) as i64 {
-        // Extract request_id + attempt from key for the label.
+        // Extract request_id for logs and attempt for the bounded metric label.
         // Key shape: billing:inflight:<instance_id>:<request_id>:<attempt_index>
         // instance_id itself may contain colons so we count from the right.
         let parts: Vec<&str> = key.split(':').collect();
@@ -118,7 +118,6 @@ async fn check_key(pool: &RedisPool, key: &str, emit_lag_t0_secs: u64) -> anyhow
         );
         metrics::counter!(
             "gw_billing_emit_lag_t0_total",
-            "request_id" => request_id.to_string(),
             "attempt_index" => attempt.to_string(),
         )
         .increment(1);

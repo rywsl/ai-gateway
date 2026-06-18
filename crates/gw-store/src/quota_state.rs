@@ -10,15 +10,15 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct QuotaStateWriter {
     pg: PgPool,
-    redis: RedisCtx,
 }
 
 impl QuotaStateWriter {
-    pub fn new(pg: PgPool, redis: RedisCtx) -> Self {
-        Self { pg, redis }
+    pub fn new(pg: PgPool) -> Self {
+        Self { pg }
     }
 
     pub async fn write(&self, key_id: &str, state: &QuotaState) -> anyhow::Result<()> {
+        let mut tx = self.pg.begin().await?;
         sqlx::query(update_sql())
             .bind(key_id)
             .bind(availability_str(state.availability))
@@ -26,14 +26,105 @@ impl QuotaStateWriter {
             .bind(state.limit)
             .bind(state.reset_at_unix_s)
             .bind(state.observed_at_unix_s)
-            .execute(&self.pg)
+            .execute(&mut *tx)
             .await?;
 
+        sqlx::query(insert_outbox_sql())
+            .bind(key_id)
+            .bind(serde_json::to_value(state)?)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+pub struct QuotaStateOutboxProcessor {
+    pg: PgPool,
+    redis: RedisCtx,
+}
+
+#[derive(Debug)]
+struct QuotaStateOutboxRow {
+    id: i64,
+    vendor_key_id: String,
+    status: String,
+    attempt: i32,
+}
+
+impl QuotaStateOutboxProcessor {
+    pub fn new(pg: PgPool, redis: RedisCtx) -> Self {
+        Self { pg, redis }
+    }
+
+    pub async fn process_batch(&self, batch_size: i64) -> anyhow::Result<u64> {
+        let mut tx = self.pg.begin().await?;
+        let rows = sqlx::query_as::<_, (i64, String, String, i32)>(select_due_outbox_sql())
+            .bind(batch_size)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .map(|(id, vendor_key_id, status, attempt)| QuotaStateOutboxRow {
+                id,
+                vendor_key_id,
+                status,
+                attempt,
+            })
+            .collect::<Vec<_>>();
+
+        let mut processed = 0_u64;
+        for row in &rows {
+            match self.process_row(&mut tx, row).await {
+                Ok(()) => {
+                    processed += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "gw_store::quota_state",
+                        outbox_id = row.id,
+                        vendor_key_id = %row.vendor_key_id,
+                        error = %err,
+                        "quota state outbox row retry scheduled"
+                    );
+                    mark_outbox_retry(&mut tx, row.id, row.attempt).await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(processed)
+    }
+
+    async fn process_row(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        row: &QuotaStateOutboxRow,
+    ) -> anyhow::Result<()> {
+        match row.status.as_str() {
+            "pending" => {
+                self.emit_entity_event(&row.vendor_key_id).await?;
+                set_outbox_status(tx, row.id, "emitted_xadd").await?;
+                self.delete_vendor_key_cache(&row.vendor_key_id).await?;
+                set_outbox_status(tx, row.id, "emitted_del").await?;
+                set_outbox_committed(tx, row.id).await?;
+            }
+            "emitted_xadd" => {
+                self.delete_vendor_key_cache(&row.vendor_key_id).await?;
+                set_outbox_status(tx, row.id, "emitted_del").await?;
+                set_outbox_committed(tx, row.id).await?;
+            }
+            "emitted_del" => {
+                set_outbox_committed(tx, row.id).await?;
+            }
+            other => anyhow::bail!("unsupported quota_state_outbox status {other}"),
+        }
+        Ok(())
+    }
+
+    async fn emit_entity_event(&self, key_id: &str) -> anyhow::Result<()> {
         let client = self.redis.pool.next();
-        let redis_key = format!("entity:vendor_key:{key_id}");
-        let _: Result<(), _> = client.del(redis_key).await;
-        let _: Result<String, _> = client
-            .xadd(
+        client
+            .xadd::<String, _, _, _, _>(
                 "events:entity",
                 false,
                 None::<()>,
@@ -44,9 +135,102 @@ impl QuotaStateWriter {
                     ("op".to_string(), "quota_state".to_string()),
                 ],
             )
-            .await;
+            .await?;
         Ok(())
     }
+
+    async fn delete_vendor_key_cache(&self, key_id: &str) -> anyhow::Result<()> {
+        let client = self.redis.pool.next();
+        let redis_key = format!("entity:vendor_key:{key_id}");
+        client.del::<(), _>(redis_key).await?;
+        Ok(())
+    }
+}
+
+pub fn insert_outbox_sql() -> &'static str {
+    "INSERT INTO quota_state_outbox (vendor_key_id, payload, status) \
+     VALUES ($1, $2, 'pending')"
+}
+
+pub fn select_due_outbox_sql() -> &'static str {
+    "SELECT id, vendor_key_id, status, attempt \
+     FROM quota_state_outbox \
+     WHERE status IN ('pending', 'emitted_xadd', 'emitted_del') \
+       AND next_attempt_at <= NOW() \
+     ORDER BY id ASC \
+     LIMIT $1 \
+     FOR UPDATE SKIP LOCKED"
+}
+
+fn set_outbox_status_sql() -> &'static str {
+    "UPDATE quota_state_outbox \
+     SET status = $2, updated_at = NOW() \
+     WHERE id = $1"
+}
+
+fn set_outbox_committed_sql() -> &'static str {
+    "UPDATE quota_state_outbox \
+     SET status = 'committed', updated_at = NOW() \
+     WHERE id = $1"
+}
+
+async fn set_outbox_status(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+    status: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(set_outbox_status_sql())
+        .bind(id)
+        .bind(status)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn set_outbox_committed(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(set_outbox_committed_sql())
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn mark_outbox_retry(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+    attempt: i32,
+) -> anyhow::Result<()> {
+    let next_attempt = attempt.saturating_add(1);
+    if next_attempt >= 5 {
+        sqlx::query(
+            "UPDATE quota_state_outbox \
+             SET status = 'failed', attempt = $2, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(next_attempt)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        let bounded_attempt = next_attempt.clamp(0, 5) as u32;
+        let delay_secs = i64::from(1_i32 << bounded_attempt);
+        sqlx::query(
+            "UPDATE quota_state_outbox \
+             SET attempt = $2, \
+                 next_attempt_at = NOW() + ($3::TEXT || ' seconds')::INTERVAL, \
+                 updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(next_attempt)
+        .bind(delay_secs.to_string())
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 pub fn update_sql() -> &'static str {
@@ -97,24 +281,27 @@ impl QuotaStateUpdateQueue {
 
         let writer = Arc::clone(&self.writer);
         let pending = Arc::clone(&self.pending);
-        tokio::spawn(async move {
-            match writer.write(&key_id, &state).await {
-                Ok(()) => {
-                    metrics::counter!("gw_quota_state_update_total", "result" => "ok").increment(1)
+        drop(gw_runtime::supervisor::one_shot_spawn(
+            "quota_state_update",
+            move || async move {
+                match writer.write(&key_id, &state).await {
+                    Ok(()) => metrics::counter!("gw_quota_state_update_total", "result" => "ok")
+                        .increment(1),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "gw_store::quota_state",
+                            key_id = %key_id,
+                            error = %e,
+                            "quota state write failed"
+                        );
+                        metrics::counter!("gw_quota_state_update_total", "result" => "failed")
+                            .increment(1);
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "gw_store::quota_state",
-                        key_id = %key_id,
-                        error = %e,
-                        "quota state write failed"
-                    );
-                    metrics::counter!("gw_quota_state_update_total", "result" => "failed")
-                        .increment(1);
-                }
-            }
-            pending.remove(&key_id);
-        });
+                pending.remove(&key_id);
+                Ok(())
+            },
+        ));
     }
 }
 
@@ -134,17 +321,29 @@ pub struct QuotaStateProbeRunner {
 }
 
 impl QuotaStateProbeRunner {
-    pub fn start(self) {
+    pub fn start(self, token: gw_runtime::ShutdownToken) {
         if !self.cfg.enabled {
             return;
         }
-        tokio::spawn(async move {
-            let interval = Duration::from_secs(self.cfg.interval_secs.max(1));
-            loop {
-                self.run_once().await;
-                tokio::time::sleep(interval).await;
-            }
-        });
+        let runner = std::sync::Arc::new(self);
+        drop(gw_runtime::supervisor::supervised_spawn(
+            "quota_state_probe",
+            gw_runtime::supervisor::policy_probe(),
+            token,
+            move |t| {
+                let runner = Arc::clone(&runner);
+                async move {
+                    let interval = Duration::from_secs(runner.cfg.interval_secs.max(1));
+                    loop {
+                        tokio::select! {
+                            _ = t.cancelled() => return Ok(()),
+                            _ = tokio::time::sleep(interval) => {}
+                        }
+                        runner.run_once().await;
+                    }
+                }
+            },
+        ));
     }
 
     pub async fn run_once(&self) {
@@ -283,6 +482,47 @@ mod tests {
         assert!(sql.contains("quota_availability = $2"));
         assert!(sql.contains("version = version + 1"));
         assert!(sql.contains("jsonb_set"));
+    }
+
+    #[test]
+    fn quota_state_writer_persists_outbox_in_pg_transaction() {
+        let src = include_str!("quota_state.rs");
+        let production_src = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            production_src.contains("INSERT INTO quota_state_outbox"),
+            "writer must persist a quota_state_outbox row instead of best-effort Redis"
+        );
+        assert!(
+            production_src.contains("tx.commit().await"),
+            "vendor_keys update and outbox insert must commit together"
+        );
+        assert!(
+            !production_src.contains("let _: Result<(), _> = client.del"),
+            "writer must not ignore Redis DEL failures after PG commit"
+        );
+        assert!(
+            !production_src.contains("let _: Result<String, _> = client"),
+            "writer must not ignore Redis XADD failures after PG commit"
+        );
+    }
+
+    #[test]
+    fn quota_state_outbox_processor_uses_locked_due_rows_and_state_steps() {
+        let src = include_str!("quota_state.rs");
+        let production_src = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(production_src.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(production_src.contains("'pending'"));
+        assert!(production_src.contains("'emitted_xadd'"));
+        assert!(production_src.contains("'committed'"));
+        assert!(production_src.contains("status = 'failed'"));
     }
 
     #[test]

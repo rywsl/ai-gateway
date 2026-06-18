@@ -1,0 +1,22 @@
+name: license_enforce
+type: enum
+enum_values: [disabled, warn, enforce]
+default: warn
+owner_ws: "WS-15, WS-16"
+description: |
+  Gateway license verification mode. disabled skips checks, warn records
+  would-block violations while allowing traffic, and enforce returns 402 for
+  invalid license state. The 14-day warn-only window must precede enforce.
+go_repo_path: modules/license/business/enforce.go
+rust_repo_path: crates/gw-auth/src/license.rs
+switch_plan:
+  introduced_release: N+0
+  warn_window_days: 14
+  enforce_release: N+1
+  delete_legacy_release: N+2
+rollback_steps:
+  - "Set ALM_FLAGS__LICENSE_ENFORCE=warn on Go pods and roll them."
+  - "Set GW_FLAGS__LICENSE_ENFORCE=warn on Rust pods and roll them."
+  - "Watch license_block_total{mode=\"warn\"} and customer-facing 402s for five minutes."
+  - "If violations persist, set both sides to disabled with the same rolling restart."
+mixed_version_safe: true

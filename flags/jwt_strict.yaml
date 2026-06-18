@@ -1,0 +1,19 @@
+name: jwt_strict
+type: bool
+default: false
+owner_ws: "WS-5, WS-15"
+description: |
+  When true, Rust JWT validation rejects issuer, audience, algorithm, and kid
+  mismatches through the strict path. When false, the legacy-compatible path
+  remains available during the mixed-version window.
+go_repo_path: null
+rust_repo_path: crates/gw-auth/src/jwt.rs
+switch_plan:
+  introduced_release: N+0
+  enforce_release: N+1
+  delete_legacy_release: N+2
+rollback_steps:
+  - "Set GW_FLAGS__JWT_STRICT=false on Rust pods and roll them."
+  - "Watch gw_auth_jwt_failures_total and public 401 rate for two minutes."
+  - "If clients still fail, clear any JWT validation cache before retrying traffic."
+mixed_version_safe: true

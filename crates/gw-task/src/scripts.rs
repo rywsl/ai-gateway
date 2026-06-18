@@ -64,6 +64,11 @@ local released_micro = tonumber(ARGV[4]) or 0
 local deducted_micro = tonumber(ARGV[5]) or 0
 local usage_payload = ARGV[6]
 
+local cur = redis.call('HGET', KEYS[1], 'status')
+if cur == 'settled' or cur == 'cancelled' or cur == 'expired' then
+    return 'noop'
+end
+
 if ((#ARGV - 6) % 2) ~= 0 then
     return redis.error_reply('settle fields must be field/value pairs')
 end

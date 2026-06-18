@@ -1,0 +1,19 @@
+name: r7_502_on_parse_fail
+type: bool
+default: false
+owner_ws: "WS-3, WS-6, WS-15"
+description: |
+  When true, the gateway returns HTTP 502 GW_UPSTREAM_PROTOCOL_DECODE_ERROR
+  when upstream response parsing fails. When false, the legacy response path
+  remains available for frontend and client compatibility during rollout.
+go_repo_path: null
+rust_repo_path: crates/gw-proxy/src/filters/response.rs
+switch_plan:
+  introduced_release: N+0
+  enforce_release: N+1
+  delete_legacy_release: N+2
+rollback_steps:
+  - "Set GW_FLAGS__R7_502_ON_PARSE_FAIL=false on Rust pods and roll them."
+  - "Watch gw_upstream_protocol_decode_error_total and public 502 rate."
+  - "If customers remain blocked, redeploy the previous frontend tag from WS-11."
+mixed_version_safe: false

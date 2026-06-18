@@ -1,0 +1,18 @@
+# Schema for flags/*.yaml - WS-15 ledger format.
+# Validated by scripts/check-flags-schema.sh at make check.
+fields:
+  name: { required: true, type: string, pattern: '^[a-z][a-z0-9_]*$' }
+  type: { required: true, enum: [bool, enum] }
+  enum_values: { required_if_type: enum, type: list }
+  default: { required: true }
+  owner_ws: { required: true, type: string }
+  description: { required: true, type: string }
+  go_repo_path: { required: false, type: string }
+  rust_repo_path: { required: false, type: string }
+  switch_plan:
+    introduced_release: { required: true, type: string }
+    warn_window_days: { required: false, type: int }
+    enforce_release: { required: false, type: string }
+    delete_legacy_release: { required: false, type: string }
+  rollback_steps: { required: true, type: list }
+  mixed_version_safe: { required: true, type: bool }

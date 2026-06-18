@@ -43,7 +43,7 @@ impl TaskFreezeRelease for RedisTaskFreezeRelease {
         &self,
         uid: &UserId,
         task_id: &str,
-        frozen_amount: u64,
+        frozen_amount: i64,
     ) -> Result<ReleaseOutcome, anyhow::Error> {
         let leases_key = "tasks:leases".to_string();
         let task_key = format!("entity:task:{task_id}");

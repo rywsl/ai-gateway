@@ -110,6 +110,7 @@ mod tests {
             cache_creation_input_tokens: None,
             thinking_tokens: None,
             multimodal_input_tokens: None,
+            ..Default::default()
         };
         let c = actual_usage_credits(42, "model-x", &usage).unwrap();
         // 5*100 + 10*200 + 3*50 + 0 + 0 + 0

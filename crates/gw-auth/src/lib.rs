@@ -9,6 +9,7 @@ pub mod ip_filter;
 pub mod ip_ratelimit;
 pub mod jwt;
 pub mod jwt_blacklist;
+pub mod license;
 pub mod merge;
 pub mod mgmt;
 pub mod model_permissions;

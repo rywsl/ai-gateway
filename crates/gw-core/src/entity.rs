@@ -394,16 +394,28 @@ pub struct AuthConfig {
     pub expected_aud: smallvec::SmallVec<[String; 2]>,
     pub leeway_secs: u32,
     pub require_nbf: bool,
+    #[serde(default)]
+    pub allowed_algs: smallvec::SmallVec<[JwtAlgorithm; 2]>,
     pub blacklist_fail_mode: BlacklistFailMode,
     /// HS256 shared-secret bytes for the client-bearer JWT path (G6, T1-E).
     /// Absent means the HS256 path is disabled.
     #[serde(default)]
     pub static_secret_hs256: Option<Vec<u8>>,
     /// Static RS256 public-key PEM for the client-bearer JWT path (G6, T1-E).
-    /// Acts as fallback when the JWKS resolver returns `None` or the token has
-    /// no `kid` header. Absent means the RS256 static path is disabled.
+    /// Used for no-`kid` RS256 tokens. Unknown-`kid` fallback is disabled
+    /// unless `allow_static_pem_fallback_for_unknown_kid` is explicitly true.
     #[serde(default)]
     pub static_pem_rs256: Option<Vec<u8>>,
+    #[serde(default)]
+    pub allow_static_pem_fallback_for_unknown_kid: bool,
+}
+
+/// JWT algorithms allowed by AuthConfig.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum JwtAlgorithm {
+    HS256,
+    RS256,
 }
 
 /// JWT-blacklist behavior when Redis is unreachable.

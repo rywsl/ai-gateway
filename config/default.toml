@@ -109,8 +109,16 @@ single_payload_soft_cap_bytes = 8_388_608
 # closed (i.e. blocklist matches the LB's IP, not arbitrary clients).
 trust_xff = false
 
+[runtime]
+# CIDRs for L7 load balancers or sidecars allowed to supply X-Forwarded-For.
+# XFF is still ignored unless [security].trust_xff = true. In production,
+# trust_xff=true with an empty list fails startup with
+# "production_trusted_proxies_empty".
+trusted_proxies = []
+
 [signature]
 required = false
+replay_check = "none"
 
 [routing]
 # How long the `Sticky` strategy keeps a conversation_id → vendor_key_id
@@ -123,6 +131,7 @@ sticky_ttl_secs = 1800
 [routing.reservation]
 enabled = false
 interval_secs = 5
+startup_grace_secs = 30
 thresholds = {}
 
 [routing.presets]
@@ -208,6 +217,13 @@ max_sessions = 64
 # default is fail-static and based on the educated guess in spec §11 #2; tune it
 # by packet-capturing a live Codex CLI session (known gap #2).
 turn_state_ttl_secs = 300
+
+[flags]
+# WS-15 rollback registry. See flags/*.yaml for switch plan and rollback steps.
+license_enforce = "warn"
+jwt_strict = false
+payment_webhook_5xx = false
+r7_502_on_parse_fail = false
 
 [protection]
 # Hard overdraft protection — credit lease layer above the legacy soft defense.

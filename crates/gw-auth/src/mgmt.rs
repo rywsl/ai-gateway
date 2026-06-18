@@ -62,6 +62,15 @@ pub enum MgmtVerifyOutcome {
     ScopeDenied,
 }
 
+pub type MgmtPublicError = (u16, &'static str);
+
+pub fn public_error_for_outcome(outcome: &MgmtVerifyOutcome) -> Option<MgmtPublicError> {
+    match outcome {
+        MgmtVerifyOutcome::Ok => None,
+        _ => Some((401, gw_core::error::codes::GW_AUTH_FAILED)),
+    }
+}
+
 /// Split a raw management bearer of the form `mt_<token_id>.<secret>` into
 /// its `token_id` and `secret` halves. Returns `None` when the `mt_` prefix
 /// is missing, no `.` is present, or the secret half is empty.
@@ -221,5 +230,20 @@ mod verify_tests {
         let entry = build_entry("s3cret", MgmtScope::AdminFull, 3600, KeyStatus::Disabled);
         let outcome = verify_mgmt_token_secret(&entry, "s3cret", MgmtScope::UserSelf);
         assert!(matches!(outcome, MgmtVerifyOutcome::Disabled));
+    }
+
+    #[test]
+    fn non_ok_outcomes_share_public_error() {
+        let outcomes = [
+            MgmtVerifyOutcome::InvalidFormat,
+            MgmtVerifyOutcome::Invalid,
+            MgmtVerifyOutcome::Expired,
+            MgmtVerifyOutcome::Disabled,
+            MgmtVerifyOutcome::ScopeDenied,
+        ];
+        let first = public_error_for_outcome(&outcomes[0]).expect("non-ok maps to error");
+        for outcome in outcomes.iter().skip(1) {
+            assert_eq!(public_error_for_outcome(outcome), Some(first));
+        }
     }
 }

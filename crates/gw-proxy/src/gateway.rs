@@ -47,6 +47,10 @@ use url::Url;
 /// again.
 const MAX_CONNECT_RETRIES: u32 = 2;
 
+/// Metric: count of grace-expired requests whose archive surfaces were
+/// force-flushed (partial mode) in the `logging` filter. W6-T01 / W6-T07.
+const ARCHIVE_EMIT_GRACE_FLUSH_TOTAL: &str = "gw_archive_emit_grace_flush_total";
+
 /// Classification of a connect-time error for the G10 retry hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectErrorKind {
@@ -330,12 +334,13 @@ pub struct LlmGateway {
     pub global_rpm: u32,
     pub admin_upstream_url: Url,
     /// When `true`, parse the client IP from the `X-Forwarded-For` header
-    /// (using the first / left-most entry, which represents the original
-    /// client per RFC 7239 convention). When `false`, use the L4 socket
-    /// peer address only. Default is `false` so a misconfigured deployment
-    /// does not silently bypass IP blocklisting via a forged header.
+    /// only if the immediate peer is in `trusted_proxies`. When `false`, use
+    /// the L4 socket peer address only. Default is `false` so a misconfigured
+    /// deployment does not silently bypass IP blocklisting via a forged header.
     pub trust_xff: bool,
+    pub trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     pub signature_required: bool,
+    pub signature_replay: Arc<gw_auth::signature::ReplayChecker>,
     pub task_enabled: bool,
     pub task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
     pub task_billing_config: Option<gw_billing::TaskBillingConfig>,
@@ -400,6 +405,14 @@ pub struct LlmGateway {
     /// capture a final usage frame the vendor may still be sending.
     /// Populated from `cfg.billing.cancel_grace_ms` at boot time.
     pub(crate) cancel_grace_ms: u64,
+    /// WS-15/T15.7 rollout flag for non-stream response parse failures.
+    pub(crate) r7_502_on_parse_fail: bool,
+    /// WS-15/T15.4 license enforcement gate (hot-reloadable). Consulted in
+    /// `request_filter` so a licence violation is gated by
+    /// `[flags].license_enforce`. Real `LicenseStatus` arrives with WS-5 /
+    /// WS-16; until then the skeleton calls `enforce` with `Valid` so the
+    /// 402 rejection path sits inert.
+    pub(crate) license_gate: Arc<gw_auth::license::LicenseGate>,
     /// Hard-cap configuration (ADR-024). Threaded from `cfg.auth.*` at boot.
     pub(crate) hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
     /// Credit-lease protection-mode config (Spec 2026-05-29-credit-lease-design).
@@ -457,7 +470,9 @@ impl LlmGateway {
         global_rpm: u32,
         admin_upstream_url: Url,
         trust_xff: bool,
+        trusted_proxies: Arc<Vec<ipnet::IpNet>>,
         signature_required: bool,
+        signature_replay: Arc<gw_auth::signature::ReplayChecker>,
         task_enabled: bool,
         task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
         task_billing_config: Option<gw_billing::TaskBillingConfig>,
@@ -477,6 +492,8 @@ impl LlmGateway {
         inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
         response_deadline_ms: u64,
         cancel_grace_ms: u64,
+        r7_502_on_parse_fail: bool,
+        license_gate: Arc<gw_auth::license::LicenseGate>,
         hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
         protection_cfg: gw_ledger::ProtectionConfig,
         overflow_gate: std::sync::Arc<gw_ledger::overflow::OverflowGate>,
@@ -516,7 +533,9 @@ impl LlmGateway {
             global_rpm,
             admin_upstream_url,
             trust_xff,
+            trusted_proxies,
             signature_required,
+            signature_replay,
             task_enabled,
             task_contract,
             task_billing_config,
@@ -536,6 +555,8 @@ impl LlmGateway {
             inflight,
             response_deadline_ms,
             cancel_grace_ms,
+            r7_502_on_parse_fail,
+            license_gate,
             hard_cap_cfg,
             protection_cfg,
             overflow_gate,
@@ -636,14 +657,33 @@ impl LlmGateway {
     }
 
     /// Emit upstream + downstream response surfaces at end-of-stream.
-    /// Called from `response_body_filter` when `end_of_stream = true`.
-    async fn emit_response_surfaces(&self, ctx: &mut ReqCtx) {
+    /// Called from the `logging` filter (W6-T07) once per request.
+    ///
+    /// When `force_flush_partial` is true (W6-T01: grace-expired path), a
+    /// missing `archive_upstream_response_meta` is synthesized from
+    /// `ctx.upstream_status` so partial SSE/JSON already received is still
+    /// archived rather than silently dropped. Internal failures remain
+    /// best-effort (try_send + warn); the outer request flow is unaffected.
+    async fn emit_response_surfaces(&self, ctx: &mut ReqCtx, force_flush_partial: bool) {
         use crate::ctx::{ArchiveState, ResponseMeta};
         use gw_ledger::detailed_archive::{CapturedSurface, Kind, ResponsePayload, SurfacePayload};
         let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
 
-        // upstream_response — paired with the headers snapshot taken in response_filter
-        if let Some(meta) = ctx.archive_upstream_response_meta.take() {
+        // upstream_response — paired with the headers snapshot taken in response_filter.
+        // W6-T01: when force_flush_partial is true and no meta was captured
+        // (e.g. cancel-grace-expired before response_filter committed headers),
+        // synthesize a minimal meta so the partial body is still archived.
+        let upstream_meta = ctx.archive_upstream_response_meta.take().or_else(|| {
+            if force_flush_partial {
+                Some(ResponseMeta {
+                    status: ctx.upstream_status.unwrap_or(0),
+                    headers: Vec::new(),
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(meta) = upstream_meta {
             let body_bytes = match ctx.archive_upstream_response_body.read_for_emit().await {
                 Ok(b) => Bytes::from(b),
                 Err(e) => {
@@ -825,6 +865,7 @@ impl ProxyHttp for LlmGateway {
         ctx.turn_state_cache = Some(self.turn_state_cache.clone());
         ctx.spill_root = self.spill_root.clone();
         ctx.archive_caps = self.archive_caps;
+        ctx.r7_502_on_parse_fail = self.r7_502_on_parse_fail;
         ctx
     }
 
@@ -839,12 +880,36 @@ impl ProxyHttp for LlmGateway {
                 ip_ratelimit: &self.ip_ratelimit,
                 ip_allowlist_mode: self.ip_allowlist_mode,
                 trust_xff: self.trust_xff,
+                trusted_proxies: &self.trusted_proxies,
             },
         )
         .await
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        // WS-15/T15.4: license gate. Real `LicenseStatus` arrives with WS-5 /
+        // WS-16; until then the gate is wired but inert (Valid status never
+        // violates). The `enforce` Err arm carries the 402 `GW_LICENSE_REQUIRED`
+        // decision — mapping it to an HTTP 402 response lands alongside the
+        // real status source (the rejection path is exercised by `license::tests`).
+        let license_status = gw_auth::license::LicenseStatus::Valid;
+        if let Err(lic_err) = self
+            .license_gate
+            .enforce(&gw_auth::license::LicenseContext {
+                license_status: &license_status,
+                feature: None,
+            })
+        {
+            tracing::warn!(
+                target: "gw_gateway",
+                error = ?lic_err,
+                "license gate rejected request (skeleton: status source pending WS-5/WS-16)"
+            );
+            // TODO(WS-5/WS-16): once a real LicenseStatus source feeds a
+            // violation, emit ErrorIR{status:402, code:GW_LICENSE_REQUIRED}
+            // and short-circuit (Ok(true)). Skeleton status is always Valid,
+            // so this branch is not reached yet.
+        }
         // R7b: snapshot the current JWT validator per-request. `load_full` is
         // lock-free and yields an owned `Option<Arc<JwtValidator>>` safe to hold
         // across the `.await` below; a concurrent hot-reload swaps the handle so
@@ -861,7 +926,9 @@ impl ProxyHttp for LlmGateway {
             &self.counters,
             self.global_rpm,
             self.trust_xff,
+            &self.trusted_proxies,
             self.signature_required,
+            &self.signature_replay,
             self.task_enabled,
             self.task_contract.as_deref(),
             self.task_billing_config,
@@ -1501,14 +1568,11 @@ impl ProxyHttp for LlmGateway {
             rt.block_on(filters::response::run(session, body, end_of_stream, ctx))
         });
 
-        if end_of_stream {
-            // classify_final_upstream_error is async (reads archive via
-            // read_for_emit); wrap in block_in_place + block_on.
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(self.classify_final_upstream_error(ctx))
-            });
-        }
+        // W6-T07: classify_final_upstream_error + emit_response_surfaces moved
+        // to the async `logging` filter to eliminate the blocking wrapper. The
+        // error-passthrough re-render stays here because it must mutate `body`
+        // before Pingora forwards the chunk; only its archive read is
+        // conditional (sync for InMemory, blocking only for Spilled).
 
         if end_of_stream && ctx.error_passthrough_active {
             if let Some(status) = ctx.upstream_status {
@@ -1518,26 +1582,32 @@ impl ProxyHttp for LlmGateway {
                     .map_or(gw_core::protocol::ProtocolKind::OpenAi, |c| c.kind());
 
                 // Read archive bytes for error-passthrough content detection.
+                // W6-T07: InMemory / Truncated are read synchronously; only
+                // Spilled needs the blocking wrapper for the async file read.
                 // Fall back to empty on I/O error — the is_html / JSON parse
                 // will simply fail open (no passthrough body rendered).
-                let accumulated = tokio::task::block_in_place(|| {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
-                        match ctx.archive_upstream_response_body.read_for_emit().await {
-                            Ok(b) => b,
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "gw_proxy::archive",
-                                    request_id = %ctx.request_id,
-                                    surface = "upstream",
-                                    error = %e,
-                                    "archive_emit_read_failed"
-                                );
-                                Vec::new()
+                let accumulated = match &ctx.archive_upstream_response_body {
+                    crate::ctx::ArchiveState::InMemory(b) => b.to_vec(),
+                    crate::ctx::ArchiveState::Truncated { .. } => Vec::new(),
+                    crate::ctx::ArchiveState::Spilled { .. } => tokio::task::block_in_place(|| {
+                        let rt = tokio::runtime::Handle::current();
+                        rt.block_on(async {
+                            match ctx.archive_upstream_response_body.read_for_emit().await {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "gw_proxy::archive",
+                                        request_id = %ctx.request_id,
+                                        surface = "upstream",
+                                        error = %e,
+                                        "archive_emit_read_failed"
+                                    );
+                                    Vec::new()
+                                }
                             }
-                        }
-                    })
-                });
+                        })
+                    }),
+                };
                 let is_html = accumulated.get(..100).is_some_and(|s| {
                     let start = std::str::from_utf8(s).unwrap_or("");
                     let trimmed = start.trim_start();
@@ -1572,14 +1642,8 @@ impl ProxyHttp for LlmGateway {
             crate::stream_probe::mark_client_committed(ctx);
         }
 
-        if end_of_stream {
-            // emit_response_surfaces is async (reads archive via read_for_emit);
-            // wrap in block_in_place + block_on.
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(self.emit_response_surfaces(ctx))
-            });
-        }
+        // W6-T07: emit_response_surfaces moved to the async `logging` filter
+        // (runs after settle_actual + record_actual per M7 ordering invariant).
         res
     }
 
@@ -1901,6 +1965,14 @@ impl ProxyHttp for LlmGateway {
             }
         }
 
+        // W6-T07: classify_final_upstream_error moved here from
+        // response_body_filter. Runs BEFORE filters::logging::run so that
+        // ctx.error_outcome (set by this call) is fresh when the error-handler
+        // fanout inside filters::logging::run reads it. This is async (reads
+        // archive via read_for_emit) — the async logging trait method can
+        // await it directly without a blocking wrapper.
+        self.classify_final_upstream_error(ctx).await;
+
         filters::logging::run(
             session,
             err,
@@ -1916,6 +1988,26 @@ impl ProxyHttp for LlmGateway {
             &self.overflow_gate,
         )
         .await;
+
+        // W6-T01 + W6-T07: emit_response_surfaces moved here from
+        // response_body_filter. Runs AFTER filters::logging::run which
+        // performs guard.settle_actual(actual) → overflow_gate.record_actual(...)
+        // (filters/logging.rs:160-172). M7 ordering invariant: settle_actual
+        // → record_actual → emit_response_surfaces — must not be reversed or
+        // interleaved (would double-count overflow or race settle refund with
+        // overflow INCRBY).
+        //
+        // W6-T01: force_flush_partial=true for grace-expired requests (cancel
+        // observed + grace window elapsed). The signal reuses existing ctx
+        // state: cancel_observed_at_ms.is_some() && !cancel_grace_active
+        // uniquely identifies the GraceStatus::Expired path (the Expired arm
+        // is the only branch that clears cancel_grace_active while
+        // cancel_observed_at_ms remains Some). No new ctx field needed.
+        let force_flush_partial = ctx.cancel_observed_at_ms.is_some() && !ctx.cancel_grace_active;
+        self.emit_response_surfaces(ctx, force_flush_partial).await;
+        if force_flush_partial {
+            metrics::counter!(ARCHIVE_EMIT_GRACE_FLUSH_TOTAL).increment(1);
+        }
 
         // mark_settled after the UsageRecord has been sent to the ledger.
         // If the request never reached the upstream (short-circuit before

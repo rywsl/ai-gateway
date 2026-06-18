@@ -7,6 +7,7 @@
 //! - [`regex_cache`] — Moka-backed compiled-regex cache.
 //! - [`health`] — `HealthHook` trait, `SystemHealthMonitor`, `BackpressureGate`.
 
+pub mod contracts_version;
 pub mod health;
 pub mod redis_retry;
 pub mod regex_cache;

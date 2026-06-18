@@ -96,17 +96,33 @@ pub async fn renew_heartbeat(pool: &RedisPool, instance_id: &str) -> anyhow::Res
     Ok(())
 }
 
-pub fn spawn_heartbeat_task(pool: RedisPool, instance_id: String) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-        // Fire once at startup, then on each tick.
-        loop {
-            tick.tick().await;
-            if let Err(e) = renew_heartbeat(&pool, &instance_id).await {
-                tracing::warn!(error = ?e, instance_id = %instance_id, "instance heartbeat renewal failed");
+pub fn spawn_heartbeat_task(
+    pool: RedisPool,
+    instance_id: String,
+    token: gw_runtime::ShutdownToken,
+) {
+    drop(gw_runtime::supervisor::supervised_spawn(
+        "instance_heartbeat",
+        gw_runtime::supervisor::policy_heartbeat(),
+        token,
+        move |t| {
+            let pool = pool.clone();
+            let instance_id = instance_id.clone();
+            async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+                // Fire once at startup, then on each tick.
+                loop {
+                    tokio::select! {
+                        _ = t.cancelled() => return Ok(()),
+                        _ = tick.tick() => {}
+                    }
+                    if let Err(e) = renew_heartbeat(&pool, &instance_id).await {
+                        tracing::warn!(error = ?e, instance_id = %instance_id, "instance heartbeat renewal failed");
+                    }
+                }
             }
-        }
-    });
+        },
+    ));
 }
 
 #[doc(hidden)]

@@ -7,11 +7,17 @@
 //! reconciler is the proper recovery path.
 
 use fred::clients::RedisPool;
-use fred::interfaces::{HashesInterface, KeysInterface};
+use fred::interfaces::{HashesInterface, KeysInterface, LuaInterface};
 
 /// Hash TTL in seconds — 24h safety net only. Crash recovery happens via the
 /// W4 startup reconciler scanning these keys, not via TTL expiry.
 const EXPIRE_SECS: i64 = 86_400;
+
+const REGISTER_INFLIGHT_LUA: &str = r#"
+redis.call('HSET', KEYS[1], unpack(ARGV, 2))
+redis.call('PEXPIRE', KEYS[1], ARGV[1])
+return 'ok'
+"#;
 
 #[derive(Clone, Debug)]
 pub struct InflightRegistration {
@@ -77,8 +83,16 @@ impl InflightLedger {
                 r.prompt_estimate_tokens.to_string(),
             ),
         ];
-        let _: () = self.pool.hset::<(), _, _>(&key, fields).await?;
-        let _: () = self.pool.expire::<(), _>(&key, EXPIRE_SECS).await?;
+        let mut args = vec![(EXPIRE_SECS * 1000).to_string()];
+        for (field, value) in fields {
+            args.push(field.to_string());
+            args.push(value);
+        }
+        let result: String = self
+            .pool
+            .eval(REGISTER_INFLIGHT_LUA, vec![key.as_str()], args)
+            .await?;
+        anyhow::ensure!(result == "ok", "register inflight lua returned {result}");
         Ok(())
     }
 
@@ -102,5 +116,29 @@ impl InflightLedger {
         let key = self.key(request_id, attempt);
         let _: () = self.pool.del::<(), _>(&[key]).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn inflight_register_uses_atomic_lua_hset_and_pexpire() {
+        let src = include_str!("inflight.rs");
+        let production_src = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            production_src.contains("REGISTER_INFLIGHT_LUA"),
+            "register must use a named Lua script for atomic HSET+PEXPIRE"
+        );
+        assert!(
+            production_src.contains("redis.call('HSET', KEYS[1], unpack(ARGV, 2))"),
+            "register Lua must set hash fields inside the script"
+        );
+        assert!(
+            production_src.contains("redis.call('PEXPIRE', KEYS[1], ARGV[1])"),
+            "register Lua must set TTL inside the same script"
+        );
     }
 }

@@ -418,17 +418,25 @@ fn dispatch_payload<'a>(
                             .iter()
                             .position(|b| b.name == name_str);
 
+                        // T-W3-08: try_push_function_call enforces the
+                        // per-stream cap and emits
+                        // gw_codec_overflow_total{kind="too_many_function_calls"}.
+                        // On overflow we skip this call entirely (no
+                        // ToolCallStart / ToolCallDelta) — emitting half a
+                        // call would corrupt the IR.
                         let builder_idx = match existing_idx {
                             Some(i) => i,
                             None => {
                                 let next = st.pending_function_calls.len() as u32;
-                                st.pending_function_calls.push(GeminiFunctionCallBuilder {
+                                match st.try_push_function_call(GeminiFunctionCallBuilder {
                                     name: name_str.to_owned(),
                                     args_json: String::new(),
                                     emitted_start: false,
                                     ir_index: next,
-                                });
-                                st.pending_function_calls.len() - 1
+                                }) {
+                                    Ok(i) => i,
+                                    Err(_) => continue,
+                                }
                             }
                         };
 
@@ -441,6 +449,7 @@ fn dispatch_payload<'a>(
                                 name: Cow::Owned(builder.name.clone()),
                             });
                         }
+                        let ir_index = builder.ir_index;
                         // Serialize the args fragment to a JSON string and
                         // emit as a ToolCallDelta. Gemini usually delivers
                         // args in one shot, but the IR contract is
@@ -449,11 +458,18 @@ fn dispatch_payload<'a>(
                         let frag = serde_json::to_string(&function_call.args)
                             .unwrap_or_else(|_| "null".to_owned());
                         if !frag.is_empty() && frag != "null" && frag != "{}" {
-                            builder.args_json.push_str(&frag);
-                            events.push(StreamEventIR::ToolCallDelta {
-                                index: builder.ir_index,
-                                arguments_chunk: Cow::Owned(frag),
-                            });
+                            // T-W3-08: try_extend_args enforces the
+                            // per-builder args-buffer cap. On overflow we
+                            // drop the delta and skip the ToolCallDelta —
+                            // the partial buffer that already shipped
+                            // stays valid; later finalisation may still
+                            // surface what we have.
+                            if st.try_extend_args(builder_idx, &frag).is_ok() {
+                                events.push(StreamEventIR::ToolCallDelta {
+                                    index: ir_index,
+                                    arguments_chunk: Cow::Owned(frag),
+                                });
+                            }
                         }
                     }
                     GeminiPart::FunctionResponse { .. }

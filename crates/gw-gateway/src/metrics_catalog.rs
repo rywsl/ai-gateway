@@ -103,6 +103,11 @@ pub static METRICS: &[MetricSpec] = &[
         help: "auth failures; label=reason",
     },
     MetricSpec {
+        name: "gateway_license_violation_total",
+        kind: MetricKind::Counter,
+        help: "License violations gated by [flags].license_enforce; labels=mode (disabled|warn|enforce), reason (expired|feature_missing|node_count_exceeded)",
+    },
+    MetricSpec {
         name: "gw_target_filter_denied_total",
         kind: MetricKind::Counter,
         help: "outbound targets denied by filter; label=host",
@@ -278,6 +283,11 @@ pub static METRICS: &[MetricSpec] = &[
         help: "Detailed-archive entries emitted (labels: kind, encoding)",
     },
     MetricSpec {
+        name: "gw_archive_emit_grace_flush_total",
+        kind: MetricKind::Counter,
+        help: "Archive surfaces force-flushed in partial mode for grace-expired requests (W6-T01)",
+    },
+    MetricSpec {
         name: "gw_detailed_log_payload_bytes",
         kind: MetricKind::Histogram,
         help: "Compressed payload size per detailed-archive entry (labels: kind, encoding)",
@@ -386,7 +396,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_tunnel_open_total",
         kind: MetricKind::Counter,
-        help: "tunnel stream-open outcome per node; labels=node_id,result (ok/no_live/target_denied/err). node_id is bounded by the operator-managed proxy_nodes table (<50 in practice) — D5 #17.",
+        help: "tunnel stream-open outcome per node; labels=node_id,result (ok/no_live/target_denied/err)",
     },
     MetricSpec {
         name: "gw_tunnel_resolve_total",
@@ -396,17 +406,17 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_tunnel_transport_present",
         kind: MetricKind::Gauge,
-        help: "1 if ReconnectingTransport::current() is Some, else 0; label=node_id (bounded by proxy_nodes, <50; D5 #17)",
+        help: "1 if ReconnectingTransport::current() is Some, else 0; label=node_id",
     },
     MetricSpec {
         name: "gw_tunnel_last_pong_age_seconds",
         kind: MetricKind::Gauge,
-        help: "seconds since last pong from tunnel transport; label=node_id (bounded by proxy_nodes, <50; D5 #17)",
+        help: "seconds since last pong from tunnel transport; label=node_id",
     },
     MetricSpec {
         name: "gw_tunnel_reconnect_total",
         kind: MetricKind::Counter,
-        help: "reconnect supervisor attempts; labels=node_id,reason (node_id bounded by proxy_nodes, <50; D5 #17)",
+        help: "reconnect supervisor attempts; labels=node_id,reason",
     },
     MetricSpec {
         name: "gw_tunnel_doh_resolve_total",
@@ -464,7 +474,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_billing_inflight_register_failure_total",
         kind: MetricKind::Counter,
-        help: "InflightLedger register() returned an error (Redis unreachable / write failed). ANY non-zero value = page on-call.",
+        help: "InflightLedger register() returned an error (Redis unreachable / write failed)",
     },
     // --- Billing robustness W2-T7 ---
     MetricSpec {
@@ -683,7 +693,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_credit_lease_expired_total",
         kind: MetricKind::Counter,
-        help: "Requests rejected because lease TTL expired (Go push pipeline lag). ANY non-zero value = page on-call.",
+        help: "Requests rejected because lease TTL expired (Go push pipeline lag)",
     },
     MetricSpec {
         name: "gw_credit_lease_warmup_pending_total",
@@ -708,15 +718,16 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_credit_lease_active_users",
         kind: MetricKind::Gauge,
-        // Sampled by the gw-ledger ledger_sweep loop (D9 #17): counts LEASE_POOL
-        // entries with mode() == Mode::Protected, once at boot then every 60s.
+        // TODO: sampler not yet wired; gauge is registered so /metrics surfaces HELP+TYPE.
+        // A follow-up task should add a background sampler that iterates LEASE_POOL and
+        // counts entries where mode() == Mode::Protected.
         help: "Number of users currently in protected mode (sampled)",
     },
     MetricSpec {
         name: "gw_credit_coef_table_version_active",
         kind: MetricKind::Gauge,
-        // Sampled by the gw-ledger ledger_sweep loop (D9 #17): set to
-        // current_coef_snapshot().version, once at boot then every 60s.
+        // TODO: sampler not yet wired; gauge is registered so /metrics surfaces HELP+TYPE.
+        // A follow-up task should call current_coef_snapshot().version and set this gauge.
         help: "Currently active coef_table_version",
     },
 ];
@@ -744,11 +755,6 @@ pub static PAGE_ON_CALL_BILLING_COUNTERS: &[&str] = &[
     "gw_billing_flusher_panic_total",
     "gw_billing_flusher_dead_total",
     "gw_billing_emit_lag_t0_total",
-    // D19/D20 (#17): the remaining two P1 page-on-call counters. Zero-init so
-    // their `deploy/prometheus/billing-rules.yml` alerts evaluate against a
-    // healthy `0` baseline rather than an absent ("No data") series.
-    "gw_billing_inflight_register_failure_total",
-    "gw_credit_lease_expired_total",
 ];
 
 /// Zero-initialize the page-on-call billing counters so their series render at

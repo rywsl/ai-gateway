@@ -87,6 +87,7 @@ fn test_record() -> UsageRecord {
             cache_creation_input_tokens: None,
             thinking_tokens: None,
             multimodal_input_tokens: None,
+            ..Default::default()
         },
         attempt_index: 2,
         vendor_exposure_state: VendorExposureState::Settled,

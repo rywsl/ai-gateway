@@ -108,7 +108,7 @@ async fn run_active_pod_heartbeat(
                     jitter: 0.0,
                     total_deadline: Duration::from_secs(2),
                 };
-                let result = redis_retry::retry(&retry_cfg, || {
+                let result = redis_retry::retry_with_shutdown(&retry_cfg, &shutdown, || {
                     let pool = pool.clone();
                     let instance_id = instance_id.clone();
                     async move { renew_active_pod(&pool, &instance_id, cfg.ttl_secs).await }
@@ -117,7 +117,15 @@ async fn run_active_pod_heartbeat(
                     Ok(()) => {
                         metrics::counter!(HEARTBEAT_SADD_TOTAL, "result" => "success").increment(1);
                     }
-                    Err(err) => {
+                    Err(redis_retry::RetryError::Cancelled) => {
+                        tracing::info!(
+                            target: "gw_ledger::heartbeat",
+                            instance_id = %instance_id,
+                            "active pod heartbeat retry cancelled during shutdown"
+                        );
+                        return;
+                    }
+                    Err(redis_retry::RetryError::Exhausted(err)) => {
                         metrics::counter!(HEARTBEAT_SADD_TOTAL, "result" => "failed").increment(1);
                         tracing::warn!(
                             target: "gw_ledger::heartbeat",

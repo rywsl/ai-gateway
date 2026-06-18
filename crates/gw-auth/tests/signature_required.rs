@@ -80,7 +80,7 @@ fn required_true_stale_timestamp_fails() {
         },
     );
     // T1-D: out-of-window timestamps now resolve to `TimestampDrift`
-    // (distinct from `Invalid`). Note "1" is unix-epoch+1s — far outside ±300s.
+    // (distinct from `Invalid`). Note "1" is unix-epoch+1s — far outside ±60s.
     assert_eq!(r, SignatureCheckResult::TimestampDrift);
 }
 

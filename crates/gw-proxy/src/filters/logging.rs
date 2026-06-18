@@ -152,7 +152,7 @@ pub async fn run(
             Ok(actual) => {
                 if actual > guard.reserved() {
                     metrics::counter!(
-                        "gw_credit_actual_exceeds_reserved_total",
+                        gw_ledger::metrics::CREDIT_ACTUAL_EXCEEDS_RESERVED_TOTAL,
                         "model_id" => model_name.clone(),
                     )
                     .increment(1);
@@ -371,10 +371,6 @@ pub async fn run(
         // -----------------------------------------------------------------
         let tpm_tokens = (ctx.usage.input_tokens as u64) + (ctx.usage.output_tokens as u64);
         if tpm_tokens > 0 {
-            // D3 (#17): aggregate counter, no per-user label. Per-user TPM
-            // enforcement is owned by `ratelimit.deduct_tpm` below; the metric
-            // only needs aggregate throughput, so the high-cardinality
-            // `user_id` label is intentionally omitted.
             metrics::counter!("gateway_tpm_consumed_total").increment(tpm_tokens);
 
             if let Some(perm) = ctx.merged_perm.as_ref() {
@@ -452,6 +448,15 @@ fn raw_usage_snapshot(ctx: &ReqCtx) -> UsageSnapshot {
         cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
         thinking_tokens: ctx.usage.thinking_tokens,
         multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
+        audio_input_tokens: None,
+        audio_output_tokens: None,
+        accepted_prediction_tokens: None,
+        rejected_prediction_tokens: None,
+        cache_creation_5m_tokens: None,
+        cache_creation_1h_tokens: None,
+        server_tool_web_search_count: None,
+        server_tool_web_fetch_count: None,
+        pv: gw_core::usage::CURRENT_PV,
     }
 }
 

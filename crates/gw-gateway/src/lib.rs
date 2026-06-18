@@ -81,7 +81,9 @@ struct Wired {
     counters: Arc<CounterStore>,
     global_rpm: u32,
     trust_xff: bool,
+    trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     signature_required: bool,
+    signature_replay: Arc<gw_auth::signature::ReplayChecker>,
     task_enabled: bool,
     task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
     task_billing_config: Option<gw_billing::TaskBillingConfig>,
@@ -119,6 +121,13 @@ struct Wired {
     response_deadline_ms: u64,
     /// Cancel grace window (W3-T5). From `cfg.billing.cancel_grace_ms`.
     cancel_grace_ms: u64,
+    /// WS-15/T15.7 rollout flag for response parse failures.
+    r7_502_on_parse_fail: bool,
+    /// WS-15/T15.4 license enforcement gate. Hot-reloadable; threaded into
+    /// `LlmGateway::request_filter` so the gate is consulted per request.
+    /// Real `LicenseStatus` arrives with WS-5/WS-16; until then `enforce` is
+    /// a no-op (Valid status) and the 402 rejection path sits inert.
+    license_gate: Arc<gw_auth::license::LicenseGate>,
     /// Hard-cap configuration (ADR-024). From `cfg.auth.*`.
     hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
     /// Credit-lease protection-mode config (Spec 2026-05-29-credit-lease-design).
@@ -191,14 +200,25 @@ struct Wired {
 fn build_validator_from_auth_config(
     store: &Arc<EntityStore>,
     cfg: &gw_core::entity::AuthConfig,
+    jwt_strict: bool,
 ) -> gw_auth::jwt::JwtValidator {
     let vcfg = gw_auth::jwt::JwtValidatorConfig {
         static_secret_hs256: cfg.static_secret_hs256.clone(),
         static_pem_rs256: cfg.static_pem_rs256.clone(),
+        allow_static_pem_fallback_for_unknown_kid: cfg.allow_static_pem_fallback_for_unknown_kid,
         expected_iss: cfg.expected_iss.clone(),
         expected_aud: cfg.expected_aud.clone(),
+        strict_claims: jwt_strict,
         leeway_secs: cfg.leeway_secs,
         require_nbf: cfg.require_nbf,
+        allowed_algs: cfg
+            .allowed_algs
+            .iter()
+            .map(|alg| match alg {
+                gw_core::entity::JwtAlgorithm::HS256 => gw_auth::jwt::JwtAlgorithm::HS256,
+                gw_core::entity::JwtAlgorithm::RS256 => gw_auth::jwt::JwtAlgorithm::RS256,
+            })
+            .collect(),
     };
     let mut v = gw_auth::jwt::JwtValidator::new(vcfg);
     v.attach_jwks(Arc::new(gw_auth::jwt::EntityStoreJwksResolver {
@@ -217,12 +237,14 @@ async fn rebuild_jwt_validator_and_swap(
     store: &Arc<EntityStore>,
     id: &str,
     handle: &arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator>,
+    jwt_strict: bool,
 ) {
     match store.auth_config_or_load(id).await {
         Some(cfg_v) => {
             handle.store(Some(Arc::new(build_validator_from_auth_config(
                 store,
                 &cfg_v.value,
+                jwt_strict,
             ))));
             tracing::info!(
                 target: "gw_gateway",
@@ -343,7 +365,9 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.global_rpm,
                 wired.admin_upstream_url,
                 wired.trust_xff,
+                wired.trusted_proxies,
                 wired.signature_required,
+                wired.signature_replay,
                 wired.task_enabled,
                 wired.task_contract,
                 wired.task_billing_config,
@@ -366,6 +390,8 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.inflight,
                 wired.response_deadline_ms,
                 wired.cancel_grace_ms,
+                wired.r7_502_on_parse_fail,
+                wired.license_gate.clone(),
                 wired.hard_cap_cfg,
                 wired.protection_cfg.clone(),
                 wired.overflow_gate,
@@ -580,6 +606,21 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
     })
 }
 
+/// Convert the figment-parsed `[flags].license_enforce` enum into the
+/// self-contained `gw-auth` one. Kept here (not as a `From` impl) so
+/// `gw-auth` stays free of any `gw-gateway` dependency — the two enums are
+/// deliberately identical but live in separate crates to avoid a layering
+/// cycle.
+fn license_mode_from_config(
+    mode: config::LicenseEnforceMode,
+) -> gw_auth::license::LicenseEnforceMode {
+    match mode {
+        config::LicenseEnforceMode::Disabled => gw_auth::license::LicenseEnforceMode::Disabled,
+        config::LicenseEnforceMode::Warn => gw_auth::license::LicenseEnforceMode::Warn,
+        config::LicenseEnforceMode::Enforce => gw_auth::license::LicenseEnforceMode::Enforce,
+    }
+}
+
 async fn bootstrap(
     cfg: &config::Config,
 ) -> anyhow::Result<(
@@ -762,13 +803,14 @@ async fn bootstrap(
         Arc::new(arc_swap::ArcSwapOption::new(None));
     {
         let swap_for_hook = jwt_validator.clone();
+        let jwt_strict = cfg.flags.jwt_strict;
         store_inner.on_auth_config_rebuild(Arc::new(
             move |store: Arc<EntityStore>,
                   id: String|
                   -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
                 let swap = swap_for_hook.clone();
                 Box::pin(async move {
-                    rebuild_jwt_validator_and_swap(&store, &id, &swap).await;
+                    rebuild_jwt_validator_and_swap(&store, &id, &swap, jwt_strict).await;
                 })
             },
         ));
@@ -793,10 +835,7 @@ async fn bootstrap(
             },
         ));
     let quota_state_updates = {
-        let writer = Arc::new(gw_store::quota_state::QuotaStateWriter::new(
-            pg.clone(),
-            redis.clone(),
-        ));
+        let writer = Arc::new(gw_store::quota_state::QuotaStateWriter::new(pg.clone()));
         Arc::new(gw_store::quota_state::QuotaStateUpdateQueue::new(
             writer,
             cfg.quota_state_probe.max_pending,
@@ -814,10 +853,63 @@ async fn bootstrap(
                 max_pending: cfg.quota_state_probe.max_pending,
             },
         }
-        .start();
+        .start(shutdown_token.clone());
+    }
+    {
+        let processor = Arc::new(gw_store::quota_state::QuotaStateOutboxProcessor::new(
+            pg.clone(),
+            redis.clone(),
+        ));
+        let handle = Supervisor::new(
+            "quota_state_outbox",
+            RestartPolicy::default(),
+            shutdown_token.clone(),
+        )
+        .spawn(move |tok| {
+            let processor = processor.clone();
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    tokio::select! {
+                        _ = tok.cancelled() => return Ok(()),
+                        _ = interval.tick() => {
+                            match processor.process_batch(100).await {
+                                Ok(processed) => {
+                                    if processed > 0 {
+                                        metrics::counter!(
+                                            "gw_quota_state_outbox_total",
+                                            "result" => "processed"
+                                        )
+                                        .increment(processed);
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        target: "gw_gateway",
+                                        error = %err,
+                                        "quota state outbox processor tick failed"
+                                    );
+                                    metrics::counter!(
+                                        "gw_quota_state_outbox_total",
+                                        "result" => "failed"
+                                    )
+                                    .increment(1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        shutdown.register(handle);
     }
     let health = Arc::new(KeyHealthStore::default());
     let in_flight = Arc::new(InFlightStore::default());
+    let strategies = Arc::new(gw_routing::strategy::set::StrategySet::new_with_presets(
+        Duration::from_secs(cfg.routing.sticky_ttl_secs),
+        cfg.routing.preset_weights(),
+    ));
+    register_weighted_rr_health_observer(&health, strategies.clone());
     let ratelimit = Arc::new(RateLimitGuard::new());
     let ip_allowlist_mode = map_ip_allowlist_mode(cfg.ip_filter.allowlist_mode);
     let ip_allowlist = Arc::new(IpAllowlistGuard::new(ip_allowlist_mode));
@@ -1042,6 +1134,7 @@ async fn bootstrap(
     let detailed_archive = Arc::new(gw_ledger::detailed_archive::DetailedArchive::start(
         (*redis.pool).clone(),
         archive_cfg,
+        shutdown_token.clone(),
     ));
 
     // Egress impersonation loopback + identity persistence (Task 4.6, configured by
@@ -1079,7 +1172,11 @@ async fn bootstrap(
 
     // 4d. InflightLedger + background tasks (W2-T6).
     // instance_id was resolved above (before Ledger::start) and is reused here.
-    gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
+    gw_ledger::instance_id::spawn_heartbeat_task(
+        (*redis.pool).clone(),
+        instance_id.clone(),
+        shutdown_token.clone(),
+    );
     match gw_ledger::load_latest_coef_snapshot(&redis.pool).await {
         Ok(Some(outcome)) => {
             tracing::info!(
@@ -1164,8 +1261,6 @@ async fn bootstrap(
     }
 
     // 5. Stream consumer — invalidate-on-event for cross-pod cache freshness.
-    // The consumer's join handle is intentionally dropped: the task lives for
-    // the life of the bootstrap runtime (which itself is parked on pending()).
     //
     // Install the credit-lease counter handler BEFORE start() so the very
     // first events:counter delivery has a registered handler. OnceCell-backed,
@@ -1178,10 +1273,11 @@ async fn bootstrap(
     });
     // start() is sync and infallible: Supervisor::spawn handles ensure() on boot
     // and automatically recreates groups on NOGROUP (e.g. after Redis FLUSHALL).
-    let _consumer_handle = consumer.start();
+    let consumer_handle = consumer.start();
+    shutdown.register(consumer_handle);
     tracing::info!(
         target: "gw_gateway",
-        "stream consumer started (events:entity, events:counter:pod:<instance_id>) with XREADGROUP invalidate-on-event"
+        "stream consumer started (events:entity, events:counter:pod:<instance_id>) with XREADGROUP/XAUTOCLAIM invalidate-on-event"
     );
 
     if cfg.control_plane.enabled {
@@ -1216,6 +1312,7 @@ async fn bootstrap(
             jwt_validator.store(Some(Arc::new(build_validator_from_auth_config(
                 &store,
                 &cfg_v.value,
+                cfg.flags.jwt_strict,
             ))));
             tracing::info!(
                 target: "gw_gateway",
@@ -1619,7 +1716,12 @@ async fn bootstrap(
             global_rpm: cfg.ratelimit.global_rpm,
             admin_upstream_url,
             trust_xff: cfg.security.trust_xff,
+            trusted_proxies: Arc::new(cfg.runtime.trusted_proxies.clone()),
             signature_required: cfg.signature.required,
+            signature_replay: gw_auth::signature::ReplayChecker::new(
+                cfg.signature.replay_check,
+                Some((*redis.pool).clone()),
+            ),
             task_enabled: cfg.task.enabled,
             task_contract,
             task_billing_config: Some(gw_billing::TaskBillingConfig {
@@ -1629,10 +1731,7 @@ async fn bootstrap(
             }),
             business_port: cfg.server.business_port,
             jwt_validator,
-            strategies: Arc::new(gw_routing::strategy::set::StrategySet::new_with_presets(
-                Duration::from_secs(cfg.routing.sticky_ttl_secs),
-                cfg.routing.preset_weights(),
-            )),
+            strategies,
             affinity,
             capability_resolver,
             tunnel,
@@ -1643,6 +1742,10 @@ async fn bootstrap(
             inflight,
             response_deadline_ms: cfg.billing.response_deadline_ms,
             cancel_grace_ms: cfg.billing.cancel_grace_ms,
+            r7_502_on_parse_fail: cfg.flags.r7_502_on_parse_fail,
+            license_gate: Arc::new(gw_auth::license::LicenseGate::new(
+                license_mode_from_config(cfg.flags.license_enforce),
+            )),
             hard_cap_cfg: gw_auth::hard_cap::HardCapCfg {
                 max_input_tokens: cfg.auth.hard_cap_max_input_tokens,
                 max_cost_micro: cfg.auth.hard_cap_max_cost_micro,
@@ -1695,6 +1798,17 @@ fn map_ip_allowlist_mode(mode: config::IpFilterAllowlistMode) -> IpAllowlistMode
         config::IpFilterAllowlistMode::Off => IpAllowlistMode::Off,
         config::IpFilterAllowlistMode::Enforce => IpAllowlistMode::Enforce,
     }
+}
+
+fn register_weighted_rr_health_observer(
+    health: &KeyHealthStore,
+    strategies: Arc<gw_routing::strategy::set::StrategySet>,
+) {
+    health.register_transition_observer(move |key_id, _format, available| {
+        if !available {
+            strategies.reset_weighted_rr_key(key_id);
+        }
+    });
 }
 
 fn map_adaptive_rpm_cfg(cfg: &config::AdaptiveRpmCfg) -> AdaptiveCfg {
@@ -1843,6 +1957,22 @@ mod adaptive_rpm_tests {
 }
 
 #[cfg(test)]
+mod weighted_rr_health_observer_tests {
+    #[test]
+    fn observer_resets_weighted_rr_only_when_key_becomes_unavailable() {
+        let src = include_str!("lib.rs");
+
+        assert!(src.contains("fn register_weighted_rr_health_observer("));
+        assert!(src.contains("register_weighted_rr_health_observer(&health, strategies.clone());"));
+        assert!(
+            src.contains("health.register_transition_observer(move |key_id, _format, available|")
+        );
+        assert!(src.contains("if !available"));
+        assert!(src.contains("strategies.reset_weighted_rr_key(key_id);"));
+    }
+}
+
+#[cfg(test)]
 mod r7b_tests {
     use super::*;
 
@@ -1875,7 +2005,7 @@ mod r7b_tests {
             "pre-condition: no validator installed yet"
         );
 
-        rebuild_jwt_validator_and_swap(&store, "global", &handle).await;
+        rebuild_jwt_validator_and_swap(&store, "global", &handle, true).await;
 
         assert!(
             handle.load_full().is_some(),
@@ -1895,7 +2025,7 @@ mod r7b_tests {
         let handle: arc_swap::ArcSwapOption<gw_auth::jwt::JwtValidator> =
             arc_swap::ArcSwapOption::new(Some(old));
 
-        rebuild_jwt_validator_and_swap(&store, "global", &handle).await;
+        rebuild_jwt_validator_and_swap(&store, "global", &handle, true).await;
 
         let current = handle
             .load_full()
@@ -1905,5 +2035,14 @@ mod r7b_tests {
             old_ptr,
             "transient reload failure must NOT swap the validator (keep-old-on-fail)"
         );
+    }
+
+    #[test]
+    fn stream_consumer_handle_is_registered_for_shutdown() {
+        let src = include_str!("lib.rs");
+
+        assert!(src.contains("let consumer_handle = consumer.start();"));
+        assert!(src.contains("shutdown.register(consumer_handle);"));
+        assert!(src.contains("XREADGROUP/XAUTOCLAIM"));
     }
 }

@@ -172,59 +172,22 @@ async fn handle_connection(
                     let body = build_healthz_body(path, &state);
                     let _ = write_json_response(&mut stream, 200, "OK", body.as_bytes()).await;
                 }
-                Err(HealthzAuthError::Missing) => {
-                    let _ = write_response(
-                        &mut stream,
-                        401,
-                        "Unauthorized",
-                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_MISSING.as_bytes(),
-                    )
-                    .await;
-                }
-                Err(HealthzAuthError::Invalid) => {
-                    let _ = write_response(
-                        &mut stream,
-                        401,
-                        "Unauthorized",
-                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_INVALID.as_bytes(),
-                    )
-                    .await;
-                }
-                Err(HealthzAuthError::Expired) => {
-                    let _ = write_response(
-                        &mut stream,
-                        401,
-                        "Unauthorized",
-                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_EXPIRED.as_bytes(),
-                    )
-                    .await;
-                }
-                Err(HealthzAuthError::Disabled) => {
-                    let _ = write_response(
-                        &mut stream,
-                        401,
-                        "Unauthorized",
-                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_DISABLED.as_bytes(),
-                    )
-                    .await;
-                }
-                Err(HealthzAuthError::Revoked) => {
-                    let _ = write_response(
-                        &mut stream,
-                        401,
-                        "Unauthorized",
-                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_REVOKED.as_bytes(),
-                    )
-                    .await;
-                }
-                Err(HealthzAuthError::ScopeDenied) => {
-                    let _ = write_response(
-                        &mut stream,
-                        403,
-                        "Forbidden",
-                        gw_core::error::codes::GW_AUTH_MGMT_TOKEN_SCOPE_DENIED.as_bytes(),
-                    )
-                    .await;
+                Err(err) => {
+                    let outcome = err.outcome();
+                    tracing::warn!(
+                        target: "gw_gateway::health",
+                        outcome = ?outcome,
+                        internal_outcome = ?err,
+                        "healthz management token authentication failed"
+                    );
+                    let (status, code) = gw_auth::mgmt::public_error_for_outcome(&outcome)
+                        .expect("healthz auth error requires non-ok outcome");
+                    let reason = if status == 401 {
+                        "Unauthorized"
+                    } else {
+                        "Forbidden"
+                    };
+                    let _ = write_response(&mut stream, status, reason, code.as_bytes()).await;
                 }
             }
         }
@@ -239,6 +202,7 @@ async fn handle_connection(
 /// Internal mgmt-verify outcome for `/healthz/*`. Mirrors the proxy
 /// `request_filter` mgmt branch (T3-B) so the same revocation /
 /// expiry semantics apply on both surfaces.
+#[derive(Debug)]
 enum HealthzAuthError {
     Missing,
     Invalid,
@@ -246,6 +210,21 @@ enum HealthzAuthError {
     Disabled,
     Revoked,
     ScopeDenied,
+}
+
+impl HealthzAuthError {
+    fn outcome(&self) -> gw_auth::mgmt::MgmtVerifyOutcome {
+        match self {
+            HealthzAuthError::Missing | HealthzAuthError::Invalid => {
+                gw_auth::mgmt::MgmtVerifyOutcome::Invalid
+            }
+            HealthzAuthError::Expired => gw_auth::mgmt::MgmtVerifyOutcome::Expired,
+            HealthzAuthError::Disabled | HealthzAuthError::Revoked => {
+                gw_auth::mgmt::MgmtVerifyOutcome::Disabled
+            }
+            HealthzAuthError::ScopeDenied => gw_auth::mgmt::MgmtVerifyOutcome::ScopeDenied,
+        }
+    }
 }
 
 async fn verify_healthz_request(

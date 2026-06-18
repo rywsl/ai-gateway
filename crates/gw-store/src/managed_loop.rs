@@ -33,6 +33,10 @@ pub enum RecoverReason {
 pub struct Supervisor;
 
 impl Supervisor {
+    /// Spawn a ManagedLoop without registry integration. Prefer
+    /// [`spawn_with_registry`] for new code so `/readyz` can observe fatal
+    /// exits.
+    #[deprecated(note = "use spawn_with_registry so /readyz sees fatal exits")]
     pub fn spawn<L: ManagedLoop>(l: Arc<L>) -> JoinHandle<()> {
         let name = l.name();
         tokio::spawn(async move {
@@ -83,6 +87,63 @@ impl Supervisor {
             }
         })
     }
+
+    /// Spawn a ManagedLoop and register its health flag with the process-wide
+    /// `SUPERVISOR_REGISTRY` so `/readyz` can aggregate. The flag flips to
+    /// unhealthy on `Outcome::Fatal`, matching the existing Fatal semantics.
+    pub fn spawn_with_registry<L: ManagedLoop>(l: Arc<L>) -> JoinHandle<()> {
+        let name = l.name();
+        let flag = gw_runtime::supervisor::SUPERVISOR_REGISTRY.register(name);
+        tokio::spawn(async move {
+            if let Err(e) = l.ensure().await {
+                let extra = format!("{name}: {e:?}");
+                gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                    code: "ensure_failed",
+                    kind: gw_core::observability::ErrorKind::BackgroundWorker,
+                    stage: gw_core::observability::Stage::Background,
+                    status: None,
+                    trace_id: None,
+                    extra: Some(&extra),
+                });
+            }
+            loop {
+                match l.tick().await {
+                    Outcome::Continue => continue,
+                    Outcome::Sleep(d) => tokio::time::sleep(d).await,
+                    Outcome::Recover(reason) => {
+                        let detail: &str = match &reason {
+                            RecoverReason::UpstreamResourceGone(s) => s,
+                            RecoverReason::Other(s) => s,
+                        };
+                        let extra = format!("{name}: {detail}");
+                        gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                            code: "recover",
+                            kind: gw_core::observability::ErrorKind::BackgroundWorker,
+                            stage: gw_core::observability::Stage::Background,
+                            status: None,
+                            trace_id: None,
+                            extra: Some(&extra),
+                        });
+                        let _ = l.ensure().await;
+                    }
+                    Outcome::Fatal(e) => {
+                        let extra = format!("{name}: {e:?}");
+                        gw_core::observability::observe(gw_core::observability::ErrorObservation {
+                            code: "fatal",
+                            kind: gw_core::observability::ErrorKind::BackgroundWorker,
+                            stage: gw_core::observability::Stage::Background,
+                            status: None,
+                            trace_id: None,
+                            extra: Some(&extra),
+                        });
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        metrics::gauge!("gw_supervisor_unhealthy", "task" => name).set(1.0);
+                        break;
+                    }
+                }
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -126,7 +187,7 @@ mod tests {
             tick_calls: AtomicU32::new(0),
             recover_after: 2,
         });
-        let handle = Supervisor::spawn(l.clone());
+        let handle = Supervisor::spawn_with_registry(l.clone());
         let _ = handle.await;
         // boot ensure + one Recover ensure = 2
         assert_eq!(l.ensure_calls.load(Ordering::SeqCst), 2);

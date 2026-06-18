@@ -1,5 +1,6 @@
 stages:
   - test
+  - merge-gate
   - build
   - push
   - deploy
@@ -243,7 +244,18 @@ lint-test:
   image: rust:1.88-bookworm
   extends: .setup-rust-deps
   script:
-    - ci_rust_command 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings'
+    - ci_rust_command 'make check'
+merge-gate-deploy-order:
+  stage: merge-gate
+  image: alpine:3.23
+  extends: .retry
+  before_script:
+    - !reference [.retry, before_script]
+    - retry apk add --no-cache bash curl git gawk
+  script:
+    - ./scripts/check-deploy-order.sh
+  rules:
+    - when: never
 rust-build:
   stage: build
   image: rust:1.88-bookworm

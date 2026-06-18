@@ -131,7 +131,7 @@ fn verify_required_missing_timestamp_returns_missing() {
 #[test]
 fn verify_required_drifted_timestamp_returns_timestamp_drift() {
     let secret = b"secret";
-    let stale = (now_secs() - 400).to_string();
+    let stale = (now_secs() - 61).to_string();
     let body = b"body";
     let sig = sign_sha256(secret, "POST", "/x", &stale, body);
     let input = SignatureInput {

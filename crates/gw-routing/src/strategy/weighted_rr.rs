@@ -33,9 +33,61 @@ impl WeightedRr {
         }
     }
 
+    pub fn reset_key(&self, key_id: &KeyId) {
+        for entry in self.current.iter() {
+            if &entry.key().1 == key_id {
+                entry.value().store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
     fn weight_of(k: &Arc<VendorKey>) -> i32 {
         // `weight` is `u32`; clamp to i32::MAX to avoid wrap.
         k.weight.min(i32::MAX as u32) as i32
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_key_zeros_accumulated_current_for_all_models() {
+        let rr = WeightedRr::new();
+        let key = KeyId::from("vk-reset");
+        rr.current
+            .insert((ModelName::from("m1"), key.clone()), AtomicI32::new(42));
+        rr.current
+            .insert((ModelName::from("m2"), key.clone()), AtomicI32::new(-7));
+        rr.current.insert(
+            (ModelName::from("m3"), KeyId::from("other")),
+            AtomicI32::new(11),
+        );
+
+        rr.reset_key(&key);
+
+        assert_eq!(
+            rr.current
+                .get(&(ModelName::from("m1"), key.clone()))
+                .unwrap()
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            rr.current
+                .get(&(ModelName::from("m2"), key))
+                .unwrap()
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            rr.current
+                .get(&(ModelName::from("m3"), KeyId::from("other")))
+                .unwrap()
+                .load(Ordering::Relaxed),
+            11
+        );
     }
 }
 
@@ -75,6 +127,9 @@ impl Strategy for WeightedRr {
         let mut best_val: i32 = i32::MIN;
         for (i, k) in c.iter().enumerate() {
             if !h.is_available(&k.key_id, ctx.api_format) {
+                if let Some(cur) = self.current.get(&(ctx.model.clone(), k.key_id.clone())) {
+                    cur.store(0, Ordering::Relaxed);
+                }
                 continue;
             }
             let cur = self

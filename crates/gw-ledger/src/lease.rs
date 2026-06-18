@@ -96,6 +96,7 @@ pub struct LeaseGuard {
     reserved: i64,
     coef_version: u64,
     released: AtomicBool,
+    settled: AtomicBool,
     state: Arc<LeaseState>,
 }
 
@@ -106,6 +107,7 @@ impl std::fmt::Debug for LeaseGuard {
             .field("reserved", &self.reserved)
             .field("coef_version", &self.coef_version)
             .field("released", &self.released.load(Ordering::Relaxed))
+            .field("settled", &self.settled.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -133,6 +135,12 @@ impl LeaseGuard {
         now_ms_val: u64,
         grace_ms: u64,
     ) -> Result<Self, LeaseError> {
+        if requested <= 0 {
+            return Err(LeaseError::Insufficient {
+                requested,
+                available: 0,
+            });
+        }
         let state = match LEASE_POOL.get(uid) {
             Some(s) => Arc::clone(&*s),
             None => return Err(LeaseError::NoLease),
@@ -164,6 +172,7 @@ impl LeaseGuard {
                     reserved: requested,
                     coef_version,
                     released: AtomicBool::new(false),
+                    settled: AtomicBool::new(false),
                     state,
                 });
             }
@@ -174,6 +183,13 @@ impl LeaseGuard {
     /// the difference. If actual > reserved, does NOT double-charge — the
     /// over-spend is recorded via `usage:records.credits_consumed` (Go reconciles).
     pub fn settle_actual(&self, actual: i64) {
+        if self
+            .settled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
         let actual = actual.max(0);
         if actual >= self.reserved {
             return;
@@ -267,6 +283,32 @@ mod tests {
     }
 
     #[test]
+    fn try_acquire_rejects_non_positive_requested_without_mutating_pool() {
+        let uid = fresh_uid("acquire_non_positive");
+        upsert_protected(&uid, 100, "lease-non-positive".into(), 9, now_ms() + 60_000);
+
+        let zero = LeaseGuard::try_acquire(&uid, 0, now_ms(), 0).unwrap_err();
+        assert_eq!(
+            zero,
+            LeaseError::Insufficient {
+                requested: 0,
+                available: 0
+            }
+        );
+
+        let negative = LeaseGuard::try_acquire(&uid, -1, now_ms(), 0).unwrap_err();
+        assert_eq!(
+            negative,
+            LeaseError::Insufficient {
+                requested: -1,
+                available: 0
+            }
+        );
+
+        assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 100);
+    }
+
+    #[test]
     fn try_acquire_expired_returns_error() {
         let uid = fresh_uid("acquire_expired");
         let past = now_ms().saturating_sub(10_000);
@@ -347,6 +389,18 @@ mod tests {
         let guard = LeaseGuard::try_acquire(&uid, 500, now_ms(), 0).unwrap();
         assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 500);
         guard.settle_actual(200);
+        assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 800);
+    }
+
+    #[test]
+    fn settle_actual_is_idempotent_after_first_refund() {
+        let uid = fresh_uid("settle_idem");
+        upsert_protected(&uid, 1000, "lease-settle-idem".into(), 9, now_ms() + 60_000);
+
+        let guard = LeaseGuard::try_acquire(&uid, 500, now_ms(), 0).unwrap();
+        guard.settle_actual(200);
+        guard.settle_actual(200);
+
         assert_eq!(LEASE_POOL.get(&uid).unwrap().credits(), 800);
     }
 

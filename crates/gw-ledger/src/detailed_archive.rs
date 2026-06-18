@@ -123,15 +123,34 @@ pub struct DetailedArchive {
 }
 
 impl DetailedArchive {
-    pub fn start(redis: RedisPool, cfg: DetailedArchiveCfg) -> Self {
+    pub fn start(
+        redis: RedisPool,
+        cfg: DetailedArchiveCfg,
+        token: gw_runtime::ShutdownToken,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<CapturedSurface>(cfg.channel_capacity);
         let workers = cfg.workers.max(1);
         let shared_rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
-        for _ in 0..workers {
+        for i in 0..workers {
             let rx = shared_rx.clone();
             let cfg = cfg.clone();
             let redis = redis.clone();
-            tokio::spawn(worker(rx, redis, cfg));
+            let name: &'static str =
+                Box::leak(format!("detailed_archive_worker_{i}").into_boxed_str());
+            drop(gw_runtime::supervisor::supervised_spawn(
+                name,
+                gw_runtime::supervisor::policy_archive(),
+                token.child(),
+                move |_t| {
+                    let rx = rx.clone();
+                    let cfg = cfg.clone();
+                    let redis = redis.clone();
+                    async move {
+                        worker(rx, redis, cfg).await;
+                        Ok(())
+                    }
+                },
+            ));
         }
         Self { tx }
     }
@@ -314,11 +333,15 @@ impl DetailedArchive {
         let (tx, mut rx) = mpsc::channel::<CapturedSurface>(cfg.channel_capacity);
         // Drain the channel slowly so the second `try_send` lands on a full
         // queue.
-        tokio::spawn(async move {
-            while let Some(_s) = rx.recv().await {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        });
+        drop(gw_runtime::supervisor::one_shot_spawn(
+            "detailed_archive_test_drain",
+            || async move {
+                while let Some(_s) = rx.recv().await {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Ok(())
+            },
+        ));
         Self { tx }
     }
 }

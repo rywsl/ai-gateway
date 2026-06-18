@@ -185,13 +185,18 @@ impl OverflowGate {
             Ok(Some(consumed)) => Ok(consumed),
             Ok(None) => Ok(0),
             Err(err) => {
-                tracing::error!(
+                tracing::warn!(
                     target: "gw_ledger::overflow",
                     user_id,
                     error = ?err,
-                    "overflow consumed read failed"
+                    "overflow consumed read failed; treating as 0 (fail-open)"
                 );
-                Err(OverflowError::CacheUnavailable)
+                metrics::counter!(
+                    CREDIT_OVERFLOW_GATE_TOTAL,
+                    "result" => "consumed_read_failed_open"
+                )
+                .increment(1);
+                Ok(0)
             }
         }
     }
@@ -312,5 +317,22 @@ mod tests {
         assert_eq!(record_actual_delta(1000, 1000), None);
         assert_eq!(record_actual_delta(1000, 500), None);
         assert_eq!(record_actual_delta(-10, 5), Some(15));
+    }
+
+    #[test]
+    fn consumed_read_error_contract_is_fail_open_and_observable() {
+        let src = include_str!("overflow.rs");
+        assert!(
+            src.contains("overflow consumed read failed; treating as 0 (fail-open)"),
+            "consumed_for must warn that read failures fail open"
+        );
+        assert!(
+            src.contains("\"result\" => \"consumed_read_failed_open\""),
+            "consumed_for fail-open path must emit an observable metric label"
+        );
+        assert!(
+            src.contains("Ok(0)"),
+            "consumed_for fail-open path must treat failed consumed reads as zero"
+        );
     }
 }
