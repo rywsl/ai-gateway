@@ -115,7 +115,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_redos_timeout_total",
         kind: MetricKind::Counter,
-        help: "regex match exceeded budget; label=disabled_now",
+        help: "regex match exceeded budget; no labels (aggregate — per-ApiKey disable is tracked in-memory, not in the metric)",
     },
     MetricSpec {
         name: "gw_adaptive_rpm_observe_total",
@@ -545,7 +545,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gateway_tpm_consumed_total",
         kind: MetricKind::Counter,
-        help: "Observed tokens fed into the per-user sliding-window TPM limiter; label=role (primary/subaccount)",
+        help: "Observed tokens fed into the per-user sliding-window TPM limiter; no labels (aggregate — per-user enforcement is owned by the limiter, not the metric)",
     },
     MetricSpec {
         name: "gateway_freeze_leak_recovered_total",

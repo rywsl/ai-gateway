@@ -1,0 +1,59 @@
+groups:
+  - name: billing-page-on-call
+    rules:
+      # D19/D20 (#17): the five P1 page-on-call counters. Each is documented in
+      # the Rust metrics catalog (crates/gw-gateway/src/metrics_catalog.rs) as
+      # "ANY non-zero value = page on-call" and is zero-initialized at boot
+      # (zero_init_page_on_call) so these alerts evaluate against a healthy `0`
+      # baseline rather than an absent ("No data") series.
+
+      # T0 incident: a settled UsageRecord's inflight key was not DEL'd within
+      # emit_lag_t0_secs. Indicates the flusher is wedged or Redis is dropping
+      # the DEL - billing rows are at risk of double-emit on reconcile.
+      - alert: BillingEmitLagT0
+        expr: sum(increase(gw_billing_emit_lag_t0_total[5m])) > 0
+        for: 0m
+        labels: { severity: critical, page: "true" }
+        annotations:
+          summary: "billing emit-lag T0 incident (gw_billing_emit_lag_t0_total > 0)"
+          description: "A settled UsageRecord exceeded emit_lag_t0_secs without its inflight key being DEL'd. The ledger flusher may be wedged or Redis is dropping DELs. Investigate the flusher task and Redis health immediately."
+
+      # The single-tick ledger flusher panicked (caught by catch_unwind). Any
+      # panic risks dropped/duplicated billing records.
+      - alert: BillingFlusherPanic
+        expr: sum(increase(gw_billing_flusher_panic_total[5m])) > 0
+        for: 0m
+        labels: { severity: critical, page: "true" }
+        annotations:
+          summary: "billing flusher panicked (gw_billing_flusher_panic_total > 0)"
+          description: "A single-tick panic was captured inside the ledger flusher. Inspect logs for the panic payload; billing record integrity may be affected."
+
+      # emit() observed a closed channel - the flusher task is gone and records
+      # are falling back to sync XADD. The flusher should never die.
+      - alert: BillingFlusherDead
+        expr: sum(increase(gw_billing_flusher_dead_total[5m])) > 0
+        for: 0m
+        labels: { severity: critical, page: "true" }
+        annotations:
+          summary: "billing flusher channel closed (gw_billing_flusher_dead_total > 0)"
+          description: "emit() observed a closed flusher channel; UsageRecords are falling back to sync XADD. The flusher task has died and must be recovered (process restart) to restore batched, crash-safe billing."
+
+      # InflightLedger register() failed - crash-recovery attribution is lost for
+      # the affected requests (Redis unreachable / write failed).
+      - alert: BillingInflightRegisterFailure
+        expr: sum(increase(gw_billing_inflight_register_failure_total[5m])) > 0
+        for: 0m
+        labels: { severity: critical, page: "true" }
+        annotations:
+          summary: "inflight register failures (gw_billing_inflight_register_failure_total > 0)"
+          description: "InflightLedger.register() returned an error (Redis unreachable / write failed). Requests in this window have no crash-recovery attribution. Check Redis connectivity and the inflight key namespace."
+
+      # Credit-lease TTL expired on the request path - Go's protected-lease push
+      # pipeline is lagging and protected users are being hard-rejected.
+      - alert: CreditLeaseExpired
+        expr: sum(increase(gw_credit_lease_expired_total[5m])) > 0
+        for: 0m
+        labels: { severity: critical, page: "true" }
+        annotations:
+          summary: "credit-lease expiries (gw_credit_lease_expired_total > 0)"
+          description: "Protected-mode requests were rejected because the lease TTL expired (GW_QUOTA_LEASE_EXPIRED). Go's events:counter protected_lease push pipeline is likely lagging. Check the Go push pipeline and Redis stream lag."

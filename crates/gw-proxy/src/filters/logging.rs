@@ -371,11 +371,7 @@ pub async fn run(
         // -----------------------------------------------------------------
         let tpm_tokens = (ctx.usage.input_tokens as u64) + (ctx.usage.output_tokens as u64);
         if tpm_tokens > 0 {
-            metrics::counter!(
-                "gateway_tpm_consumed_total",
-                "role" => if auth_user_id == effective { "primary" } else { "subaccount" },
-            )
-            .increment(tpm_tokens);
+            metrics::counter!("gateway_tpm_consumed_total").increment(tpm_tokens);
 
             if let Some(perm) = ctx.merged_perm.as_ref() {
                 if let Err(e) = ratelimit.deduct_tpm(&effective, perm, tpm_tokens as u32) {

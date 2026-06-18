@@ -181,11 +181,7 @@ impl RedosTracker {
         if new_count >= TIMEOUT_THRESHOLD {
             entry.disabled.store(true, Ordering::Release);
         }
-        metrics::counter!(
-            "gw_redos_timeout_total",
-            "disabled_now" => entry.disabled.load(Ordering::Acquire).to_string(),
-        )
-        .increment(1);
+        metrics::counter!("gw_redos_timeout_total").increment(1);
     }
 
     #[cfg(test)]

@@ -39,6 +39,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_all() -> anyhow::Result<()> {
+    // D25 (#18): spawning the gateway on a bare `std::thread` (no ambient Tokio
+    // runtime) is correct. `gw_gateway::run` -> `run_with_signal_handler`
+    // (crates/gw-gateway/src/lib.rs) builds its OWN multi-thread Tokio runtime
+    // via `tokio::runtime::Builder::new_multi_thread().enable_all().build()` and
+    // `block_on`s inside it, so it does not require a runtime from this thread.
     let gw_handle = thread::Builder::new()
         .name("gateway".into())
         .spawn(gw_gateway::run)

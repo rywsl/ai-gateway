@@ -2058,6 +2058,7 @@ dependencies = [
  "gw-store",
  "lz4_flex",
  "metrics",
+ "metrics-exporter-prometheus",
  "once_cell",
  "serde",
  "serde_json",

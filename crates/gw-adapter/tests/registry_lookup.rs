@@ -57,6 +57,43 @@ fn builtin_vendor_adapters_match_known_vendor_ids() {
     assert_eq!(r.for_vendor(&VendorId::from("codex-main")).name(), "codex");
 }
 
+/// D22 (#18): exact alias ids resolve to the builtin adapters.
+#[test]
+fn builtin_vendor_adapters_match_exact_aliases() {
+    let r = AdapterRegistry::default();
+    assert_eq!(r.for_vendor(&VendorId::from("kiro")).name(), "kiro");
+    assert_eq!(r.for_vendor(&VendorId::from("vertex")).name(), "vertex");
+    assert_eq!(
+        r.for_vendor(&VendorId::from("google_vertex")).name(),
+        "vertex"
+    );
+    assert_eq!(r.for_vendor(&VendorId::from("codex")).name(), "codex");
+    assert_eq!(
+        r.for_vendor(&VendorId::from("openai_codex")).name(),
+        "codex"
+    );
+}
+
+/// D22 (#18): substring / no-boundary ids that the old `contains()` logic
+/// wrongly classified now fall through to the Noop adapter.
+#[test]
+fn builtin_vendor_adapters_reject_substring_misclassification() {
+    let r = AdapterRegistry::default();
+    for id in [
+        "akiro",
+        "codexcli",
+        "vendor_google_vertex",
+        "mygemini",
+        "unrelated",
+    ] {
+        assert_eq!(
+            r.for_vendor(&VendorId::from(id)).name(),
+            "noop",
+            "vendor id `{id}` must not match a builtin adapter by substring"
+        );
+    }
+}
+
 #[test]
 fn analyzer_lookup_falls_back_to_default() {
     let r = AdapterRegistry::default();

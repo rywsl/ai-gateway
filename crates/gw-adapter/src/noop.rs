@@ -51,7 +51,10 @@ impl UpstreamAdapter for NoopAdapter {
         if let Some(host) = ctx.upstream_host {
             ctx.headers_mut.set("host", host);
         }
-        let span_id = hex::encode(rand::random::<[u8; 8]>());
+        // D24 (#18): derive the traceparent span id from an explicit OS CSPRNG
+        // (getrandom-backed `OsRng`) rather than the implicit thread RNG, so the
+        // randomness source is auditable.
+        let span_id = random_span_id();
         let traceparent = format!("00-{}-{}-01", ctx.trace_id, span_id);
         ctx.headers_mut.set("traceparent", &traceparent);
         ctx.headers_mut
@@ -68,4 +71,39 @@ fn is_header_token(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Generate a W3C-traceparent span id (16 lowercase hex chars / 8 bytes) from an
+/// explicit OS CSPRNG. D24 (#18): the source is `rand::rngs::OsRng`
+/// (getrandom-backed) so the randomness is auditable rather than relying on the
+/// implicit thread-local RNG of `rand::random`.
+fn random_span_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 8];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::random_span_id;
+
+    #[test]
+    fn span_id_is_16_lowercase_hex() {
+        let id = random_span_id();
+        assert_eq!(id.len(), 16, "8-byte span id encodes to 16 hex chars");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "span id must be lowercase hex: {id}"
+        );
+    }
+
+    #[test]
+    fn span_id_is_not_constant() {
+        // Two draws from the CSPRNG should differ with overwhelming probability.
+        let a = random_span_id();
+        let b = random_span_id();
+        assert_ne!(a, b, "CSPRNG span ids must not repeat across calls");
+    }
 }

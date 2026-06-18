@@ -1,8 +1,12 @@
 //! `#[derive(DetectRequest)]` — parses `#[detect(path_prefix = "...",
 //! header_contains = "...")]` attributes. For v1 the actual `detect` method is
-//! hand-written in `gw-codec/src/<protocol>/codec.rs`, so this derive only
-//! validates attribute syntax without emitting code. See crate-level docs in
-//! `lib.rs` for the v1 scope decision.
+//! hand-written in `gw-codec/src/<protocol>/codec.rs`, so the real codegen is
+//! not implemented yet.
+//!
+//! D20/D21 (#18): rather than silently expanding to an empty `TokenStream`
+//! (which lets a future developer `#[derive(DetectRequest)]` and get NOTHING
+//! with no warning), the derive validates its attribute syntax and then emits a
+//! `compile_error!` so misuse fails loudly at compile time until codegen lands.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -26,9 +30,18 @@ pub fn expand(input: TokenStream) -> TokenStream {
             Ok(())
         });
     }
-    // Discard parsed values; attribute parsing is the only side effect.
+    // Discard parsed values; attribute parsing is the only validation side effect.
     let _ = (path_prefix, header_contains);
 
-    let out: TokenStream2 = quote! {};
+    // Fail loudly: codegen is not implemented. Emitting `compile_error!` (instead
+    // of an empty TokenStream) ensures any `#[derive(DetectRequest)]` is rejected
+    // at compile time rather than silently producing nothing.
+    let _ = &ast.ident;
+    let msg = "`#[derive(DetectRequest)]` is not implemented yet (codec v1 hand-writes \
+               `detect` in gw-codec/src/<protocol>/codec.rs). Implement the codegen in \
+               gw-codec-macros before using this derive.";
+    let out: TokenStream2 = quote! {
+        ::core::compile_error!(#msg);
+    };
     out.into()
 }

@@ -27,19 +27,17 @@ Related contract: [`docs/go-contracts/contract-change/2026-05-29-credit-lease.md
 
 ## 2. `gw_credit_lease_active_users` / `gw_credit_coef_table_version_active` gauges have no sampler
 
-**Status**: open
+**Status**: resolved (D9 #17, 2026-06-17)
 
 **Severity**: medium — operational blind spot.
 
-**What**: `crates/gw-gateway/src/metrics_catalog.rs` registers descriptions for both gauges (Task 11) but no background task ever sets their values. Both stay at 0 in `/metrics`. Code-level TODO comments mark the gap.
+**What**: `crates/gw-gateway/src/metrics_catalog.rs` registers descriptions for both gauges (Task 11) but no background task ever set their values. Both stayed at 0 in `/metrics`.
 
-**Why it matters**: dashboards and alerts that key off "are any users in protected mode" or "which coef_table_version is live" silently report nothing. Operators relying on either gauge for the §13 staged rollout will not see the signal they need.
+**Resolution**: the supervised `gw_ledger::ledger_sweep` loop now samples both gauges — once at spawn (immediate population) then every 60 s:
+- `gw_credit_lease_active_users` = `gw_ledger::lease::protected_user_count()` (count of `LEASE_POOL` entries with `mode() == Mode::Protected`)
+- `gw_credit_coef_table_version_active` = `gw_ledger::coef::current_snapshot().version`
 
-**Fix sketch**: a small `ManagedLoop` task in `gw-ledger` that, every ~10s, sets:
-- `gw_credit_lease_active_users` = count of `LEASE_POOL` entries with `mode == Protected`
-- `gw_credit_coef_table_version_active` = `current_coef_snapshot().version`
-
-`gw-ledger` already has the `ManagedLoop` infrastructure (`InflightReaper`, `DeductGc`) — follow that pattern.
+The TODO comments in `metrics_catalog.rs` were removed. The 60 s cadence (vs the ~10 s originally sketched) reuses the existing supervised, shutdown-registered loop instead of adding a new bootstrap-wired task; both gauges move slowly enough that 60 s is sufficient. Guarded by `gw_ledger::lease::tests::protected_user_count_counts_protected_entries` and `gw_gateway::tests::metrics_catalog::credit_lease_gauges_registered`.
 
 ---
 
