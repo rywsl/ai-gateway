@@ -303,6 +303,7 @@ fn codec_for_shape(shape: gw_core::protocol::ApiShape) -> AnyCodec {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod trusted_proxies_tests {
     use super::*;
 

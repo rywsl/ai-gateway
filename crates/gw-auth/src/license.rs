@@ -4,10 +4,10 @@
 //! and gates license-violation handling on it:
 //! - `disabled`: no-op (never blocks, never meters).
 //! - `warn`:     emit `gateway_license_violation_total{mode="warn",reason}` and
-//!               pass the request through. Response bytes are identical to
-//!               `disabled` — warn mode MUST NOT alter the response.
+//!   pass the request through. Response bytes are identical to
+//!   `disabled` — warn mode MUST NOT alter the response.
 //! - `enforce`:  emit the metric and return `Err(LicenseError)` so the caller
-//!               rejects the request (HTTP 402 `GW_LICENSE_REQUIRED`).
+//!   rejects the request (HTTP 402 `GW_LICENSE_REQUIRED`).
 //!
 //! Default is `warn` so a misconfigured deployment never locks itself out
 //! (REV-FINAL-LICENSE-COMM / v2 REV-004e): a missing/typo'd flag resolves to
