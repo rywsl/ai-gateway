@@ -13,6 +13,7 @@
 use gw_core::error::{codes, ErrorCategory, ErrorIR};
 use gw_core::ids::{Kid, UserId};
 use gw_store::EntityStore;
+pub use jsonwebtoken::Algorithm as JwtAlgorithm;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -85,17 +86,35 @@ fn auth_err() -> ErrorIR<'static> {
 /// At construction time the secret material is optional: HS256 traffic must
 /// supply `static_secret_hs256`, RS256 traffic must supply either a
 /// `JwksResolver` (attached via [`JwtValidator::attach_jwks`]) or
-/// `static_pem_rs256` (or both — the resolver is tried first and the static
-/// PEM acts as a fallback when `kid` is missing or the resolver returns
-/// `None`).
-#[derive(Clone, Default)]
+/// `static_pem_rs256` (or both — the resolver is tried first; static PEM is
+/// only an unknown-`kid` fallback when explicitly enabled).
+#[derive(Clone)]
 pub struct JwtValidatorConfig {
     pub static_secret_hs256: Option<Vec<u8>>,
     pub static_pem_rs256: Option<Vec<u8>>,
+    pub allow_static_pem_fallback_for_unknown_kid: bool,
     pub expected_iss: SmallVec<[String; 2]>,
     pub expected_aud: SmallVec<[String; 2]>,
+    pub strict_claims: bool,
     pub leeway_secs: u32,
     pub require_nbf: bool,
+    pub allowed_algs: SmallVec<[Algorithm; 2]>,
+}
+
+impl Default for JwtValidatorConfig {
+    fn default() -> Self {
+        Self {
+            static_secret_hs256: None,
+            static_pem_rs256: None,
+            allow_static_pem_fallback_for_unknown_kid: false,
+            expected_iss: SmallVec::new(),
+            expected_aud: SmallVec::new(),
+            strict_claims: true,
+            leeway_secs: 0,
+            require_nbf: false,
+            allowed_algs: smallvec::smallvec![Algorithm::HS256, Algorithm::RS256],
+        }
+    }
 }
 
 /// Async resolver that maps a JWK `kid` to a PEM-encoded public key.
@@ -188,9 +207,9 @@ impl JwtValidator {
     /// | `alg`   | `kid` | resolver wired | key source                                            |
     /// |---------|-------|----------------|-------------------------------------------------------|
     /// | HS256   | -     | -              | `static_secret_hs256` (else `InvalidSignature`)       |
-    /// | RS256   | Some  | Some           | `resolver.resolve(kid).await`, fallback `static_pem_rs256` |
+    /// | RS256   | Some  | Some           | `resolver.resolve(kid).await`; unknown `kid` rejects unless static fallback is explicitly enabled |
     /// | RS256   | None  | -              | `static_pem_rs256` (else `InvalidSignature`)          |
-    /// | RS256   | Some  | None           | `static_pem_rs256` (else `InvalidSignature`)          |
+    /// | RS256   | Some  | None           | `static_pem_rs256` only when static fallback is explicitly enabled |
     ///
     /// Then runs `jsonwebtoken::decode` with `iss`/`aud`/`exp`/`nbf` according
     /// to the config.
@@ -198,6 +217,9 @@ impl JwtValidator {
         let header = decode_header(token).map_err(|_| JwtError::InvalidSignature)?;
         let alg = header.alg;
         if !matches!(alg, Algorithm::HS256 | Algorithm::RS256) {
+            return Err(JwtError::InvalidSignature);
+        }
+        if !self.cfg.allowed_algs.is_empty() && !self.cfg.allowed_algs.contains(&alg) {
             return Err(JwtError::InvalidSignature);
         }
 
@@ -209,9 +231,18 @@ impl JwtValidator {
                 .clone()
                 .ok_or(JwtError::InvalidSignature)?,
             Algorithm::RS256 => {
-                let mut chosen: Option<Vec<u8>> = None;
-                if let (Some(kid), Some(jwks)) = (header.kid.as_deref(), self.jwks.as_ref()) {
-                    chosen = jwks.resolve(kid).await;
+                let mut chosen = None;
+                match (header.kid.as_deref(), self.jwks.as_ref()) {
+                    (Some(kid), Some(jwks)) => {
+                        chosen = jwks.resolve(kid).await;
+                        if chosen.is_none() && !self.cfg.allow_static_pem_fallback_for_unknown_kid {
+                            return Err(JwtError::InvalidSignature);
+                        }
+                    }
+                    (Some(_), None) if !self.cfg.allow_static_pem_fallback_for_unknown_kid => {
+                        return Err(JwtError::InvalidSignature);
+                    }
+                    _ => {}
                 }
                 if chosen.is_none() {
                     chosen = self.cfg.static_pem_rs256.clone();
@@ -233,11 +264,11 @@ impl JwtValidator {
         val.leeway = self.cfg.leeway_secs as u64;
         val.validate_exp = true;
         val.validate_nbf = self.cfg.require_nbf;
-        if !self.cfg.expected_iss.is_empty() {
+        if self.cfg.strict_claims && !self.cfg.expected_iss.is_empty() {
             let iss: Vec<String> = self.cfg.expected_iss.iter().cloned().collect();
             val.set_issuer(&iss);
         }
-        if !self.cfg.expected_aud.is_empty() {
+        if self.cfg.strict_claims && !self.cfg.expected_aud.is_empty() {
             let aud: Vec<String> = self.cfg.expected_aud.iter().cloned().collect();
             val.set_audience(&aud);
         } else {

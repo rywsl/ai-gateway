@@ -80,7 +80,7 @@ fred = { version = "9", features = ["metrics", "i-scripts", "i-sorted-sets"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "json"] }
 jsonwebtoken = "9"
 governor = "0.7"
-ipnet = "2.10"
+ipnet = { version = "2.10", features = ["serde"] }
 hex = "0.4"
 crc32fast = "1.5"
 brotli = "7"

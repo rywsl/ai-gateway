@@ -49,6 +49,7 @@ v2 REV-003g：**WS-14 编号分配完成前，任何新 migration PR（含 WS-1/
 | W14-T09 | Rust | `crates/gw-store/migrations/0012_task_freeze_pending.sql` | CREATE TABLE `task_freeze_pending` | R9 | WS-1 |
 | W14-T10 | Rust | `crates/gw-store/migrations/0013_pricings_extended.sql` | ALTER `pricings` ADD 新列（nullable） | C1 / REV-FINAL-H8.5 | WS-8 |
 | W14-T11 | Rust | `crates/gw-store/migrations/0014_billing_query_indexes.sql` | Rust-side 热查询覆盖索引（`task_records`/`vendor_keys`） | SLQ3-Rust 部分 | WS-9 |
+| W14-T12 | Rust | `crates/gw-store/migrations/0015_quota_state_outbox.sql` | CREATE TABLE `quota_state_outbox` | R23 / REV-FINAL-W12 | WS-2 |
 
 > **注**：v2 草案 `00041` (default_user_group_seed) 落到 W14-T08 的 `00074`，因为前 6 个 Go migration 占 00067..00072 + SLQ3 占 00073 + V15 占 00074。
 
@@ -84,7 +85,7 @@ CLAUDE.md 已显式承认这是已存在的 **deliberate divergence**，未来�
 
 合并到 main 前每一条都必须达成：
 
-1. **§1.2 表内每个 .sql 文件存在**，且字面包含 `-- +goose Up` 与 `-- +goose Down` 两段（HOW 字面要求见各 §6）。
+1. **§1.2 表内每个 .sql 文件存在**。Go migration 字面包含 `-- +goose Up` 与 `-- +goose Down`；Rust migration 保持该仓惯例的裸 SQL，并提供同名 `.down.sql` sidecar（HOW 字面要求见各 §6）。
 2. **W14-T12 的 down-restore 脚本在 staging snapshot 上闭环通过**：snapshot → up → down → 验 schema 与 snapshot **byte-equivalent**（用 `pg_dump --schema-only` diff，零行差异）。
 3. **W14-T11 的 CI gate** 阻断未在 §1.2 表的 migration PR 合并。
 4. **W14-T13 跨仓部署演练报告** 写入 `docs/issues/2026-06-17-investigates/WS-14-staging-rehearsal.md`，包含 Rust→Go 顺序的 5 分钟、10 分钟、20 分钟切片下 staging readiness gate 行为日志。
@@ -221,28 +222,29 @@ CLAUDE.md 已显式承认这是已存在的 **deliberate divergence**，未来�
   ```sql
   -- +goose Up
   CREATE TABLE payment_outbox (
-      id              bigserial   PRIMARY KEY,
-      payment_id      bigint      NOT NULL UNIQUE,
-      payload         jsonb       NOT NULL,
-      status          text        NOT NULL CHECK (status IN ('pending','committed','dead')),
-      attempt_count   int         NOT NULL DEFAULT 0,
-      last_error      text        NULL,
-      next_attempt_at timestamptz NOT NULL DEFAULT now(),
-      created_at      timestamptz NOT NULL DEFAULT now(),
-      committed_at    timestamptz NULL
+      id              BIGSERIAL PRIMARY KEY,
+      payment_id      TEXT        NOT NULL UNIQUE,
+      payload         JSONB       NOT NULL,
+      request_hash    TEXT        NOT NULL,
+      status          TEXT        NOT NULL CHECK (status IN ('pending','committed','dead')),
+      attempt_count   INT         NOT NULL DEFAULT 0,
+      last_error      TEXT,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+      committed_at    TIMESTAMPTZ
   );
   CREATE INDEX payment_outbox_due_idx
-      ON payment_outbox (next_attempt_at)
+      ON payment_outbox (next_attempt_at, id)
       WHERE status = 'pending';
 
   -- +goose Down
   DROP INDEX IF EXISTS payment_outbox_due_idx;
   DROP TABLE IF EXISTS payment_outbox;
   ```
-- 增量于 v1 草稿：`attempt_count` + `last_error` + `committed_at` + `dead` 状态（处理 attempt > max 后 hand-off 到人工）。
+- 增量于 v1 草稿：`request_hash` + `attempt_count` + `last_error` + `committed_at` + `dead` 状态（处理 attempt > max 后 hand-off 到人工）；`payment_id` 使用现有 Go 订单 ID 的 `TEXT` 形态。
 
 **【如何验证 VERIFY】**
-- `psql -c "\d payment_outbox"` 显示 9 列 + PK + 1 partial index。
+- `psql -c "\d payment_outbox"` 显示 10 列 + PK + 1 partial index。
 - `EXPLAIN SELECT id FROM payment_outbox WHERE status='pending' AND next_attempt_at<=now() LIMIT 100;` 显示 `Index Scan using payment_outbox_due_idx`（非 Seq Scan）。
 - Down 验证同 W14-T01。
 
@@ -262,8 +264,8 @@ CLAUDE.md 已显式承认这是已存在的 **deliberate divergence**，未来�
 - 引用：v1 §6 line 192（M3）+ line 266-268（S1.7）。
 
 **【DO】**
-1. 抄 W14-T02 schema，键改 `refund_id bigint NOT NULL UNIQUE`，payload 仍 jsonb。
-2. 加 `payment_id bigint NOT NULL`（refund 必须能溯源 payment），并加 `refund_outbox_payment_idx` index 服务 Refund.Create 的双查。
+1. 抄 W14-T02 schema，键改 `refund_id TEXT NOT NULL UNIQUE`，payload 仍 jsonb。
+2. 加 `payment_id TEXT NOT NULL DEFAULT ''`（refund 必须能溯源 payment；默认空串用于历史/手工退款兼容），并加 `refund_outbox_payment_idx` index 服务 Refund.Create 的双查。
 
 **【DON'T】**
 - ❌ 不 FK 到 `payment_outbox.payment_id`（同 W14-T02 原因）。
@@ -273,19 +275,20 @@ CLAUDE.md 已显式承认这是已存在的 **deliberate divergence**，未来�
 ```sql
 -- +goose Up
 CREATE TABLE refund_outbox (
-    id              bigserial   PRIMARY KEY,
-    refund_id       bigint      NOT NULL UNIQUE,
-    payment_id      bigint      NOT NULL,
-    payload         jsonb       NOT NULL,
-    status          text        NOT NULL CHECK (status IN ('pending','committed','dead')),
-    attempt_count   int         NOT NULL DEFAULT 0,
-    last_error      text        NULL,
-    next_attempt_at timestamptz NOT NULL DEFAULT now(),
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    committed_at    timestamptz NULL
+    id              BIGSERIAL PRIMARY KEY,
+    refund_id       TEXT        NOT NULL UNIQUE,
+    payment_id      TEXT        NOT NULL DEFAULT '',
+    payload         JSONB       NOT NULL,
+    request_hash    TEXT        NOT NULL,
+    status          TEXT        NOT NULL CHECK (status IN ('pending','committed','dead')),
+    attempt_count   INT         NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    committed_at    TIMESTAMPTZ
 );
 CREATE INDEX refund_outbox_due_idx
-    ON refund_outbox (next_attempt_at)
+    ON refund_outbox (next_attempt_at, id)
     WHERE status = 'pending';
 CREATE INDEX refund_outbox_payment_idx
     ON refund_outbox (payment_id);
@@ -316,8 +319,8 @@ DROP TABLE IF EXISTS refund_outbox;
 - 引用：v1 §3 line 67（G7）+ v2 REV-FINAL-M10。
 
 **【DO】**
-1. schema 同 outbox 模式，键改 `old_subscription_id bigint NOT NULL UNIQUE`，加 `new_product_id bigint NOT NULL`。
-2. payload 保存升级时计算好的 prorate / credit 数据。
+1. schema 同 WS-1 T13 outbox 模式，键为 `old_sub_id TEXT NOT NULL UNIQUE REFERENCES user_subscriptions(id)`，payload 保存升级时计算好的 PurchaseInput / prorate / credit 数据。
+2. 同 migration 扩展 `user_subscriptions_status_check`，允许中间态 `upgrading`。
 
 **【DON'T】**
 - ❌ 不要 FK 到 `subscriptions(id)`（同 W14-T02 原因）。
@@ -326,22 +329,26 @@ DROP TABLE IF EXISTS refund_outbox;
 ```sql
 -- +goose Up
 CREATE TABLE subscription_upgrade_outbox (
-    id                   bigserial   PRIMARY KEY,
-    old_subscription_id  bigint      NOT NULL UNIQUE,
-    new_product_id       bigint      NOT NULL,
-    payload              jsonb       NOT NULL,
-    status               text        NOT NULL CHECK (status IN ('pending','committed','dead')),
-    attempt_count        int         NOT NULL DEFAULT 0,
-    last_error           text        NULL,
-    next_attempt_at      timestamptz NOT NULL DEFAULT now(),
-    created_at           timestamptz NOT NULL DEFAULT now(),
-    committed_at         timestamptz NULL
+    id              BIGSERIAL PRIMARY KEY,
+    old_sub_id      TEXT        NOT NULL UNIQUE REFERENCES user_subscriptions(id),
+    payload         JSONB       NOT NULL,
+    status          TEXT        NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','committed','failed','dlq')),
+    attempt         INTEGER     NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX subscription_upgrade_outbox_due_idx
-    ON subscription_upgrade_outbox (next_attempt_at)
+    ON subscription_upgrade_outbox (next_attempt_at, id)
     WHERE status = 'pending';
+ALTER TABLE user_subscriptions DROP CONSTRAINT IF EXISTS user_subscriptions_status_check;
+ALTER TABLE user_subscriptions ADD CONSTRAINT user_subscriptions_status_check
+    CHECK (status IN ('pending_payment','active','canceled','expired','upgrading'));
 
 -- +goose Down
+ALTER TABLE user_subscriptions DROP CONSTRAINT IF EXISTS user_subscriptions_status_check;
+ALTER TABLE user_subscriptions ADD CONSTRAINT user_subscriptions_status_check
+    CHECK (status IN ('pending_payment','active','canceled','expired'));
 DROP INDEX IF EXISTS subscription_upgrade_outbox_due_idx;
 DROP TABLE IF EXISTS subscription_upgrade_outbox;
 ```
@@ -448,11 +455,11 @@ ALTER TABLE user_subscriptions DROP CONSTRAINT IF EXISTS user_subscriptions_quot
 - ❌ 不替代 `0014_billing_query_indexes.sql`（Rust 端，W14-T11）——本任务是 Go-side。
 
 **【为什么】**
-- 根因（SLQ3）：当前查 apikey 的 `getApiKeyByHash` / `getApiKeyByID` 命中 hash index 但回表读 user_id / status / quota → 高 QPS 路径 buffer cache 抖动。covering index `(hash) INCLUDE (user_id, status, ...)` 全在 index 内。
+- 根因（SLQ3）：当前查 apikey 的 `GetApiKeyByHash` / `GetApiKeyByID` 命中 hash/id index 但回表读 `user_id` / `is_active` / `is_locked` / `expires_at` / `signature_secret` 等列；billing 热查询还会按 user/status/time 读 wallet/payment 历史，缺覆盖索引会放大 buffer cache 抖动。
 - 引用：v1 §WS-9 line 796。
 
 **【DO】**
-1. **先 Read** `AILinkMax-Go/migrations/00062_idx_api_keys_user_standalone_active.sql` 与 `AILinkMax-Go/migrations/00006_api_keys.sql` 取真实列名（v2 §0 重要 2）；本任务草稿假设列名 `key_hash`、`user_id`、`status`、`is_active`，落地前以源码为准。
+1. **先 Read** `AILinkMax-Go/migrations/00062_idx_api_keys_user_standalone_active.sql`、`AILinkMax-Go/migrations/00006_api_keys.sql`、`AILinkMax-Go/migrations/00035_gateway_entity_bridge.sql` 与 `modules/apikey/model/queries/api_keys.sql` 取真实列名（v2 §0 重要 2）。实读：`api_keys` 无 `status` 列，热查询读取 `is_active`/`is_locked`/`expires_at`/`signature_secret`。
 2. CONCURRENTLY 建 index（不锁写）。
 3. 必须 `-- +goose NO TRANSACTION`（CONCURRENTLY 不能在 tx 内）。
 4. Down 同样 CONCURRENTLY DROP。
@@ -465,18 +472,33 @@ ALTER TABLE user_subscriptions DROP CONSTRAINT IF EXISTS user_subscriptions_quot
 ```sql
 -- +goose NO TRANSACTION
 -- +goose Up
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_api_keys_hash_covering
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_api_keys_hash_covering_active
     ON api_keys (key_hash)
-    INCLUDE (user_id, status, is_active)
+    INCLUDE (id, user_id, is_standalone, is_active, is_locked, expires_at, signature_secret)
     WHERE deleted_at IS NULL;
--- TODO(W14-T07 author): 在 Read 源码核实列名后改字面（v2 §0 重要 2）
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_api_keys_id_covering_active
+    ON api_keys (id)
+    INCLUDE (user_id, key_hash, is_standalone, is_active, is_locked, expires_at, signature_secret)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_wallet_tx_user_created_covering
+    ON wallet_transactions (user_id, created_at DESC)
+    INCLUDE (category, reason_code, amount_micros, link_type, link_id);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_payment_orders_user_status_created_covering
+    ON payment_orders (user_id, status, created_at DESC)
+    INCLUDE (wallet_id, amount_micros, payment_method, order_type, gateway_order_id);
 
 -- +goose Down
-DROP INDEX CONCURRENTLY IF EXISTS idx_api_keys_hash_covering;
+DROP INDEX CONCURRENTLY IF EXISTS idx_payment_orders_user_status_created_covering;
+DROP INDEX CONCURRENTLY IF EXISTS idx_wallet_tx_user_created_covering;
+DROP INDEX CONCURRENTLY IF EXISTS idx_api_keys_id_covering_active;
+DROP INDEX CONCURRENTLY IF EXISTS idx_api_keys_hash_covering_active;
 ```
 
 **【VERIFY】**
-- `EXPLAIN (BUFFERS) SELECT user_id, status, is_active FROM api_keys WHERE key_hash=$1 AND deleted_at IS NULL;` 输出含 `Index Only Scan` 且 `Heap Fetches: 0`。
+- `EXPLAIN (BUFFERS) SELECT user_id, is_active, is_locked, expires_at FROM api_keys WHERE key_hash=$1 AND deleted_at IS NULL;` 输出含 `Index Only Scan` 且 `Heap Fetches: 0`。
 - 本任务 author 必须把 Read 后修正的真实列名写回本计划 §HOW 部分（v2 §0 重要 2 闭环）。
 
 ---
@@ -484,7 +506,7 @@ DROP INDEX CONCURRENTLY IF EXISTS idx_api_keys_hash_covering;
 ## 11. 任务 W14-T08：Go `00074_default_user_group_seed.sql`
 
 **【是什么】**
-- 文件 `AILinkMax-Go/migrations/00074_default_user_group_seed.sql`。落地 REV-FINAL-V15：seed 一行 `user_groups` 名 `default`，并把 `users.group_id` 改 NOT NULL。
+- 文件 `AILinkMax-Go/migrations/00074_default_user_group_seed.sql`。落地 REV-FINAL-V15：确认/seed 既有默认 user group `ug_default`，并把 `users.group_id` 改 NOT NULL。
 
 **【不是什么】**
 - ❌ 不创建 `user_groups` 表（它在 `00014_model_groups.sql` 或 `00031_user_groups_and_preferences.sql` 已存在；W14-T08 author 必须 Read 确认表名）。
@@ -495,40 +517,47 @@ DROP INDEX CONCURRENTLY IF EXISTS idx_api_keys_hash_covering;
 - 引用：v2 §4 line 355（REV-FINAL-V15）。
 
 **【DO】**
-1. **先 Read** `AILinkMax-Go/migrations/00031_user_groups_and_preferences.sql` 取真实 `user_groups` 表 schema（v2 §0 重要 2）。本任务草稿假设列 `id uuid`, `name text UNIQUE`, `created_at`。
-2. INSERT seed（UPSERT 用 ON CONFLICT (name) DO NOTHING）。
-3. ALTER `users` ADD `group_id uuid REFERENCES user_groups(id)`（若已存在则跳过此 ALTER；W14-T08 author 必须 Read `AILinkMax-Go/migrations/00049_users_default_group_backfill.sql` 看是否已加列）。
+1. **先 Read** `AILinkMax-Go/migrations/00031_user_groups_and_preferences.sql` 取真实 `user_groups` 表 schema（v2 §0 重要 2）。实读 schema 为 `id TEXT PRIMARY KEY`, `name TEXT NOT NULL UNIQUE`, `created_at BIGINT NOT NULL`, `updated_at BIGINT NOT NULL`；`00031` 已 seed `id='ug_default', name='Default'`。
+2. INSERT seed（UPSERT 用 `ON CONFLICT (id) DO NOTHING`，保持既有 `ug_default` 契约）。
+3. `users.group_id TEXT REFERENCES user_groups(id)` 已由 `00031_user_groups_and_preferences.sql` 创建；W14-T08 不再重复 ADD COLUMN。
 4. 把现有 `users` 没有 group_id 的行回填 default group id。
 5. ALTER 列 SET NOT NULL（必须先回填，否则 NOT NULL 会失败）。
 
 **【DON'T】**
-- ❌ 不要 hardcode UUID 值（`gen_random_uuid()`；后续 ON CONFLICT 保护重复 seed 安全）。
+- ❌ 不要把真实 `TEXT` id schema 改成 UUID；既有契约是硬编码 `ug_default`。
 - ❌ 不要在同 migration 里 ALTER + SET NOT NULL + 不回填——会失败。
 - ❌ Down 段不要 DROP NOT NULL 后还 DROP COLUMN——可能毁前 migration 已加的列。本任务 Down 仅撤销本次的 SET NOT NULL（恢复 NULL），并删除本次 seed 行（如果别的 user 已经引用，删除会失败，但这是预期：down 段在 staging 验证时若发现 dependency，需要 truncate test data 再跑）。
 
 **【HOW】**
 ```sql
 -- +goose Up
--- Read 00031_user_groups_and_preferences.sql 确认 user_groups 表存在并有 (name UNIQUE) 与 (id uuid PK)
-INSERT INTO user_groups (id, name, created_at)
-VALUES (gen_random_uuid(), 'default', now())
-ON CONFLICT (name) DO NOTHING;
+-- Read 00031_user_groups_and_preferences.sql 确认 user_groups 表存在并有 TEXT id PK/name UNIQUE/BIGINT timestamps.
+INSERT INTO user_groups (
+    id, name, description, is_default, allowed_api_formats,
+    scheduling_mode, model_group_bindings, rate_limit, created_at, updated_at
+)
+VALUES (
+    'ug_default', 'Default', 'Default user group', TRUE, NULL,
+    'cache_affinity', '[]'::jsonb, NULL,
+    EXTRACT(EPOCH FROM now())::BIGINT * 1000,
+    EXTRACT(EPOCH FROM now())::BIGINT * 1000
+)
+ON CONFLICT (id) DO NOTHING;
 
 -- 回填 users.group_id（00049_users_default_group_backfill.sql 已为部分行回填，再次兜底）
 UPDATE users
-   SET group_id = (SELECT id FROM user_groups WHERE name='default')
- WHERE group_id IS NULL;
+   SET group_id = 'ug_default'
+ WHERE group_id IS NULL OR btrim(group_id) = '';
 
 ALTER TABLE users ALTER COLUMN group_id SET NOT NULL;
 
 -- +goose Down
 ALTER TABLE users ALTER COLUMN group_id DROP NOT NULL;
-DELETE FROM user_groups WHERE name='default';
 ```
 
 **【VERIFY】**
-- `SELECT 1 FROM user_groups WHERE name='default';` 返回 1 行。
-- `\d users` 显示 `group_id uuid NOT NULL`。
+- `SELECT 1 FROM user_groups WHERE id='ug_default' AND is_default;` 返回 1 行。
+- `\d users` 显示 `group_id text NOT NULL`。
 - 故意 `INSERT INTO users (...其他必填..., group_id) VALUES (..., NULL);` 报 NOT NULL 违反。
 - Down 后 `\d users` 显示 group_id 又可 NULL。
 
@@ -562,17 +591,20 @@ DELETE FROM user_groups WHERE name='default';
   -- 0012_task_freeze_pending.sql - persistent retry queue for failed
   -- task-freeze releases (R9 fix; WS-1 T18 sweeper consumes this table).
   CREATE TABLE IF NOT EXISTS task_freeze_pending (
-      id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id         uuid        NOT NULL,
+      id              bigserial   PRIMARY KEY,
+      user_id         text        NOT NULL,
       task_id         uuid        NOT NULL,
       frozen_micro    bigint      NOT NULL CHECK (frozen_micro > 0),
       attempt_count   int         NOT NULL DEFAULT 0,
       last_error      text        NULL,
       next_attempt_at timestamptz NOT NULL DEFAULT now(),
-      created_at      timestamptz NOT NULL DEFAULT now()
+      created_at      timestamptz NOT NULL DEFAULT now(),
+      updated_at      timestamptz NOT NULL DEFAULT now()
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS task_freeze_pending_task_idx
+      ON task_freeze_pending (task_id);
   CREATE INDEX IF NOT EXISTS task_freeze_pending_due_idx
-      ON task_freeze_pending (next_attempt_at);
+      ON task_freeze_pending (next_attempt_at, id);
   CREATE INDEX IF NOT EXISTS task_freeze_pending_user_task_idx
       ON task_freeze_pending (user_id, task_id);
   ```
@@ -580,12 +612,13 @@ DELETE FROM user_groups WHERE name='default';
   ```sql
   DROP INDEX IF EXISTS task_freeze_pending_user_task_idx;
   DROP INDEX IF EXISTS task_freeze_pending_due_idx;
+  DROP INDEX IF EXISTS task_freeze_pending_task_idx;
   DROP TABLE IF EXISTS task_freeze_pending;
   ```
 
 **【VERIFY】**
 - `psql -f 0012_task_freeze_pending.sql <db>` 通过。
-- `\d task_freeze_pending` 显示 8 列 + PK + 2 index。
+- `\d task_freeze_pending` 显示 9 列 + PK + 3 index。
 - `psql -f 0012_task_freeze_pending.down.sql <db>` 完整撤销。
 - W14-T11 的 CI gate 接受 Rust 端 `.down.sql` sidecar 模式（vs Go 端的 `-- +goose Down` 段）。
 
@@ -678,20 +711,22 @@ DELETE FROM user_groups WHERE name='default';
 - 文件 `ailinkmax-gateway/crates/gw-store/migrations/0014_billing_query_indexes.sql`：
   ```sql
   -- 0014_billing_query_indexes.sql - SLQ3 Rust portion. Covering indexes for
-  -- hot-path lookups in request_filter. Each candidate below MUST be
-  -- EXPLAIN-validated on staging before committing literal columns. Author:
-  -- replace TODO comments with verified column names from 0001_initial.sql.
+  -- gateway billing and routing hot-path lookups.
   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_vendor_keys_active_lookup
-      ON vendor_keys (vendor_id, key_id)
+      ON vendor_keys (id)
+      INCLUDE (version, quota_availability, quota_reset_at, quota_remaining, quota_limit)
       WHERE deleted_at IS NULL;
-  -- TODO(W14-T11 author): verify column list after EXPLAIN; add INCLUDE columns
-  -- only if the hot query reads them (excessive INCLUDE bloats the index).
-  CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_records_user_created
-      ON task_records (user_id, created_at DESC);
+  CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_records_user_status_created
+      ON task_records (user_id, status, created_at DESC)
+      INCLUDE (task_id, api_key_id, frozen_micro, actual_micro, settled_at);
+  CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_records_api_key_status_created
+      ON task_records (api_key_id, status, created_at DESC)
+      INCLUDE (task_id, user_id, frozen_micro, actual_micro, settled_at);
   ```
 - 配套 `ailinkmax-gateway/crates/gw-store/migrations/0014_billing_query_indexes.down.sql`：
   ```sql
-  DROP INDEX CONCURRENTLY IF EXISTS idx_task_records_user_created;
+  DROP INDEX CONCURRENTLY IF EXISTS idx_task_records_api_key_status_created;
+  DROP INDEX CONCURRENTLY IF EXISTS idx_task_records_user_status_created;
   DROP INDEX CONCURRENTLY IF EXISTS idx_vendor_keys_active_lookup;
   ```
 
@@ -845,10 +880,12 @@ DELETE FROM user_groups WHERE name='default';
 | 2026-06-17 | 计划起草 | v2 §5 WS-14 把"billing_indexes"放 Rust 0014，但 v1 SLQ3 描述指 Go 端 apikey 索引 | 拆为 Go-side W14-T07 `00073_billing_covering_indexes.sql` + Rust-side W14-T11 `0014_billing_query_indexes.sql` |
 | 2026-06-17 | 计划起草 | Rust 端 migrations 实读无 `-- +goose Up/Down` 标记，是裸 SQL（per ailinkmax-gateway CLAUDE.md：not auto-applied, run with `psql -f`） | Rust 端 down 走 `.down.sql` sidecar，W14-T12 脚本反序执行 |
 | 2026-06-17 | 计划起草 | Rust 已有 duplicate `0004_capabilities.sql` + `0004_task_worker.sql`（CLAUDE.md 显式承认） | W14-T13 CI gate 包含 whitelist；新增不得复制此模式 |
-| (待 author 填) | W14-T07 | api_keys 真实列名 = ? | (Read 后写入并修正本计划 §6 HOW) |
-| (待 author 填) | W14-T08 | user_groups 真实 schema = ? | (同上) |
-| (待 author 填) | W14-T11 | EXPLAIN 验证的 hot query plan = ? | (同上) |
-| (待 manager) | W14-T00 | Track G GitHub handle = ? | (CODEOWNERS 落地时回填) |
+| 2026-06-17 | W2-T23 | WS-2 要求 `quota_state_outbox`，但 §1.2 Rust migration 编号表未分配该表 | 追加 W14-T12 `0015_quota_state_outbox.sql` + `.down.sql` sidecar |
+| 2026-06-18 | W14-T07 | `api_keys` 真实列名为 `key_hash`, `user_id`, `is_standalone`, `is_active`, `is_locked`, `expires_at`, `signature_secret`, `deleted_at`；无 `status` 列 | `00073_billing_covering_indexes.sql` 改为 hash/id covering + wallet/payment billing covering indexes |
+| 2026-06-17 | W14-T08 | user_groups 真实 schema = `id TEXT PRIMARY KEY`, `name TEXT NOT NULL UNIQUE`, `created_at/updated_at BIGINT`; existing seed id/name = `ug_default`/`Default`; users.group_id already TEXT from 00031 | `00074_default_user_group_seed.sql` keeps `ug_default`, backfills NULL/blank, and only drops NOT NULL in Down |
+| 2026-06-18 | W14-T09 | `TaskId` 是 UUID newtype，`UserId` 是 String newtype；`task_records.user_id` 已是 TEXT | `0012_task_freeze_pending.sql` 使用 `task_id UUID`, `user_id TEXT`, `BIGSERIAL id`，避免新增 `gen_random_uuid()` 扩展依赖 |
+| 2026-06-18 | W14-T11 | `vendor_keys` 基础实体表无 `vendor_id`/`key_id` 列；查询主键为 `id`，quota 列来自 `0010_vendor_key_quota_state.sql`; `task_records` 来自 `0004_task_worker.sql` | `0014_billing_query_indexes.sql` 使用 `vendor_keys(id) INCLUDE (...)` 与 `task_records(user_id/api_key_id,status,created_at)` 覆盖索引；staging EXPLAIN 仍需在真实数据集上补证据 |
+| 2026-06-18 | W14-T00 | Track G GitHub handle 未在计划里给出；本地 CODEOWNERS 先绑定当前仓库 owner `@whereslow` | manager 若另有 Track G team slug，需后续替换 CODEOWNERS 同行 |
 
 **关联 INVESTIGATE-011（v2 §99）**：本计划全部 W14-T0N 任务都涉及 file:line 声明核对，每个 author 必须在 PR description 写"已 Read 以下 file:line 并核对一致：[列表]"。
 

@@ -1,6 +1,8 @@
 use gw_task::TaskKind;
 use serde::{Deserialize, Serialize};
 
+const VENDOR_FACTOR_MICRO_SCALE: u32 = 1_000_000;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TaskBillingConfig {
     pub base_micro: i64,
@@ -78,7 +80,30 @@ fn scaled_micro(
         return 0;
     }
 
-    let amount =
-        (base_micro as f64) * f64::from(kind_factor) * vendor_factor * f64::from(duration_factor);
-    amount.round().clamp(0.0, i64::MAX as f64) as i64
+    let vendor_factor_micro = vendor_factor_micro_units(vendor_factor);
+    if vendor_factor_micro == 0 {
+        return 0;
+    }
+
+    let amount = i128::from(base_micro)
+        .saturating_mul(i128::from(kind_factor))
+        .saturating_mul(i128::from(vendor_factor_micro))
+        .saturating_mul(i128::from(duration_factor));
+    let scale = i128::from(VENDOR_FACTOR_MICRO_SCALE);
+    let amount = amount.saturating_add(scale / 2) / scale;
+    amount.clamp(0, i128::from(i64::MAX)) as i64
+}
+
+fn vendor_factor_micro_units(vendor_factor: f64) -> u32 {
+    if vendor_factor.is_nan() || vendor_factor <= 0.0 {
+        return 0;
+    }
+    let scaled = vendor_factor * f64::from(VENDOR_FACTOR_MICRO_SCALE);
+    if scaled.is_infinite() {
+        return u32::MAX;
+    }
+    if !scaled.is_finite() || scaled <= 0.0 {
+        return 0;
+    }
+    scaled.round().clamp(0.0, f64::from(u32::MAX)) as u32
 }

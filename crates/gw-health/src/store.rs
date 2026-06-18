@@ -11,6 +11,11 @@ use gw_core::protocol::ApiFormat;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+type HealthTransitionObserver = Arc<dyn Fn(&KeyId, ApiFormat, bool) + Send + Sync>;
+
+const RETRY_AFTER_MIN_SECS: u32 = 1;
+const RETRY_AFTER_MAX_SECS: u32 = 3_600;
+
 fn current_epoch_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -34,6 +39,7 @@ fn health_snapshot(h: &FormatHealth, now: u64) -> HealthSnapshot {
 #[derive(Default)]
 pub struct KeyHealthStore {
     pub by_key_format: DashMap<(KeyId, ApiFormat), Arc<FormatHealth>>,
+    transition_observers: parking_lot::RwLock<Vec<HealthTransitionObserver>>,
 }
 
 /// Read-only snapshot returned by [`KeyHealthStore::peek`]. Does NOT trigger
@@ -70,6 +76,20 @@ impl KeyHealthStore {
             .entry((key.clone(), fmt))
             .or_insert_with(|| Arc::new(FormatHealth::new()))
             .clone()
+    }
+
+    pub fn register_transition_observer<F>(&self, observer: F)
+    where
+        F: Fn(&KeyId, ApiFormat, bool) + Send + Sync + 'static,
+    {
+        self.transition_observers.write().push(Arc::new(observer));
+    }
+
+    fn notify_transition(&self, key: &KeyId, fmt: ApiFormat, available: bool) {
+        let observers = self.transition_observers.read().clone();
+        for observer in observers {
+            observer(key, fmt, available);
+        }
     }
 
     pub fn is_available(&self, key: &KeyId, fmt: ApiFormat) -> bool {
@@ -126,6 +146,7 @@ impl KeyHealthStore {
 
     pub fn record(&self, key: &KeyId, fmt: ApiFormat, outcome: OutcomeKind) {
         let health = self.get_or_create(key, fmt);
+        let was_available = health.is_available();
         let ok = matches!(outcome, OutcomeKind::Success);
         health.record(ok);
         if let OutcomeKind::Failure {
@@ -133,23 +154,41 @@ impl KeyHealthStore {
             retry_after_secs,
         } = outcome
         {
-            if let Some(directive) = failure_payload_directive(http_status, retry_after_secs) {
+            if let Some(directive) =
+                failure_payload_directive(key.as_ref(), http_status, retry_after_secs)
+            {
                 health.apply_cooldown(directive);
             }
+        }
+        let is_available = health.is_available();
+        if was_available != is_available {
+            self.notify_transition(key, fmt, is_available);
         }
     }
 
     pub fn apply_cooldown(&self, key: &KeyId, fmt: ApiFormat, d: CooldownDirective) {
-        self.get_or_create(key, fmt).apply_cooldown(d);
+        let health = self.get_or_create(key, fmt);
+        let was_available = health.is_available();
+        health.apply_cooldown(d);
         metrics::counter!(
             "gw_health_apply_cooldown_total",
             "reason" => d.reason.label(),
         )
         .increment(1);
+        let is_available = health.is_available();
+        if was_available != is_available {
+            self.notify_transition(key, fmt, is_available);
+        }
     }
 
     pub fn clear_cooldown(&self, key: &KeyId, fmt: ApiFormat) {
-        self.get_or_create(key, fmt).clear_cooldown();
+        let health = self.get_or_create(key, fmt);
+        let was_available = health.is_available();
+        health.clear_cooldown();
+        let is_available = health.is_available();
+        if was_available != is_available {
+            self.notify_transition(key, fmt, is_available);
+        }
     }
 
     /// Full runtime reset of the `(key, fmt)` cell — empties the failure
@@ -158,8 +197,14 @@ impl KeyHealthStore {
     /// admin `reset-cost` control-plane command; distinct from
     /// [`Self::clear_cooldown`], which only lifts an explicit cooldown.
     pub fn reset_runtime(&self, key: &KeyId, fmt: ApiFormat) {
-        self.get_or_create(key, fmt).reset_runtime();
+        let health = self.get_or_create(key, fmt);
+        let was_available = health.is_available();
+        health.reset_runtime();
         metrics::counter!("gw_health_reset_runtime_total").increment(1);
+        let is_available = health.is_available();
+        if was_available != is_available {
+            self.notify_transition(key, fmt, is_available);
+        }
     }
 
     /// JSON snapshot of every `(key, format)` health row, intended for the
@@ -235,13 +280,14 @@ impl KeyHealthStore {
 }
 
 fn failure_payload_directive(
+    key: &str,
     http_status: u16,
     retry_after_secs: Option<u32>,
 ) -> Option<CooldownDirective> {
     match http_status {
         429 => Some(CooldownDirective {
             reason: CooldownReason::Status429RateLimit,
-            ttl_secs: retry_after_secs.unwrap_or(60),
+            ttl_secs: retry_after_ttl_secs(key, retry_after_secs, 60, "status429_rate_limit"),
             reset_consecutive: false,
         }),
         500..=599 => Some(CooldownDirective {
@@ -250,11 +296,30 @@ fn failure_payload_directive(
             } else {
                 CooldownReason::StatusTransient5xx
             },
-            ttl_secs: retry_after_secs.unwrap_or(30),
+            ttl_secs: retry_after_ttl_secs(key, retry_after_secs, 30, "status_transient_5xx"),
             reset_consecutive: false,
         }),
         _ => None,
     }
+}
+
+fn retry_after_ttl_secs(
+    key: &str,
+    retry_after_secs: Option<u32>,
+    default_secs: u32,
+    vendor: &'static str,
+) -> u32 {
+    let raw = retry_after_secs.unwrap_or(default_secs);
+    let clamped = raw.clamp(RETRY_AFTER_MIN_SECS, RETRY_AFTER_MAX_SECS);
+    if clamped != raw {
+        metrics::counter!(
+            "gw_health_cooldown_clamp_total",
+            "key" => key.to_string(),
+            "vendor" => vendor,
+        )
+        .increment(1);
+    }
+    clamped
 }
 
 fn snapshot_to_string(v: serde_json::Value) -> String {
@@ -333,6 +398,61 @@ mod snapshot_tests {
         let snap = store.peek(&key, ProtocolKind::OpenAi);
         assert!(snap.in_cooldown);
         assert_eq!(snap.cooldown_reason, CooldownReason::Status429RateLimit);
+    }
+
+    #[test]
+    fn record_429_clamps_retry_after_to_one_hour() {
+        let store = KeyHealthStore::default();
+        let key = KeyId::from("vk-429-long");
+        store.record(
+            &key,
+            ProtocolKind::OpenAi,
+            OutcomeKind::Failure {
+                http_status: 429,
+                retry_after_secs: Some(u32::MAX),
+            },
+        );
+        let snap = store.peek(&key, ProtocolKind::OpenAi);
+        let until = snap.cooldown_until_ms.expect("cooldown deadline");
+        let now = current_epoch_ms();
+
+        assert!(snap.in_cooldown);
+        assert_eq!(snap.cooldown_reason, CooldownReason::Status429RateLimit);
+        assert!(
+            until <= now + 3_600_000 + 1_000,
+            "retry_after must clamp to roughly one hour, got delta={}ms",
+            until.saturating_sub(now)
+        );
+    }
+
+    #[test]
+    fn transition_observer_fires_when_key_becomes_unavailable() {
+        let store = KeyHealthStore::default();
+        let key = KeyId::from("vk-observer");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_for_observer = seen.clone();
+        store.register_transition_observer(move |key_id, format, available| {
+            seen_for_observer.lock().unwrap().push((
+                key_id.as_ref().to_string(),
+                format.as_str().to_string(),
+                available,
+            ));
+        });
+
+        store.apply_cooldown(
+            &key,
+            ProtocolKind::OpenAi,
+            CooldownDirective {
+                reason: CooldownReason::Status429RateLimit,
+                ttl_secs: 60,
+                reset_consecutive: false,
+            },
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![("vk-observer".to_string(), "openai".to_string(), false)]
+        );
     }
 
     #[test]

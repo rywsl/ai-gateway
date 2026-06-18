@@ -37,6 +37,28 @@ fn test_settle_amount_calculation() {
 }
 
 #[test]
+fn vendor_multiplier_math_clamps_without_wrapping() {
+    let config = TaskBillingConfig {
+        base_micro: i64::MAX,
+        vendor_multiplier: f64::MAX,
+        estimated_duration_secs: u64::MAX,
+    };
+
+    assert_eq!(calculate_freeze_amount(TaskKind::Video, &config), i64::MAX);
+}
+
+#[test]
+fn vendor_multiplier_uses_micro_unit_quantization() {
+    let config = TaskBillingConfig {
+        base_micro: 1_001,
+        vendor_multiplier: 1.234_567,
+        estimated_duration_secs: 1,
+    };
+
+    assert_eq!(calculate_freeze_amount(TaskKind::Generic, &config), 1_236);
+}
+
+#[test]
 fn test_no_cost_per_token() {
     let src = fs::read_to_string("src/formulas.rs").expect("formulas source should be readable");
     let banned = ["cost_per_token", "price_per_token", "token_price"];

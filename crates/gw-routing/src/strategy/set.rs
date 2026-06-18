@@ -38,6 +38,7 @@ use crate::strategy::sticky::{Sticky, DEFAULT_STICKY_CAP, DEFAULT_STICKY_TTL_SEC
 use crate::strategy::weighted_rr::WeightedRr;
 use crate::strategy::StrategyAny;
 use gw_core::entity::StrategyKind;
+use gw_core::ids::KeyId;
 use moka::sync::Cache;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -165,6 +166,12 @@ impl StrategySet {
                 .increment(1);
                 &self.fixed_order
             }),
+        }
+    }
+
+    pub fn reset_weighted_rr_key(&self, key_id: &KeyId) {
+        if let StrategyAny::WeightedRr(weighted_rr) = &self.weighted_rr {
+            weighted_rr.reset_key(key_id);
         }
     }
 }

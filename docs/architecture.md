@@ -3,6 +3,10 @@
 > **Sync rule**: if you change the crate layout, layering invariants, traits, configuration tables, persistence namespaces, or background-task graph, update this file in the same commit. Code is the source of truth; this document is the index.
 >
 > Companion: [`workflow.md`](workflow.md) — what each filter does, per phase.
+>
+> CI deploy invariant note: `scripts/check-k3s-image-sync-ci.rb` was removed on
+> 2026-06-17; the Rust/Go deploy contract it encoded is preserved in
+> [`docs/spec/ci-deploy-contract.md`](spec/ci-deploy-contract.md).
 
 ## 1. What this gateway is
 
@@ -138,7 +142,7 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 | `[ledger]` | `channel_capacity`, `batch_size`, `flush_interval_ms` for the billing flusher | |
 | `[kms]` | active KEK identifier plus optional previous KEK identifier during rotation; secret material is env-only | `previous_key_id` / `previous_kek_hex` let a restarted gateway keep dual-read compatibility while old rows are re-encrypted. |
 | `[debug]` | Sampling rate + body-capture toggles for detailed logs | |
-| `[security]` | `trust_xff` (default `false`) | |
+| `[security]` / `[runtime]` | `trust_xff` (default `false`), `trusted_proxies` (default `[]`) | XFF is trusted only when enabled and the immediate peer is in a trusted CIDR. Production rejects `trust_xff=true` with an empty trusted proxy list. |
 | `[routing]` | `sticky_ttl_secs` (1800) | Routing knobs loaded at boot. `sticky_ttl_secs` controls Sticky's conversation binding TTL. |
 | `[routing.reservation]` | `enabled` (false), `interval_secs` (5), optional `instance_id`, `thresholds` (`HashMap<String,u64>`) | Local-read + async-aggregate reservation global view. Disabled by default, so no tracker or Redis task is allocated and the reservation gate always passes. When enabled, picks increment a local per-model atomic counter; a background task publishes model rates to `events:reservation` and consumes that stream into a local `DashMap`. Redis is never called from the request path. `thresholds` maps model glob-prefix patterns (`*`, exact names, or `prefix*`) to max RPM; if the local global rate for the request model exceeds the matched threshold, the pipeline gate stage excludes all candidates for that model before scoring. Models without a threshold pass and still receive any scoring-phase `reservation_pressure`. The view is explicitly 5-second eventual consistency in v1 (`interval_secs` controls the sampling/aggregation cadence). |
 | `[routing.presets]` | Multi-dim scheduling presets keyed by preset name; each value has `health`, `latency`, `cost`, `inflight`, `error_rate`, `reservation` weights | Boot-time only. Built-ins are `health_first`, `latency_first`, `cost_first`, and `balanced`; deployments may add custom preset names and select them with `StrategyKind::MultiDim("<name>")` in `model_groups.payload.strategy`. Weights are normalised at construction; all-zero weights become uniform. `reservation` defaults to 0 and only affects scoring when `[routing.reservation].enabled = true` has populated `CandidateFeatures.reservation_pressure`. |
@@ -160,11 +164,17 @@ Figment layering (low → high): `config/default.toml` → `config/local.toml` (
 
 Secrets must come from env, never the TOML.
 
-### 4.2 Env-var caveat
+### 4.2 Metric label cardinality
+
+Prometheus metric label names must stay low-cardinality and non-PII. `scripts/check-metric-labels.sh` enforces the M13 canonical banned set: `request_id`, `api_key_id`, `user_id`, `ip`, `ip_address`, `email`, `token`, `session_id`, `jti`, `refresh_token`, `access_token`, `hash`.
+
+The banned set intentionally excludes bounded enum labels used by the hard-mode credit-lease and runtime metrics, including `result`, `op`, `path`, `attempt_index`, and `model_id`. New metric labels must either be bounded enums or carry a local `allow-label` / `metric-label` comment with an operator-reviewed reason.
+
+### 4.3 Env-var caveat
 
 `GW_KMS__KEK_HEX` **must contain at least one a-f character**. Figment tries integer coercion first; an all-digit 64-char hex round-trips as `i64` and fails the hex parser downstream. Use `python3 -c 'import secrets; print(secrets.token_hex(32))'`. During a KEK rotation window, `GW_KMS__PREVIOUS_KEK_HEX` and `GW_KMS__PREVIOUS_KEY_ID` must be supplied together; the previous kid must differ from the active `GW_KMS__KEY_ID`.
 
-### 4.3 KEK rotation state machine
+### 4.4 KEK rotation state machine
 
 `crates/gw-store/src/encrypt.rs::KekCache`:
 
@@ -377,8 +387,14 @@ Active lints (all green at HEAD):
 | `managed_loop_advisory` (warn) | Long-loop `tokio::spawn` in gw-store/gw-ledger should use `ManagedLoop` + `Supervisor::spawn` (see `crates/gw-store/src/managed_loop.rs`). Warn-only during migration. |
 | `no_currency_in_lease` | Credit lease modules (`gw-ledger::lease`, `::coef`, `::credit_estimator`, `::counter_handler`) must hold only opaque credits; no currency / pricing references. See `2026-05-29-credit-lease-design.md` §2/§16. |
 | `supervisor_universal` | Every long-running tokio task runs under `gw_runtime::Supervisor`. The `managed_loop_advisory` lint is subsumed; new spawns must use `Supervisor::spawn` from the start. |
+| `oneshot_runtime_tasks` | One-shot runtime tasks that need I/O but no restart loop should use `gw_runtime::supervisor::one_shot_spawn`, which catches returned errors and panics and emits `gw_oneshot_total{task,result}`. `gw-store::managed_loop::Supervisor` remains only for `ManagedLoop` state-machine recovery. |
 | `backpressure_opaque_503` | The 503 returned by `BackpressureGate` must never reveal which hook tripped. The response body is the generic `GW_BACKPRESSURE_REJECTED` envelope; no hook-specific error code or header. |
 | `backlog_unbounded_by_construction` | `BillingBacklog` is an unbounded `VecDeque` — pressure shows as `gw_billing_backlog_pending_count` rising, not as dropped envelopes. The BackpressureGate at `early_request_filter` is the only shed point; once a `UsageRecord` exists, it must be delivered. |
+| `ws12_tokio_spawn_baseline` | `scripts/check-tokio-spawn.rs` freezes existing raw `tokio::spawn` call sites; new call sites must use supervised runtime paths or get explicit review. |
+| `ws12_money_cast_baseline` | `scripts/check-money-as-cast.sh` freezes existing money-sensitive `as` casts in billing/ledger/store; new casts require checked conversion or review. |
+| `ws12_rustpact_pv` | `scripts/check-rustpact-pv.sh` and `scripts/check-deploy-order.sh` guard protocol version bumps and Go/Rust deployment compatibility. |
+| `ws14_migration_numbers` | `scripts/check-migration-number.sh` freezes the WS-14 Rust migration ledger, requires `.down.sql` sidecars for `0012`..`0015`, and permits no duplicate prefix beyond the existing `0004_*` whitelist. |
+| `ws14_migration_roundtrip_static` | `scripts/verify-migrations-roundtrip.sh --static` checks local prerequisites for staging up/down/up validation and ensures the e2e runner skips `.down.sql` sidecars. |
 
 Pending lints (uncomment when target phase lands):
 
@@ -393,7 +409,7 @@ Pending lints (uncomment when target phase lands):
 | Behaviour | Reason | Source |
 |-----------|--------|--------|
 | `(x-api-key, x-api-key-id)` pair required | A BYOK gateway can't route by key prefix; the pair makes tenant routing explicit. Anthropic SDK clients must supply both. Missing either yields `GW_AUTH_INVALID_APIKEY` (deliberately generic). | `crates/gw-proxy/src/filters/request.rs` auth extraction |
-| `trust_xff = false` by default | With it off, the IP blocklist matches the L4 socket peer. Enabling it behind an untrusted L7 hop lets clients forge XFF and bypass the blocklist. Fail-closed. | `config/default.toml [security]`, `crates/gw-proxy/src/filters/early.rs` |
+| `trust_xff = false` and `trusted_proxies = []` by default | With it off, the IP blocklist matches the L4 socket peer. Enabling it only reads XFF when the immediate peer matches `[runtime].trusted_proxies`; production refuses an empty or wildcard trusted proxy list. Fail-closed. | `config/default.toml [security]/[runtime]`, `crates/gw-proxy/src/filters/early.rs` |
 | Distinct 429 codes | `GW_QUOTA_RPM_EXCEEDED` (gateway tripped per-user RPM) vs `GW_UPSTREAM_OVERLOADED` (upstream returned 429) — clients need to distinguish local vs upstream throttling. | `crates/gw-core/src/error/codes.rs` |
 | Body filter swaps at EOS only | Cross-protocol rewrites happen in `upstream_request_filter` and must reach the wire in one shot. Pre-EOS chunks are dropped. | `crates/gw-proxy/src/gateway.rs::request_body_filter` |
 | **`RequestBodyView` (`crates/gw-proxy/src/body/view.rs`) is the sole authority on request body bytes.** Three explicit states: `raw` (immutable on-wire), `decoded()` (`OnceCell`-cached lazy decompress, populated by HMAC verify via `prefill_decoded` so codec parse reuses), `outbound_or_raw()` (post-mutation outbound). `cached_body` field was deleted in Phase B of 2026-05-28-systemic-fixes. CI lint `no_cached_body` enforces. | Centralises decompress-once behaviour; eliminates the dual-semantic `cached_body` that required callers to know whether it held raw or decoded bytes. | `crates/gw-proxy/src/body/view.rs`, `crates/gw-proxy/src/filters/request.rs` step 7b → step 8, `scripts/check-invariants.sh` `no_cached_body` |

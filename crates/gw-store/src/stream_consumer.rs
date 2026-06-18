@@ -33,6 +33,8 @@ const ENTITY_STREAM: &str = "events:entity";
 const COUNTER_STREAM_PREFIX: &str = "events:counter:pod";
 const BLOCK_MS: u64 = 200;
 const COUNT_PER_POLL: u64 = 64;
+const PEL_MIN_IDLE_MS: u64 = 30_000;
+const PEL_RECLAIM_COUNT: u64 = 32;
 
 pub fn counter_stream_for_instance(instance_id: &str) -> String {
     format!("{COUNTER_STREAM_PREFIX}:{instance_id}")
@@ -103,6 +105,78 @@ impl StreamConsumer {
 
     fn counter_stream(&self) -> String {
         counter_stream_for_instance(&self.instance_id)
+    }
+
+    async fn reclaim_pending(
+        &self,
+        client: &fred::clients::RedisClient,
+        consumer_name: &str,
+        stream: &str,
+    ) -> Result<usize, fred::error::RedisError> {
+        let (_cursor, entries): (String, Vec<(String, HashMap<String, String>)>) = client
+            .xautoclaim_values(
+                stream,
+                &*self.instance_id,
+                consumer_name,
+                PEL_MIN_IDLE_MS,
+                "0-0",
+                Some(PEL_RECLAIM_COUNT),
+                false,
+            )
+            .await?;
+
+        for (entry_id, fields) in &entries {
+            self.apply(stream, fields).await;
+            let ack: Result<u64, _> = client
+                .xack(stream, &*self.instance_id, entry_id.clone())
+                .await;
+            if let Err(e) = ack {
+                tracing::warn!(
+                    target: "gw_store::stream_consumer",
+                    error = %e,
+                    stream = %stream,
+                    entry_id = %entry_id,
+                    "xack failed after xautoclaim; will be reclaimed again"
+                );
+            }
+        }
+        Ok(entries.len())
+    }
+
+    async fn reclaim_pending_streams(
+        &self,
+        client: &fred::clients::RedisClient,
+        consumer_name: &str,
+        counter_stream: &str,
+    ) {
+        for stream in [ENTITY_STREAM, counter_stream] {
+            match self.reclaim_pending(client, consumer_name, stream).await {
+                Ok(0) => {}
+                Ok(count) => {
+                    metrics::counter!(
+                        "gw_stream_consumer_xautoclaim_total",
+                        "stream" => stream.to_string()
+                    )
+                    .increment(count as u64);
+                }
+                Err(e) if is_nogroup_error(&e) => {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        error = %e,
+                        stream = %stream,
+                        "xautoclaim saw missing group; ensure will recreate"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "gw_store::stream_consumer",
+                        error = %e,
+                        stream = %stream,
+                        "xautoclaim failed; backing off to normal reads"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -236,6 +310,21 @@ mod counter_stream_tests {
             "events:counter:pod:pod-a"
         );
     }
+
+    #[test]
+    fn stream_consumer_reclaims_pel_with_xautoclaim() {
+        let src = include_str!("stream_consumer.rs");
+        let production_src = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(production_src.contains("xautoclaim_values"));
+        assert!(production_src.contains("PEL_MIN_IDLE_MS"));
+        assert!(production_src.contains("PEL_RECLAIM_COUNT"));
+        assert!(production_src.contains("self.apply(stream, fields).await"));
+        assert!(production_src.contains(".xack(stream, &*self.instance_id"));
+    }
 }
 
 fn is_nogroup_error(e: &fred::error::RedisError) -> bool {
@@ -258,6 +347,8 @@ impl ManagedLoop for StreamConsumer {
         let consumer_name = format!("{}-consumer", self.instance_id);
         let client = self.redis.pool.next();
         let counter_stream = self.counter_stream();
+        self.reclaim_pending_streams(&client, &consumer_name, counter_stream.as_str())
+            .await;
         // Raw xreadgroup: RESP Null on BLOCK timeout is handled explicitly.
         let raw: Result<RedisValue, fred::error::RedisError> = client
             .xreadgroup(

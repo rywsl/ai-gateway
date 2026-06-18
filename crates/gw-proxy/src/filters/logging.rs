@@ -152,7 +152,7 @@ pub async fn run(
             Ok(actual) => {
                 if actual > guard.reserved() {
                     metrics::counter!(
-                        "gw_credit_actual_exceeds_reserved_total",
+                        gw_ledger::metrics::CREDIT_ACTUAL_EXCEEDS_RESERVED_TOTAL,
                         "model_id" => model_name.clone(),
                     )
                     .increment(1);
@@ -373,7 +373,7 @@ pub async fn run(
         if tpm_tokens > 0 {
             metrics::counter!(
                 "gateway_tpm_consumed_total",
-                "user_id" => effective.to_string(),
+                "role" => if auth_user_id == effective { "primary" } else { "subaccount" },
             )
             .increment(tpm_tokens);
 

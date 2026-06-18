@@ -12,11 +12,11 @@
 Per v2 §0 重要 2: sonnet output is **hypothesis, not conclusion**. Before starting any task below, the executor MUST:
 
 1. Read each `file:line` cited in §1 (the API change inventory). If the literal code disagrees with the description here, **source code wins**; record the divergence in `docs/issues/2026-06-17-investigates/WS-11-discrepancy.md` and adjust the affected task.
-2. INVESTIGATE-012 (open): `frontend/src/api/client.ts:213` currently treats `status===403 && body.detail==='license_required'` as the license trigger. The Rust+Go gateway design (v1 §S5.1, v2 REV-FINAL-V13) specifies **HTTP 402 + `X-Reason: license_required` response header**. This sub-plan assumes the gateway lands the 402 first (T-WS11-02), then the frontend follows (T-WS11-04). Verify the Go-side license middleware PR is merged and emits 402 before merging the frontend swap.
-3. INVESTIGATE-013 (open): `ErrPaymentStillProcessing` does not yet exist in `modules/wallet/business/service.go` — only refund-related code is at line 539. v1 §S1.* introduces it. Verify the Go error sentinel is added (WS-1 owner) before frontend wires `payment_still_processing` UX.
+2. INVESTIGATE-012 (closed 2026-06-18): Go-side license middleware emits **HTTP 402 + `X-Reason: license_required`** in enforce mode (`modules/license/api/middleware.go`) and warn mode emits `X-License-Warning`. `frontend/src/api/client.ts` now handles the 402/header path.
+3. INVESTIGATE-013 (closed 2026-06-18): the sentinel lives in `modules/payment/business/refunds.go` as `ErrPaymentStillProcessing`; user/admin payment handlers map it to HTTP 409 Conflict with the `payment_still_processing` error path.
 4. Verified facts (already cross-checked against repo):
    - `GW_UPSTREAM_PROTOCOL_DECODE_ERROR` constant exists: `ailinkmax-gateway/crates/gw-core/src/error/codes.rs:97`.
-   - Six distinct mgmt-token codes exist today: `codes.rs:132-137` (`GW_AUTH_MGMT_TOKEN_MISSING|INVALID|EXPIRED|DISABLED|REVOKED|SCOPE_DENIED`). The collapse to single `GW_AUTH_FAILED` is a v1 §S5.18 design change; the Rust constant `GW_AUTH_FAILED` does **not yet exist** — confirm it lands as part of WS-5 F2 Track before merging T-WS11-05.
+   - `GW_AUTH_FAILED` exists and is used by the Rust management-token HTTP path (`gw-core/src/error/codes.rs`, `gw-auth/src/mgmt.rs`). The granular `GW_AUTH_MGMT_TOKEN_*` constants remain for internal drilldown and legacy references only.
    - `e2e-fake-web/src/store.rs:55` comment already notes a similar collapse intent for JWT codes (`GW_AUTH_JWT_INVALID_ISS/AUD` → `GW_AUTH_INVALID_JWT`); cross-check the same pattern applies to mgmt collapse.
 
 ---
@@ -401,11 +401,11 @@ function explain(error: unknown): string {
 **【如何验证 VERIFY】**
 1. `git grep -E 'GW_AUTH_MGMT_TOKEN_' frontend/src/` returns ZERO matches after the edit.
 2. `pnpm tsc --noEmit && pnpm vitest run src/api/__tests__/management-tokens.spec.ts` green.
-3. INVESTIGATE-002 (v2 §99): cross-reference with WS-5 F2 owner that the Rust constant `GW_AUTH_FAILED` is published in `crates/gw-core/src/error/codes.rs` and used by the mgmt path; verified-absent in `codes.rs:132-137` today, so this task **blocks** on Rust-side landing.
+3. INVESTIGATE-002 (closed 2026-06-18): `GW_AUTH_FAILED` is published in `crates/gw-core/src/error/codes.rs` and used by `crates/gw-auth/src/mgmt.rs`; this task no longer blocks on Rust-side landing.
 4. Output `logs/T-WS11-05-verify.txt` with zero-match grep output.
 
 **【依赖 + 对抗复审】**
-- Depends on: T-WS11-01, WS-5 Track F2 publishes `GW_AUTH_FAILED` constant.
+- Depends on: T-WS11-01; Rust `GW_AUTH_FAILED` publication is already landed.
 - Blocks: nothing (other than user-visible cleanup).
 - Adversarial review: ask sonnet to grep for any code outside frontend (docs, e2e) that still references the six legacy codes — document the cleanup in WS-12 lint.
 
@@ -491,7 +491,7 @@ config.headers[NONCE_HEADER] = crypto.randomUUID()
 **【如何验证 VERIFY】**
 1. Negative-case audit: `git grep -E '(X-Signature|HMAC)' frontend/src/` finds zero (expected) → record in `logs/T-WS11-07-audit.txt`.
 2. Positive-case (if any HMAC client found): vitest mock returns 403 + `GW_AUTH_REPLAY_DETECTED` once → retry happens once, second nonce differs.
-3. INVESTIGATE-014: confirm the Rust gateway parses header `X-Nonce` (not `X-Signature-Nonce` or `X-Idem-Nonce`); read Rust HMAC code under `crates/gw-proxy/src/auth/` (search). If header name differs, update `NONCE_HEADER` constant.
+3. INVESTIGATE-014 (closed 2026-06-18): Rust request parsing reads nonce from `x-nonce` in `crates/gw-proxy/src/filters/request.rs`; `NONCE_HEADER = "X-Nonce"` is correct. See `docs/issues/2026-06-17-investigates/WS-11-hmac-nonce-audit.md`.
 
 **【依赖 + 对抗复审】**
 - Depends on: T-WS11-01.
@@ -573,7 +573,7 @@ this.client.interceptors.response.use((response) => {
 
 **【为什么 Why this exists】**
 - v1 §4 WS-1 line 268: `Refund.Create` returns `ErrPaymentStillProcessing` when `payment_outbox` row for the payment is not yet `committed`. If frontend treats this as a generic 4xx, the operator sees "refund failed" and may try a workaround that double-refunds.
-- INVESTIGATE-013: HTTP mapping (409 vs 422) is undefined in v1; this plan assumes 409 Conflict (the canonical "concurrent state" code). Confirm with WS-1 Track A1 owner.
+- INVESTIGATE-013 is closed: Go handlers map `ErrPaymentStillProcessing` to HTTP 409 Conflict.
 
 **【做什么 DO】**
 1. Add the constant `PAYMENT_STILL_PROCESSING` to T-WS11-01 (already listed).
@@ -622,7 +622,7 @@ export async function refundPayment(paymentId: string): Promise<RefundResult> {
 4. Output `logs/T-WS11-09-verify.txt`.
 
 **【依赖 + 对抗复审】**
-- Depends on: T-WS11-01; WS-1 Track A1 publishes `ErrPaymentStillProcessing` with HTTP mapping (INVESTIGATE-013).
+- Depends on: T-WS11-01; WS-1 Track A1 sentinel and 409 HTTP mapping are already landed.
 - Blocks: none.
 - Adversarial review: sonnet checks (a) the Go-side `Refund.Create` actually returns the sentinel before any DB write side-effect; (b) HTTP layer maps it to 409 (not 422 / not 500); (c) the body shape matches `GatewayErrorBody`.
 
@@ -692,10 +692,10 @@ fi
 D0:  T-WS11-01 (constants module)
 D1:  T-WS11-02 verify (after WS-5 F1 lands 402) → T-WS11-03 (route contract)
 D2:  T-WS11-04 (interceptor swap)    + T-WS11-06 (R7 audit, likely no-op) in parallel
-D3:  T-WS11-05 (GW_AUTH_FAILED, after WS-5 F2 lands Rust constant)
+D3:  T-WS11-05 (GW_AUTH_FAILED, Rust constant already landed)
      T-WS11-07 (HMAC nonce audit, likely no-op for browser)
 D4:  T-WS11-08 (X-Request-Id capture)
-     T-WS11-09 (PAYMENT_STILL_PROCESSING, after WS-1 A1 lands sentinel)
+     T-WS11-09 (PAYMENT_STILL_PROCESSING, sentinel already landed)
 D5:  T-WS11-10 (CI gate) + final integration `make test-frontend`
 ```
 
@@ -703,14 +703,14 @@ Total: ~3-4 person-days as estimated in v2 §2 REV-001 table.
 
 ---
 
-## 4. Open INVESTIGATEs (carry into v2 §99)
+## 4. Investigation Closure Ledger
 
-| ID | Question | Owner |
+| ID | Result | Evidence |
 |---|---|---|
-| INVESTIGATE-012 | License middleware: does Go actually emit 402 + `X-Reason` header as v1 §S5.1 specifies, or did the F1 implementation drift to 403/body? | T-WS11-02 |
-| INVESTIGATE-013 | HTTP mapping for `ErrPaymentStillProcessing` — 409 or 422? | WS-1 A1 + T-WS11-09 |
-| INVESTIGATE-014 | Exact Rust HMAC nonce header name — `X-Nonce`, `X-Signature-Nonce`, `X-Idem-Nonce`? | T-WS11-07 |
-| INVESTIGATE-015 | Does any non-frontend caller in this repo (e2e harness, ops scripts) already consume the legacy six mgmt-token codes and require coordinated removal alongside T-WS11-05? | T-WS11-05 |
+| INVESTIGATE-012 | Closed: Go emits 402 + `X-Reason: license_required`; frontend handles it. | `modules/license/api/middleware.go`, `frontend/src/api/client.ts` |
+| INVESTIGATE-013 | Closed: `ErrPaymentStillProcessing` maps to HTTP 409 Conflict. | `modules/payment/business/refunds.go`, `modules/payment/api/handlers_{admin,user}.go` |
+| INVESTIGATE-014 | Closed: Rust nonce wire header is `X-Nonce`. | `docs/issues/2026-06-17-investigates/WS-11-hmac-nonce-audit.md` |
+| INVESTIGATE-015 | Closed: browser frontend has no legacy six-code consumer; Go e2e example comments/assertions were updated to `GW_AUTH_FAILED`; Rust e2e already asserts collapsed public code. | `docs/issues/2026-06-17-investigates/WS-11-mgmt-code-collapse-audit.md` |
 
 ---
 

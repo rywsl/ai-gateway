@@ -57,15 +57,19 @@ pub trait TaskFreezeRelease: Send + Sync {
         &self,
         uid: &UserId,
         task_id: &str,
-        frozen_amount: u64,
+        frozen_amount: i64,
     ) -> Result<ReleaseOutcome, anyhow::Error>;
 }
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("freeze amount {0} exceeds i64::MAX")]
+pub struct FreezeAmountOverflow(pub u64);
 
 /// Per-request freeze. Mutates the in-process `DeductionState.frozen_micro`
 /// only — Redis sync is handled via C-γ §ADR-Cγ-3.
 pub struct RequestFreeze {
     pub(crate) uid: UserId,
-    pub(crate) freeze_amount: u64,
+    pub(crate) freeze_amount: i64,
     pub(crate) released: AtomicBool,
     pub(crate) state: Arc<DeductionState>,
 }
@@ -73,7 +77,8 @@ pub struct RequestFreeze {
 impl RequestFreeze {
     /// Reserve `amount` micro-units against the user's `frozen_micro`.
     /// The returned guard MUST be released (explicitly or via `Drop`).
-    pub fn new(uid: UserId, amount: u64) -> Self {
+    pub fn new(uid: UserId, amount: u64) -> Result<Self, FreezeAmountOverflow> {
+        let amount = i64::try_from(amount).map_err(|_| FreezeAmountOverflow(amount))?;
         let state = DEDUCT
             .entry(uid.clone())
             .or_insert_with(|| {
@@ -84,16 +89,14 @@ impl RequestFreeze {
                 })
             })
             .clone();
-        state
-            .frozen_micro
-            .fetch_add(amount as i64, Ordering::AcqRel);
-        crate::flusher::enqueue_frozen_delta(&uid, amount as i64);
-        Self {
+        state.frozen_micro.fetch_add(amount, Ordering::AcqRel);
+        crate::flusher::enqueue_frozen_delta(&uid, amount);
+        Ok(Self {
             uid,
             freeze_amount: amount,
             released: AtomicBool::new(false),
             state,
-        }
+        })
     }
 }
 
@@ -103,7 +106,7 @@ impl FreezeGuard for RequestFreeze {
     }
 
     fn freeze_amount(&self) -> u64 {
-        self.freeze_amount
+        self.freeze_amount as u64
     }
 
     fn uid(&self) -> &UserId {
@@ -120,8 +123,8 @@ impl FreezeGuard for RequestFreeze {
         }
         self.state
             .frozen_micro
-            .fetch_sub(self.freeze_amount as i64, Ordering::AcqRel);
-        crate::flusher::enqueue_frozen_delta(&self.uid, -(self.freeze_amount as i64));
+            .fetch_sub(self.freeze_amount, Ordering::AcqRel);
+        crate::flusher::enqueue_frozen_delta(&self.uid, -self.freeze_amount);
     }
 }
 
@@ -133,8 +136,8 @@ impl Drop for RequestFreeze {
         if !self.released.swap(true, Ordering::AcqRel) {
             self.state
                 .frozen_micro
-                .fetch_sub(self.freeze_amount as i64, Ordering::AcqRel);
-            crate::flusher::enqueue_frozen_delta(&self.uid, -(self.freeze_amount as i64));
+                .fetch_sub(self.freeze_amount, Ordering::AcqRel);
+            crate::flusher::enqueue_frozen_delta(&self.uid, -self.freeze_amount);
             metrics::counter!("gateway_freeze_leak_recovered_total").increment(1);
         }
     }
@@ -145,7 +148,7 @@ impl Drop for RequestFreeze {
 pub struct TaskFreeze {
     pub(crate) uid: UserId,
     pub(crate) task_id: String,
-    pub(crate) freeze_amount: u64,
+    pub(crate) freeze_amount: i64,
     pub(crate) released: AtomicBool,
     pub(crate) releaser: Option<Arc<dyn TaskFreezeRelease>>,
 }
@@ -156,14 +159,15 @@ impl TaskFreeze {
         task_id: impl Into<String>,
         amount: u64,
         releaser: Option<Arc<dyn TaskFreezeRelease>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, FreezeAmountOverflow> {
+        let amount = i64::try_from(amount).map_err(|_| FreezeAmountOverflow(amount))?;
+        Ok(Self {
             uid,
             task_id: task_id.into(),
             freeze_amount: amount,
             released: AtomicBool::new(false),
             releaser,
-        }
+        })
     }
 }
 
@@ -173,7 +177,7 @@ impl FreezeGuard for TaskFreeze {
     }
 
     fn freeze_amount(&self) -> u64 {
-        self.freeze_amount
+        self.freeze_amount as u64
     }
 
     fn uid(&self) -> &UserId {
@@ -212,5 +216,68 @@ impl FreezeGuard for TaskFreeze {
 impl Drop for TaskFreeze {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FreezeGuard, RequestFreeze, TaskFreeze};
+    use gw_core::ids::UserId;
+    use gw_store::deduction::DEDUCT;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn overflow_rejected() {
+        let overflow = match RequestFreeze::new(UserId::from("u-freeze-overflow"), u64::MAX) {
+            Ok(_) => panic!("amounts above i64::MAX must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(overflow.0, u64::MAX);
+
+        let max = RequestFreeze::new(UserId::from("u-freeze-i64-max"), i64::MAX as u64)
+            .expect("i64::MAX remains a valid freeze amount");
+        assert_eq!(max.freeze_amount(), i64::MAX as u64);
+        max.release();
+
+        let zero = RequestFreeze::new(UserId::from("u-freeze-zero"), 0)
+            .expect("zero remains a valid freeze amount");
+        assert_eq!(zero.freeze_amount(), 0);
+        zero.release();
+    }
+
+    #[test]
+    fn task_freeze_overflow_rejected() {
+        let overflow = match TaskFreeze::new(
+            UserId::from("u-task-freeze-overflow"),
+            "task-overflow",
+            u64::MAX,
+            None,
+        ) {
+            Ok(_) => panic!("task freeze amounts above i64::MAX must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(overflow.0, u64::MAX);
+
+        let max = TaskFreeze::new(
+            UserId::from("u-task-freeze-i64-max"),
+            "task-i64-max",
+            i64::MAX as u64,
+            None,
+        )
+        .expect("i64::MAX remains a valid task freeze amount");
+        assert_eq!(max.freeze_amount(), i64::MAX as u64);
+        max.release();
+    }
+
+    #[test]
+    fn release_idempotent_after_i64_internal_amount() {
+        let uid = UserId::from("u-freeze-release-idempotent-i64");
+        let guard = RequestFreeze::new(uid.clone(), 1000).expect("valid freeze");
+        guard.release();
+        guard.release();
+
+        let state = DEDUCT.get(&uid).unwrap().clone();
+        assert_eq!(state.frozen_micro.load(Ordering::Relaxed), 0);
+        assert_eq!(state.deducted_micro.load(Ordering::Relaxed), 0);
     }
 }

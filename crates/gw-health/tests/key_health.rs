@@ -241,3 +241,31 @@ fn half_open_failure_reopens() {
         "a fresh probe is admitted once the re-armed hold elapses"
     );
 }
+
+#[test]
+fn half_open_success_closes_even_with_dirty_failure_window() {
+    use gw_health::format_health::FormatHealth;
+    use std::sync::atomic::Ordering;
+
+    let h = FormatHealth::new();
+    for _ in 0..20 {
+        h.record(false);
+    }
+    h.circuit
+        .store(CircuitState::Open.as_u8(), Ordering::Release);
+    h.open_until_ms.store(0, Ordering::Release);
+    assert!(h.is_available(), "probe slot claimed");
+    assert_eq!(
+        CircuitState::from_u8(h.circuit.load(Ordering::Acquire)),
+        CircuitState::HalfOpen,
+    );
+
+    h.record(true);
+
+    assert_eq!(
+        CircuitState::from_u8(h.circuit.load(Ordering::Acquire)),
+        CircuitState::Closed,
+        "half-open success must win before stale failure-window trip logic"
+    );
+    assert!(h.is_available(), "closed circuit should be routable again");
+}

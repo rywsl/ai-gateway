@@ -4,7 +4,7 @@ use fred::types::{RedisValue, XReadResponse};
 use gw_core::ids::ModelName;
 use gw_store::redis_client::RedisCtx;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
@@ -130,6 +130,7 @@ pub struct ReservationGlobalView {
     by_model: DashMap<ModelName, GlobalModelView>,
     by_model_instance: DashMap<(ModelName, String), InstanceRate>,
     gate: ReservationGate,
+    received_event: AtomicBool,
 }
 
 impl ReservationGlobalView {
@@ -142,6 +143,7 @@ impl ReservationGlobalView {
             by_model: DashMap::new(),
             by_model_instance: DashMap::new(),
             gate,
+            received_event: AtomicBool::new(false),
         }
     }
 
@@ -153,12 +155,17 @@ impl ReservationGlobalView {
         self.gate.allows(model, Some(self))
     }
 
+    pub fn has_received_event(&self) -> bool {
+        self.received_event.load(Ordering::Acquire)
+    }
+
     pub fn pressure_for(&self, model: &ModelName) -> Option<f64> {
         self.get(model)
             .map(|view| reservation_pressure(view.total_rate))
     }
 
     pub fn apply_event(&self, event: ReservationEvent) {
+        self.received_event.store(true, Ordering::Release);
         self.by_model_instance.insert(
             (event.model.clone(), event.instance_id),
             InstanceRate {

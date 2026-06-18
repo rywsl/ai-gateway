@@ -437,6 +437,10 @@ pub struct ReqCtx {
     /// Read by `logging` to surface the right `GW_*` code in metrics / detailed
     /// logs. `None` on the happy path.
     pub upstream_error_code: Option<&'static str>,
+    /// WS-15/T15.7 rollout flag. When true, a non-stream upstream
+    /// `parse_response` failure is surfaced as a deterministic 502-style
+    /// decode error instead of preserving the legacy vendor-body pass-through.
+    pub r7_502_on_parse_fail: bool,
     /// Human-readable upstream error detail. Set by `response_filter` from the
     /// `X-Egress-Error-Detail` header when the loopback egress reports a
     /// transport failure. Surfaced in detailed logs / error_emit. `None` on
@@ -468,6 +472,7 @@ pub struct ReqCtx {
     pub signature_algo: gw_core::entity::SignatureAlgo,
     pub signature_received: Option<Vec<u8>>,
     pub signature_timestamp: Option<String>,
+    pub signature_nonce: Option<String>,
     pub req_content_encoding: gw_codec::compression::Encoding,
     /// Upstream RESPONSE content-encoding, captured in `response_filter` before
     /// the cross-protocol header strip so `handle_non_stream_chunk` can decode
@@ -671,6 +676,7 @@ impl ReqCtx {
             stream_probe_retry_pending: false,
             retry_blacklist: Vec::new(),
             upstream_error_code: None,
+            r7_502_on_parse_fail: false,
             upstream_error_detail: None,
             pending_client_body: None,
             error_outcome: None,
@@ -680,6 +686,7 @@ impl ReqCtx {
             signature_algo: gw_core::entity::SignatureAlgo::default(),
             signature_received: None,
             signature_timestamp: None,
+            signature_nonce: None,
             req_content_encoding: gw_codec::compression::Encoding::Identity,
             resp_content_encoding: gw_codec::compression::Encoding::Identity,
             signature_secret: Vec::new(),

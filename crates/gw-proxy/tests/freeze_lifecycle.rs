@@ -32,7 +32,7 @@ fn release_zeros_frozen_and_leaves_deducted_alone() {
     let before_frozen = frozen(&uid);
     let before_deducted = deducted(&uid);
 
-    let guard = RequestFreeze::new(uid.clone(), 1_000);
+    let guard = RequestFreeze::new(uid.clone(), 1_000).expect("valid request freeze");
     assert_eq!(frozen(&uid), before_frozen + 1_000);
 
     guard.release();
@@ -54,7 +54,7 @@ fn drop_without_release_rolls_back_frozen() {
     let before_frozen = frozen(&uid);
 
     {
-        let _guard = RequestFreeze::new(uid.clone(), 500);
+        let _guard = RequestFreeze::new(uid.clone(), 500).expect("valid request freeze");
         assert_eq!(frozen(&uid), before_frozen + 500);
     }
     assert_eq!(frozen(&uid), before_frozen);
@@ -65,7 +65,7 @@ fn double_release_is_idempotent() {
     let uid = UserId::from("freeze_proxy_double");
     let before_deducted = deducted(&uid);
 
-    let guard = RequestFreeze::new(uid.clone(), 100);
+    let guard = RequestFreeze::new(uid.clone(), 100).expect("valid request freeze");
     guard.release();
     guard.release();
     assert_eq!(deducted(&uid), before_deducted);
@@ -74,7 +74,8 @@ fn double_release_is_idempotent() {
 #[test]
 fn trait_object_release_dispatches() {
     let uid = UserId::from("freeze_proxy_trait_obj");
-    let g: Box<dyn FreezeGuard> = Box::new(RequestFreeze::new(uid.clone(), 250));
+    let g: Box<dyn FreezeGuard> =
+        Box::new(RequestFreeze::new(uid.clone(), 250).expect("valid request freeze"));
     assert_eq!(g.freeze_amount(), 250);
     g.release();
     assert_eq!(frozen(&uid), 0);

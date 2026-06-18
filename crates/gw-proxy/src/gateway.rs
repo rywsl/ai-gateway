@@ -330,12 +330,13 @@ pub struct LlmGateway {
     pub global_rpm: u32,
     pub admin_upstream_url: Url,
     /// When `true`, parse the client IP from the `X-Forwarded-For` header
-    /// (using the first / left-most entry, which represents the original
-    /// client per RFC 7239 convention). When `false`, use the L4 socket
-    /// peer address only. Default is `false` so a misconfigured deployment
-    /// does not silently bypass IP blocklisting via a forged header.
+    /// only if the immediate peer is in `trusted_proxies`. When `false`, use
+    /// the L4 socket peer address only. Default is `false` so a misconfigured
+    /// deployment does not silently bypass IP blocklisting via a forged header.
     pub trust_xff: bool,
+    pub trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     pub signature_required: bool,
+    pub signature_replay: Arc<gw_auth::signature::ReplayChecker>,
     pub task_enabled: bool,
     pub task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
     pub task_billing_config: Option<gw_billing::TaskBillingConfig>,
@@ -400,6 +401,8 @@ pub struct LlmGateway {
     /// capture a final usage frame the vendor may still be sending.
     /// Populated from `cfg.billing.cancel_grace_ms` at boot time.
     pub(crate) cancel_grace_ms: u64,
+    /// WS-15/T15.7 rollout flag for non-stream response parse failures.
+    pub(crate) r7_502_on_parse_fail: bool,
     /// Hard-cap configuration (ADR-024). Threaded from `cfg.auth.*` at boot.
     pub(crate) hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
     /// Credit-lease protection-mode config (Spec 2026-05-29-credit-lease-design).
@@ -457,7 +460,9 @@ impl LlmGateway {
         global_rpm: u32,
         admin_upstream_url: Url,
         trust_xff: bool,
+        trusted_proxies: Arc<Vec<ipnet::IpNet>>,
         signature_required: bool,
+        signature_replay: Arc<gw_auth::signature::ReplayChecker>,
         task_enabled: bool,
         task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
         task_billing_config: Option<gw_billing::TaskBillingConfig>,
@@ -477,6 +482,7 @@ impl LlmGateway {
         inflight: std::sync::Arc<gw_ledger::inflight::InflightLedger>,
         response_deadline_ms: u64,
         cancel_grace_ms: u64,
+        r7_502_on_parse_fail: bool,
         hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
         protection_cfg: gw_ledger::ProtectionConfig,
         overflow_gate: std::sync::Arc<gw_ledger::overflow::OverflowGate>,
@@ -516,7 +522,9 @@ impl LlmGateway {
             global_rpm,
             admin_upstream_url,
             trust_xff,
+            trusted_proxies,
             signature_required,
+            signature_replay,
             task_enabled,
             task_contract,
             task_billing_config,
@@ -536,6 +544,7 @@ impl LlmGateway {
             inflight,
             response_deadline_ms,
             cancel_grace_ms,
+            r7_502_on_parse_fail,
             hard_cap_cfg,
             protection_cfg,
             overflow_gate,
@@ -825,6 +834,7 @@ impl ProxyHttp for LlmGateway {
         ctx.turn_state_cache = Some(self.turn_state_cache.clone());
         ctx.spill_root = self.spill_root.clone();
         ctx.archive_caps = self.archive_caps;
+        ctx.r7_502_on_parse_fail = self.r7_502_on_parse_fail;
         ctx
     }
 
@@ -839,6 +849,7 @@ impl ProxyHttp for LlmGateway {
                 ip_ratelimit: &self.ip_ratelimit,
                 ip_allowlist_mode: self.ip_allowlist_mode,
                 trust_xff: self.trust_xff,
+                trusted_proxies: &self.trusted_proxies,
             },
         )
         .await
@@ -861,7 +872,9 @@ impl ProxyHttp for LlmGateway {
             &self.counters,
             self.global_rpm,
             self.trust_xff,
+            &self.trusted_proxies,
             self.signature_required,
+            &self.signature_replay,
             self.task_enabled,
             self.task_contract.as_deref(),
             self.task_billing_config,

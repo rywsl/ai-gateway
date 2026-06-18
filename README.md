@@ -9,6 +9,7 @@ A Rust LLM gateway built on Pingora 0.8. Terminates OpenAI-, Anthropic-, and Gem
 - **Request lifecycle (bootstrap, every filter phase, error fanout, streaming, cache invalidation)** → [`docs/workflow.md`](docs/workflow.md).
 - **Per-machine dev setup (Postgres, Redis, Docker)** → [`docs/dev-setup.md`](docs/dev-setup.md).
 - **Authoritative as-built design** → [`docs/spec/`](docs/spec/). **Roadmap + implementation status** → [`docs/ROADMAP.md`](docs/ROADMAP.md). **Operational gotchas** → [`docs/issues/`](docs/issues/).
+- **Security disclosure and WS-16 artifacts** → [`SECURITY.md`](SECURITY.md) and [`docs/security/INDEX.md`](docs/security/INDEX.md).
 
 ## Quick start
 

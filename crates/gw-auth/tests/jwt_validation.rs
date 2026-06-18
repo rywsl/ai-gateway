@@ -55,6 +55,7 @@ fn cfg(secret: &[u8], iss: &str, aud: &str, leeway: u32, require_nbf: bool) -> J
         expected_aud: smallvec![aud.into()],
         leeway_secs: leeway,
         require_nbf,
+        ..JwtValidatorConfig::default()
     }
 }
 
@@ -75,6 +76,27 @@ async fn rejects_aud_mismatch() {
     let v = JwtValidator::new(cfg(secret, "good", "gw", 30, true));
     let err = v.validate::<Claims>(&token).await.unwrap_err();
     assert_eq!(err, JwtError::InvalidAud);
+}
+
+#[tokio::test]
+async fn strict_claims_false_tolerates_iss_and_aud_mismatch() {
+    let secret = b"secret";
+    let token = make_token(secret, "evil", "unexpected", 60, -1);
+    let v = JwtValidator::new(JwtValidatorConfig {
+        static_secret_hs256: Some(secret.to_vec()),
+        static_pem_rs256: None,
+        expected_iss: smallvec!["good".into()],
+        expected_aud: smallvec!["gw".into()],
+        leeway_secs: 30,
+        require_nbf: true,
+        strict_claims: false,
+        ..JwtValidatorConfig::default()
+    });
+
+    let claims = v.validate::<Claims>(&token).await.unwrap();
+    assert_eq!(claims.sub, "u1");
+    assert_eq!(claims.iss, "evil");
+    assert_eq!(claims.aud, "unexpected");
 }
 
 #[tokio::test]
@@ -132,6 +154,7 @@ async fn validate_sub_extracts_token_version() {
         expected_aud: smallvec![],
         leeway_secs: 0,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
 
     let (uid, jti, tv) = v.validate_sub(&token).await.unwrap();
@@ -160,6 +183,7 @@ async fn validate_sub_missing_token_version_is_none() {
         expected_aud: smallvec![],
         leeway_secs: 0,
         require_nbf: false,
+        ..JwtValidatorConfig::default()
     });
 
     let (_, _, tv) = v.validate_sub(&token).await.unwrap();

@@ -64,7 +64,9 @@ pub async fn run(
     counters: &Arc<CounterStore>,
     global_rpm: u32,
     trust_xff: bool,
+    trusted_proxies: &Arc<Vec<ipnet::IpNet>>,
     signature_required: bool,
+    signature_replay: &Arc<gw_auth::signature::ReplayChecker>,
     task_enabled: bool,
     task_contract: Option<&gw_task::redis_contract::RedisTaskContract>,
     task_billing_config: Option<TaskBillingConfig>,
@@ -109,12 +111,20 @@ pub async fn run(
             .unwrap_or("");
 
         macro_rules! mgmt_bail {
-            ($status:expr, $code:expr) => {{
+            ($outcome:expr, $internal_outcome:expr) => {{
+                tracing::warn!(
+                    target: "gw_proxy::mgmt_auth",
+                    outcome = ?$outcome,
+                    internal_outcome = $internal_outcome,
+                    "management token authentication failed"
+                );
+                let (status, code) = gw_auth::mgmt::public_error_for_outcome(&$outcome)
+                    .expect("mgmt_bail requires non-ok outcome");
                 let err = ErrorIR {
                     category: ErrorCategory::ClientAuth,
-                    status: $status,
+                    status,
                     upstream_status: None,
-                    code: Cow::Borrowed($code),
+                    code: Cow::Borrowed(code),
                     message: Cow::Borrowed(""),
                     retryable: false,
                     upstream_raw: None,
@@ -128,18 +138,24 @@ pub async fn run(
 
         // 1. Authorization: Mgmt <token>
         let Some(parsed_auth) = gw_auth::mgmt::parse_mgmt_authorization(mgmt_auth_hdr) else {
-            mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_MISSING);
+            mgmt_bail!(
+                gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat,
+                "missing_authorization"
+            );
         };
 
         // 2. Split mt_<id>.<secret>
         let Some(parts) = gw_auth::mgmt::split_mgmt_token_payload(&parsed_auth.token) else {
-            mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_INVALID);
+            mgmt_bail!(
+                gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat,
+                "invalid_format"
+            );
         };
 
         // 3. Load entry via Moka L1 → cold load. Miss → INVALID (same code as
         //    hash mismatch, by design — see spec §1.3 step 4).
         let Some(entry) = store.mgmt_token_or_load(parts.token_id).await else {
-            mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_INVALID);
+            mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Invalid, "not_found");
         };
 
         // 4. Mgmt-token blacklist. FailClosed: a Redis outage rejects the
@@ -151,7 +167,7 @@ pub async fn run(
             )
             .await
         {
-            mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_REVOKED);
+            mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Disabled, "revoked");
         }
 
         // 5. Constant-time secret compare + status / expiry / scope.
@@ -168,16 +184,19 @@ pub async fn run(
             }
             gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat
             | gw_auth::mgmt::MgmtVerifyOutcome::Invalid => {
-                mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_INVALID);
+                mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Invalid, "invalid_secret");
             }
             gw_auth::mgmt::MgmtVerifyOutcome::Expired => {
-                mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_EXPIRED);
+                mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Expired, "expired");
             }
             gw_auth::mgmt::MgmtVerifyOutcome::Disabled => {
-                mgmt_bail!(401, codes::GW_AUTH_MGMT_TOKEN_DISABLED);
+                mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Disabled, "disabled");
             }
             gw_auth::mgmt::MgmtVerifyOutcome::ScopeDenied => {
-                mgmt_bail!(403, codes::GW_AUTH_MGMT_TOKEN_SCOPE_DENIED);
+                mgmt_bail!(
+                    gw_auth::mgmt::MgmtVerifyOutcome::ScopeDenied,
+                    "scope_denied"
+                );
             }
         }
 
@@ -462,7 +481,7 @@ pub async fn run(
     // ---------------------------------------------------------------------
     // 2. Re-run unified IP filtering with the resolved scope IDs.
     // ---------------------------------------------------------------------
-    let client_ip_v = client_ip_from_session(session, trust_xff);
+    let client_ip_v = client_ip_from_session(session, trust_xff, trusted_proxies);
     if let Some(ip) = client_ip_v {
         if let Err(err) = check_ip(
             ip,
@@ -588,8 +607,48 @@ pub async fn run(
             max_decoded_bytes: Some(32 * 1024 * 1024),
         };
         match crate::body_verify::verify_body(input) {
-            Ok((SignatureCheckResult::Valid, decoded))
-            | Ok((SignatureCheckResult::NotRequired, decoded)) => {
+            Ok((SignatureCheckResult::Valid, decoded)) => {
+                if let Err(err) = signature_replay.check(ctx.signature_nonce.as_deref()).await {
+                    let (category, status, code, message) = match err {
+                        gw_auth::signature::ReplayCheckError::MissingNonce
+                        | gw_auth::signature::ReplayCheckError::ReplayDetected => (
+                            ErrorCategory::ClientAuth,
+                            401,
+                            codes::GW_AUTH_REPLAY_DETECTED,
+                            "signature replay detected",
+                        ),
+                        gw_auth::signature::ReplayCheckError::Backend(_) => (
+                            ErrorCategory::GatewayInternal,
+                            503,
+                            codes::GW_BACKEND_UNAVAILABLE,
+                            "signature replay check unavailable",
+                        ),
+                    };
+                    let err = ErrorIR {
+                        category,
+                        status,
+                        upstream_status: None,
+                        code: Cow::Borrowed(code),
+                        message: Cow::Borrowed(message),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &err, &request_id)
+                }
+                if !matches!(
+                    ctx.req_content_encoding,
+                    gw_codec::compression::Encoding::Identity
+                ) {
+                    // Pre-populate view's decoded OnceCell so codec parse reuses
+                    // the bytes HMAC already decompressed — decompress happens once.
+                    if let Some(view) = ctx.body.as_ref() {
+                        view.prefill_decoded(decoded);
+                    }
+                }
+            }
+            Ok((SignatureCheckResult::NotRequired, decoded)) => {
                 if !matches!(
                     ctx.req_content_encoding,
                     gw_codec::compression::Encoding::Identity
@@ -1291,11 +1350,6 @@ pub async fn run(
                         "result" => "no_coefs"
                     )
                     .increment(1);
-                    metrics::counter!(
-                        "gw_credit_lease_acquire_total",
-                        "result" => "no_coefs"
-                    )
-                    .increment(1);
                     let err = ErrorIR {
                         category: ErrorCategory::ClientQuota,
                         status: 503,
@@ -1331,11 +1385,6 @@ pub async fn run(
                         "result" => "success"
                     )
                     .increment(1);
-                    metrics::counter!(
-                        "gw_credit_lease_acquire_total",
-                        "result" => "ok"
-                    )
-                    .increment(1);
                     ctx.lease_guard = Some(guard);
                     ctx.merged_perm = Some(merged);
                     ctx.phase_end();
@@ -1367,11 +1416,6 @@ pub async fn run(
                 Err(gw_ledger::LeaseError::Insufficient { .. }) => {
                     metrics::counter!(
                         gw_ledger::metrics::CREDIT_LEASE_ACQUIRE_TOTAL,
-                        "result" => "insufficient"
-                    )
-                    .increment(1);
-                    metrics::counter!(
-                        "gw_credit_lease_acquire_total",
                         "result" => "insufficient"
                     )
                     .increment(1);
@@ -1450,7 +1494,23 @@ pub async fn run(
     //     back the frozen amount (leak-recovered metric increments).
     // ---------------------------------------------------------------------
     use gw_ledger::RequestFreeze;
-    let guard = RequestFreeze::new(merged.effective_user_id.clone(), freeze_estimate_micro);
+    let guard = match RequestFreeze::new(merged.effective_user_id.clone(), freeze_estimate_micro) {
+        Ok(guard) => guard,
+        Err(err) => {
+            let err = ErrorIR {
+                category: ErrorCategory::ClientBadRequest,
+                status: 400,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_AMOUNT_OVERFLOW),
+                message: Cow::Owned(err.to_string()),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            bail!(session, ctx, &err, &request_id)
+        }
+    };
     ctx.freeze_guard = Some(guard);
 
     ctx.merged_perm = Some(merged);
@@ -1544,6 +1604,12 @@ fn resolve_api_key_entry(
             .req_header()
             .headers
             .get("x-timestamp")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        ctx.signature_nonce = session
+            .req_header()
+            .headers
+            .get("x-nonce")
             .and_then(|v| v.to_str().ok())
             .map(String::from);
         ctx.signature_secret = entry.value.signature_secret.clone().unwrap_or_default();
@@ -1905,12 +1971,6 @@ async fn run_overflow_gate(
             if let Some(err) = overflow_error_for_decision(decision) {
                 return Err(err);
             }
-            metrics::counter!(
-                "gw_credit_overflow_gate_total",
-                "result" => "allow",
-                "lease_result" => lease_result,
-            )
-            .increment(1);
             Ok(())
         }
         Err(err) => {

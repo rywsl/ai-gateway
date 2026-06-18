@@ -159,6 +159,119 @@ else
   ok "gw-billing carries no per-token pricing fields"
 fi
 
+# ---------------------------------------------------------------------------
+# credit_lease_metric_names — the hard-mode credit-lease subsystem emits metric
+# names through gw-ledger constants. Those constants must match the gateway
+# metrics catalog (`gw_` prefix), and gw-proxy must not reintroduce split
+# hardcoded series for the same signals.
+# ---------------------------------------------------------------------------
+echo "[credit_lease_metric_names] credit-lease metric constants must use gw_ names"
+if grep -rnE 'pub const (CREDIT_LEASE_ACQUIRE_TOTAL|CREDIT_LEASE_ESTIMATE_CREDITS|CREDIT_OVERFLOW_GATE_TOTAL|CREDIT_OVERFLOW_LATENCY_MS|CREDIT_OVERFLOW_CONSUMED_WINDOW|PG_FALLBACK_TOTAL|COEF_TABLE_ACTIVE_VERSION|HEARTBEAT_SADD_TOTAL): &str = "(credit_|pg_fallback_total|coef_table_active_version|heartbeat_sadd_total)' crates/gw-ledger/src/metrics.rs 2>/dev/null; then
+  bad "credit-lease metric constants are missing the gw_ prefix"
+else
+  ok "credit-lease metric constants use gw_ names"
+fi
+
+echo "[credit_lease_metric_names] gw-proxy must use gw-ledger metric constants for credit lease metrics"
+if grep -rnE '"gw_credit_lease_acquire_total"|"gw_credit_overflow_gate_total"|"gw_credit_actual_exceeds_reserved_total"' crates/gw-proxy/src 2>/dev/null; then
+  bad "gw-proxy has hardcoded credit-lease metric names"
+else
+  ok "gw-proxy credit-lease metrics use constants"
+fi
+
+echo "[metric_label_cardinality] Prometheus labels must not use M13 high-cardinality / PII names"
+if bash scripts/check-metric-labels.sh; then
+  ok "metric label cardinality lint passed"
+else
+  bad "metric label cardinality lint failed"
+fi
+
+echo "[feature_flag_registry] WS-15 flag ledger must match schema"
+if bash scripts/check-flags-schema.sh; then
+  ok "flag registry schema lint passed"
+else
+  bad "flag registry schema lint failed"
+fi
+
+echo "[feature_flag_defaults] WS-15 flag defaults must match yaml ledger"
+if bash scripts/check-mixed-version-flags.sh; then
+  ok "flag default drift lint passed"
+else
+  bad "flag default drift lint failed"
+fi
+
+echo "[runbook_completeness] WS-15 flags must have runbook coverage"
+if bash scripts/check-runbook-completeness.sh; then
+  ok "feature-flag runbook covers all flags"
+else
+  bad "feature-flag runbook coverage failed"
+fi
+
+echo "[ws12_prod_compose] production manifests must not contain demo bootstrap env"
+if bash scripts/check-prod-compose.sh; then
+  ok "production manifest bootstrap lint passed"
+else
+  bad "production manifest bootstrap lint failed"
+fi
+
+echo "[ws12_soft_delete] Rust repo soft-delete mirror"
+if bash scripts/check-soft-delete.sh; then
+  ok "soft-delete mirror lint passed"
+else
+  bad "soft-delete mirror lint failed"
+fi
+
+echo "[ws12_tokio_spawn_baseline] raw tokio::spawn baseline must not grow"
+tokio_bin="${TMPDIR:-/tmp}/check-tokio-spawn.$$"
+if rustc scripts/check-tokio-spawn.rs -o "$tokio_bin" && "$tokio_bin" crates; then
+  ok "tokio spawn baseline lint passed"
+else
+  bad "tokio spawn baseline lint failed"
+fi
+rm -f "$tokio_bin"
+
+echo "[ws12_money_cast_baseline] money-sensitive casts baseline must not grow"
+if bash scripts/check-money-as-cast.sh; then
+  ok "money cast baseline lint passed"
+else
+  bad "money cast baseline lint failed"
+fi
+
+echo "[ws12_rustpact_pv] protocol fields require rustpact version bump"
+if bash scripts/check-rustpact-pv.sh; then
+  ok "rustpact pv lint passed"
+else
+  bad "rustpact pv lint failed"
+fi
+
+echo "[ws12_newfindings] continuous-discovery audit"
+if bash scripts/audit-newfindings.sh; then
+  ok "new findings audit completed"
+else
+  bad "new findings audit failed"
+fi
+
+echo "[ws13_chaos_scenarios] stable chaos scenario registry must be complete"
+if bash scripts/check-chaos-dod-refs.sh; then
+  ok "chaos scenario registry complete"
+else
+  bad "chaos scenario registry failed"
+fi
+
+echo "[ws14_migration_numbers] migration ledger and down sidecars must be complete"
+if bash scripts/check-migration-number.sh; then
+  ok "migration ledger gate passed"
+else
+  bad "migration ledger gate failed"
+fi
+
+echo "[ws14_migration_roundtrip_static] migration roundtrip static prerequisites"
+if bash scripts/verify-migrations-roundtrip.sh --static; then
+  ok "migration roundtrip static prerequisites passed"
+else
+  bad "migration roundtrip static prerequisites failed"
+fi
+
 echo "[no_cli_auth_bypass] gw-codec CLI variants must not contain auth bypass markers"
 if grep -rnE 'skip_auth|bypass_auth' crates/gw-codec/src/cli/ 2>/dev/null; then
   bad "gw-codec CLI variants contain auth bypass markers"

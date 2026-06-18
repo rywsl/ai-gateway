@@ -33,7 +33,7 @@ fn stale_timestamp() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    (now - 301).to_string()
+    (now - 61).to_string()
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn wrong_signature_returns_invalid_result() {
 }
 
 #[test]
-fn replay_outside_300_seconds_returns_timestamp_drift() {
+fn replay_outside_60_seconds_returns_timestamp_drift() {
     let secret = b"s";
     let body = b"{}";
     let ts = stale_timestamp();

@@ -22,7 +22,8 @@ pub mod usage;
 pub use deduct_gc::DeductGc;
 pub use flusher::{ClearKey, Ledger, LedgerItem};
 pub use freeze::{
-    FreezeGuard, FreezeKind, ReleaseOutcome, RequestFreeze, TaskFreeze, TaskFreezeRelease,
+    FreezeAmountOverflow, FreezeGuard, FreezeKind, ReleaseOutcome, RequestFreeze, TaskFreeze,
+    TaskFreezeRelease,
 };
 pub use gw_core::permissions::MarkupChainSnapshot;
 pub use usage::{UsageRecord, UsageStatus, VendorExposureState};

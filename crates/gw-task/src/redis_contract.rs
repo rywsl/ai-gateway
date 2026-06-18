@@ -520,7 +520,7 @@ impl TaskContract for RedisTaskContract {
                 "eval settle lua",
             )
             .await?;
-        if result != "ok" {
+        if result != "ok" && result != "noop" {
             return Err(TaskError::Storage(format!("settle lua returned {result}")));
         }
         Ok(SettleOutcome {

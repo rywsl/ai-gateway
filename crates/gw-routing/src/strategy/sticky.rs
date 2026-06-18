@@ -104,7 +104,16 @@ impl Strategy for Sticky {
                     return Some(k);
                 }
             }
-            // Bound key is gone or unavailable; fall through to rebind.
+            let available: Vec<&Arc<VendorKey>> = c
+                .iter()
+                .filter(|k| h.is_available(&k.key_id, ctx.api_format))
+                .collect();
+            if available.is_empty() {
+                return None;
+            }
+            let idx = Self::hash_conv(conv, available.len());
+            metrics::counter!("gw_sticky_fallback_total").increment(1);
+            return c.iter().find(|k| k.key_id == available[idx].key_id);
         }
 
         // Bind path: compute a fresh binding over the available set.
@@ -131,5 +140,91 @@ impl ScoringPolicy for Sticky {
 
     fn score(&self, features: &CandidateFeatures, _ctx: &PickCtx<'_>) -> f64 {
         features.index as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::in_flight::InFlightStore;
+    use crate::latency::LatencyTracker;
+    use gw_core::entity::{KeyStatus, VendorKey};
+    use gw_core::ids::{ModelName, UserId, VendorId};
+    use gw_core::protocol::ProtocolKind;
+    use gw_health::KeyHealthStore;
+    use secrecy::SecretString;
+
+    fn fake_key(id: &str) -> Arc<VendorKey> {
+        Arc::new(VendorKey {
+            key_id: KeyId::from(id),
+            vendor_id: VendorId::from("v1"),
+            api_key: SecretString::from("sk".to_string()),
+            accessible_models: vec![],
+            model_mapping: Default::default(),
+            accessible_endpoints: vec![],
+            protocol_conversion: false,
+            priority: 0,
+            weight: 1,
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_usage_count: None,
+            proxy: None,
+            ip_allowlist: None,
+            expires_at: None,
+            status: KeyStatus::Active,
+            tags: vec![],
+            forced_capabilities: vec![],
+            exclusive_capability_match: false,
+            tunnel_preference: None,
+            oauth: None,
+            identity_snapshot: None,
+            quota_state: Default::default(),
+        })
+    }
+
+    fn pick_key(sticky: &Sticky, keys: &[Arc<VendorKey>], conv: &str) -> Option<KeyId> {
+        let health = KeyHealthStore::default();
+        let in_flight = InFlightStore::default();
+        let latency = LatencyTracker::new();
+        let user = UserId::from("u");
+        let model = ModelName::from("m");
+        let ctx = PickCtx {
+            user_id: &user,
+            model: &model,
+            conversation_id: Some(conv),
+            message_hash: None,
+            api_format: ProtocolKind::OpenAi,
+            pricing: None,
+            latency_tracker: &latency,
+            reservation_view: None,
+            frequency_tracker: None,
+        };
+        sticky
+            .pick(keys, &health, &in_flight, &ctx)
+            .map(|k| k.key_id.clone())
+    }
+
+    #[test]
+    fn missing_bound_key_falls_back_without_rewriting_binding() {
+        let sticky = Sticky::default();
+        let conv = "stable-conv";
+
+        assert_eq!(
+            pick_key(&sticky, &[fake_key("a")], conv),
+            Some(KeyId::from("a"))
+        );
+        sticky.invalidate_expired();
+        assert_eq!(sticky.bindings.get(conv), Some(KeyId::from("a")));
+
+        let fallback = pick_key(&sticky, &[fake_key("x"), fake_key("y")], conv)
+            .expect("fallback should pick an available key for this request");
+
+        assert!(fallback == KeyId::from("x") || fallback == KeyId::from("y"));
+        sticky.invalidate_expired();
+        assert_eq!(
+            sticky.bindings.get(conv),
+            Some(KeyId::from("a")),
+            "fallback must not rewrite the sticky binding"
+        );
     }
 }

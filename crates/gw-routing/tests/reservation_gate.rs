@@ -12,6 +12,7 @@ use gw_routing::strategy::{PickCtx, Strategy};
 use secrecy::SecretString;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 fn fake_key(id: &str, priority: i32) -> Arc<VendorKey> {
     Arc::new(VendorKey {
@@ -103,6 +104,35 @@ fn no_threshold_for_model_passes() {
     let model = ModelName::from("claude-3-5-sonnet");
     let view = hot_view("claude-3-5-sonnet", 10_000.0);
     let gate = ReservationGate::enabled(HashMap::from([("gpt-*".to_string(), 60)]));
+
+    assert!(gate.allows(&model, Some(&view)));
+}
+
+#[test]
+fn enabled_gate_rejects_cold_start_without_view_or_grace() {
+    let model = ModelName::from("gpt-4o");
+    let gate = ReservationGate::enabled(HashMap::from([("gpt-*".to_string(), 60)]));
+
+    assert!(!gate.allows(&model, None));
+}
+
+#[test]
+fn enabled_gate_accepts_after_startup_grace_without_view() {
+    let model = ModelName::from("gpt-4o");
+    let gate = ReservationGate::with_startup_grace(
+        true,
+        HashMap::from([("gpt-*".to_string(), 60)]),
+        Duration::ZERO,
+    );
+
+    assert!(gate.allows(&model, None));
+}
+
+#[test]
+fn enabled_gate_accepts_after_first_reservation_event_even_during_grace() {
+    let model = ModelName::from("gpt-4o");
+    let gate = ReservationGate::enabled(HashMap::from([("gpt-*".to_string(), 60)]));
+    let view = hot_view("gpt-4o", 10.0);
 
     assert!(gate.allows(&model, Some(&view)));
 }

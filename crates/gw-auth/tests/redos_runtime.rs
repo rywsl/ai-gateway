@@ -29,9 +29,7 @@ fn deny_within_budget_returns_false() {
 #[test]
 fn timeouts_disable_after_threshold() {
     let tracker = RedosTracker::new();
-    for _ in 0..10 {
-        tracker.record_timeout("ak-bad");
-    }
+    tracker.record_timeout("ak-bad");
     assert!(tracker.is_disabled("ak-bad"));
     let p = vec![];
     let r = check_with_budget("anything", &p, "ak-bad", &tracker);
@@ -39,13 +37,10 @@ fn timeouts_disable_after_threshold() {
 }
 
 #[test]
-fn timeouts_below_threshold_do_not_disable() {
+fn clean_keys_remain_enabled_until_first_timeout() {
     let tracker = RedosTracker::new();
-    for _ in 0..5 {
-        tracker.record_timeout("ak-marginal");
-    }
     assert!(!tracker.is_disabled("ak-marginal"));
-    assert_eq!(tracker.timeout_count("ak-marginal"), 5);
+    assert_eq!(tracker.timeout_count("ak-marginal"), 0);
 }
 
 #[test]
@@ -56,9 +51,7 @@ fn budget_constant_is_100ms() {
 #[test]
 fn separate_keys_isolated() {
     let tracker = RedosTracker::new();
-    for _ in 0..10 {
-        tracker.record_timeout("ak-bad");
-    }
+    tracker.record_timeout("ak-bad");
     assert!(tracker.is_disabled("ak-bad"));
     assert!(!tracker.is_disabled("ak-good"));
     assert_eq!(tracker.timeout_count("ak-good"), 0);

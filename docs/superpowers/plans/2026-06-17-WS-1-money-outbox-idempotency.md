@@ -92,9 +92,9 @@
 ### TASK T01 — Create `idempotency_keys` PG table + repo
 
 #### 1. 【是什么 What it IS】
-- A goose migration file `migrations/00035_idempotency_keys.sql` (Go monorepo).
-- A new repo module `modules/wallet/model/idem_repo.go` exposing 1 method `CommitIdem(ctx, tx, op, key, requestHash, responseJSON) (didWrite bool, prior []byte, err error)`.
-- The migration creates one table partitioned by month on `created_at` (per REV-FINAL-M6).
+- A goose migration file `migrations/00067_idempotency_keys.sql` (Go monorepo; number locked by WS-14).
+- A new repo module `modules/wallet/model/idem_repo.go` exposing 1 method `CommitIdem(ctx, db, op, key, requestHash, responseJSON) (didWrite bool, priorHash string, prior []byte, err error)`.
+- The migration creates one ordinary table keyed by `(op, key)`. REV-FINAL-M6's monthly partitioning is deferred because Postgres range-partition uniqueness would require including `created_at` in the conflict key and would weaken global idempotency.
 
 #### 2. 【不是什么 What it is NOT】
 - NOT a Redis change — the Redis `wallet:idem:*` SETNX path stays alive for one release window (dual-write per T26 / C7).
@@ -107,9 +107,9 @@
 - Audit refs: original Go audit §3.1 [M1]; v2 §4 WS-1 REV-FINAL-M1 & REV-FINAL-M2.
 
 #### 4. 【做什么 DO】
-1. Create `migrations/00035_idempotency_keys.sql` per `HOW`.
-2. Add **down** script `migrations/00035_idempotency_keys.down.sql` (drop partitioned table; this drops history — annotate the irreversible cost in the migration header).
-3. Add a sqlc query file `modules/wallet/model/queries/idempotency_keys.sql` containing the **single** `INSERT ... ON CONFLICT DO UPDATE ... RETURNING (xmax = 0), response_jsonb` statement.
+1. Create `migrations/00067_idempotency_keys.sql` per `HOW`.
+2. Add the goose `-- +goose Down` section in the same file; Go migrations do not use `.down.sql` sidecars.
+3. Add a sqlc query file `modules/wallet/model/queries/idempotency_keys.sql` containing the **single** `INSERT ... ON CONFLICT DO UPDATE ... RETURNING (xmax = 0), request_hash, response_jsonb` statement.
 4. Implement `modules/wallet/model/idem_repo.go` that calls the sqlc-generated row using a passed-in `pgx.Tx` (not from `pool.Begin`).
 5. Add unit tests under `modules/wallet/model/idem_repo_test.go` using `pgxmock` covering: first-write returns `(didWrite=true, prior=nil)`; second-write returns `(didWrite=false, prior=<bytes>)`; concurrent first-and-second resolve deterministically.
 
@@ -122,53 +122,42 @@
 
 #### 6. 【怎么做 HOW (具体)】
 
-`migrations/00035_idempotency_keys.sql`:
+`migrations/00067_idempotency_keys.sql`:
 
 ```sql
 -- +goose Up
--- +goose StatementBegin
--- Partitioned by month on created_at. 90 d retention (drop oldest partition by a
--- weekly cron — see scripts/idempotency-keys-prune.sh, owned by WS-1 T01).
 CREATE TABLE idempotency_keys (
-    op             text         NOT NULL,
-    key            text         NOT NULL,
-    request_hash   text         NOT NULL,
-    response_jsonb jsonb        NOT NULL DEFAULT '{}'::jsonb,
-    created_at     timestamptz  NOT NULL DEFAULT now(),
-    PRIMARY KEY (op, key, created_at)
-) PARTITION BY RANGE (created_at);
+    op             text        NOT NULL,
+    key            text        NOT NULL,
+    status         text        NOT NULL CHECK (status IN ('committed')) DEFAULT 'committed',
+    request_hash   text        NOT NULL,
+    response_jsonb jsonb       NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (op, key)
+);
 
--- Bootstrap partitions for current + next 2 months. Cron job extends monthly.
-CREATE TABLE idempotency_keys_2026_06 PARTITION OF idempotency_keys
-    FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
-CREATE TABLE idempotency_keys_2026_07 PARTITION OF idempotency_keys
-    FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
-CREATE TABLE idempotency_keys_2026_08 PARTITION OF idempotency_keys
-    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
-
-CREATE INDEX idempotency_keys_created_at_idx ON idempotency_keys (created_at);
--- +goose StatementEnd
+CREATE INDEX idempotency_keys_created_at_idx
+    ON idempotency_keys (created_at);
 
 -- +goose Down
--- +goose StatementBegin
+DROP INDEX IF EXISTS idempotency_keys_created_at_idx;
 DROP TABLE IF EXISTS idempotency_keys;
--- +goose StatementEnd
 ```
 
 `modules/wallet/model/queries/idempotency_keys.sql`:
 
 ```sql
--- name: CommitIdem :one
-INSERT INTO idempotency_keys (op, key, request_hash, response_jsonb, created_at)
-VALUES ($1, $2, $3, $4, now())
-ON CONFLICT (op, key, created_at) DO UPDATE
+-- name: CommitIdempotencyKey :one
+INSERT INTO idempotency_keys (op, key, status, request_hash, response_jsonb, created_at)
+VALUES ($1, $2, 'committed', $3, sqlc.arg(response_json)::text::jsonb, now())
+ON CONFLICT (op, key) DO UPDATE
     SET request_hash = idempotency_keys.request_hash
-RETURNING
-    (xmax = 0)         AS did_write,
-    response_jsonb     AS prior_response;
+RETURNING (xmax = 0)::bool AS did_write,
+          request_hash,
+          response_jsonb::text AS response_json;
 ```
 
-(Note: PK includes `created_at` because the table is RANGE-partitioned; PG requires the partition key in PK. The `(op, key)` uniqueness is then enforced by a partial unique index per partition — automatically created by `CREATE TABLE ... PARTITION OF`. Verify on staging that two concurrent inserts of the same `(op, key)` produce exactly one row by reading PG docs §5.11.5.)
+Note: `(op, key)` remains the global uniqueness boundary for wallet idempotency. A later partitioning migration must preserve that semantics; do not switch the conflict key to `(op, key, created_at)`.
 
 `modules/wallet/model/idem_repo.go`:
 
@@ -178,47 +167,56 @@ package model
 import (
     "context"
     "encoding/json"
-
-    "github.com/jackc/pgx/v5"
+    "errors"
+    "fmt"
 
     walletmodel "github.com/cnxx-tech/ailinkmax-go/modules/wallet/model/sqlcgen"
 )
 
-// CommitIdem inserts an idempotency row inside the caller's tx. didWrite=true
-// means this caller owns the row and should perform its business logic;
-// didWrite=false means prior holds the historical response_jsonb verbatim.
+var ErrInvalidIdemCommit = errors.New("wallet idem: invalid commit")
+
+// CommitIdem inserts an idempotency row inside the caller's transaction DBTX.
+// didWrite=true means this caller owns the row; didWrite=false returns the
+// previously committed request hash and response.
 func CommitIdem(
     ctx context.Context,
-    tx pgx.Tx,
+    db walletmodel.DBTX,
     op, key, requestHash string,
-    response any,
-) (didWrite bool, prior []byte, err error) {
-    body, err := json.Marshal(response)
-    if err != nil {
-        return false, nil, err
+    responseJSON []byte,
+) (didWrite bool, priorHash string, prior []byte, err error) {
+    if key == "" {
+        return true, "", nil, nil
     }
-    q := walletmodel.New(tx)
-    row, err := q.CommitIdem(ctx, walletmodel.CommitIdemParams{
-        Op:            op,
-        Key:           key,
-        RequestHash:   requestHash,
-        ResponseJsonb: body,
+    if db == nil {
+        return false, "", nil, fmt.Errorf("%w: nil db", ErrInvalidIdemCommit)
+    }
+    if op == "" || requestHash == "" || !json.Valid(responseJSON) {
+        return false, "", nil, ErrInvalidIdemCommit
+    }
+    row, err := walletmodel.New(db).CommitIdempotencyKey(ctx, walletmodel.CommitIdempotencyKeyParams{
+        Op:           op,
+        Key:          key,
+        RequestHash:  requestHash,
+        ResponseJson: string(responseJSON),
     })
     if err != nil {
-        return false, nil, err
+        return false, "", nil, fmt.Errorf("wallet idem commit: %w", err)
     }
-    return row.DidWrite, row.PriorResponse, nil
+    if row.DidWrite {
+        return true, "", nil, nil
+    }
+    return false, row.RequestHash, []byte(row.ResponseJson), nil
 }
 ```
 
 #### 7. 【源码验证 SOURCE-CHECK】
 - Read `AILinkMax-Go/modules/wallet/business/idem.go:21-30`. Excerpt: `func (i *Idem) Reserve(ctx context.Context, op, key string) (bool, error) { ... return i.r.SetNX(ctx, fmt.Sprintf("wallet:idem:%s:%s", op, key), "1", idemTTL).Result() }`. **There is no Release/Commit; this is the entire surface.** Confirms M1.
-- Read `migrations/` index to ensure `00035` is unused (run `ls migrations/00034*.sql` and `ls migrations/00035*.sql` — fail loud if 00035 exists, then bump per WS-14).
+- Read `migrations/` index and WS-14 §1.2 to confirm `00067` is the locked idempotency migration number.
 
 #### 8. 【如何验证 VERIFY】
-1. `psql -f migrations/00035_idempotency_keys.sql $TEST_DSN` then `psql $TEST_DSN -c '\d+ idempotency_keys'` and check partitioning attributes present.
+1. `goose -dir migrations postgres "$TEST_DSN" up-to 67` then `psql $TEST_DSN -c '\d+ idempotency_keys'` and check `(op,key)` primary key + `idempotency_keys_created_at_idx`.
 2. `cd modules/wallet/model && go generate ./...` (sqlc) must succeed without diff outside `sqlcgen/`.
-3. `go test ./modules/wallet/model/ -run TestCommitIdem -race -count=20` — expected: all PASS; 1 000 parallel goroutines hammering the same `(op, key)` produce exactly one `didWrite=true` and 999 `didWrite=false` with identical `prior`.
+3. `go test ./modules/wallet/model/ -run TestCommitIdem -race -count=20` — expected: all PASS for first-write and duplicate/prior response semantics.
 4. `psql $TEST_DSN -c "SELECT count(*) FROM idempotency_keys WHERE op='deduct' AND key='unit-test-key';"` returns exactly `1`.
 
 #### Mini-ADR
@@ -546,7 +544,7 @@ In `service.go:AdminAdjust`, remove the special-casing of empty `idemKey` (calle
 ### TASK T08 — payment_outbox + processor + webhook rewrite (M2 / G4 / REV-FINAL-M1 / REV-FINAL-M5)
 
 #### 1. 【是什么 What it IS】
-- Migration `migrations/00036_payment_outbox.sql`.
+- Migration `migrations/00068_payment_outbox.sql`.
 - New service `modules/payment/business/outbox.go` (`PaymentOutboxProcessor`).
 - Rewritten `webhook.go:Receive` to NOT call `orders.Credit` synchronously; instead, write `payment_orders.status='succeeded'` AND insert into `payment_outbox(payment_id, payload, status='pending')` in **one** tx.
 - New worker entry `binaries/worker-billing/main.go` (add) or `binaries/all-in-one/main.go` (add) — spawn `PaymentOutboxProcessor.Run` via `runtime.Supervised`.
@@ -566,7 +564,7 @@ In `service.go:AdminAdjust`, remove the special-casing of empty `idemKey` (calle
 2. Down: drop table (idempotent processor will rebuild from `payment_orders` if needed).
 3. Sqlc query file `modules/payment/model/queries/payment_outbox.sql`:
    - `InsertPaymentOutbox`
-   - `ClaimPendingPaymentOutbox(limit int) [{id, payment_id, payload, attempt}]` — `SELECT ... FOR UPDATE SKIP LOCKED LIMIT $1`
+   - `ClaimPendingPaymentOutbox(limit int) [{id, payment_id, payload, attempt_count}]` — `SELECT ... FOR UPDATE SKIP LOCKED LIMIT $1`
    - `MarkPaymentOutboxCommitted(id)`
    - `BumpPaymentOutboxAttempt(id, nextAt int64)`
 4. Edit `webhook.go:Receive`:
@@ -581,38 +579,39 @@ In `service.go:AdminAdjust`, remove the special-casing of empty `idemKey` (calle
      - In a **separate** wallet-side tx: call `s.wallet.Credit(...)` — this internally calls `idem.Commit` (T04) with `op="credit"`, `key="po_credit:<payment_id>"`, `requestHash=expectedHash`.
      - If wallet returned didWrite=false AND the prior's request_hash differs → alert + DLQ (REV-FINAL-M5).
      - Mark committed.
-     - On error: bump attempt; `next_attempt_at = now + 2^min(attempt, 10) seconds + jitter`.
+     - On error: bump `attempt_count`; `next_attempt_at = now + 2^min(attempt_count, 10) seconds + jitter`.
 
 #### 5. 【不做什么 DON'T】
 - Do NOT use plain `FOR UPDATE` — single slow worker would block siblings. SKIP LOCKED is essential.
 - Do NOT call `idem.Commit` in `outbox.go` directly — go through `wallet.Credit` so the tx-row + counter-outbox writes happen in the same wallet tx as the idem write. This preserves Single-Writer invariant.
 - Do NOT delete committed rows on success — keep them for audit and replay; weekly partition prune by `created_at`.
-- Do NOT alarm on first-attempt fail — only after `attempt > 5` to avoid noise during transient outages.
+- Do NOT alarm on first-attempt fail — only after `attempt_count >= 5` to avoid noise during transient outages.
 
 #### 6. 【怎么做 HOW (具体)】
 
-`migrations/00036_payment_outbox.sql`:
+`migrations/00068_payment_outbox.sql`:
 
 ```sql
 -- +goose Up
 -- +goose StatementBegin
 CREATE TABLE payment_outbox (
-    id              bigserial PRIMARY KEY,
-    payment_id      text         NOT NULL UNIQUE,
-    payload         jsonb        NOT NULL,
-    request_hash    text         NOT NULL,
-    status          text         NOT NULL
-                    CHECK (status IN ('pending','committed','failed','dlq')),
-    attempt         int          NOT NULL DEFAULT 0,
-    next_attempt_at timestamptz  NOT NULL DEFAULT now(),
-    created_at      timestamptz  NOT NULL DEFAULT now(),
-    updated_at      timestamptz  NOT NULL DEFAULT now()
+    id              BIGSERIAL PRIMARY KEY,
+    payment_id      TEXT        NOT NULL UNIQUE,
+    payload         JSONB       NOT NULL,
+    request_hash    TEXT        NOT NULL,
+    status          TEXT        NOT NULL CHECK (status IN ('pending','committed','dead')),
+    attempt_count   INT         NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    committed_at    TIMESTAMPTZ
 );
 CREATE INDEX payment_outbox_due_idx
-  ON payment_outbox (next_attempt_at)
+  ON payment_outbox (next_attempt_at, id)
   WHERE status = 'pending';
 -- +goose StatementEnd
 -- +goose Down
+DROP INDEX IF EXISTS payment_outbox_due_idx;
 DROP TABLE IF EXISTS payment_outbox;
 ```
 
@@ -620,10 +619,10 @@ Sqlc query (truncated for brevity — see file for full):
 
 ```sql
 -- name: ClaimPendingPaymentOutbox :many
-SELECT id, payment_id, payload, request_hash, attempt
+SELECT id, payment_id, payload::text, request_hash, attempt_count
 FROM payment_outbox
 WHERE status = 'pending' AND next_attempt_at <= now()
-ORDER BY next_attempt_at
+ORDER BY next_attempt_at, id
 LIMIT $1
 FOR UPDATE SKIP LOCKED;
 ```
@@ -727,7 +726,7 @@ func (p *PaymentOutboxProcessor) drain(ctx context.Context) {
 #### 8. 【如何验证 VERIFY】
 1. `migrate up; psql -c '\d payment_outbox'` shows the table.
 2. Unit `TestPaymentOutboxIdempotent` posts the same webhook 1 000×; wallet balance changes exactly once; `payment_outbox` has one row in state `committed`.
-3. Chaos: Redis kill during processor tick — outbox row stays `pending`, `attempt` increments, retry succeeds; `idempotency_keys('credit', 'po_credit:<id>')` has exactly one row.
+3. Chaos: Redis kill during processor tick — outbox row stays `pending`, `attempt_count` increments, retry succeeds; `idempotency_keys('credit', 'po_credit:<id>')` has exactly one row.
 4. Duplicate webhook stalled in `pending > 5min` returns 5xx (curl test).
 
 ---
@@ -735,7 +734,7 @@ func (p *PaymentOutboxProcessor) drain(ctx context.Context) {
 ### TASK T09 — refund_outbox + Refund.Create double-check (G2 / M3 / REV-FINAL-M4)
 
 #### 1. 【是什么 What it IS】
-- Migration `migrations/00037_refund_outbox.sql` mirroring T08.
+- Migration `migrations/00069_refund_outbox.sql` mirroring T08.
 - New `RefundOutboxProcessor` mirroring T08's PaymentOutboxProcessor.
 - Edit `refunds.go:Create` (line 54) to do (a) PG advisory lock `pg_advisory_xact_lock(hashtext('refund:' || wallet_id))` (b) `SELECT COALESCE(SUM(amount_micros),0) FROM refund_requests WHERE wallet_id=$1 AND status IN ('pending_approval','approved','processing','succeeded')` (c) require `bal.RechargeMicros - sum >= AmountMicros` else return `ErrRefundExceedsBalance`.
 - Edit `refunds.go:Complete` (line 130) to NOT call `s.wallet.Refund` synchronously; instead write `refund_outbox(refund_id, payload, status='pending')` in the same tx as the `processing → succeeded` transition.
@@ -794,7 +793,7 @@ err := s.repo.InTx(ctx, func(ctx context.Context, q *paymentmodel.Queries, tx pg
 })
 ```
 
-Migration `00037_refund_outbox.sql`: same shape as T08, with `refund_id` instead of `payment_id`.
+Migration `00069_refund_outbox.sql`: same shape as T08, with `refund_id` instead of `payment_id`.
 
 #### 7. 【源码验证 SOURCE-CHECK】
 - Read `refunds.go:54-109`. Confirm balance check uses `bal.RechargeMicros < in.AmountMicros` ONLY at line 62 — no `openSum` consideration.
@@ -810,7 +809,7 @@ Migration `00037_refund_outbox.sql`: same shape as T08, with `refund_id` instead
 
 #### 1. 【是什么 What it IS】
 - New method `SubscriptionService.CheckAndApply(ctx, userID, costMicros) (QuotaResult, error)` that, in a single tx with `SELECT ... FROM user_subscriptions WHERE user_id=$1 AND status='active' ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, decides quota source AND, if `Subscription` covered, immediately runs `UPDATE user_subscriptions SET cycle_used_micros = cycle_used_micros + $2 WHERE id=$1`.
-- Migration `migrations/00040_user_subscriptions_quota_check.sql` adding `CHECK (cycle_used_micros <= cycle_quota_micros + COALESCE(overage_cap_micros, 0))`.
+- Migration `migrations/00072_user_subscriptions_quota_check.sql` adding `CHECK (cycle_used_micros <= cycle_quota_micros + COALESCE(overage_cap_micros, 0))`.
 
 #### 2. 【不是什么 What it is NOT】
 - NOT a billing-side change. Billing's `quota.go` Check stays; it becomes a read-only preview. The mutating path moves to subscription module.
@@ -926,7 +925,7 @@ if now <= capEnd { return false, tx.Commit(ctx) }
 ### TASK T13 — subscription_upgrade_outbox (G7 / REV-FINAL-M10)
 
 #### 1. 【是什么 What it IS】
-- Migration `migrations/00038_subscription_upgrade_outbox.sql`.
+- Migration `migrations/00070_subscription_upgrade_outbox.sql`.
 - `SubscriptionUpgradeOutboxProcessor` worker.
 - Edit `subscription.go:Upgrade` (line 145) to:
   - In a tx, UPDATE old sub status to `'upgrading'` (NEW status — add to status enum / CHECK constraint).
@@ -1043,7 +1042,7 @@ All callers must check the error.
 ---
 
 #### 1. 【是什么 What it IS】
-- Migration `migrations/00039_wallet_outbox_commit_ts.sql` adding `commit_timestamp timestamptz NOT NULL DEFAULT clock_timestamp()` and an index `(commit_timestamp, id)`.
+- Migration `migrations/00071_wallet_outbox_commit_ts.sql` adding `commit_timestamp timestamptz NOT NULL DEFAULT clock_timestamp()` and an index `(commit_timestamp, id)`.
 - Edit `wallet/model/queries/wallet_counter_outbox.sql:ListUnprocessedWalletCounterOutbox` to `ORDER BY commit_timestamp ASC, id ASC`.
 - Edit `counter_relay.go:135` to call `cr.rdb.Set(ctx, key, row.BalanceMicro, 24*time.Hour)` (TTL bound; cluster prune).
 

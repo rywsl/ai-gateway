@@ -1009,8 +1009,10 @@ fn is_cross_protocol(ctx: &ReqCtx) -> bool {
 /// bytes for the outbound body. The `gw_codec_cross_render_nonstream_total`
 /// counter is incremented per successful re-render; failures (parse or
 /// render) emit `GW_CODEC_PARSE_RESPONSE` / `GW_CODEC_CROSS_RENDER_FAILED`
-/// warn logs + counters and leave `pending_client_body = None` so the caller
-/// substitutes an empty body.
+/// warn logs + counters. Cross-protocol parse failures set
+/// `GW_UPSTREAM_PROTOCOL_DECODE_ERROR` and intentionally drop the raw upstream
+/// body so the fail-to-proxy path can render a 502 client-shaped error instead
+/// of forwarding wrong-protocol bytes.
 ///
 /// Failure semantics for usage extraction: any error from `parse_response`
 /// increments the counter `gw_codec_parse_response_failure_total{codec,
@@ -1182,12 +1184,17 @@ pub(crate) fn handle_non_stream_chunk(
                     trace_id: Some(ctx.trace_id.as_ref()),
                     extra: None,
                 });
-                // parse_response failed (e.g., vendor error JSON body, or a
-                // shape this codec can't decode). Forward the original
-                // upstream bytes verbatim — cross-protocol clients see
-                // upstream-shape bytes (best-effort vs an empty 200), and
-                // same-protocol clients see no change from pre-T6 behaviour.
-                return_body_to_accum = true;
+                // Same-protocol parse failures preserve historical vendor
+                // error pass-through while the WS-15 rollout flag is false.
+                // Cross-protocol callers cannot safely consume upstream-shaped
+                // bytes, and flag-on same-protocol traffic opts into the same
+                // deterministic 502 decode-error path.
+                if cross_protocol || ctx.r7_502_on_parse_fail {
+                    ctx.upstream_error_code =
+                        Some(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR);
+                } else {
+                    return_body_to_accum = true;
+                }
             }
         }
     }
@@ -1281,6 +1288,51 @@ mod non_stream_branch_tests {
         // cross-protocol branch; same-protocol callers ignore it.
         let accum = ctx.upstream_body_accum.as_ref().expect("body preserved");
         assert_eq!(accum.as_ref(), b"not json" as &[u8]);
+    }
+
+    #[test]
+    fn same_protocol_parse_failure_flag_on_sets_decode_error_and_drops_raw_body() {
+        let mut ctx = make_ctx_non_stream();
+        ctx.r7_502_on_parse_fail = true;
+        let body = Bytes::from_static(b"not json");
+
+        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+
+        assert_eq!(
+            ctx.upstream_error_code,
+            Some(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR)
+        );
+        assert!(
+            ctx.upstream_body_accum.is_none(),
+            "flag-on parse failure must not preserve raw upstream bytes for legacy 200 forwarding"
+        );
+    }
+
+    #[test]
+    fn cross_protocol_parse_failure_sets_decode_error_and_drops_raw_body() {
+        let mut ctx = ReqCtx {
+            is_stream: false,
+            client_codec: Some(AnyCodec::Anthropic(gw_codec::anthropic::Anthropic)),
+            upstream_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            upstream_status: Some(200),
+            ..ReqCtx::default()
+        };
+        let upstream_bytes = Bytes::from_static(b"not json");
+
+        handle_non_stream_chunk(Some(&upstream_bytes), true, &mut ctx);
+
+        assert_eq!(
+            ctx.upstream_error_code,
+            Some(gw_core::error::codes::GW_UPSTREAM_PROTOCOL_DECODE_ERROR)
+        );
+        assert!(
+            ctx.pending_client_body.is_none(),
+            "parse failure must not synthesize a successful client body"
+        );
+        assert!(
+            ctx.upstream_body_accum.is_none(),
+            "cross-protocol parse failure must not preserve raw upstream bytes for forwarding"
+        );
     }
 
     #[test]

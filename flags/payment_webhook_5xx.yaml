@@ -1,0 +1,19 @@
+name: payment_webhook_5xx
+type: bool
+default: false
+owner_ws: "WS-1, WS-15"
+description: |
+  When true, payment webhook handlers return HTTP 5xx on persistent storage
+  errors so providers retry. When false, the legacy compatibility behavior is
+  retained for rollout safety.
+go_repo_path: modules/payment/api/webhook.go
+rust_repo_path: null
+switch_plan:
+  introduced_release: N+0
+  enforce_release: N+1
+  delete_legacy_release: N+3
+rollback_steps:
+  - "Set ALM_FLAGS__PAYMENT_WEBHOOK_5XX=false on Go pods and roll them."
+  - "Watch payment_webhook_5xx_total and provider retry volume for one minute."
+  - "Use idempotency_keys to verify any provider retry is safe before manual replay."
+mixed_version_safe: true

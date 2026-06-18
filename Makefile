@@ -1,5 +1,27 @@
-.PHONY: e2e e2e-up e2e-down e2e-logs e2e-soak e2e-soak-smoke e2e-soak-kill \
+.PHONY: check e2e e2e-up e2e-down e2e-logs e2e-soak e2e-soak-smoke e2e-soak-kill \
+	chaos-smoke chaos-full chaos-scenario chaos-clean \
 	tunnel-e2e tunnel-e2e-up tunnel-e2e-down tunnel-e2e-logs tunnel-e2e-deps
+
+check:
+	cargo +1.88.0 fmt --all -- --check
+	cargo +1.88.0 clippy --workspace --all-targets --locked -- -D warnings
+	bash scripts/check-invariants.sh
+
+CHAOS_DRY_RUN ?= 1
+CHAOS_DRY_FLAG := $(if $(filter 1 true yes,$(CHAOS_DRY_RUN)),--dry-run,)
+
+chaos-smoke:
+	python3 tests/e2e/chaos/harness/runner.py --markers smoke --report-dir .chaos_report $(CHAOS_DRY_FLAG)
+
+chaos-full:
+	python3 tests/e2e/chaos/harness/runner.py --markers smoke,full,long_soak --report-dir .chaos_report $(CHAOS_DRY_FLAG)
+
+chaos-scenario:
+	@test -n "$(NAME)" || { echo "NAME=<scenario> is required"; exit 2; }
+	python3 tests/e2e/chaos/harness/runner.py --scenario "$(NAME)" --report-dir .chaos_report $(CHAOS_DRY_FLAG)
+
+chaos-clean:
+	rm -rf .chaos_report/
 
 e2e:
 	$(MAKE) e2e-up

@@ -299,7 +299,7 @@ RETURNING (xmax = 0) AS did_write, response_jsonb
 | **REV-FINAL-M3** | v1 §4 WS-1 S1.16 LeaseGuard 双标志 | 抽样已验证：`lease.rs:117-123` LeaseGuard 字段为 `{uid, reserved, coef_version, released, state}`，**确实没 `settled` 字段**；`settle_actual` (199-206) 仅 `fetch_add(refund)` **确实非幂等**。<br>**候选 A（推荐起点）**：加 `settled: AtomicBool`，`settle_actual` 顶端 `if self.settled.swap(true, AcqRel) { return; }`；`release` 内 `if !self.settled.load(Acquire) { self.settle_actual(0); }`；Drop 仅调 release。<br>**候选 B**：保留两 AtomicBool 但 `release` 走 settle_actual(0) 才置 released。<br>**候选 C**：用一个 `state: AtomicI64` 编码三态。<br>**执行者必须**：核实是否有合法的"先 settle(estimate) 再 settle(final)"调用模式（若有则 A 会丢第二次结算，需切换到 B 或专门 `update_actual`）。先 grep `settle_actual` 所有 caller 再定结构。 |
 | **REV-FINAL-M4** | v1 §4 WS-1 S1.9 Refund.Create | wallet 行 lock 锁不住 refund_requests 跨行 SUM。改为 `pg_advisory_xact_lock(hash_int('refund:'||wallet_id))` 在 tx 开头。Reason: PG 无 SUM predicate lock。DO: advisory lock；DON'T: 提升到 SERIALIZABLE（性能炸）。 |
 | **REV-FINAL-M5** | v1 §4 WS-1 S1.6 outbox processor 重试 | 必须查 `idempotency_keys.request_hash == sha256(canonical(outbox.payload))`。Reason: 区分"成功但丢 ack"与"被 admin 改过"。DO: 校验 hash 才 mark committed；DON'T: 见到 idem 行就 mark committed。 |
-| **REV-FINAL-M6** | v1 §4 WS-1 S1.1 idempotency_keys 表 | 加 PG 声明式分区按 `created_at` 月分区；90 天保留；周清理 job。Reason: 1 年 ~290M 行索引 bloat。DO: 分区 + 自动 drop；DON'T: 不分区只加 index（autovacuum 跟不上）。 |
+| **REV-FINAL-M6** | v1 §4 WS-1 S1.1 idempotency_keys 表 | 原建议为 PG 声明式分区按 `created_at` 月分区；落地时因 `ON CONFLICT (op,key)` 全局唯一幂等语义优先，WS-14 将首版实现锁定为普通表 + `(op,key)` PK + `created_at` 索引，分区/90 天 retention 后续由 WS-1 owner 在不破坏全局唯一约束的前提下单独 migration。Reason: PG range partition unique/PK 必须包含 partition key，会削弱 `(op,key)` 全局幂等。DO: 保住单 SQL 幂等提交；DON'T: 为分区牺牲跨月份唯一性。 |
 | **REV-FINAL-M7** | v1 §4 WS-1 S1.22 Lua | XADD 用 `MAXLEN ~ cap` 可能因配置错被 server 拒导致 Lua abort 半途。改为 `redis.call('XADD', stream, '*', ...)` **不带 MAXLEN**，trim 由独立后台 job 跑。Reason: server-side error 中断 Lua 无 rollback。DO: 拆开 trim；DON'T: 在 Lua 里 trim。 |
 | **REV-FINAL-M8** | v1 §4 WS-1 S1.23 sentinel | 取消 `billing:settled:{rid}:{attempt}` 独立 SET。reconciler 改为查 `XRANGE usage:records - +` 在最近 24h 内是否有匹配 `(rid, attempt)` 的条目。Reason: 独立 sentinel 与 Lua-DEL 的时序漏洞无法关闭。DO: 用 usage:records 自身做去重源；DON'T: 用独立 SET（永有时差）。 |
 | **REV-FINAL-M9** | v1 §4 WS-1 S1.25 catch_unwind spill | 加 `Semaphore::new(32)` 限并发 spill；spill delete 失败不容忍（escalate restart）；replay-recovery 也走 §S1.24 的 SETNX 去重。Reason: 16+ concurrent spill 在慢 Redis 下塞磁盘。DO: 限并发 + escalate；DON'T: 静默 `let _ = remove_file()`。 |
@@ -470,20 +470,22 @@ v1 改了 API 错误码、HTTP 状态码语义、header（R2 nonce、license 402
 - 写本 plan 所有 migration 的 down 脚本。
 - staging snapshot 自动验证 down 可还原。
 
-#### 编号分配表（草案）
+#### 编号分配表（WS-14 locked）
 
 | WS | 编号 | 表 | 备注 |
 |---|---|---|---|
-| WS-1 | `00035_idempotency_keys.sql` | idempotency_keys | partitioned by month |
-| WS-1 | `00036_payment_outbox.sql` | payment_outbox | + processor |
-| WS-1 | `00037_refund_outbox.sql` | refund_outbox | + processor |
-| WS-1 | `00038_subscription_upgrade_outbox.sql` | subscription_upgrade_outbox | REV-FINAL-M10 |
-| WS-1 | `00039_wallet_outbox_commit_ts.sql` | ALTER ... ADD commit_timestamp | REV-004a |
-| WS-1 | `00040_user_subscriptions_quota_check.sql` | CHECK constraint | G1 |
-| WS-5 | `00041_default_user_group_seed.sql` | seed | REV-FINAL-V15 |
+| WS-1 | `00067_idempotency_keys.sql` | idempotency_keys | 普通表 + `(op,key)` PK；分区另行评估 |
+| WS-1 | `00068_payment_outbox.sql` | payment_outbox | + processor |
+| WS-1 | `00069_refund_outbox.sql` | refund_outbox | + processor |
+| WS-1 | `00070_subscription_upgrade_outbox.sql` | subscription_upgrade_outbox | REV-FINAL-M10 |
+| WS-1 | `00071_wallet_outbox_commit_ts.sql` | ALTER ... ADD commit_timestamp | REV-004a |
+| WS-1 | `00072_user_subscriptions_quota_check.sql` | CHECK constraint | G1 |
+| WS-9 | `00073_billing_covering_indexes.sql` | covering indexes | SLQ3 Go hot queries |
+| WS-5 | `00074_default_user_group_seed.sql` | seed | REV-FINAL-V15 |
 | WS-1 Rust | `0012_task_freeze_pending.sql` | task_freeze_pending | R9 |
-| WS-8 Rust | `0013_model_pricing_extended.sql` | model_pricing 加新列 nullable | REV-FINAL-H8.5 |
-| WS-9 Rust | `0014_billing_indexes.sql` | covering indexes | SLQ3 |
+| WS-8 Rust | `0013_pricings_extended.sql` | pricings 加新列 nullable | REV-FINAL-H8.5 |
+| WS-9 Rust | `0014_billing_query_indexes.sql` | covering indexes | SLQ3 Rust hot queries |
+| WS-2 Rust | `0015_quota_state_outbox.sql` | quota_state_outbox | R23 / REV-FINAL-W12 |
 
 ### WS-15：回滚 / Feature Flag 策略
 

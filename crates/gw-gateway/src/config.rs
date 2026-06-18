@@ -16,6 +16,7 @@ use figment::{
 };
 use gw_routing::pipeline::multi_dim::DimWeights;
 use gw_routing::reservation_gate::ReservationGate;
+use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -71,6 +72,10 @@ pub struct Config {
     pub oauth_refresh: OAuthRefreshCfg,
     #[serde(default)]
     pub control_plane: ControlPlaneCfg,
+    /// Rollback / feature-flag block (WS-15). Defaults must match the yaml
+    /// ledger under `flags/*.yaml`.
+    #[serde(default)]
+    pub flags: FlagsCfg,
     /// Credit-lease protection mode (Spec 2026-05-29-credit-lease-design).
     /// `enabled = false` (the default) keeps the legacy `frozen_micro` soft
     /// defense path; flipping it on activates the per-Pod hard upper bound.
@@ -182,6 +187,42 @@ fn default_control_plane_command_group() -> String {
 
 fn default_control_plane_command_block_ms() -> u64 {
     5_000
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FlagsCfg {
+    #[serde(default = "default_license_enforce_mode")]
+    pub license_enforce: LicenseEnforceMode,
+    #[serde(default)]
+    pub jwt_strict: bool,
+    /// Declared for parity with Go side; Rust does not consume this flag.
+    #[serde(default)]
+    pub payment_webhook_5xx: bool,
+    #[serde(default)]
+    pub r7_502_on_parse_fail: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LicenseEnforceMode {
+    Disabled,
+    Warn,
+    Enforce,
+}
+
+fn default_license_enforce_mode() -> LicenseEnforceMode {
+    LicenseEnforceMode::Warn
+}
+
+impl Default for FlagsCfg {
+    fn default() -> Self {
+        Self {
+            license_enforce: default_license_enforce_mode(),
+            jwt_strict: false,
+            payment_webhook_5xx: false,
+            r7_502_on_parse_fail: false,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,6 +414,8 @@ pub struct SecurityCfg {
 pub struct SignatureCfg {
     #[serde(default)]
     pub required: bool,
+    #[serde(default)]
+    pub replay_check: gw_auth::signature::ReplayCheckMode,
 }
 
 /// Cold-loader (EntityStore) settings.
@@ -448,6 +491,8 @@ pub struct ReservationCfg {
     pub enabled: bool,
     #[serde(default = "default_reservation_interval_secs")]
     pub interval_secs: u64,
+    #[serde(default = "default_reservation_startup_grace_secs")]
+    pub startup_grace_secs: u64,
     #[serde(default)]
     pub instance_id: Option<String>,
     #[serde(default)]
@@ -458,11 +503,16 @@ fn default_reservation_interval_secs() -> u64 {
     5
 }
 
+fn default_reservation_startup_grace_secs() -> u64 {
+    gw_routing::reservation_gate::DEFAULT_STARTUP_GRACE_SECS
+}
+
 impl Default for ReservationCfg {
     fn default() -> Self {
         Self {
             enabled: false,
             interval_secs: default_reservation_interval_secs(),
+            startup_grace_secs: default_reservation_startup_grace_secs(),
             instance_id: None,
             thresholds: HashMap::new(),
         }
@@ -471,7 +521,11 @@ impl Default for ReservationCfg {
 
 impl ReservationCfg {
     pub fn gate(&self) -> ReservationGate {
-        ReservationGate::new(self.enabled, self.thresholds.clone())
+        ReservationGate::with_startup_grace(
+            self.enabled,
+            self.thresholds.clone(),
+            std::time::Duration::from_secs(self.startup_grace_secs),
+        )
     }
 }
 
@@ -1171,6 +1225,8 @@ impl Default for BillingCfg {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RuntimeConfig {
     #[serde(default)]
+    pub trusted_proxies: Vec<IpNet>,
+    #[serde(default)]
     pub supervisor: RuntimeSupervisorConfig,
     #[serde(default)]
     pub shutdown: RuntimeShutdownConfig,
@@ -1432,6 +1488,7 @@ impl Config {
         if self.pgsql.max_connections == 0 {
             anyhow::bail!("invalid config: pgsql.max_connections must be > 0");
         }
+        self.validate_trusted_proxies()?;
         self.control_plane.validate()?;
         if self.routing.presets.is_empty() {
             anyhow::bail!("invalid config: routing.presets must not be empty");
@@ -1623,6 +1680,32 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    fn validate_trusted_proxies(&self) -> anyhow::Result<()> {
+        let production = std::env::var("GW_ENV")
+            .map(|env| env.eq_ignore_ascii_case("production"))
+            .unwrap_or(false);
+        if production && self.security.trust_xff && self.runtime.trusted_proxies.is_empty() {
+            anyhow::bail!("production_trusted_proxies_empty");
+        }
+        if production
+            && self
+                .runtime
+                .trusted_proxies
+                .iter()
+                .any(is_wildcard_trust_net)
+        {
+            anyhow::bail!("production_trusted_proxies_wildcard");
+        }
+        Ok(())
+    }
+}
+
+fn is_wildcard_trust_net(net: &IpNet) -> bool {
+    match net {
+        IpNet::V4(v4) => v4.prefix_len() == 0,
+        IpNet::V6(v6) => v6.prefix_len() == 0,
     }
 }
 
@@ -1978,6 +2061,37 @@ mod routing_cfg_tests {
     }
 
     #[test]
+    fn routing_reservation_startup_grace_defaults_to_30s() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+
+        assert_eq!(cfg.routing.reservation.startup_grace_secs, 30);
+    }
+
+    #[test]
+    fn routing_reservation_startup_grace_override_parses() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+[routing.reservation]
+enabled = true
+startup_grace_secs = 7
+thresholds = { "gpt-*" = 60 }
+"#;
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("routing reservation parse");
+
+        assert!(cfg.routing.reservation.enabled);
+        assert_eq!(cfg.routing.reservation.startup_grace_secs, 7);
+        assert_eq!(cfg.routing.reservation.thresholds["gpt-*"], 60);
+    }
+
+    #[test]
     fn routing_presets_custom_weights_parse() {
         let defaults = include_str!("../../../config/default.toml");
         let overrides = r#"
@@ -2041,6 +2155,137 @@ bad = { health = 1.0, latency = 0.0, cost = 0.0, inflight = 0.0, error_rate = 0.
             .extract()
             .expect("routing preset parse");
         assert!(cfg.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod trusted_proxies_cfg_tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+    use figment::Figment;
+
+    #[test]
+    fn trusted_proxies_default_empty_and_safe() {
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(include_str!("../../../config/default.toml")))
+            .extract()
+            .expect("default.toml parses");
+
+        assert!(!cfg.security.trust_xff);
+        assert!(cfg.runtime.trusted_proxies.is_empty());
+        cfg.validate()
+            .expect("trust_xff=false permits empty proxies");
+    }
+
+    #[test]
+    fn trusted_proxies_override_parses() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+[security]
+trust_xff = true
+
+[runtime]
+trusted_proxies = ["10.0.0.0/8", "172.16.0.0/12"]
+"#;
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("trusted proxies parse");
+
+        assert!(cfg.security.trust_xff);
+        assert_eq!(cfg.runtime.trusted_proxies.len(), 2);
+    }
+
+    #[test]
+    fn production_trust_xff_rejects_empty_trusted_proxies() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("GW_ENV", "production");
+            let defaults = include_str!("../../../config/default.toml");
+            let overrides = r#"
+[security]
+trust_xff = true
+"#;
+            let cfg: Config = Figment::new()
+                .merge(Toml::string(defaults))
+                .merge(Toml::string(overrides))
+                .extract()
+                .expect("config extracts");
+
+            let err = cfg
+                .validate()
+                .expect_err("must reject prod empty trusted_proxies");
+            assert!(err.to_string().contains("production_trusted_proxies_empty"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn production_rejects_wildcard_trusted_proxy() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("GW_ENV", "production");
+            let defaults = include_str!("../../../config/default.toml");
+            let overrides = r#"
+[security]
+trust_xff = true
+
+[runtime]
+trusted_proxies = ["0.0.0.0/0"]
+"#;
+            let cfg: Config = Figment::new()
+                .merge(Toml::string(defaults))
+                .merge(Toml::string(overrides))
+                .extract()
+                .expect("config extracts");
+
+            let err = cfg
+                .validate()
+                .expect_err("must reject prod wildcard trusted proxy");
+            assert!(err
+                .to_string()
+                .contains("production_trusted_proxies_wildcard"));
+            Ok(())
+        });
+    }
+}
+
+#[cfg(test)]
+mod signature_cfg_tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+    use figment::Figment;
+
+    #[test]
+    fn signature_replay_check_defaults_to_none() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+
+        assert_eq!(
+            cfg.signature.replay_check,
+            gw_auth::signature::ReplayCheckMode::None
+        );
+    }
+
+    #[test]
+    fn signature_replay_check_override_parses() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+[signature]
+replay_check = "nonce_local"
+"#;
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("signature replay_check parses");
+
+        assert_eq!(
+            cfg.signature.replay_check,
+            gw_auth::signature::ReplayCheckMode::NonceLocal
+        );
     }
 }
 
@@ -2115,5 +2360,71 @@ top_p = 0.9
         assert_eq!(rules.len(), 2);
         assert_eq!(rules.get("temperature").unwrap(), &serde_json::json!(0.7));
         assert_eq!(rules.get("top_p").unwrap(), &serde_json::json!(0.9));
+    }
+}
+
+#[cfg(test)]
+mod flags_cfg_tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+    use figment::Figment;
+
+    #[test]
+    fn flags_defaults_match_yaml_ledger() {
+        let toml = include_str!("../../../config/default.toml");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+
+        assert_eq!(cfg.flags.license_enforce, LicenseEnforceMode::Warn);
+        assert!(!cfg.flags.jwt_strict);
+        assert!(!cfg.flags.payment_webhook_5xx);
+        assert!(!cfg.flags.r7_502_on_parse_fail);
+    }
+
+    #[test]
+    fn flags_env_override() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("GW_FLAGS__LICENSE_ENFORCE", "enforce");
+            jail.set_env("GW_FLAGS__JWT_STRICT", "true");
+            let defaults = include_str!("../../../config/default.toml");
+            let cfg: Config = Figment::new()
+                .merge(Toml::string(defaults))
+                .merge(figment::providers::Env::prefixed("GW_").split("__"))
+                .extract()
+                .expect("env override extracts");
+
+            assert_eq!(cfg.flags.license_enforce, LicenseEnforceMode::Enforce);
+            assert!(cfg.flags.jwt_strict);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn flags_invalid_enum_fails_parse() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("GW_FLAGS__LICENSE_ENFORCE", "enforce_strictly");
+            let defaults = include_str!("../../../config/default.toml");
+            let res: Result<Config, _> = Figment::new()
+                .merge(Toml::string(defaults))
+                .merge(figment::providers::Env::prefixed("GW_").split("__"))
+                .extract();
+
+            assert!(res.is_err(), "invalid enum must fail figment extract");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn missing_flags_block_uses_defaults() {
+        let defaults = include_str!("../../../config/default.toml").replace("[flags]", "[_flags]");
+        let cfg: Config = Figment::new()
+            .merge(Toml::string(&defaults))
+            .extract()
+            .expect("config without [flags] parses");
+
+        assert_eq!(cfg.flags.license_enforce, LicenseEnforceMode::Warn);
+        assert!(!cfg.flags.jwt_strict);
     }
 }

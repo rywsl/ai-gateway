@@ -159,6 +159,44 @@ impl Supervisor {
     }
 }
 
+#[must_use = "one-shot task handle should be awaited or tracked"]
+pub fn one_shot_spawn<F, Fut>(name: &'static str, fut: F) -> JoinHandle<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), anyhow::Error>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let result = AssertUnwindSafe(async { fut().await }).catch_unwind().await;
+        match result {
+            Ok(Ok(())) => {
+                metrics::counter!("gw_oneshot_total", "task" => name, "result" => "success")
+                    .increment(1);
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    target: "gw_runtime::oneshot",
+                    task = name,
+                    error = %err,
+                    "one-shot returned error"
+                );
+                metrics::counter!("gw_oneshot_total", "task" => name, "result" => "error")
+                    .increment(1);
+            }
+            Err(panic) => {
+                let payload = panic_payload_string(&panic);
+                tracing::error!(
+                    target: "gw_runtime::oneshot",
+                    task = name,
+                    panic = %payload,
+                    "one-shot panicked"
+                );
+                metrics::counter!("gw_oneshot_total", "task" => name, "result" => "panic")
+                    .increment(1);
+            }
+        }
+    })
+}
+
 fn next_backoff(current: Duration, policy: &RestartPolicy) -> Duration {
     let next = current.mul_f64(policy.backoff_multiplier);
     if next > policy.backoff_max {

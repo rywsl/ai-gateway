@@ -18,6 +18,7 @@ pub const GW_QUOTA_TPM_EXCEEDED: &str = "GW_QUOTA_TPM_EXCEEDED";
 pub const GW_QUOTA_CONCURRENT_EXCEEDED: &str = "GW_QUOTA_CONCURRENT_EXCEEDED";
 pub const GW_REQUEST_PROTOCOL_UNKNOWN: &str = "GW_REQUEST_PROTOCOL_UNKNOWN";
 pub const GW_REQUEST_INPUT_TOO_LARGE: &str = "GW_REQUEST_INPUT_TOO_LARGE";
+pub const GW_AMOUNT_OVERFLOW: &str = "GW_AMOUNT_OVERFLOW";
 pub const GW_REQUEST_COST_TOO_HIGH: &str = "GW_REQUEST_COST_TOO_HIGH";
 pub const GW_REQUEST_CONTENT_REJECTED: &str = "GW_REQUEST_CONTENT_REJECTED";
 pub const GW_REQUEST_MODEL_NOT_FOUND: &str = "GW_REQUEST_MODEL_NOT_FOUND";
@@ -61,6 +62,7 @@ pub const GW_AUTH_JWT_EXPIRED: &str = "GW_AUTH_JWT_EXPIRED";
 // above; the missing-header and clock-drift variants are new.
 pub const GW_AUTH_SIGNATURE_MISSING: &str = "GW_AUTH_SIGNATURE_MISSING";
 pub const GW_AUTH_SIGNATURE_TIMESTAMP_DRIFT: &str = "GW_AUTH_SIGNATURE_TIMESTAMP_DRIFT";
+pub const GW_AUTH_REPLAY_DETECTED: &str = "GW_AUTH_REPLAY_DETECTED";
 /// Signing is required for this key/global but no `signature_secret` is
 /// configured. HTTP 500 — fail-closed server misconfiguration, NOT a client
 /// error: verifying against an empty HMAC key would otherwise be forgeable.
@@ -126,6 +128,7 @@ pub const GW_AUTH_OAUTH_REFRESH_FAILED: &str = "GW_AUTH_OAUTH_REFRESH_FAILED";
 // --- Go-onboarding-blockers codes (B2 mgmt-token) ---
 // B2: management-token authentication (Mgmt header → ManagementTokenEntry →
 // SHA-256 verify → /healthz unlock). One code per failure mode for ops drilldown.
+pub const GW_AUTH_FAILED: &str = "GW_AUTH_FAILED";
 pub const GW_AUTH_MGMT_TOKEN_MISSING: &str = "GW_AUTH_MGMT_TOKEN_MISSING";
 pub const GW_AUTH_MGMT_TOKEN_INVALID: &str = "GW_AUTH_MGMT_TOKEN_INVALID";
 pub const GW_AUTH_MGMT_TOKEN_EXPIRED: &str = "GW_AUTH_MGMT_TOKEN_EXPIRED";

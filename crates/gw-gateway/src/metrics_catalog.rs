@@ -110,7 +110,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_redos_timeout_total",
         kind: MetricKind::Counter,
-        help: "regex match exceeded budget; label=api_key_id",
+        help: "regex match exceeded budget; label=disabled_now",
     },
     MetricSpec {
         name: "gw_adaptive_rpm_observe_total",
@@ -535,7 +535,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gateway_tpm_consumed_total",
         kind: MetricKind::Counter,
-        help: "Observed tokens fed into the per-user sliding-window TPM limiter; label=user_id",
+        help: "Observed tokens fed into the per-user sliding-window TPM limiter; label=role (primary/subaccount)",
     },
     MetricSpec {
         name: "gateway_freeze_leak_recovered_total",
