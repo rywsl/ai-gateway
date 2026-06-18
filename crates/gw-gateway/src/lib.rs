@@ -123,6 +123,11 @@ struct Wired {
     cancel_grace_ms: u64,
     /// WS-15/T15.7 rollout flag for response parse failures.
     r7_502_on_parse_fail: bool,
+    /// WS-15/T15.4 license enforcement gate. Hot-reloadable; threaded into
+    /// `LlmGateway::request_filter` so the gate is consulted per request.
+    /// Real `LicenseStatus` arrives with WS-5/WS-16; until then `enforce` is
+    /// a no-op (Valid status) and the 402 rejection path sits inert.
+    license_gate: Arc<gw_auth::license::LicenseGate>,
     /// Hard-cap configuration (ADR-024). From `cfg.auth.*`.
     hard_cap_cfg: gw_auth::hard_cap::HardCapCfg,
     /// Credit-lease protection-mode config (Spec 2026-05-29-credit-lease-design).
@@ -386,6 +391,7 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.response_deadline_ms,
                 wired.cancel_grace_ms,
                 wired.r7_502_on_parse_fail,
+                wired.license_gate.clone(),
                 wired.hard_cap_cfg,
                 wired.protection_cfg.clone(),
                 wired.overflow_gate,
@@ -598,6 +604,21 @@ pub fn run_with_signal_handler() -> anyhow::Result<()> {
             gw_runtime::DrainOutcome::Forced => std::process::exit(1),
         }
     })
+}
+
+/// Convert the figment-parsed `[flags].license_enforce` enum into the
+/// self-contained `gw-auth` one. Kept here (not as a `From` impl) so
+/// `gw-auth` stays free of any `gw-gateway` dependency — the two enums are
+/// deliberately identical but live in separate crates to avoid a layering
+/// cycle.
+fn license_mode_from_config(
+    mode: config::LicenseEnforceMode,
+) -> gw_auth::license::LicenseEnforceMode {
+    match mode {
+        config::LicenseEnforceMode::Disabled => gw_auth::license::LicenseEnforceMode::Disabled,
+        config::LicenseEnforceMode::Warn => gw_auth::license::LicenseEnforceMode::Warn,
+        config::LicenseEnforceMode::Enforce => gw_auth::license::LicenseEnforceMode::Enforce,
+    }
 }
 
 async fn bootstrap(
@@ -832,7 +853,7 @@ async fn bootstrap(
                 max_pending: cfg.quota_state_probe.max_pending,
             },
         }
-        .start();
+        .start(shutdown_token.clone());
     }
     {
         let processor = Arc::new(gw_store::quota_state::QuotaStateOutboxProcessor::new(
@@ -1113,6 +1134,7 @@ async fn bootstrap(
     let detailed_archive = Arc::new(gw_ledger::detailed_archive::DetailedArchive::start(
         (*redis.pool).clone(),
         archive_cfg,
+        shutdown_token.clone(),
     ));
 
     // Egress impersonation loopback + identity persistence (Task 4.6, configured by
@@ -1150,7 +1172,7 @@ async fn bootstrap(
 
     // 4d. InflightLedger + background tasks (W2-T6).
     // instance_id was resolved above (before Ledger::start) and is reused here.
-    gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone());
+    gw_ledger::instance_id::spawn_heartbeat_task((*redis.pool).clone(), instance_id.clone(), shutdown_token.clone());
     match gw_ledger::load_latest_coef_snapshot(&redis.pool).await {
         Ok(Some(outcome)) => {
             tracing::info!(
@@ -1717,6 +1739,9 @@ async fn bootstrap(
             response_deadline_ms: cfg.billing.response_deadline_ms,
             cancel_grace_ms: cfg.billing.cancel_grace_ms,
             r7_502_on_parse_fail: cfg.flags.r7_502_on_parse_fail,
+            license_gate: Arc::new(gw_auth::license::LicenseGate::new(
+                license_mode_from_config(cfg.flags.license_enforce),
+            )),
             hard_cap_cfg: gw_auth::hard_cap::HardCapCfg {
                 max_input_tokens: cfg.auth.hard_cap_max_input_tokens,
                 max_cost_micro: cfg.auth.hard_cap_max_cost_micro,

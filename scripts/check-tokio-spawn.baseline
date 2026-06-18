@@ -24,10 +24,7 @@ crates/gw-gateway/src/lib.rs:498:tokio-spawn
 crates/gw-gateway/src/lib.rs:529:tokio-spawn
 crates/gw-gateway/src/lib.rs:1666:tokio-spawn
 crates/gw-health/src/quota_probe.rs:86:tokio-spawn
-crates/gw-ledger/src/detailed_archive.rs:134:tokio-spawn
-crates/gw-ledger/src/detailed_archive.rs:317:tokio-spawn
 crates/gw-ledger/src/freeze.rs:202:tokio-spawn
-crates/gw-ledger/src/instance_id.rs:100:tokio-spawn
 crates/gw-proxy/src/billing_lifecycle.rs:431:tokio-spawn
 crates/gw-proxy/src/error/listeners/cache_invalidate.rs:25:tokio-spawn
 crates/gw-proxy/src/error/listeners/oauth.rs:61:tokio-spawn
@@ -51,8 +48,6 @@ crates/gw-runtime/src/supervisor.rs:84:tokio-spawn
 crates/gw-runtime/src/supervisor.rs:168:tokio-spawn
 crates/gw-store/src/identity_persist.rs:51:tokio-spawn
 crates/gw-store/src/managed_loop.rs:38:tokio-spawn
-crates/gw-store/src/quota_state.rs:284:tokio-spawn
-crates/gw-store/src/quota_state.rs:325:tokio-spawn
 crates/gw-task-worker/src/lib.rs:597:tokio-spawn
 crates/gw-tunnel-client/src/cnexus/pool.rs:64:tokio-spawn
 crates/gw-tunnel-client/src/cnexus/transport.rs:167:tokio-spawn

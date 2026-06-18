@@ -257,7 +257,16 @@ pub async fn run(
     let client_kind = ctx.client_codec.as_ref().map(AnyCodec::kind);
 
     if let Some(chunk) = body.as_ref() {
-        ctx.sse_leftover.extend_from_slice(chunk);
+        // T-W3-06: cap sse_leftover at SSE_LEFTOVER_CAP_BYTES with the
+        // Truncate policy. Losing tail bytes only drops a partial event;
+        // the SSE framing recovers at the next `\n\n`.
+        let _ = crate::bounded::push_bounded_vec(
+            &mut ctx.sse_leftover,
+            chunk,
+            crate::bounded::SSE_LEFTOVER_CAP_BYTES,
+            crate::bounded::SSE_LEFTOVER_LABEL,
+            gw_core::bounded_buf::OverflowPolicy::Truncate,
+        );
     }
 
     // Drain complete `\n\n`- OR `\r\n\r\n`-terminated events. `find_event_boundary`
@@ -397,9 +406,30 @@ pub async fn run_cli_body_filter(
         if ctx.is_stream {
             scan_cli_stream_chunk(shape, &passthrough, ctx);
         } else {
-            ctx.upstream_body_accum
-                .get_or_insert_with(BytesMut::new)
-                .extend_from_slice(&passthrough);
+            // T-W3-05: cap at UPSTREAM_BODY_ACCUM_CAP_BYTES with the
+            // Reject policy. A truncated body would mis-parse JSON and
+            // produce a wrong token count → wrong cost; we MUST refuse
+            // rather than silently corrupt.
+            let buf = ctx
+                .upstream_body_accum
+                .get_or_insert_with(BytesMut::new);
+            let outcome = crate::bounded::push_bounded_bytes(
+                buf,
+                &passthrough,
+                crate::bounded::UPSTREAM_BODY_ACCUM_CAP_BYTES,
+                crate::bounded::UPSTREAM_BODY_ACCUM_LABEL,
+                gw_core::bounded_buf::OverflowPolicy::Reject,
+            );
+            if matches!(outcome, crate::bounded::PushOutcome::Rejected { .. }) {
+                return Err(pingora::Error::because(
+                    pingora::ErrorType::CustomCode("GW_UPSTREAM_BODY_TRUNCATED", 502),
+                    "upstream body exceeded bounded_buf cap",
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        "upstream_body_accum cap exceeded",
+                    )),
+                ));
+            }
         }
         if let Some(sr) = ctx.spill_root.clone() {
             ctx.archive_downstream_response_body
@@ -442,7 +472,14 @@ fn cli_passthrough_response_chunk(shape: ApiShape, chunk: &[u8]) -> std::borrow:
 }
 
 fn scan_cli_stream_chunk(shape: ApiShape, chunk: &[u8], ctx: &mut ReqCtx) {
-    ctx.sse_leftover.extend_from_slice(chunk);
+    // T-W3-06: same Truncate policy as the main response streaming path.
+    let _ = crate::bounded::push_bounded_vec(
+        &mut ctx.sse_leftover,
+        chunk,
+        crate::bounded::SSE_LEFTOVER_CAP_BYTES,
+        crate::bounded::SSE_LEFTOVER_LABEL,
+        gw_core::bounded_buf::OverflowPolicy::Truncate,
+    );
     loop {
         let Some((idx, sep_len)) = find_event_boundary(&ctx.sse_leftover) else {
             break;
@@ -1023,9 +1060,25 @@ pub(crate) fn handle_non_stream_chunk(
     ctx: &mut ReqCtx,
 ) {
     if let Some(b) = chunk {
-        ctx.upstream_body_accum
-            .get_or_insert_with(BytesMut::new)
-            .extend_from_slice(b);
+        // T-W3-05: cap at UPSTREAM_BODY_ACCUM_CAP_BYTES with Reject policy.
+        // On overflow we drop the offending chunk (buffer stays at cap)
+        // and stamp `upstream_error_code` so `logging` reports
+        // `GW_UPSTREAM_BODY_TRUNCATED` instead of a misleading parse error.
+        // The existing fail-to-proxy path will then surface a 502.
+        let buf = ctx
+            .upstream_body_accum
+            .get_or_insert_with(BytesMut::new);
+        let outcome = crate::bounded::push_bounded_bytes(
+            buf,
+            b,
+            crate::bounded::UPSTREAM_BODY_ACCUM_CAP_BYTES,
+            crate::bounded::UPSTREAM_BODY_ACCUM_LABEL,
+            gw_core::bounded_buf::OverflowPolicy::Reject,
+        );
+        if matches!(outcome, crate::bounded::PushOutcome::Rejected { .. }) {
+            ctx.upstream_error_code
+                .get_or_insert("GW_UPSTREAM_BODY_TRUNCATED");
+        }
     }
 
     if !end_of_stream {

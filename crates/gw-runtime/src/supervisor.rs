@@ -11,7 +11,8 @@
 
 use crate::shutdown::ShutdownToken;
 use futures::FutureExt;
-use std::collections::VecDeque;
+use once_cell::sync::Lazy;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -165,9 +166,10 @@ where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), anyhow::Error>> + Send + 'static,
 {
+    let flag = SUPERVISOR_REGISTRY.register(name);
     tokio::spawn(async move {
         let result = AssertUnwindSafe(async { fut().await }).catch_unwind().await;
-        match result {
+        match &result {
             Ok(Ok(())) => {
                 metrics::counter!("gw_oneshot_total", "task" => name, "result" => "success")
                     .increment(1);
@@ -179,22 +181,168 @@ where
                     error = %err,
                     "one-shot returned error"
                 );
+                flag.store(true, Ordering::SeqCst);
+                metrics::gauge!("gw_supervisor_unhealthy", "task" => name).set(1.0);
                 metrics::counter!("gw_oneshot_total", "task" => name, "result" => "error")
                     .increment(1);
             }
             Err(panic) => {
-                let payload = panic_payload_string(&panic);
+                let payload = panic_payload_string(panic);
                 tracing::error!(
                     target: "gw_runtime::oneshot",
                     task = name,
                     panic = %payload,
                     "one-shot panicked"
                 );
+                flag.store(true, Ordering::SeqCst);
+                metrics::gauge!("gw_supervisor_unhealthy", "task" => name).set(1.0);
                 metrics::counter!("gw_oneshot_total", "task" => name, "result" => "panic")
                     .increment(1);
             }
         }
     })
+}
+
+// --- SupervisorRegistry -----------------------------------------------------
+
+/// Process-wide registry of supervised task health flags.
+///
+/// Each `supervised_spawn`/`one_shot_spawn` task registers an
+/// `Arc<AtomicBool>` here. The flag is `false` while healthy and flips to
+/// `true` when the task burns its restart budget or returns/panics
+/// irrecoverably. `/readyz` reads `all_healthy()` to decide 200 vs 503.
+pub struct SupervisorRegistry {
+    flags: parking_lot::RwLock<HashMap<&'static str, Arc<AtomicBool>>>,
+}
+
+impl SupervisorRegistry {
+    pub fn new() -> Self {
+        Self {
+            flags: parking_lot::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a task and return its health flag. The flag starts healthy
+    /// (`false`). Re-registering the same name returns the existing flag so
+    /// idempotent boot paths do not panic.
+    pub fn register(&self, name: &'static str) -> Arc<AtomicBool> {
+        let mut guard = self.flags.write();
+        if let Some(existing) = guard.get(&name) {
+            return Arc::clone(existing);
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        guard.insert(name, Arc::clone(&flag));
+        flag
+    }
+
+    /// Register a task with an externally-owned flag (e.g. the one created by
+    /// `Supervisor::new`). The registry and the caller share the same
+    /// `Arc<AtomicBool>` so a flip is immediately visible to `/readyz`.
+    pub fn register_with_flag(&self, name: &'static str, flag: Arc<AtomicBool>) {
+        let mut guard = self.flags.write();
+        guard.insert(name, flag);
+    }
+
+    /// `true` when every registered task is healthy.
+    pub fn all_healthy(&self) -> bool {
+        self.flags
+            .read()
+            .values()
+            .all(|f| !f.load(Ordering::SeqCst))
+    }
+
+    /// Sorted list of task names whose health flag has flipped to unhealthy.
+    pub fn unhealthy_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .flags
+            .read()
+            .iter()
+            .filter(|(_, f)| f.load(Ordering::SeqCst))
+            .map(|(n, _)| (*n).to_string())
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Test-only: clear all registrations so unit tests start from a clean
+    /// registry. Production code never calls this.
+    #[doc(hidden)]
+    pub fn reset_for_tests(&self) {
+        self.flags.write().clear();
+    }
+}
+
+impl Default for SupervisorRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub static SUPERVISOR_REGISTRY: Lazy<SupervisorRegistry> = Lazy::new(SupervisorRegistry::new);
+
+/// Spawn a supervised task that is registered with `SUPERVISOR_REGISTRY`.
+///
+/// Thin wrapper over `Supervisor::new(...).spawn(factory)` that also shares
+/// the supervisor's `unhealthy` flag with the process-wide registry so
+/// `/readyz` can aggregate. The factory receives a child `ShutdownToken` so
+/// the task can observe cancellation.
+#[must_use = "supervised task handle should be awaited or tracked"]
+pub fn supervised_spawn<F, Fut>(
+    name: &'static str,
+    policy: RestartPolicy,
+    token: ShutdownToken,
+    factory: F,
+) -> JoinHandle<()>
+where
+    F: Fn(ShutdownToken) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), anyhow::Error>> + Send + 'static,
+{
+    let sup = Supervisor::new(name, policy, token);
+    let flag = sup.unhealthy_flag();
+    // Share the supervisor's unhealthy flag with the registry so /readyz
+    // sees the flip immediately when the supervisor burns its budget — no
+    // watchdog task needed.
+    SUPERVISOR_REGISTRY.register_with_flag(name, flag);
+    sup.spawn(factory)
+}
+
+// --- Policy constructors ----------------------------------------------------
+
+pub fn policy_default() -> RestartPolicy {
+    RestartPolicy::default()
+}
+
+pub fn policy_archive() -> RestartPolicy {
+    RestartPolicy {
+        max_restarts: 10,
+        window: Duration::from_secs(60),
+        backoff_initial: Duration::from_millis(100),
+        backoff_max: Duration::from_secs(5),
+        backoff_multiplier: 2.0,
+        backoff_jitter: 0.2,
+    }
+}
+
+pub fn policy_probe() -> RestartPolicy {
+    RestartPolicy {
+        max_restarts: 5,
+        window: Duration::from_secs(300),
+        backoff_initial: Duration::from_secs(1),
+        backoff_max: Duration::from_secs(30),
+        backoff_multiplier: 2.0,
+        backoff_jitter: 0.2,
+    }
+}
+
+pub fn policy_heartbeat() -> RestartPolicy {
+    RestartPolicy {
+        max_restarts: 10,
+        window: Duration::from_secs(120),
+        backoff_initial: Duration::from_secs(1),
+        backoff_max: Duration::from_secs(10),
+        backoff_multiplier: 2.0,
+        backoff_jitter: 0.2,
+    }
 }
 
 fn next_backoff(current: Duration, policy: &RestartPolicy) -> Duration {

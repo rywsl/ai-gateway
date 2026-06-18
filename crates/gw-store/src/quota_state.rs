@@ -281,24 +281,27 @@ impl QuotaStateUpdateQueue {
 
         let writer = Arc::clone(&self.writer);
         let pending = Arc::clone(&self.pending);
-        tokio::spawn(async move {
-            match writer.write(&key_id, &state).await {
-                Ok(()) => {
-                    metrics::counter!("gw_quota_state_update_total", "result" => "ok").increment(1)
+        drop(gw_runtime::supervisor::one_shot_spawn("quota_state_update", move || {
+            async move {
+                match writer.write(&key_id, &state).await {
+                    Ok(()) => {
+                        metrics::counter!("gw_quota_state_update_total", "result" => "ok").increment(1)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "gw_store::quota_state",
+                            key_id = %key_id,
+                            error = %e,
+                            "quota state write failed"
+                        );
+                        metrics::counter!("gw_quota_state_update_total", "result" => "failed")
+                            .increment(1);
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "gw_store::quota_state",
-                        key_id = %key_id,
-                        error = %e,
-                        "quota state write failed"
-                    );
-                    metrics::counter!("gw_quota_state_update_total", "result" => "failed")
-                        .increment(1);
-                }
+                pending.remove(&key_id);
+                Ok(())
             }
-            pending.remove(&key_id);
-        });
+        }));
     }
 }
 
@@ -318,17 +321,29 @@ pub struct QuotaStateProbeRunner {
 }
 
 impl QuotaStateProbeRunner {
-    pub fn start(self) {
+    pub fn start(self, token: gw_runtime::ShutdownToken) {
         if !self.cfg.enabled {
             return;
         }
-        tokio::spawn(async move {
-            let interval = Duration::from_secs(self.cfg.interval_secs.max(1));
-            loop {
-                self.run_once().await;
-                tokio::time::sleep(interval).await;
-            }
-        });
+        let runner = std::sync::Arc::new(self);
+        drop(gw_runtime::supervisor::supervised_spawn(
+            "quota_state_probe",
+            gw_runtime::supervisor::policy_probe(),
+            token,
+            move |t| {
+                let runner = Arc::clone(&runner);
+                async move {
+                    let interval = Duration::from_secs(runner.cfg.interval_secs.max(1));
+                    loop {
+                        tokio::select! {
+                            _ = t.cancelled() => return Ok(()),
+                            _ = tokio::time::sleep(interval) => {}
+                        }
+                        runner.run_once().await;
+                    }
+                }
+            },
+        ));
     }
 
     pub async fn run_once(&self) {

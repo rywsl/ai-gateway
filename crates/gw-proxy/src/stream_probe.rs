@@ -1,5 +1,10 @@
 use bytes::{Bytes, BytesMut};
+use gw_core::bounded_buf::OverflowPolicy;
 use std::time::{Duration, Instant};
+
+use crate::bounded::{
+    push_bounded_bytes, PushOutcome, STREAM_PROBE_BUFFER_CAP_BYTES, STREAM_PROBE_BUFFER_LABEL,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamPhase {
@@ -13,6 +18,11 @@ pub enum ProbeFailure {
     UpstreamErrorBody,
     MalformedFrame,
     Timeout,
+    /// T-W3-07: the probe buffer would have exceeded its cap
+    /// (`STREAM_PROBE_BUFFER_CAP_BYTES`). Treated as malformed for
+    /// failover purposes — a probe that needs more than 256 KiB to
+    /// classify is almost certainly a hostile or non-SSE upstream.
+    BufferCap,
 }
 
 impl ProbeFailure {
@@ -21,6 +31,7 @@ impl ProbeFailure {
             ProbeFailure::UpstreamErrorBody => "upstream_error_body",
             ProbeFailure::MalformedFrame => "malformed_frame",
             ProbeFailure::Timeout => "timeout",
+            ProbeFailure::BufferCap => "buffer_cap",
         }
     }
 }
@@ -52,6 +63,21 @@ impl StreamProbeState {
             buffer: BytesMut::new(),
         }
     }
+
+    /// T-W3-07: cap-aware append. Returns `true` when all bytes were
+    /// appended; returns `false` when the cap was reached under the
+    /// `Reject` policy, in which case the buffer is unchanged and the
+    /// caller MUST surface `ProbeDecision::Fail(ProbeFailure::BufferCap)`.
+    fn try_buffer_chunk(&mut self, chunk: &[u8]) -> bool {
+        let outcome = push_bounded_bytes(
+            &mut self.buffer,
+            chunk,
+            STREAM_PROBE_BUFFER_CAP_BYTES,
+            STREAM_PROBE_BUFFER_LABEL,
+            OverflowPolicy::Reject,
+        );
+        matches!(outcome, PushOutcome::Appended)
+    }
 }
 
 pub fn apply_probe_chunk(
@@ -64,7 +90,9 @@ pub fn apply_probe_chunk(
     }
     state.phase = StreamPhase::Probing;
     if let Some(chunk) = chunk {
-        state.buffer.extend_from_slice(&chunk);
+        if !state.try_buffer_chunk(&chunk) {
+            return ProbeDecision::Fail(ProbeFailure::BufferCap);
+        }
     }
     let Some(boundary) = find_sse_boundary(&state.buffer) else {
         if end_of_stream && !state.buffer.is_empty() {
@@ -95,7 +123,9 @@ pub fn apply_probe_chunk_with_codec(
     }
     state.phase = StreamPhase::Probing;
     if let Some(chunk) = chunk {
-        state.buffer.extend_from_slice(&chunk);
+        if !state.try_buffer_chunk(&chunk) {
+            return ProbeDecision::Fail(ProbeFailure::BufferCap);
+        }
     }
     let Some(boundary) = find_sse_boundary(&state.buffer) else {
         if end_of_stream && !state.buffer.is_empty() {

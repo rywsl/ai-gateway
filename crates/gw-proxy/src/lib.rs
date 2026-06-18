@@ -10,6 +10,7 @@
 pub mod billing_lifecycle;
 pub mod body;
 pub mod body_verify;
+pub mod bounded;
 pub mod cancellation;
 pub mod ctx;
 pub mod detailed_log;

@@ -103,6 +103,11 @@ pub static METRICS: &[MetricSpec] = &[
         help: "auth failures; label=reason",
     },
     MetricSpec {
+        name: "gateway_license_violation_total",
+        kind: MetricKind::Counter,
+        help: "License violations gated by [flags].license_enforce; labels=mode (disabled|warn|enforce), reason (expired|feature_missing|node_count_exceeded)",
+    },
+    MetricSpec {
         name: "gw_target_filter_denied_total",
         kind: MetricKind::Counter,
         help: "outbound targets denied by filter; label=host",
@@ -276,6 +281,11 @@ pub static METRICS: &[MetricSpec] = &[
         name: "gw_detailed_log_emit_total",
         kind: MetricKind::Counter,
         help: "Detailed-archive entries emitted (labels: kind, encoding)",
+    },
+    MetricSpec {
+        name: "gw_archive_emit_grace_flush_total",
+        kind: MetricKind::Counter,
+        help: "Archive surfaces force-flushed in partial mode for grace-expired requests (W6-T01)",
     },
     MetricSpec {
         name: "gw_detailed_log_payload_bytes",

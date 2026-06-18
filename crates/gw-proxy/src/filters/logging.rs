@@ -452,6 +452,15 @@ fn raw_usage_snapshot(ctx: &ReqCtx) -> UsageSnapshot {
         cache_creation_input_tokens: ctx.usage.cache_creation_tokens,
         thinking_tokens: ctx.usage.thinking_tokens,
         multimodal_input_tokens: ctx.usage.multimodal_input_tokens,
+        audio_input_tokens: None,
+        audio_output_tokens: None,
+        accepted_prediction_tokens: None,
+        rejected_prediction_tokens: None,
+        cache_creation_5m_tokens: None,
+        cache_creation_1h_tokens: None,
+        server_tool_web_search_count: None,
+        server_tool_web_fetch_count: None,
+        pv: gw_core::usage::CURRENT_PV,
     }
 }
 

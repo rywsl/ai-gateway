@@ -55,7 +55,7 @@ impl StreamConsumer {
     }
 
     pub fn start(self: Arc<Self>) -> JoinHandle<()> {
-        crate::managed_loop::Supervisor::spawn(self)
+        crate::managed_loop::Supervisor::spawn_with_registry(self)
     }
 
     async fn apply(&self, stream: &str, fields: &HashMap<String, String>) {
@@ -113,6 +113,7 @@ impl StreamConsumer {
         consumer_name: &str,
         stream: &str,
     ) -> Result<usize, fred::error::RedisError> {
+        #[allow(clippy::type_complexity)]
         let (_cursor, entries): (String, Vec<(String, HashMap<String, String>)>) = client
             .xautoclaim_values(
                 stream,
@@ -347,7 +348,7 @@ impl ManagedLoop for StreamConsumer {
         let consumer_name = format!("{}-consumer", self.instance_id);
         let client = self.redis.pool.next();
         let counter_stream = self.counter_stream();
-        self.reclaim_pending_streams(&client, &consumer_name, counter_stream.as_str())
+        self.reclaim_pending_streams(client, &consumer_name, counter_stream.as_str())
             .await;
         // Raw xreadgroup: RESP Null on BLOCK timeout is handled explicitly.
         let raw: Result<RedisValue, fred::error::RedisError> = client

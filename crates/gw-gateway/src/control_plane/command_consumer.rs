@@ -40,7 +40,7 @@ pub struct CommandConsumer {
 
 impl CommandConsumer {
     pub fn start(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        gw_store::managed_loop::Supervisor::spawn(self)
+        gw_store::managed_loop::Supervisor::spawn_with_registry(self)
     }
 
     async fn ensure_groups(&self) -> anyhow::Result<()> {

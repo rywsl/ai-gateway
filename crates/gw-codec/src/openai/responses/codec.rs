@@ -554,17 +554,23 @@ fn dispatch_event(
                     } else {
                         call_id.clone()
                     };
-                    let builder = st.pending_function_calls.entry(item_id).or_default();
-                    builder.index = idx;
-                    builder.call_id = call_id;
-                    builder.name = name.clone();
-                    if !builder.start_emitted {
-                        builder.start_emitted = true;
-                        events.push(StreamEventIR::ToolCallStart {
-                            index: idx,
-                            id: Cow::Owned(stable_id),
-                            name: Cow::Owned(name),
-                        });
+                    // T-W3-08: try_get_or_insert_function_call enforces the
+                    // per-stream cap and emits
+                    // gw_codec_overflow_total{kind="too_many_function_calls"}
+                    // on overflow. On reject, drop the event entirely
+                    // (no ToolCallStart) so the IR stays consistent.
+                    if let Ok(builder) = st.try_get_or_insert_function_call(&item_id) {
+                        builder.index = idx;
+                        builder.call_id = call_id;
+                        builder.name = name.clone();
+                        if !builder.start_emitted {
+                            builder.start_emitted = true;
+                            events.push(StreamEventIR::ToolCallStart {
+                                index: idx,
+                                id: Cow::Owned(stable_id),
+                                name: Cow::Owned(name),
+                            });
+                        }
                     }
                 }
                 "web_search_call"
@@ -649,12 +655,22 @@ fn dispatch_event(
             if delta.is_empty() {
                 return;
             }
-            if let Some(builder) = st.pending_function_calls.get_mut(item_id) {
-                builder.arguments.push_str(delta);
-                events.push(StreamEventIR::ToolCallDelta {
-                    index: builder.index,
-                    arguments_chunk: Cow::Owned(delta.to_owned()),
-                });
+            // T-W3-08: try_extend_function_arguments enforces the
+            // per-builder cap on `arguments` and emits
+            // gw_codec_overflow_total{kind="args_buffer_cap"} on overflow.
+            // On overflow we skip the ToolCallDelta so the downstream
+            // doesn't observe a cap-truncated tail it cannot parse.
+            let index_for_delta = st
+                .pending_function_calls
+                .get(item_id)
+                .map(|b| b.index);
+            if st.try_extend_function_arguments(item_id, delta).is_ok() {
+                if let Some(index) = index_for_delta {
+                    events.push(StreamEventIR::ToolCallDelta {
+                        index,
+                        arguments_chunk: Cow::Owned(delta.to_owned()),
+                    });
+                }
             }
         }
         OpenAiResponsesStreamEventType::ResponseOutputItemDone => {
