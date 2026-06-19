@@ -88,6 +88,8 @@ struct Wired {
     task_contract: Option<Arc<gw_task::redis_contract::RedisTaskContract>>,
     task_billing_config: Option<gw_billing::TaskBillingConfig>,
     business_port: u16,
+    pingora_threads: usize,
+    listener_tasks_per_fd: usize,
     admin_upstream_url: url::Url,
     // --- Fields wired during bootstrap ---
     /// Hot-reloadable JWT claim validator (T1-E + R7b). The handle holds `None`
@@ -305,6 +307,22 @@ pub(crate) async fn bootstrap_gateway() -> anyhow::Result<(
         business_port = cfg.server.business_port,
         metrics_port = cfg.server.metrics_port,
         health_port = cfg.server.health_port,
+        effective_cpus = cfg.auto_sizing.machine.effective_cpus,
+        effective_memory_bytes = cfg.auto_sizing.machine.effective_memory_bytes,
+        pingora_threads = cfg.server.pingora_threads,
+        pingora_threads_source = cfg.auto_sizing.pingora_threads.as_str(),
+        listener_tasks_per_fd = cfg.server.listener_tasks_per_fd,
+        listener_tasks_per_fd_source = cfg.auto_sizing.listener_tasks_per_fd.as_str(),
+        redis_pool_size = cfg.redis.pool_size,
+        redis_pool_size_source = cfg.auto_sizing.redis_pool_size.as_str(),
+        pgsql_max_connections = cfg.pgsql.max_connections,
+        pgsql_max_connections_source = cfg.auto_sizing.pgsql_max_connections.as_str(),
+        detailed_log_channel_capacity = cfg.detailed_log.channel.capacity,
+        detailed_log_channel_capacity_source = cfg.auto_sizing.detailed_log_channel_capacity.as_str(),
+        detailed_log_workers = cfg.detailed_log.flusher.workers,
+        detailed_log_workers_source = cfg.auto_sizing.detailed_log_workers.as_str(),
+        egress_max_sessions = cfg.egress.max_sessions,
+        egress_max_sessions_source = cfg.auto_sizing.egress_max_sessions.as_str(),
         "gw-gateway starting"
     );
 
@@ -329,6 +347,8 @@ pub(crate) async fn bootstrap_gateway() -> anyhow::Result<(
 /// the supervised spawns).
 fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
     let business_port = wired.business_port;
+    let pingora_threads = wired.pingora_threads;
+    let listener_tasks_per_fd = wired.listener_tasks_per_fd;
 
     let handle = std::thread::Builder::new()
         .name("gw-pingora".into())
@@ -337,17 +357,17 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
             // returns. Any panic here is intentional — the supervising
             // tokio runtime will see the thread die and the process will
             // exit shortly after.
-            let mut server = match pingora::server::Server::new(None) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(
-                        target: "gw_gateway",
-                        error = %e,
-                        "pingora Server::new failed; serve thread exiting"
-                    );
-                    return;
-                }
+            let Some(mut pingora_conf) = pingora::server::configuration::ServerConf::new() else {
+                tracing::error!(
+                    target: "gw_gateway",
+                    "pingora ServerConf::new failed; serve thread exiting"
+                );
+                return;
             };
+            pingora_conf.threads = pingora_threads;
+            pingora_conf.listener_tasks_per_fd = listener_tasks_per_fd;
+
+            let mut server = pingora::server::Server::new_with_opt_and_conf(None, pingora_conf);
             server.bootstrap();
 
             let mut gw = LlmGateway::new(
@@ -1107,21 +1127,13 @@ async fn bootstrap(
     }
     let ledger = Arc::new(ledger_inner);
 
-    // 4b. Detailed-log archive (T10). Workers is auto when configured to 0:
-    // use 1/4 of available parallelism, minimum 1.
+    // 4b. Detailed-log archive (T10). Worker count is resolved during config
+    // load so the runtime path sees only final numeric values.
     let archive_cfg = gw_ledger::detailed_archive::DetailedArchiveCfg {
         stream: cfg.detailed_log.stream.clone(),
         maxlen: cfg.detailed_log.maxlen,
         channel_capacity: cfg.detailed_log.channel.capacity,
-        workers: if cfg.detailed_log.flusher.workers == 0 {
-            (std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-                / 4)
-            .max(1)
-        } else {
-            cfg.detailed_log.flusher.workers
-        },
+        workers: cfg.detailed_log.flusher.workers,
         single_payload_soft_cap_bytes: cfg.detailed_log.limits.single_payload_soft_cap_bytes,
         compression: gw_ledger::encoding::CompressionCfg {
             thresholds: gw_ledger::encoding::TierThresholds {
@@ -1730,6 +1742,8 @@ async fn bootstrap(
                 estimated_duration_secs: cfg.task.billing_estimated_duration_secs,
             }),
             business_port: cfg.server.business_port,
+            pingora_threads: cfg.server.pingora_threads,
+            listener_tasks_per_fd: cfg.server.listener_tasks_per_fd,
             jwt_validator,
             strategies,
             affinity,
