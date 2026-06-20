@@ -13,6 +13,9 @@
 business_port = 8000
 metrics_port = 9090
 health_port = 8080
+# 0 = auto-size from the runtime-visible CPU count at startup.
+pingora_threads = 0
+listener_tasks_per_fd = 0
 
 [admin]
 upstream_url = "http://localhost:3000"
@@ -27,11 +30,11 @@ command_block_ms = 5000
 
 [redis]
 url = "redis://localhost:6379"
-pool_size = 8
+pool_size = 0
 
 [pgsql]
 url = "postgres://postgres:postgres@localhost:5432/gateway"
-max_connections = 16
+max_connections = 0
 
 [ratelimit]
 # Workspace-global ceiling for requests per minute. Per-user RPM lives in
@@ -93,10 +96,10 @@ medium_threshold_bytes = 65536
 zstd_level = 3
 
 [detailed_log.channel]
-capacity = 65536
+capacity = 0
 
 [detailed_log.flusher]
-workers = 0   # 0 = num_cpus.saturating_div(4).max(1)
+workers = 0   # 0 = auto-size from the runtime-visible CPU count.
 
 [detailed_log.limits]
 single_payload_soft_cap_bytes = 8_388_608
@@ -211,7 +214,7 @@ bind_uds = "/tmp/gw-egress.sock"
 
 # Maximum concurrent loopback sessions handled by the supervisor before
 # new connections back-pressure.
-max_sessions = 64
+max_sessions = 0
 
 # TTL on the in-process `TurnStateCache` (Codex per-turn state). The 300 s
 # default is fail-static and based on the educated guess in spec §11 #2; tune it
@@ -271,6 +274,7 @@ evaluate_interval_ms = 1000
 hysteresis_healthy_ticks = 3
 
 [proxy.archive]
+storage = "memory"
 soft_cap_bytes = 4194304
 hard_cap_bytes = 8388608
 spill_dir = "/data/cnexus/spill/archive"

@@ -28,15 +28,15 @@ groups:
           summary: "billing flusher panicked (gw_billing_flusher_panic_total > 0)"
           description: "A single-tick panic was captured inside the ledger flusher. Inspect logs for the panic payload; billing record integrity may be affected."
 
-      # emit() observed a closed channel - the flusher task is gone and records
-      # are falling back to sync XADD. The flusher should never die.
+      # Primary and primary-overflow channels are both closed; the first
+      # must-deliver layer is fully down and records are cascading to DLQ/backlog.
       - alert: BillingFlusherDead
         expr: sum(increase(gw_billing_flusher_dead_total[5m])) > 0
         for: 0m
         labels: { severity: critical, page: "true" }
         annotations:
-          summary: "billing flusher channel closed (gw_billing_flusher_dead_total > 0)"
-          description: "emit() observed a closed flusher channel; UsageRecords are falling back to sync XADD. The flusher task has died and must be recovered (process restart) to restore batched, crash-safe billing."
+          summary: "billing primary and overflow channels closed (gw_billing_flusher_dead_total > 0)"
+          description: "emit() observed both primary and primary-overflow channels closed; UsageRecords are entering the DLQ/backlog cascade. The ledger worker set must be recovered to restore normal batched delivery."
 
       # InflightLedger register() failed - crash-recovery attribution is lost for
       # the affected requests (Redis unreachable / write failed).

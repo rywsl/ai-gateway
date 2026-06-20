@@ -82,6 +82,8 @@ PgSQL 同步表则携带 `version BIGINT`（详见 Part 03）。
 | `usage:detailed` | Rust DetailedArchive flusher pool | Go drainer（**必需**） | `go-archive-drainer`（推荐） |
 | `commands:gateway` | **Go** | Rust StreamConsumer | `group:<instance_id>`（每副本独立 group,广播,SP-C;stream 只携带 `command_id`/`delivery_id`/`target_instance_id`/`delivery_mode`/`issued_at_ms`,主体在 `entity:gateway_command_delivery:<delivery_id>`） |
 
+`usage:detailed` body payloads may be hard-cap truncated by Rust archive storage; truncated entries retain the body prefix in `body_b64` rather than using an empty body sentinel.
+
 **XREADGROUP 锚点**：Rust 启动期对 `events:*` 用 `$`（参 `crates/gw-store/src/stream_consumer.rs:41`），仅消费启动后事件；启动前状态靠冷加载链获取。Go consumer 自决（settle 通常从 `0` 开始消费全量）。
 
 ### 3.4 写顺序原则

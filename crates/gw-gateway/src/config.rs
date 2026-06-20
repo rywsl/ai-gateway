@@ -25,6 +25,8 @@ use std::net::IpAddr;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub server: ServerCfg,
+    #[serde(skip)]
+    pub auto_sizing: AutoSizingReport,
     #[serde(default)]
     pub admin: AdminCfg,
     pub redis: RedisCfg,
@@ -98,6 +100,132 @@ pub struct ServerCfg {
     pub business_port: u16,
     pub metrics_port: u16,
     pub health_port: u16,
+    #[serde(default)]
+    pub pingora_threads: usize,
+    #[serde(default)]
+    pub listener_tasks_per_fd: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConfigValueSource {
+    #[default]
+    Config,
+    Auto,
+}
+
+impl ConfigValueSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineSizing {
+    pub effective_cpus: usize,
+    pub effective_memory_bytes: u64,
+}
+
+impl Default for MachineSizing {
+    fn default() -> Self {
+        Self::detect()
+    }
+}
+
+impl MachineSizing {
+    pub fn detect() -> Self {
+        let effective_cpus = detect_effective_cpus();
+        let effective_memory_bytes = detect_effective_memory_bytes();
+        Self {
+            effective_cpus,
+            effective_memory_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoSizingReport {
+    pub machine: MachineSizing,
+    pub pingora_threads: ConfigValueSource,
+    pub listener_tasks_per_fd: ConfigValueSource,
+    pub redis_pool_size: ConfigValueSource,
+    pub pgsql_max_connections: ConfigValueSource,
+    pub detailed_log_channel_capacity: ConfigValueSource,
+    pub detailed_log_workers: ConfigValueSource,
+    pub egress_max_sessions: ConfigValueSource,
+}
+
+impl Default for AutoSizingReport {
+    fn default() -> Self {
+        Self {
+            machine: MachineSizing {
+                effective_cpus: 1,
+                effective_memory_bytes: 0,
+            },
+            pingora_threads: ConfigValueSource::Config,
+            listener_tasks_per_fd: ConfigValueSource::Config,
+            redis_pool_size: ConfigValueSource::Config,
+            pgsql_max_connections: ConfigValueSource::Config,
+            detailed_log_channel_capacity: ConfigValueSource::Config,
+            detailed_log_workers: ConfigValueSource::Config,
+            egress_max_sessions: ConfigValueSource::Config,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutoSizingRecommendations {
+    pingora_threads: usize,
+    listener_tasks_per_fd: usize,
+    redis_pool_size: usize,
+    pgsql_max_connections: u32,
+    detailed_log_channel_capacity: usize,
+    detailed_log_workers: usize,
+    egress_max_sessions: usize,
+}
+
+fn recommendations_for(machine: MachineSizing) -> AutoSizingRecommendations {
+    let cpus = machine.effective_cpus.max(1);
+    AutoSizingRecommendations {
+        pingora_threads: cpus,
+        listener_tasks_per_fd: if cpus >= 16 { 2 } else { 1 },
+        redis_pool_size: clamp_usize(cpus.saturating_mul(2).saturating_add(8), 8, 64),
+        pgsql_max_connections: clamp_usize(cpus.saturating_mul(2), 8, 32) as u32,
+        detailed_log_channel_capacity: recommended_channel_capacity(machine.effective_memory_bytes),
+        detailed_log_workers: clamp_usize(cpus / 4, 1, 8),
+        egress_max_sessions: clamp_usize(cpus.saturating_mul(16), 64, 512),
+    }
+}
+
+fn recommended_channel_capacity(memory_bytes: u64) -> usize {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if memory_bytes > 0 && memory_bytes < GIB {
+        8_192
+    } else if memory_bytes > 0 && memory_bytes < 2 * GIB {
+        16_384
+    } else {
+        65_536
+    }
+}
+
+fn clamp_usize(value: usize, min: usize, max: usize) -> usize {
+    value.max(min).min(max)
+}
+
+fn detect_effective_cpus() -> usize {
+    num_cpus::get().max(1)
+}
+
+fn detect_effective_memory_bytes() -> u64 {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    system
+        .cgroup_limits()
+        .map(|limits| limits.total_memory)
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or_else(|| system.total_memory())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1415,8 +1543,17 @@ pub struct ProxyConfig {
     pub archive: ProxyArchiveConfig,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyArchiveStorage {
+    Memory,
+    DiskSpill,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProxyArchiveConfig {
+    #[serde(default = "default_proxy_archive_storage")]
+    pub storage: ProxyArchiveStorage,
     #[serde(default = "default_proxy_archive_soft_cap_bytes")]
     pub soft_cap_bytes: usize,
     #[serde(default = "default_proxy_archive_hard_cap_bytes")]
@@ -1425,6 +1562,9 @@ pub struct ProxyArchiveConfig {
     pub spill_dir: std::path::PathBuf,
 }
 
+fn default_proxy_archive_storage() -> ProxyArchiveStorage {
+    ProxyArchiveStorage::Memory
+}
 fn default_proxy_archive_soft_cap_bytes() -> usize {
     4 * 1024 * 1024
 }
@@ -1438,6 +1578,7 @@ fn default_proxy_archive_spill_dir() -> std::path::PathBuf {
 impl Default for ProxyArchiveConfig {
     fn default() -> Self {
         Self {
+            storage: default_proxy_archive_storage(),
             soft_cap_bytes: default_proxy_archive_soft_cap_bytes(),
             hard_cap_bytes: default_proxy_archive_hard_cap_bytes(),
             spill_dir: default_proxy_archive_spill_dir(),
@@ -1462,6 +1603,45 @@ impl PgCfg {
 }
 
 impl Config {
+    pub fn apply_auto_sizing(&mut self, machine: MachineSizing) {
+        let recommendations = recommendations_for(machine);
+        let mut report = AutoSizingReport {
+            machine,
+            ..AutoSizingReport::default()
+        };
+
+        if self.server.pingora_threads == 0 {
+            self.server.pingora_threads = recommendations.pingora_threads;
+            report.pingora_threads = ConfigValueSource::Auto;
+        }
+        if self.server.listener_tasks_per_fd == 0 {
+            self.server.listener_tasks_per_fd = recommendations.listener_tasks_per_fd;
+            report.listener_tasks_per_fd = ConfigValueSource::Auto;
+        }
+        if self.redis.pool_size == 0 {
+            self.redis.pool_size = recommendations.redis_pool_size;
+            report.redis_pool_size = ConfigValueSource::Auto;
+        }
+        if self.pgsql.max_connections == 0 {
+            self.pgsql.max_connections = recommendations.pgsql_max_connections;
+            report.pgsql_max_connections = ConfigValueSource::Auto;
+        }
+        if self.detailed_log.channel.capacity == 0 {
+            self.detailed_log.channel.capacity = recommendations.detailed_log_channel_capacity;
+            report.detailed_log_channel_capacity = ConfigValueSource::Auto;
+        }
+        if self.detailed_log.flusher.workers == 0 {
+            self.detailed_log.flusher.workers = recommendations.detailed_log_workers;
+            report.detailed_log_workers = ConfigValueSource::Auto;
+        }
+        if self.egress.max_sessions == 0 {
+            self.egress.max_sessions = recommendations.egress_max_sessions;
+            report.egress_max_sessions = ConfigValueSource::Auto;
+        }
+
+        self.auto_sizing = report;
+    }
+
     /// Validate cross-field invariants and numeric ranges. Called from
     /// [`load`] right after deserialisation so misconfiguration surfaces at
     /// startup rather than at first use.
@@ -1480,13 +1660,6 @@ impl Config {
                 "invalid config: server.business_port, server.metrics_port \
                  and server.health_port must all differ"
             );
-        }
-
-        if self.redis.pool_size == 0 {
-            anyhow::bail!("invalid config: redis.pool_size must be > 0");
-        }
-        if self.pgsql.max_connections == 0 {
-            anyhow::bail!("invalid config: pgsql.max_connections must be > 0");
         }
         self.validate_trusted_proxies()?;
         self.control_plane.validate()?;
@@ -1538,6 +1711,9 @@ impl Config {
         }
         if self.ledger.flush_interval_ms == 0 {
             anyhow::bail!("invalid config: ledger.flush_interval_ms must be > 0");
+        }
+        if self.proxy.archive.soft_cap_bytes > self.proxy.archive.hard_cap_bytes {
+            anyhow::bail!("invalid config: proxy.archive.soft_cap_bytes must be <= hard_cap_bytes");
         }
 
         if self.tunnel.enabled {
@@ -1682,6 +1858,37 @@ impl Config {
         Ok(())
     }
 
+    pub fn validate_resolved_sizing(&self) -> anyhow::Result<()> {
+        if self.server.pingora_threads == 0 {
+            anyhow::bail!("invalid config: server.pingora_threads must be > 0 after auto sizing");
+        }
+        if self.server.listener_tasks_per_fd == 0 {
+            anyhow::bail!(
+                "invalid config: server.listener_tasks_per_fd must be > 0 after auto sizing"
+            );
+        }
+        if self.redis.pool_size == 0 {
+            anyhow::bail!("invalid config: redis.pool_size must be > 0 after auto sizing");
+        }
+        if self.pgsql.max_connections == 0 {
+            anyhow::bail!("invalid config: pgsql.max_connections must be > 0 after auto sizing");
+        }
+        if self.detailed_log.channel.capacity == 0 {
+            anyhow::bail!(
+                "invalid config: detailed_log.channel.capacity must be > 0 after auto sizing"
+            );
+        }
+        if self.detailed_log.flusher.workers == 0 {
+            anyhow::bail!(
+                "invalid config: detailed_log.flusher.workers must be > 0 after auto sizing"
+            );
+        }
+        if self.egress.max_sessions == 0 {
+            anyhow::bail!("invalid config: egress.max_sessions must be > 0 after auto sizing");
+        }
+        Ok(())
+    }
+
     fn validate_trusted_proxies(&self) -> anyhow::Result<()> {
         let production = std::env::var("GW_ENV")
             .map(|env| env.eq_ignore_ascii_case("production"))
@@ -1710,12 +1917,14 @@ fn is_wildcard_trust_net(net: &IpNet) -> bool {
 }
 
 pub fn load() -> anyhow::Result<Config> {
-    let cfg: Config = Figment::new()
+    let mut cfg: Config = Figment::new()
         .merge(Toml::file("config/default.toml"))
         .merge(Toml::file("config/local.toml"))
         .merge(Env::prefixed("GW_").split("__"))
         .extract()?;
+    cfg.apply_auto_sizing(MachineSizing::detect());
     cfg.validate()?;
+    cfg.validate_resolved_sizing()?;
     Ok(cfg)
 }
 
@@ -1836,11 +2045,17 @@ mod egress_cfg_tests {
     #[test]
     fn egress_section_from_default_toml() {
         let toml = include_str!("../../../config/default.toml");
-        let cfg: Config = Figment::new()
+        let mut cfg: Config = Figment::new()
             .merge(Toml::string(toml))
             .extract()
             .expect("default.toml should parse with [egress] section");
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 4,
+            effective_memory_bytes: 4 * 1024 * 1024 * 1024,
+        });
         cfg.validate().expect("default.toml should validate");
+        cfg.validate_resolved_sizing()
+            .expect("default.toml sizing should resolve");
         assert!(!cfg.egress.disabled);
         assert_eq!(cfg.egress.max_sessions, 64);
         assert_eq!(cfg.egress.turn_state_ttl_secs, 300);
@@ -1849,6 +2064,170 @@ mod egress_cfg_tests {
             Some(std::path::PathBuf::from("/tmp/gw-egress.sock"))
         );
         assert!(cfg.egress.bind_tcp.is_none());
+    }
+
+    #[test]
+    fn proxy_archive_storage_defaults_to_memory() {
+        let defaults = include_str!("../../../config/default.toml");
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .extract()
+            .expect("default.toml parses");
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 4,
+            effective_memory_bytes: 4 * 1024 * 1024 * 1024,
+        });
+        cfg.validate().expect("default.toml validates");
+        cfg.validate_resolved_sizing().expect("sizing resolves");
+
+        assert_eq!(cfg.proxy.archive.storage, ProxyArchiveStorage::Memory);
+    }
+
+    #[test]
+    fn proxy_archive_accepts_disk_spill_storage() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+            [proxy.archive]
+            storage = "disk_spill"
+            soft_cap_bytes = 1024
+            hard_cap_bytes = 4096
+        "#;
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("config parses");
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 4,
+            effective_memory_bytes: 4 * 1024 * 1024 * 1024,
+        });
+        cfg.validate().expect("disk_spill archive config validates");
+        cfg.validate_resolved_sizing().expect("sizing resolves");
+
+        assert_eq!(cfg.proxy.archive.storage, ProxyArchiveStorage::DiskSpill);
+        assert_eq!(cfg.proxy.archive.soft_cap_bytes, 1024);
+        assert_eq!(cfg.proxy.archive.hard_cap_bytes, 4096);
+    }
+
+    #[test]
+    fn proxy_archive_rejects_soft_cap_above_hard_cap() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+            [proxy.archive]
+            soft_cap_bytes = 8192
+            hard_cap_bytes = 4096
+        "#;
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("config parses");
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 4,
+            effective_memory_bytes: 4 * 1024 * 1024 * 1024,
+        });
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("proxy.archive.soft_cap_bytes must be <= hard_cap_bytes"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn auto_sizing_uses_machine_recommendations_when_values_are_omitted() {
+        let toml = include_str!("../../../config/default.toml");
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 16,
+            effective_memory_bytes: 16 * 1024 * 1024 * 1024,
+        });
+
+        assert_eq!(cfg.server.pingora_threads, 16);
+        assert_eq!(cfg.server.listener_tasks_per_fd, 2);
+        assert_eq!(cfg.redis.pool_size, 40);
+        assert_eq!(cfg.pgsql.max_connections, 32);
+        assert_eq!(cfg.detailed_log.channel.capacity, 65_536);
+        assert_eq!(cfg.detailed_log.flusher.workers, 4);
+        assert_eq!(cfg.egress.max_sessions, 256);
+    }
+
+    #[test]
+    fn auto_sizing_does_not_cap_pingora_workers_on_large_machines() {
+        let toml = include_str!("../../../config/default.toml");
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("default.toml parses");
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 128,
+            effective_memory_bytes: 128 * 1024 * 1024 * 1024,
+        });
+
+        assert_eq!(cfg.server.pingora_threads, 128);
+        assert_eq!(cfg.server.listener_tasks_per_fd, 2);
+        assert_eq!(cfg.redis.pool_size, 64);
+        assert_eq!(cfg.pgsql.max_connections, 32);
+        assert_eq!(cfg.detailed_log.flusher.workers, 8);
+        assert_eq!(cfg.egress.max_sessions, 512);
+    }
+
+    #[test]
+    fn auto_sizing_preserves_explicit_values() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+            [server]
+            pingora_threads = 3
+            listener_tasks_per_fd = 4
+
+            [redis]
+            pool_size = 9
+
+            [pgsql]
+            max_connections = 10
+
+            [detailed_log.channel]
+            capacity = 11
+
+            [detailed_log.flusher]
+            workers = 2
+
+            [egress]
+            max_sessions = 70
+        "#;
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("config parses");
+
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 16,
+            effective_memory_bytes: 16 * 1024 * 1024 * 1024,
+        });
+
+        assert_eq!(cfg.server.pingora_threads, 3);
+        assert_eq!(cfg.server.listener_tasks_per_fd, 4);
+        assert_eq!(cfg.redis.pool_size, 9);
+        assert_eq!(cfg.pgsql.max_connections, 10);
+        assert_eq!(cfg.detailed_log.channel.capacity, 11);
+        assert_eq!(cfg.detailed_log.flusher.workers, 2);
+        assert_eq!(cfg.egress.max_sessions, 70);
+    }
+
+    #[test]
+    fn auto_sizing_scales_log_channel_by_memory() {
+        assert_eq!(recommended_channel_capacity(512 * 1024 * 1024), 8_192);
+        assert_eq!(recommended_channel_capacity(1536 * 1024 * 1024), 16_384);
+        assert_eq!(
+            recommended_channel_capacity(16 * 1024 * 1024 * 1024),
+            65_536
+        );
     }
 }
 

@@ -109,12 +109,20 @@ fn billing_w2_t6_inflight_register_failure_registered() {
 fn billing_w2_t7_must_deliver_metrics_registered() {
     let names: Vec<&str> = METRICS.iter().map(|m| m.name).collect();
     assert!(
-        names.contains(&"gw_billing_mpsc_bypass_total"),
-        "missing metric: gw_billing_mpsc_bypass_total"
+        !names.contains(&"gw_billing_mpsc_bypass_total"),
+        "legacy sync-XADD bypass metric should be removed"
     );
     assert!(
         names.contains(&"gw_billing_emit_path_total"),
         "missing metric: gw_billing_emit_path_total"
+    );
+    assert!(
+        names.contains(&"gw_billing_primary_overflow_pending"),
+        "missing metric: gw_billing_primary_overflow_pending"
+    );
+    assert!(
+        names.contains(&"gw_billing_overflow_buf_rescued_total"),
+        "missing metric: gw_billing_overflow_buf_rescued_total"
     );
 }
 
@@ -254,6 +262,7 @@ fn runtime_operational_metrics_registered() {
         "gateway_usage_flush_errors_total",
         "gw_usage_dlq_emergency_file_total",
         "gw_usage_dlq_retry_queue_total",
+        "gw_usage_dlq_backlog_pushed_total",
         "gw_frozen_delta_enqueue_total",
         "gw_frozen_delta_redis_total",
         "gw_deduct_gc_removed_total",

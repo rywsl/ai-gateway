@@ -61,6 +61,8 @@ arc-swap.workspace = true
 hostname = { workspace = true }
 uuid.workspace = true
 ipnet.workspace = true
+num_cpus.workspace = true
+sysinfo.workspace = true
 
 [dev-dependencies]
 # Phase 6 e2e + failure-mode integration tests. Most of these are pulled in

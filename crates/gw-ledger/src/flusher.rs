@@ -11,12 +11,14 @@
 //! partial buffer so latency stays bounded even at low QPS.
 //!
 //! **Must-deliver semantic**: `emit` is the production billing path — on a
-//! full mpsc channel it falls back to a synchronous direct XADD rather than
-//! dropping; `try_send` retains the original drop-on-full behaviour for
-//! callers that explicitly opt out of the blocking fallback.
+//! full or closed primary mpsc channel it attempts non-blocking primary
+//! overflow, then falls through to the DLQ / emergency disk / backlog cascade
+//! if overflow cannot accept the item. `try_send` retains the original
+//! drop-on-full behaviour for callers that explicitly opt out.
 
 use crate::backlog::BillingBacklog;
 use crate::dlq::{DlqEnvelope, DlqLayer, EmergencyDlqWriter};
+use crate::primary_delivery::PrimaryDelivery;
 use crate::usage::UsageRecord;
 use arc_swap::ArcSwapOption;
 use fred::interfaces::{KeysInterface, StreamsInterface};
@@ -37,7 +39,6 @@ use tokio::time::{interval, Duration};
 
 const USAGE_STREAM: &str = "usage:records";
 const DLQ_STREAM: &str = "usage:records:dlq";
-const DLQ_PERMANENT_FAILED_STREAM: &str = "usage:records:dlq:permanent_failed";
 const DLQ_MAXLEN: u64 = 100_000;
 const DLQ_RETRY_CAPACITY: usize = 4096;
 const FROZEN_DELTA_CAPACITY: usize = 65_536;
@@ -46,7 +47,7 @@ static FROZEN_DELTA_TX: Lazy<ArcSwapOption<mpsc::Sender<FrozenDelta>>> =
     Lazy::new(ArcSwapOption::empty);
 
 /// Channel-internal envelope: the wire `UsageRecord` plus an optional
-/// inflight clear instruction. The flusher (or `sync_xadd` bypass) DELs
+/// inflight clear instruction. The flusher DELs
 /// `billing:inflight:<instance>:<request_id>:<attempt>` after — and only
 /// after — the corresponding `record` is XADD-confirmed on
 /// `usage:records`. See `docs/spec/06-billing-ledger.md` (DEL rule).
@@ -64,15 +65,15 @@ pub struct ClearKey {
 
 pub struct Ledger {
     pub tx: mpsc::Sender<LedgerItem>,
-    redis: RedisCtx,
     instance_id: String,
     dlq_fallback: DlqFallback,
+    primary_overflow: PrimaryDelivery,
 }
 
 impl Ledger {
-    /// Start the Ledger with all four supervised background workers
+    /// Start the Ledger with all five supervised background workers
     /// (billing flusher, frozen-delta worker, DLQ retry worker,
-    /// billing backlog drainer).
+    /// billing backlog drainer, primary overflow worker).
     ///
     /// Returns the `Ledger` paired with the `JoinHandle`s of all spawned
     /// supervised tasks. The caller MUST register every handle with the
@@ -131,6 +132,9 @@ impl Ledger {
     ) -> (Self, Vec<JoinHandle<()>>) {
         let (tx, rx) = mpsc::channel::<LedgerItem>(channel_capacity);
         let rx = Arc::new(Mutex::new(rx));
+        let (overflow_tx, overflow_rx) = mpsc::channel::<LedgerItem>(channel_capacity.max(1024));
+        let primary_overflow = PrimaryDelivery::new(overflow_tx);
+        let overflow_rx = Arc::new(Mutex::new(overflow_rx));
         let (dlq_retry_tx, dlq_retry_rx) = mpsc::channel::<DlqEnvelope>(DLQ_RETRY_CAPACITY);
         let (frozen_tx, frozen_rx) = mpsc::channel::<FrozenDelta>(FROZEN_DELTA_CAPACITY);
         FROZEN_DELTA_TX.store(Some(Arc::new(frozen_tx)));
@@ -143,7 +147,7 @@ impl Ledger {
         let dlq_handle = spawn_dlq_retry_worker(
             redis.clone(),
             dlq_retry_rx,
-            dlq_fallback.writer.clone(),
+            dlq_fallback.clone(),
             shutdown.clone(),
             drain_budget,
         );
@@ -154,6 +158,17 @@ impl Ledger {
             dlq_fallback.writer.clone(),
             backlog,
             shutdown.clone(),
+        );
+        let overflow_handle = spawn_primary_overflow_worker(
+            redis.clone(),
+            instance_id.clone(),
+            dlq_fallback.clone(),
+            primary_overflow.clone(),
+            overflow_rx,
+            batch_size,
+            flush_interval,
+            shutdown.clone(),
+            drain_budget,
         );
         let worker_redis = redis.clone();
         let worker_instance = instance_id.clone();
@@ -202,25 +217,24 @@ impl Ledger {
                                     Some(item) => {
                                         buf.push(item);
                                         if buf.len() >= batch_size {
-                                            let mut taken = std::mem::take(&mut buf);
-                                            let result = AssertUnwindSafe(
-                                                flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
-                                            ).catch_unwind().await;
-                                            if let Err(_panic) = result {
-                                                metrics::counter!("gw_billing_flusher_panic_total").increment(1);
-                                                tracing::error!(
-                                                    target: "gw_ledger",
-                                                    "flusher: flush() panicked; channel kept open, batch lost (inflight keys remain for reconciler)"
-                                                );
-                                            }
+                                            flush_batch_with_panic_fallback(
+                                                &worker_redis,
+                                                &worker_instance,
+                                                &worker_dlq,
+                                                &mut buf,
+                                            )
+                                            .await;
                                         }
                                     }
                                     None => {
                                         if !buf.is_empty() {
-                                            let mut taken = std::mem::take(&mut buf);
-                                            let _ = AssertUnwindSafe(
-                                                flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
-                                            ).catch_unwind().await;
+                                            flush_batch_with_panic_fallback(
+                                                &worker_redis,
+                                                &worker_instance,
+                                                &worker_dlq,
+                                                &mut buf,
+                                            )
+                                            .await;
                                         }
                                         break;
                                     }
@@ -228,17 +242,13 @@ impl Ledger {
                             }
                             _ = ticker.tick() => {
                                 if !buf.is_empty() {
-                                    let mut taken = std::mem::take(&mut buf);
-                                    let result = AssertUnwindSafe(
-                                        flush(&worker_redis, &worker_instance, &worker_dlq, &mut taken)
-                                    ).catch_unwind().await;
-                                    if let Err(_panic) = result {
-                                        metrics::counter!("gw_billing_flusher_panic_total").increment(1);
-                                        tracing::error!(
-                                            target: "gw_ledger",
-                                            "flusher: flush() panicked on tick; channel kept open"
-                                        );
-                                    }
+                                    flush_batch_with_panic_fallback(
+                                        &worker_redis,
+                                        &worker_instance,
+                                        &worker_dlq,
+                                        &mut buf,
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -249,11 +259,17 @@ impl Ledger {
         (
             Self {
                 tx,
-                redis,
                 instance_id,
                 dlq_fallback,
+                primary_overflow,
             },
-            vec![flusher_handle, dlq_handle, frozen_handle, backlog_handle],
+            vec![
+                flusher_handle,
+                dlq_handle,
+                frozen_handle,
+                backlog_handle,
+                overflow_handle,
+            ],
         )
     }
 
@@ -268,96 +284,162 @@ impl Ledger {
     #[doc(hidden)]
     pub fn from_parts(
         tx: mpsc::Sender<LedgerItem>,
-        redis: RedisCtx,
+        _redis: RedisCtx,
         instance_id: String,
         spill_root: Arc<SpillRoot>,
         dlq_shards: NonZeroUsize,
     ) -> Self {
         let (retry_tx, _rx) = mpsc::channel(1);
+        let (overflow_tx, _overflow_rx) = mpsc::channel(1);
         Self {
             tx,
-            redis,
             instance_id,
             dlq_fallback: DlqFallback {
                 writer: Arc::new(EmergencyDlqWriter::new(spill_root, dlq_shards)),
                 retry_tx,
                 backlog: Arc::new(BillingBacklog::new()),
             },
+            primary_overflow: PrimaryDelivery::new(overflow_tx),
         }
     }
 
-    /// Must-deliver billing emit path. Attempts the mpsc fast path first; on a
-    /// full channel falls back to a synchronous direct XADD (bypass), routing
-    /// to the DLQ if even the bypass fails. Use this for all production billing
-    /// emits so that backpressure never silently drops revenue records.
+    /// Construct a Ledger with a live overflow worker for deterministic tests.
+    /// Holding the returned primary receiver without reading simulates a full
+    /// primary channel; dropping it simulates primary closed while overflow
+    /// remains available. The `shutdown` token is passed through to the
+    /// overflow worker so the test can trigger cancel-drain and assert late
+    /// records still land in `usage:records`.
+    #[doc(hidden)]
+    pub fn for_test_with_overflow(
+        redis: RedisCtx,
+        instance_id: String,
+        primary_capacity: usize,
+        overflow_capacity: usize,
+        spill_root: Arc<SpillRoot>,
+        dlq_shards: NonZeroUsize,
+        shutdown: ShutdownToken,
+    ) -> (Self, mpsc::Receiver<LedgerItem>, JoinHandle<()>) {
+        let (primary_tx, primary_rx) = mpsc::channel::<LedgerItem>(primary_capacity);
+        let (overflow_tx, overflow_rx) = mpsc::channel::<LedgerItem>(overflow_capacity);
+        let primary_overflow = PrimaryDelivery::new(overflow_tx);
+        let overflow_rx = Arc::new(Mutex::new(overflow_rx));
+        let (retry_tx, _retry_rx) = mpsc::channel(1);
+        let dlq_fallback = DlqFallback {
+            writer: Arc::new(EmergencyDlqWriter::new(spill_root, dlq_shards)),
+            retry_tx,
+            backlog: Arc::new(BillingBacklog::new()),
+        };
+        let overflow_handle = spawn_primary_overflow_worker(
+            redis.clone(),
+            instance_id.clone(),
+            dlq_fallback.clone(),
+            primary_overflow.clone(),
+            overflow_rx,
+            64,
+            Duration::from_millis(50),
+            shutdown,
+            Duration::from_secs(2),
+        );
+        let ledger = Self {
+            tx: primary_tx,
+            instance_id,
+            dlq_fallback,
+            primary_overflow,
+        };
+        (ledger, primary_rx, overflow_handle)
+    }
+
+    /// Must-deliver billing emit path. Attempts the primary mpsc fast path
+    /// first; on a full or closed primary channel it tries a non-blocking
+    /// in-memory overflow queue. If that also cannot accept the record, the
+    /// item is routed through the DLQ → emergency disk → backlog cascade.
     pub async fn emit(&self, item: LedgerItem) {
         match self.tx.try_send(item) {
             Ok(()) => {
                 metrics::counter!("gw_billing_emit_path_total", "path" => "channel").increment(1);
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(item_back)) => {
-                metrics::counter!("gw_billing_mpsc_bypass_total").increment(1);
-                match sync_xadd(&self.redis, &item_back.record).await {
+                metrics::counter!(
+                    "gw_billing_emit_path_total",
+                    "path" => "primary_full_attempt"
+                )
+                .increment(1);
+                match self.primary_overflow.try_enqueue(item_back) {
                     Ok(()) => {
-                        // XADD durably landed — apply the DEL rule.
-                        if let Some(ck) = &item_back.clear {
-                            sync_del_inflight(&self.redis, &self.instance_id, ck).await;
-                        }
+                        metrics::counter!(
+                            "gw_billing_emit_path_total",
+                            "path" => "primary_overflow_ok"
+                        )
+                        .increment(1);
                     }
-                    Err(e) => {
-                        tracing::error!(error = ?e, "must-deliver sync XADD bypass failed; routing to DLQ");
-                        let envelope = DlqEnvelope::new(
-                            item_back.record.clone(),
-                            format!("sync_xadd_bypass_failed: {e}"),
-                            0,
-                            DlqLayer::Redis,
-                            now_ms(),
-                        );
-                        route_to_dlq(&self.dlq_fallback, envelope).await;
-                        if item_back.clear.is_some() {
-                            metrics::counter!(
-                                "gw_billing_inflight_clear_total",
-                                "outcome" => "skipped_dlq"
-                            )
-                            .increment(1);
-                        }
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(item_back)) => {
+                        metrics::counter!(
+                            "gw_billing_emit_path_total",
+                            "path" => "overflow_full_dlq"
+                        )
+                        .increment(1);
+                        route_ledger_item_to_dlq(
+                            &self.dlq_fallback,
+                            item_back,
+                            "primary_overflow_full",
+                        )
+                        .await;
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(item_back)) => {
+                        metrics::counter!(
+                            "gw_billing_emit_path_total",
+                            "path" => "overflow_closed_dlq"
+                        )
+                        .increment(1);
+                        route_ledger_item_to_dlq(
+                            &self.dlq_fallback,
+                            item_back,
+                            "primary_overflow_closed",
+                        )
+                        .await;
                     }
                 }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(item_back)) => {
-                metrics::counter!("gw_billing_emit_path_total", "path" => "closed").increment(1);
-                metrics::counter!("gw_billing_flusher_dead_total").increment(1);
-                tracing::error!(
-                    "usage record channel closed; flusher dead — falling back to sync XADD"
-                );
-                match sync_xadd(&self.redis, &item_back.record).await {
+                metrics::counter!(
+                    "gw_billing_emit_path_total",
+                    "path" => "primary_closed_attempt"
+                )
+                .increment(1);
+                match self.primary_overflow.try_enqueue(item_back) {
                     Ok(()) => {
                         metrics::counter!(
                             "gw_billing_emit_path_total",
-                            "path" => "sync_bypass_closed"
+                            "path" => "primary_closed_overflow_ok"
                         )
                         .increment(1);
-                        if let Some(ck) = &item_back.clear {
-                            sync_del_inflight(&self.redis, &self.instance_id, ck).await;
-                        }
                     }
-                    Err(e) => {
-                        tracing::error!(error = ?e, "Closed-branch sync XADD failed; routing to DLQ");
-                        let envelope = DlqEnvelope::new(
-                            item_back.record.clone(),
-                            format!("flusher_dead: {e}"),
-                            0,
-                            DlqLayer::Redis,
-                            now_ms(),
-                        );
-                        route_to_dlq(&self.dlq_fallback, envelope).await;
-                        if item_back.clear.is_some() {
-                            metrics::counter!(
-                                "gw_billing_inflight_clear_total",
-                                "outcome" => "skipped_dlq"
-                            )
-                            .increment(1);
-                        }
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(item_back)) => {
+                        metrics::counter!(
+                            "gw_billing_emit_path_total",
+                            "path" => "primary_closed_overflow_full_dlq"
+                        )
+                        .increment(1);
+                        route_ledger_item_to_dlq(
+                            &self.dlq_fallback,
+                            item_back,
+                            "primary_closed_overflow_full",
+                        )
+                        .await;
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(item_back)) => {
+                        metrics::counter!(
+                            "gw_billing_emit_path_total",
+                            "path" => "primary_closed_overflow_closed_dlq"
+                        )
+                        .increment(1);
+                        metrics::counter!("gw_billing_flusher_dead_total").increment(1);
+                        route_ledger_item_to_dlq(
+                            &self.dlq_fallback,
+                            item_back,
+                            "primary_closed_overflow_closed",
+                        )
+                        .await;
                     }
                 }
             }
@@ -406,10 +488,7 @@ async fn drain_billing_channel(
         let now = tokio::time::Instant::now();
         let at_deadline = now >= deadline;
         if buf.len() >= batch_size || (!buf.is_empty() && at_deadline) {
-            let mut taken = std::mem::take(buf);
-            let _ = AssertUnwindSafe(flush(worker_redis, worker_instance, worker_dlq, &mut taken))
-                .catch_unwind()
-                .await;
+            flush_batch_with_panic_fallback(worker_redis, worker_instance, worker_dlq, buf).await;
         }
         if at_deadline {
             break;
@@ -427,10 +506,285 @@ async fn drain_billing_channel(
     // or items try_recv'd in the next loop iteration after a budget-bounded
     // recv returned Err.
     if !buf.is_empty() {
-        let mut taken = std::mem::take(buf);
-        let _ = AssertUnwindSafe(flush(worker_redis, worker_instance, worker_dlq, &mut taken))
-            .catch_unwind()
-            .await;
+        flush_batch_with_panic_fallback(worker_redis, worker_instance, worker_dlq, buf).await;
+    }
+}
+
+fn spawn_primary_overflow_worker(
+    redis: RedisCtx,
+    instance_id: String,
+    dlq_fallback: DlqFallback,
+    primary_overflow: PrimaryDelivery,
+    rx: Arc<Mutex<mpsc::Receiver<LedgerItem>>>,
+    batch_size: usize,
+    flush_interval: Duration,
+    shutdown: ShutdownToken,
+    drain_budget: Duration,
+) -> JoinHandle<()> {
+    Supervisor::new(
+        "billing_primary_overflow",
+        RestartPolicy::default(),
+        shutdown,
+    )
+    .spawn(move |tok| {
+        let redis = redis.clone();
+        let instance_id = instance_id.clone();
+        let dlq_fallback = dlq_fallback.clone();
+        let primary_overflow = primary_overflow.clone();
+        let rx = rx.clone();
+        async move {
+            let mut buf_guard =
+                OverflowBufGuard::new(batch_size, dlq_fallback.clone(), primary_overflow.clone());
+            let rx_guard = OverflowReceiverGuard::new(
+                rx.clone(),
+                dlq_fallback.clone(),
+                primary_overflow.clone(),
+            );
+            let mut ticker = interval(flush_interval);
+            loop {
+                tokio::select! {
+                    _ = tok.cancelled() => {
+                        drain_primary_overflow_channel(
+                            &rx,
+                            &mut buf_guard.buf,
+                            batch_size,
+                            drain_budget,
+                            &redis,
+                            &instance_id,
+                            &dlq_fallback,
+                            &primary_overflow,
+                        ).await;
+                        tracing::info!(
+                            target: "gw_ledger",
+                            "billing_primary_overflow: shutdown drain complete"
+                        );
+                        buf_guard.disarm();
+                        rx_guard.disarm();
+                        return Ok(());
+                    }
+                    maybe_item = async {
+                        let mut guard = rx.lock().await;
+                        guard.recv().await
+                    } => {
+                        match maybe_item {
+                            Some(item) => {
+                                buf_guard.buf.push(item);
+                                if buf_guard.buf.len() >= batch_size {
+                                    flush_primary_overflow_batch(
+                                        &redis,
+                                        &instance_id,
+                                        &dlq_fallback,
+                                        &primary_overflow,
+                                        &mut buf_guard.buf,
+                                    ).await;
+                                }
+                            }
+                            None => {
+                                if !buf_guard.buf.is_empty() {
+                                    flush_primary_overflow_batch(
+                                        &redis,
+                                        &instance_id,
+                                        &dlq_fallback,
+                                        &primary_overflow,
+                                        &mut buf_guard.buf,
+                                    ).await;
+                                }
+                                buf_guard.disarm();
+                                rx_guard.disarm();
+                                return Ok(());
+                            }
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        if !buf_guard.buf.is_empty() {
+                            flush_primary_overflow_batch(
+                                &redis,
+                                &instance_id,
+                                &dlq_fallback,
+                                &primary_overflow,
+                                &mut buf_guard.buf,
+                            ).await;
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+struct OverflowBufGuard {
+    buf: Vec<LedgerItem>,
+    dlq_fallback: DlqFallback,
+    primary_overflow: PrimaryDelivery,
+    active: bool,
+}
+
+struct OverflowReceiverGuard {
+    rx: Arc<Mutex<mpsc::Receiver<LedgerItem>>>,
+    dlq_fallback: DlqFallback,
+    primary_overflow: PrimaryDelivery,
+    active: std::sync::atomic::AtomicBool,
+}
+
+impl OverflowReceiverGuard {
+    fn new(
+        rx: Arc<Mutex<mpsc::Receiver<LedgerItem>>>,
+        dlq_fallback: DlqFallback,
+        primary_overflow: PrimaryDelivery,
+    ) -> Self {
+        Self {
+            rx,
+            dlq_fallback,
+            primary_overflow,
+            active: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    fn disarm(&self) {
+        self.active
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for OverflowReceiverGuard {
+    fn drop(&mut self) {
+        if !self.active.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let Ok(mut rx_guard) = self.rx.try_lock() else {
+            tracing::error!(
+                target: "gw_ledger",
+                "overflow receiver rescue could not acquire receiver lock"
+            );
+            return;
+        };
+        let mut items = Vec::new();
+        while let Ok(item) = rx_guard.try_recv() {
+            items.push(item);
+        }
+        if items.is_empty() {
+            return;
+        }
+        let drained = items.len();
+        self.primary_overflow.mark_drained(drained);
+        rescue_overflow_items_blocking(
+            self.dlq_fallback.clone(),
+            items,
+            "overflow_receiver_aborted",
+        );
+        metrics::counter!("gw_billing_overflow_buf_rescued_total").increment(1);
+    }
+}
+
+impl OverflowBufGuard {
+    fn new(capacity: usize, dlq_fallback: DlqFallback, primary_overflow: PrimaryDelivery) -> Self {
+        Self {
+            buf: Vec::with_capacity(capacity),
+            dlq_fallback,
+            primary_overflow,
+            active: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for OverflowBufGuard {
+    fn drop(&mut self) {
+        if !self.active || self.buf.is_empty() {
+            return;
+        }
+        let items = std::mem::take(&mut self.buf);
+        let drained = items.len();
+        self.primary_overflow.mark_drained(drained);
+        rescue_overflow_items_blocking(self.dlq_fallback.clone(), items, "overflow_worker_aborted");
+        metrics::counter!("gw_billing_overflow_buf_rescued_total").increment(1);
+    }
+}
+
+fn rescue_overflow_items_blocking(
+    dlq_fallback: DlqFallback,
+    items: Vec<LedgerItem>,
+    reason: &'static str,
+) {
+    for item in items {
+        let had_clear = item.clear.is_some();
+        let envelope = DlqEnvelope::new(item.record, reason, 0, DlqLayer::Disk, now_ms());
+        match dlq_fallback.writer.append_blocking_rescue(&envelope) {
+            Ok(()) => {
+                metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "success")
+                    .increment(1);
+            }
+            Err(err) => {
+                metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error")
+                    .increment(1);
+                tracing::error!(
+                    target: "gw_ledger",
+                    error = %err,
+                    "overflow buffer rescue disk write failed; falling back to BillingBacklog"
+                );
+                dlq_fallback.backlog.push_blocking(envelope);
+                metrics::counter!("gw_usage_dlq_backlog_pushed_total").increment(1);
+            }
+        }
+        if had_clear {
+            metrics::counter!(
+                "gw_billing_inflight_clear_total",
+                "outcome" => "skipped_dlq"
+            )
+            .increment(1);
+        }
+    }
+}
+
+async fn flush_primary_overflow_batch(
+    redis: &RedisCtx,
+    instance_id: &str,
+    dlq_fallback: &DlqFallback,
+    primary_overflow: &PrimaryDelivery,
+    buf: &mut Vec<LedgerItem>,
+) {
+    let queued = buf.len();
+    flush_batch_with_panic_fallback(redis, instance_id, dlq_fallback, buf).await;
+    let actually_drained = queued.saturating_sub(buf.len());
+    primary_overflow.mark_drained(actually_drained);
+}
+
+async fn drain_primary_overflow_channel(
+    rx: &Arc<Mutex<mpsc::Receiver<LedgerItem>>>,
+    buf: &mut Vec<LedgerItem>,
+    batch_size: usize,
+    drain_budget: Duration,
+    redis: &RedisCtx,
+    instance_id: &str,
+    dlq_fallback: &DlqFallback,
+    primary_overflow: &PrimaryDelivery,
+) {
+    let deadline = tokio::time::Instant::now() + drain_budget;
+    let mut rx_guard = rx.lock().await;
+    loop {
+        while let Ok(item) = rx_guard.try_recv() {
+            buf.push(item);
+        }
+        let now = tokio::time::Instant::now();
+        let at_deadline = now >= deadline;
+        if buf.len() >= batch_size || (!buf.is_empty() && at_deadline) {
+            flush_primary_overflow_batch(redis, instance_id, dlq_fallback, primary_overflow, buf)
+                .await;
+        }
+        if at_deadline {
+            break;
+        }
+        match tokio::time::timeout_at(deadline, rx_guard.recv()).await {
+            Ok(Some(item)) => buf.push(item),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    if !buf.is_empty() {
+        flush_primary_overflow_batch(redis, instance_id, dlq_fallback, primary_overflow, buf).await;
     }
 }
 
@@ -665,7 +1019,7 @@ pub fn spawn_backlog_drainer(
 fn spawn_dlq_retry_worker(
     redis: RedisCtx,
     rx: mpsc::Receiver<DlqEnvelope>,
-    writer: Arc<EmergencyDlqWriter>,
+    fallback: DlqFallback,
     shutdown: ShutdownToken,
     drain_budget: Duration,
 ) -> JoinHandle<()> {
@@ -673,7 +1027,7 @@ fn spawn_dlq_retry_worker(
     Supervisor::new("dlq_retry_worker", RestartPolicy::default(), shutdown).spawn(move |tok| {
         let rx = rx.clone();
         let redis = redis.clone();
-        let writer = writer.clone();
+        let fallback = fallback.clone();
         async move {
             let mut ticker = interval(Duration::from_secs(30));
             loop {
@@ -683,7 +1037,7 @@ fn spawn_dlq_retry_worker(
                         // phase-1 land in the channel. Recv with a
                         // deadline so we retry them (skipping the
                         // inter-retry ticker — we're shutting down).
-                        drain_dlq_retry_channel(&rx, &redis, &writer, drain_budget).await;
+                        drain_dlq_retry_channel(&rx, &redis, &fallback, drain_budget).await;
                         tracing::info!(
                             target: "gw_ledger",
                             "dlq_retry_worker: shutdown drain complete"
@@ -697,7 +1051,7 @@ fn spawn_dlq_retry_worker(
                         match envelope {
                             Some(envelope) => {
                                 ticker.tick().await;
-                                process_dlq_envelope(&redis, &writer, envelope).await;
+                                process_dlq_envelope(&redis, &fallback, envelope).await;
                             }
                             None => break,
                         }
@@ -709,33 +1063,28 @@ fn spawn_dlq_retry_worker(
     })
 }
 
-async fn process_dlq_envelope(
-    redis: &RedisCtx,
-    writer: &Arc<EmergencyDlqWriter>,
-    mut envelope: DlqEnvelope,
-) {
+async fn process_dlq_envelope(redis: &RedisCtx, fallback: &DlqFallback, mut envelope: DlqEnvelope) {
     envelope.dlq_meta.retry_count_before_dlq =
         envelope.dlq_meta.retry_count_before_dlq.saturating_add(1);
     if dlq_xadd(redis, &envelope).await.is_ok() {
         return;
     }
     let disk_envelope = envelope.with_layer(DlqLayer::Disk);
-    if let Err(err) = writer.append(&disk_envelope).await {
-        metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error").increment(1);
-        tracing::error!(
-            target: "gw_ledger",
-            error = %err,
-            "DLQ retry failed and emergency JSONL write failed"
-        );
-        if permanent_failed_xadd(
-            redis,
-            &disk_envelope,
-            &format!("retry_dlq_and_emergency_file_failed: {err}"),
-        )
-        .await
-        .is_err()
-        {
-            metrics::counter!("gateway_usage_records_lost_total").increment(1);
+    match fallback.writer.append(&disk_envelope).await {
+        Ok(()) => {
+            metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "success")
+                .increment(1);
+        }
+        Err(err) => {
+            metrics::counter!("gw_usage_dlq_emergency_file_total", "outcome" => "error")
+                .increment(1);
+            tracing::error!(
+                target: "gw_ledger",
+                error = %err,
+                "DLQ retry failed and emergency JSONL write failed"
+            );
+            fallback.backlog.push(disk_envelope).await;
+            metrics::counter!("gw_usage_dlq_backlog_pushed_total").increment(1);
         }
     }
 }
@@ -743,20 +1092,20 @@ async fn process_dlq_envelope(
 async fn drain_dlq_retry_channel(
     rx: &Arc<Mutex<mpsc::Receiver<DlqEnvelope>>>,
     redis: &RedisCtx,
-    writer: &Arc<EmergencyDlqWriter>,
+    fallback: &DlqFallback,
     drain_budget: Duration,
 ) {
     let deadline = tokio::time::Instant::now() + drain_budget;
     let mut rx_guard = rx.lock().await;
     loop {
         while let Ok(envelope) = rx_guard.try_recv() {
-            process_dlq_envelope(redis, writer, envelope).await;
+            process_dlq_envelope(redis, fallback, envelope).await;
             if tokio::time::Instant::now() >= deadline {
                 return;
             }
         }
         match tokio::time::timeout_at(deadline, rx_guard.recv()).await {
-            Ok(Some(envelope)) => process_dlq_envelope(redis, writer, envelope).await,
+            Ok(Some(envelope)) => process_dlq_envelope(redis, fallback, envelope).await,
             Ok(None) => break,
             Err(_) => break,
         }
@@ -774,43 +1123,14 @@ fn inflight_key(instance_id: &str, ck: &ClearKey) -> String {
     )
 }
 
-/// Direct single-record XADD to `usage:records`, used as the must-deliver
-/// bypass when the mpsc channel is full.
-async fn sync_xadd(redis: &RedisCtx, rec: &UsageRecord) -> Result<(), String> {
-    let payload = serde_json::to_string(rec).map_err(|e| format!("serialize: {e}"))?;
-    let client = redis.pool.next();
-    client
-        .xadd::<(), _, _, _, _>(USAGE_STREAM, false, None::<()>, "*", ("payload", payload))
-        .await
-        .map_err(|e| format!("xadd: {e}"))
-}
-
-/// DEL a single inflight key after a successful sync_xadd bypass. Best-effort:
-/// failure is warned + counted but never propagated (record durability has
-/// already been confirmed at the caller; key residue is harmless and
-/// reconciler-recoverable).
-async fn sync_del_inflight(redis: &RedisCtx, instance_id: &str, ck: &ClearKey) {
-    let key = inflight_key(instance_id, ck);
-    let client = redis.pool.next();
-    match client.del::<(), _>(&[key.as_str()]).await {
-        Ok(_) => {
-            metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "ok").increment(1);
-        }
-        Err(e) => {
-            tracing::warn!(target: "gw_ledger", error = %e, key, "sync inflight DEL failed");
-            metrics::counter!("gw_billing_inflight_clear_total", "outcome" => "del_failed")
-                .increment(1);
-        }
-    }
-}
-
 fn dlq_cap() -> XCap {
     XCap::try_from((XCapKind::MaxLen, XCapTrim::AlmostExact, DLQ_MAXLEN))
         .expect("XCap::try_from infallible for (MaxLen, AlmostExact, u64)")
 }
 
 /// Best-effort XADD to the DLQ stream. Returns Ok on success; on failure the
-/// record is fully dropped and the caller bumps `gw_usage_records_lost_total`.
+/// caller must route the envelope through the emergency disk / backlog
+/// fallback chain.
 async fn dlq_xadd(redis: &RedisCtx, envelope: &DlqEnvelope) -> Result<(), String> {
     let wrapped = serde_json::to_string(envelope).map_err(|e| format!("serialize dlq: {e}"))?;
     let client = redis.pool.next();
@@ -827,30 +1147,6 @@ async fn dlq_xadd(redis: &RedisCtx, envelope: &DlqEnvelope) -> Result<(), String
             Err(e.to_string())
         }
     }
-}
-
-async fn permanent_failed_xadd(
-    redis: &RedisCtx,
-    envelope: &DlqEnvelope,
-    reason: &str,
-) -> Result<(), String> {
-    let payload = serde_json::json!({
-        "permanent_failure_reason": reason,
-        "dlq_envelope": envelope,
-    })
-    .to_string();
-    let client = redis.pool.next();
-    client
-        .xadd::<String, _, _, _, _>(
-            DLQ_PERMANENT_FAILED_STREAM,
-            false,
-            dlq_cap(),
-            "*",
-            ("payload", payload),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
 }
 
 /// Failure cascade for a DLQ-bound envelope.
@@ -902,6 +1198,64 @@ async fn route_to_dlq(fallback: &DlqFallback, mut env: DlqEnvelope) {
     // Last fallback: unbounded BillingBacklog. Never drops.
     fallback.backlog.push(disk).await;
     metrics::counter!("gw_usage_dlq_backlog_pushed_total").increment(1);
+}
+
+async fn route_ledger_items_to_dlq(
+    dlq_fallback: &DlqFallback,
+    items: Vec<LedgerItem>,
+    reason: &'static str,
+) {
+    for item in items {
+        route_ledger_item_to_dlq(dlq_fallback, item, reason).await;
+    }
+}
+
+async fn route_ledger_item_to_dlq(
+    dlq_fallback: &DlqFallback,
+    item: LedgerItem,
+    reason: &'static str,
+) {
+    let had_clear = item.clear.is_some();
+    let envelope = DlqEnvelope::new(item.record, reason, 0, DlqLayer::Mem, now_ms());
+    route_to_dlq(dlq_fallback, envelope).await;
+    if had_clear {
+        metrics::counter!(
+            "gw_billing_inflight_clear_total",
+            "outcome" => "skipped_dlq"
+        )
+        .increment(1);
+    }
+}
+
+async fn flush_batch_with_panic_fallback(
+    redis: &RedisCtx,
+    instance_id: &str,
+    dlq_fallback: &DlqFallback,
+    buf: &mut Vec<LedgerItem>,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    let backup = buf.clone();
+    let mut taken = std::mem::take(buf);
+    let result = AssertUnwindSafe(flush(redis, instance_id, dlq_fallback, &mut taken))
+        .catch_unwind()
+        .await;
+    match result {
+        Ok(()) => {
+            if !taken.is_empty() {
+                *buf = taken;
+            }
+        }
+        Err(_) => {
+            metrics::counter!("gw_billing_flusher_panic_total").increment(1);
+            tracing::error!(
+                target: "gw_ledger",
+                "flush panicked; routing backup batch to DLQ fallback"
+            );
+            route_ledger_items_to_dlq(dlq_fallback, backup, "flush_panicked").await;
+        }
+    }
 }
 
 async fn flush(
@@ -1117,5 +1471,113 @@ mod tests {
         // The structural property (channel survives a flush panic) is validated
         // by the integration soak harness in Task 20 (`make e2e-soak-kill`).
         metrics::counter!("gw_billing_flusher_panic_total").increment(0);
+    }
+
+    #[test]
+    fn flush_wrapper_keeps_owned_backup_for_panic_fallback() {
+        let src = include_str!("flusher.rs");
+        assert!(
+            src.contains("flush_batch_with_panic_fallback"),
+            "flush calls must go through panic-safe wrapper"
+        );
+        let wrapper_start = src
+            .find("async fn flush_batch_with_panic_fallback")
+            .expect("wrapper exists");
+        let wrapper = &src[wrapper_start..];
+        assert!(wrapper.contains("backup"));
+        assert!(wrapper.contains("catch_unwind"));
+        assert!(wrapper.contains("route_ledger_items_to_dlq"));
+        assert!(
+            wrapper.contains("*buf = taken") || wrapper.contains("buf.extend(taken)"),
+            "wrapper must restore unprocessed items into *buf on success"
+        );
+    }
+
+    #[test]
+    fn overflow_abnormal_drop_rescues_buffer_and_receiver_queue() {
+        let src = include_str!("flusher.rs");
+        assert!(
+            src.contains("struct OverflowReceiverGuard"),
+            "overflow receiver must have a Drop rescue for queued items"
+        );
+        let receiver_start = src
+            .find("impl Drop for OverflowReceiverGuard")
+            .expect("receiver Drop rescue exists");
+        let receiver_body = &src[receiver_start..];
+        assert!(receiver_body.contains("rx_guard.try_recv()"));
+        assert!(receiver_body.contains("rescue_overflow_items_blocking"));
+        assert!(receiver_body.contains("overflow_receiver_aborted"));
+
+        let buf_start = src
+            .find("impl Drop for OverflowBufGuard")
+            .expect("buffer Drop rescue exists");
+        let buf_body = &src[buf_start..];
+        assert!(buf_body.contains("rescue_overflow_items_blocking"));
+        assert!(buf_body.contains("overflow_worker_aborted"));
+    }
+
+    #[test]
+    fn dlq_retry_terminal_failure_routes_to_backlog() {
+        let src = include_str!("flusher.rs");
+        let start = src
+            .find("async fn process_dlq_envelope")
+            .expect("process_dlq_envelope exists");
+        let body = &src[start..];
+        assert!(
+            body.contains("fallback.backlog.push"),
+            "terminal DLQ retry failure must go to BillingBacklog, not lost counter only"
+        );
+        assert!(
+            body.contains("gw_usage_dlq_emergency_file_total")
+                && body.contains("\"outcome\" => \"success\""),
+            "DLQ retry disk fallback success must be observable"
+        );
+    }
+
+    #[test]
+    fn emit_full_branch_does_not_call_sync_xadd_or_await_overflow_capacity() {
+        let src = include_str!("flusher.rs");
+        let emit_start = src.find("pub async fn emit").expect("emit exists");
+        let after_emit = src[emit_start..]
+            .find("pub fn try_send")
+            .map(|n| emit_start + n)
+            .unwrap_or(src.len());
+        let emit_body = &src[emit_start..after_emit];
+
+        assert!(!emit_body.contains("sync_xadd"));
+        assert!(!emit_body.contains(".send("));
+        assert!(emit_body.contains("primary_overflow.try_enqueue"));
+        assert!(emit_body.contains("route_ledger_item_to_dlq"));
+    }
+
+    #[test]
+    fn flusher_dead_total_only_increments_when_overflow_also_closed() {
+        let src = include_str!("flusher.rs");
+        let emit_start = src.find("pub async fn emit").expect("emit exists");
+        let after_emit = src[emit_start..]
+            .find("pub fn try_send")
+            .map(|n| emit_start + n)
+            .unwrap_or(src.len());
+        let emit_body = &src[emit_start..after_emit];
+
+        let dead_pos = emit_body
+            .find("gw_billing_flusher_dead_total")
+            .expect("flusher_dead_total still tracked");
+        let nearby = &emit_body[dead_pos.saturating_sub(400)..dead_pos];
+        assert!(
+            nearby.contains("primary_closed_overflow_closed"),
+            "flusher_dead_total must be inside the primary-closed + overflow-closed sub-branch"
+        );
+    }
+
+    #[test]
+    fn start_registers_primary_overflow_worker_handle() {
+        let src = include_str!("flusher.rs");
+        assert!(src.contains("let overflow_handle = spawn_primary_overflow_worker("));
+        let returns = src
+            .find("vec![")
+            .map(|idx| &src[idx..])
+            .expect("worker handle vector exists");
+        assert!(returns.contains("overflow_handle"));
     }
 }

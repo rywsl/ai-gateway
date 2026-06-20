@@ -8,9 +8,8 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
-use tokio::sync::Mutex;
 
 /// Upward-crossing threshold for `BillingBacklog::pending_count`. When the
 /// count crosses this upward, `gw_billing_backlog_over_threshold_total`
@@ -74,16 +73,36 @@ impl BillingBacklog {
     }
 
     pub async fn push(&self, env: DlqEnvelope) {
+        self.push_sync(env);
+    }
+
+    /// Synchronous last-resort push for abnormal Drop/rescue paths that cannot
+    /// await. Do not use on normal hot paths.
+    pub fn push_blocking(&self, env: DlqEnvelope) {
+        self.push_sync(env);
+    }
+
+    fn push_sync(&self, env: DlqEnvelope) {
         let bytes = serde_json::to_vec(&env)
             .map(|b| b.len() as u64)
             .unwrap_or(0);
-        let mut q = self.queue.lock().await;
+        let mut q = self.queue_lock();
         let now = Instant::now();
         if q.is_empty() {
             self.oldest_ns.store(elapsed_ns(now), Ordering::Release);
         }
         q.push_back((now, env));
         let count = self.pending_count.fetch_add(1, Ordering::AcqRel) + 1;
+        self.account_push(bytes, count);
+    }
+
+    fn queue_lock(&self) -> MutexGuard<'_, VecDeque<(Instant, DlqEnvelope)>> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn account_push(&self, bytes: u64, count: usize) {
         self.pending_bytes.fetch_add(bytes, Ordering::AcqRel);
         let mut hwm = self.high_watermark_count.load(Ordering::Acquire);
         while count > hwm {
@@ -111,7 +130,7 @@ impl BillingBacklog {
     }
 
     pub async fn pop(&self) -> Option<DlqEnvelope> {
-        let mut q = self.queue.lock().await;
+        let mut q = self.queue_lock();
         let (_, env) = q.pop_front()?;
         let new_oldest = q.front().map(|(t, _)| elapsed_ns(*t)).unwrap_or(0);
         self.oldest_ns.store(new_oldest, Ordering::Release);
@@ -133,7 +152,7 @@ impl BillingBacklog {
     }
 
     pub async fn drain_to_vec(&self) -> Vec<DlqEnvelope> {
-        let mut q = self.queue.lock().await;
+        let mut q = self.queue_lock();
         let out: Vec<DlqEnvelope> = q.drain(..).map(|(_, e)| e).collect();
         self.pending_count.store(0, Ordering::Release);
         self.pending_bytes.store(0, Ordering::Release);
@@ -339,6 +358,16 @@ mod tests {
         assert_eq!(drained.len(), 10);
         assert_eq!(b.pending_count(), 0);
         assert_eq!(b.pending_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn blocking_push_is_safe_inside_tokio_context() {
+        let b = BillingBacklog::new();
+
+        b.push_blocking(env());
+
+        assert_eq!(b.pending_count(), 1);
+        assert!(b.pop().await.is_some());
     }
 
     #[tokio::test]

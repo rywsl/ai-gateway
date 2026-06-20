@@ -30,14 +30,21 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveStorage {
+    Memory,
+    DiskSpill,
+}
+
 /// Cap policy for response-archive accumulation. See [`ArchiveState`].
 ///
-/// `soft_cap_bytes` is the in-memory ceiling: once exceeded, the accumulator
-/// transitions to disk spill. `hard_cap_bytes` is the disk ceiling: once
-/// exceeded, the accumulator transitions to `Truncated` and further bytes
-/// are dropped (counted, not lost silently).
+/// `storage = Memory` keeps a hard-capped prefix in memory and never writes
+/// per-request archive bytes to disk. `storage = DiskSpill` preserves the
+/// previous soft-cap spill behavior. `hard_cap_bytes` is always enforced:
+/// bytes beyond it are counted in `dropped`.
 #[derive(Debug, Clone, Copy)]
 pub struct ArchiveCaps {
+    pub storage: ArchiveStorage,
     pub soft_cap_bytes: usize,
     pub hard_cap_bytes: usize,
 }
@@ -45,8 +52,9 @@ pub struct ArchiveCaps {
 impl Default for ArchiveCaps {
     fn default() -> Self {
         // Conservative defaults; bootstrap (T5.2) overrides from
-        // `cfg.proxy.archive.{soft_cap_bytes,hard_cap_bytes}`.
+        // `cfg.proxy.archive.{storage,soft_cap_bytes,hard_cap_bytes}`.
         Self {
+            storage: ArchiveStorage::Memory,
             soft_cap_bytes: 4 * 1024 * 1024,
             hard_cap_bytes: 8 * 1024 * 1024,
         }
@@ -57,12 +65,15 @@ impl Default for ArchiveCaps {
 ///
 /// Lifecycle:
 /// - Starts as [`ArchiveState::InMemory`] backed by a `BytesMut`.
-/// - On crossing `soft_cap_bytes`, transitions to [`ArchiveState::Spilled`]:
-///   the in-memory buffer is flushed to a sharded [`SpillFile`] and the
-///   incoming chunk is appended to disk.
+/// - In memory mode, remains in [`ArchiveState::InMemory`] until
+///   `hard_cap_bytes`; then transitions to [`ArchiveState::Truncated`] while
+///   retaining the hard-cap prefix.
+/// - In disk-spill mode, crossing `soft_cap_bytes` transitions to
+///   [`ArchiveState::Spilled`]: the in-memory buffer is flushed to a sharded
+///   [`SpillFile`] and the incoming chunk is appended to disk.
 /// - On crossing `hard_cap_bytes`, or on any spill I/O failure, transitions
-///   to [`ArchiveState::Truncated`]: subsequent bytes are dropped and only
-///   the `dropped` counter advances.
+///   to [`ArchiveState::Truncated`]: the retained prefix remains readable and
+///   subsequent bytes advance the `dropped` counter.
 ///
 /// `append_chunk` never returns an error — failures are logged via
 /// `tracing::warn!` with `request_id` / `surface` / `bytes_written` /
@@ -70,7 +81,7 @@ impl Default for ArchiveCaps {
 pub enum ArchiveState {
     InMemory(BytesMut),
     Spilled { file: Box<SpillFile>, written: u64 },
-    Truncated { written: u64, dropped: u64 },
+    Truncated { retained: BytesMut, dropped: u64 },
 }
 
 impl Default for ArchiveState {
@@ -84,7 +95,7 @@ impl ArchiveState {
         match self {
             Self::InMemory(b) => b.len() as u64,
             Self::Spilled { written, .. } => *written,
-            Self::Truncated { written, .. } => *written,
+            Self::Truncated { retained, .. } => retained.len() as u64,
         }
     }
 
@@ -103,9 +114,28 @@ impl ArchiveState {
         matches!(self, Self::Truncated { .. })
     }
 
-    /// Append a chunk; transition InMemory → Spilled at soft cap,
-    /// Spilled → Truncated at hard cap. Never returns error to the caller —
-    /// failures are logged + counted but the response path is not blocked.
+    /// Append a chunk synchronously for the memory archive path. This path
+    /// never spills and never performs disk I/O.
+    pub fn append_chunk_sync(
+        &mut self,
+        chunk: &[u8],
+        caps: &ArchiveCaps,
+        request_id: &str,
+        surface: &'static str,
+    ) {
+        debug_assert_eq!(
+            caps.storage,
+            ArchiveStorage::Memory,
+            "append_chunk_sync is only valid for memory archive storage"
+        );
+        self.append_memory_chunk(chunk, caps.hard_cap_bytes, request_id, surface);
+    }
+
+    /// Append a chunk; in memory mode this is a CPU-only hard-capped prefix
+    /// append. In disk-spill mode it transitions InMemory → Spilled at soft
+    /// cap, then Spilled → Truncated at hard cap. Never returns error to the
+    /// caller — failures are logged + counted but the response path is not
+    /// blocked.
     pub async fn append_chunk(
         &mut self,
         chunk: &[u8],
@@ -114,10 +144,24 @@ impl ArchiveState {
         request_id: &str,
         surface: &'static str,
     ) {
+        if caps.storage == ArchiveStorage::Memory {
+            self.append_chunk_sync(chunk, caps, request_id, surface);
+            return;
+        }
+
         let new_total = self.len().saturating_add(chunk.len() as u64);
 
         match self {
             Self::InMemory(buf) => {
+                if new_total > caps.hard_cap_bytes as u64 {
+                    self.truncate_in_memory_with_chunk(
+                        chunk,
+                        caps.hard_cap_bytes,
+                        request_id,
+                        surface,
+                    );
+                    return;
+                }
                 if new_total <= caps.soft_cap_bytes as u64 {
                     buf.extend_from_slice(chunk);
                     return;
@@ -139,11 +183,12 @@ impl ArchiveState {
                                 error = %e,
                                 "archive_spill_append_failed"
                             );
-                            *self = Self::Truncated {
-                                written: buf.len() as u64,
-                                dropped: chunk.len() as u64,
-                            };
-                            metrics::counter!("gw_archive_truncated_total").increment(1);
+                            self.truncate_in_memory_with_chunk(
+                                chunk,
+                                caps.hard_cap_bytes,
+                                request_id,
+                                surface,
+                            );
                             return;
                         }
                         if let Err(e) = file.append(chunk).await {
@@ -156,11 +201,12 @@ impl ArchiveState {
                                 error = %e,
                                 "archive_spill_append_failed"
                             );
-                            *self = Self::Truncated {
-                                written: buf.len() as u64,
-                                dropped: chunk.len() as u64,
-                            };
-                            metrics::counter!("gw_archive_truncated_total").increment(1);
+                            self.truncate_in_memory_with_chunk(
+                                chunk,
+                                caps.hard_cap_bytes,
+                                request_id,
+                                surface,
+                            );
                             return;
                         }
                         let written = (buf.len() + chunk.len()) as u64;
@@ -179,21 +225,45 @@ impl ArchiveState {
                             error = %e,
                             "archive_spill_create_failed"
                         );
-                        *self = Self::Truncated {
-                            written: buf.len() as u64,
-                            dropped: chunk.len() as u64,
-                        };
-                        metrics::counter!("gw_archive_truncated_total").increment(1);
+                        self.truncate_in_memory_with_chunk(
+                            chunk,
+                            caps.hard_cap_bytes,
+                            request_id,
+                            surface,
+                        );
                         metrics::counter!("gw_archive_disk_full_total").increment(1);
                     }
                 }
             }
             Self::Spilled { file, written } => {
                 if new_total > caps.hard_cap_bytes as u64 {
-                    *self = Self::Truncated {
-                        written: *written,
-                        dropped: chunk.len() as u64,
+                    let mut dropped: u64 = 0;
+                    let mut retained = match file.read_all().await {
+                        Ok(shards) => {
+                            BytesMut::from(shards.into_iter().next().unwrap_or_default().as_slice())
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "gw_proxy::archive",
+                                request_id,
+                                surface,
+                                bytes_written = *written,
+                                bytes_dropped = chunk.len(),
+                                error = %e,
+                                "archive_spill_read_before_truncate_failed"
+                            );
+                            dropped = dropped.saturating_add(*written);
+                            BytesMut::new()
+                        }
                     };
+                    Self::trim_retained_to_cap(&mut retained, &mut dropped, caps.hard_cap_bytes);
+                    Self::append_retained_prefix(
+                        &mut retained,
+                        &mut dropped,
+                        chunk,
+                        caps.hard_cap_bytes,
+                    );
+                    *self = Self::Truncated { retained, dropped };
                     metrics::counter!("gw_archive_truncated_total").increment(1);
                     return;
                 }
@@ -207,24 +277,48 @@ impl ArchiveState {
                         error = %e,
                         "archive_spill_append_failed"
                     );
-                    *self = Self::Truncated {
-                        written: *written,
-                        dropped: chunk.len() as u64,
+                    let mut dropped: u64 = 0;
+                    let mut retained = match file.read_all().await {
+                        Ok(shards) => {
+                            BytesMut::from(shards.into_iter().next().unwrap_or_default().as_slice())
+                        }
+                        Err(read_err) => {
+                            tracing::warn!(
+                                target: "gw_proxy::archive",
+                                request_id,
+                                surface,
+                                bytes_written = *written,
+                                bytes_dropped = chunk.len(),
+                                error = %read_err,
+                                "archive_spill_read_after_append_failed"
+                            );
+                            dropped = dropped.saturating_add(*written);
+                            BytesMut::new()
+                        }
                     };
+                    Self::trim_retained_to_cap(&mut retained, &mut dropped, caps.hard_cap_bytes);
+                    Self::append_retained_prefix(
+                        &mut retained,
+                        &mut dropped,
+                        chunk,
+                        caps.hard_cap_bytes,
+                    );
+                    *self = Self::Truncated { retained, dropped };
                     metrics::counter!("gw_archive_truncated_total").increment(1);
                 } else {
                     *written += chunk.len() as u64;
                 }
             }
-            Self::Truncated { dropped, .. } => {
-                *dropped += chunk.len() as u64;
+            Self::Truncated { retained, dropped } => {
+                Self::append_retained_prefix(retained, dropped, chunk, caps.hard_cap_bytes);
             }
         }
     }
 
     /// Read accumulated bytes for emission to the detailed-archive sink.
-    /// `Spilled` shards are concatenated; `Truncated` returns `Vec::new()`
-    /// (callers should consult `is_truncated()` / `dropped()` for metadata).
+    /// `Spilled` shards are concatenated; `Truncated` returns the retained
+    /// hard-cap prefix (callers should consult `is_truncated()` / `dropped()`
+    /// for truncation metadata).
     pub async fn read_for_emit(&self) -> std::io::Result<Vec<u8>> {
         match self {
             Self::InMemory(b) => Ok(b.to_vec()),
@@ -232,8 +326,119 @@ impl ArchiveState {
                 let shards = file.read_all().await?;
                 Ok(shards.into_iter().next().unwrap_or_default())
             }
-            Self::Truncated { .. } => Ok(Vec::new()),
+            Self::Truncated { retained, .. } => Ok(retained.to_vec()),
         }
+    }
+
+    /// Synchronous read for Pingora's response hot path. This is intentionally
+    /// CPU-only; `Spilled` cannot be read without async file I/O.
+    pub fn read_for_emit_sync(&self) -> Vec<u8> {
+        match self {
+            Self::InMemory(b) => b.to_vec(),
+            Self::Truncated { retained, .. } => retained.to_vec(),
+            Self::Spilled { .. } => Vec::new(),
+        }
+    }
+
+    fn append_memory_chunk(
+        &mut self,
+        chunk: &[u8],
+        hard_cap_bytes: usize,
+        request_id: &str,
+        surface: &'static str,
+    ) {
+        match self {
+            Self::InMemory(buf) => {
+                let new_total = buf.len().saturating_add(chunk.len());
+                if new_total <= hard_cap_bytes {
+                    buf.extend_from_slice(chunk);
+                    return;
+                }
+                self.truncate_in_memory_with_chunk(chunk, hard_cap_bytes, request_id, surface);
+            }
+            Self::Truncated { retained, dropped } => {
+                Self::append_retained_prefix(retained, dropped, chunk, hard_cap_bytes);
+            }
+            Self::Spilled { written, .. } => {
+                debug_assert!(
+                    false,
+                    "memory archive storage must not observe a spilled archive state"
+                );
+                tracing::warn!(
+                    target: "gw_proxy::archive",
+                    request_id,
+                    surface,
+                    bytes_written = *written,
+                    bytes_dropped = chunk.len(),
+                    "archive_memory_append_observed_spilled_state"
+                );
+                let dropped = written.saturating_add(chunk.len() as u64);
+                *self = Self::Truncated {
+                    retained: BytesMut::new(),
+                    dropped,
+                };
+            }
+        }
+    }
+
+    fn truncate_in_memory_with_chunk(
+        &mut self,
+        chunk: &[u8],
+        hard_cap_bytes: usize,
+        request_id: &str,
+        surface: &'static str,
+    ) {
+        let mut dropped = 0;
+        let mut retained = match self {
+            Self::InMemory(buf) => std::mem::take(buf),
+            Self::Truncated {
+                retained,
+                dropped: dropped_count,
+            } => {
+                let next = std::mem::take(retained);
+                dropped = *dropped_count;
+                next
+            }
+            Self::Spilled { written, .. } => {
+                dropped = *written;
+                BytesMut::new()
+            }
+        };
+        Self::trim_retained_to_cap(&mut retained, &mut dropped, hard_cap_bytes);
+        Self::append_retained_prefix(&mut retained, &mut dropped, chunk, hard_cap_bytes);
+        tracing::warn!(
+            target: "gw_proxy::archive",
+            request_id,
+            surface,
+            bytes_retained = retained.len(),
+            bytes_dropped = dropped,
+            "archive_truncated"
+        );
+        *self = Self::Truncated { retained, dropped };
+        metrics::counter!("gw_archive_truncated_total").increment(1);
+    }
+
+    fn trim_retained_to_cap(retained: &mut BytesMut, dropped: &mut u64, hard_cap_bytes: usize) {
+        if retained.len() <= hard_cap_bytes {
+            return;
+        }
+        let excess = retained.len() - hard_cap_bytes;
+        retained.truncate(hard_cap_bytes);
+        *dropped = dropped.saturating_add(excess as u64);
+    }
+
+    fn append_retained_prefix(
+        retained: &mut BytesMut,
+        dropped: &mut u64,
+        chunk: &[u8],
+        hard_cap_bytes: usize,
+    ) {
+        let available = hard_cap_bytes.saturating_sub(retained.len());
+        let keep = available.min(chunk.len());
+        if keep > 0 {
+            retained.extend_from_slice(&chunk[..keep]);
+        }
+        *dropped = dropped.saturating_add((chunk.len() - keep) as u64);
     }
 }
 

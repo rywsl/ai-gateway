@@ -11,17 +11,21 @@ use fred::interfaces::{KeysInterface, StreamsInterface};
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
-use gw_ledger::flusher::LedgerItem;
+use gw_ledger::backlog::BillingBacklog;
+use gw_ledger::dlq::{DlqEnvelope, DlqLayer, EmergencyDlqWriter};
+use gw_ledger::flusher::{DlqFallback, LedgerItem};
 use gw_ledger::usage::{UsageRecord, UsageStatus, VendorExposureState};
 use gw_ledger::Ledger;
 use gw_runtime::spill_io::{SpillRoot, SpillRootConfig};
 use gw_runtime::ShutdownToken;
 use gw_store::redis_client::RedisCtx;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use tokio::sync::mpsc;
 
 const DLQ_SHARDS: usize = 4;
 
@@ -121,4 +125,66 @@ async fn primary_xadd_failure_routes_to_dlq_stream() {
         dlq_len, 2,
         "both records should land in usage:records:dlq when primary stream is unwritable"
     );
+}
+
+/// DLQ retry terminal fallback: when both the Redis DLQ XADD and the
+/// emergency-file append fail inside `process_dlq_envelope`, the envelope
+/// is pushed into `BillingBacklog` and `gateway_usage_records_lost_total`
+/// is NOT incremented.
+///
+/// Deviation from prompt: `process_dlq_envelope` is private to the
+/// `gw-ledger` crate, so it cannot be called directly from an integration
+/// test without changing production API visibility. Per the prompt's
+/// fallback allowance, this test constructs a `DlqFallback` manually and
+/// invokes the terminal `fallback.backlog.push(disk_envelope).await` line
+/// directly — the exact code path `process_dlq_envelope` takes after both
+/// Redis XADD and `EmergencyDlqWriter::append` have failed. The static
+/// source-level test `dlq_retry_terminal_failure_routes_to_backlog` in
+/// `crates/gw-ledger/src/flusher.rs` already pins the source shape
+/// (including the absence of a `gateway_usage_records_lost_total`
+/// increment on this path); this runtime test pins the behavior of the
+/// terminal push.
+#[tokio::test]
+async fn dlq_retry_terminal_failure_pushes_backlog() {
+    let tmp = TempDir::new().unwrap();
+    let spill_root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 16 * 1024 * 1024,
+        buffer_size: 4096,
+    }));
+    let writer = Arc::new(EmergencyDlqWriter::new(
+        spill_root,
+        NonZeroUsize::new(DLQ_SHARDS).unwrap(),
+    ));
+    let (retry_tx, _retry_rx) = mpsc::channel::<DlqEnvelope>(1);
+    let backlog = Arc::new(BillingBacklog::new());
+    let fallback = DlqFallback {
+        writer: writer.clone(),
+        retry_tx,
+        backlog: backlog.clone(),
+    };
+
+    let disk_envelope = DlqEnvelope::new(
+        sample_record(),
+        "redis_xadd_failed + disk_append_failed",
+        3,
+        DlqLayer::Disk,
+        0,
+    );
+
+    // Terminal branch of process_dlq_envelope: both Redis XADD and
+    // EmergencyDlqWriter::append failed — push to the unbounded backlog.
+    fallback.backlog.push(disk_envelope).await;
+
+    assert_eq!(
+        fallback.backlog.pending_count(),
+        1,
+        "terminal DLQ retry failure must push envelope into BillingBacklog, not drop it"
+    );
+    // The `gateway_usage_records_lost_total` counter is NOT incremented on
+    // this path — that property is pinned by the static source test
+    // `dlq_retry_terminal_failure_routes_to_backlog` in flusher.rs, which
+    // asserts the source contains `fallback.backlog.push` and the
+    // emergency-file metric but no lost-counter increment in
+    // `process_dlq_envelope`'s body.
 }

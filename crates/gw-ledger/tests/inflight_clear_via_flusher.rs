@@ -5,6 +5,7 @@
 //! Docker; run with `cargo test -p gw-ledger --test inflight_clear_via_flusher -- --ignored`.
 
 use fred::interfaces::{KeysInterface, StreamsInterface};
+use fred::types::{RedisValue, XReadResponse};
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
@@ -66,6 +67,25 @@ fn fresh_usage_record(req_id: &str, attempt: u32) -> UsageRecord {
         coef_table_version: None,
         attempted_keys: Vec::new(),
     }
+}
+
+async fn read_usage_records(redis: &RedisCtx) -> Vec<UsageRecord> {
+    let raw: RedisValue = redis
+        .pool
+        .xread(None::<u64>, None::<u64>, "usage:records", "0-0")
+        .await
+        .unwrap();
+    let response: XReadResponse<String, String, String, String> =
+        raw.into_xread_response().unwrap();
+    response
+        .into_iter()
+        .flat_map(|(_stream, entries)| entries.into_iter())
+        .filter_map(|(_entry_id, fields)| {
+            fields
+                .get("payload")
+                .and_then(|payload| serde_json::from_str::<UsageRecord>(payload).ok())
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -134,7 +154,7 @@ async fn flusher_dels_inflight_key_on_xadd_success() {
 
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers Redis)"]
-async fn full_bypass_sync_xadd_dels_inflight_key() {
+async fn full_primary_routes_to_overflow_and_dels_inflight_key() {
     let node = Redis::default().start().await.unwrap();
     let port = node.get_host_port_ipv4(6379).await.unwrap();
     let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
@@ -158,27 +178,22 @@ async fn full_bypass_sync_xadd_dels_inflight_key() {
     let key = InflightLedger::test_key(&instance, "req-bypass", 0);
     assert_eq!(redis.pool.exists::<u64, _>(&key).await.unwrap(), 1);
 
-    // Force the channel to be Full immediately: capacity = 1, ticker disabled.
     let (_tmp, spill_root) = make_spill_root();
-    let (ledger, _handles) = Ledger::start(
+    let (ledger, _primary_rx_held, _overflow_handle) = Ledger::for_test_with_overflow(
         redis.clone(),
         instance.clone(),
         1,
-        1,
-        Duration::from_secs(600), // ticker effectively disabled
+        64,
         spill_root,
-        DLQ_SHARDS,
+        NonZeroUsize::new(DLQ_SHARDS).unwrap(),
         ShutdownToken::new(),
-        Duration::from_secs(5),
     );
-    // First emit fills the channel.
     ledger
         .emit(LedgerItem {
             record: fresh_usage_record("filler", 0),
             clear: None,
         })
         .await;
-    // Second emit must hit the Full branch → sync_xadd.
     ledger
         .emit(LedgerItem {
             record: fresh_usage_record("req-bypass", 0),
@@ -189,17 +204,22 @@ async fn full_bypass_sync_xadd_dels_inflight_key() {
         })
         .await;
 
-    // sync_xadd is awaited inside emit; no sleep needed for the bypass path.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let records = read_usage_records(&redis).await;
+    assert!(
+        records.iter().any(|r| r.request_id == "req-bypass"),
+        "overflow record must reach usage:records before DEL"
+    );
     assert_eq!(
         redis.pool.exists::<u64, _>(&key).await.unwrap(),
         0,
-        "Full-branch sync_xadd → DEL"
+        "Full primary branch overflow delivery → DEL"
     );
 }
 
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers Redis)"]
-async fn closed_branch_routes_through_sync_xadd_with_del() {
+async fn closed_primary_routes_to_overflow_with_del() {
     let node = Redis::default().start().await.unwrap();
     let port = node.get_host_port_ipv4(6379).await.unwrap();
     let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
@@ -223,18 +243,17 @@ async fn closed_branch_routes_through_sync_xadd_with_del() {
     let key = InflightLedger::test_key(&instance, "req-closed", 0);
     assert_eq!(redis.pool.exists::<u64, _>(&key).await.unwrap(), 1);
 
-    // Construct a Ledger whose flusher task never starts: drop the rx
-    // end immediately. Subsequent emits hit the Closed branch.
-    let (tx, rx) = tokio::sync::mpsc::channel::<LedgerItem>(8);
-    drop(rx); // channel is now Closed
     let (_tmp, spill_root) = make_spill_root();
-    let ledger = Ledger::from_parts(
-        tx,
+    let (ledger, primary_rx, _overflow_handle) = Ledger::for_test_with_overflow(
         redis.clone(),
         instance.clone(),
+        1,
+        64,
         spill_root,
         NonZeroUsize::new(DLQ_SHARDS).unwrap(),
+        ShutdownToken::new(),
     );
+    drop(primary_rx);
 
     ledger
         .emit(LedgerItem {
@@ -246,12 +265,15 @@ async fn closed_branch_routes_through_sync_xadd_with_del() {
         })
         .await;
 
-    // sync_xadd is awaited inside emit; no sleep needed.
-    let xlen: u64 = redis.pool.xlen("usage:records").await.unwrap();
-    assert!(xlen >= 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let records = read_usage_records(&redis).await;
+    assert!(
+        records.iter().any(|r| r.request_id == "req-closed"),
+        "closed-primary overflow record must reach usage:records before DEL"
+    );
     assert_eq!(
         redis.pool.exists::<u64, _>(&key).await.unwrap(),
         0,
-        "Closed branch sync_xadd → DEL"
+        "Closed primary branch overflow delivery → DEL"
     );
 }
