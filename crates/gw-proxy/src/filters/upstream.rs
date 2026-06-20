@@ -1007,6 +1007,8 @@ pub async fn rewrite_request(
     }
     ctx.upstream_codec = Some(upstream_codec);
     ctx.upstream_shape = ctx.upstream_codec.as_ref().map(AnyCodec::api_shape);
+    rewrite_cross_protocol_path(upstream_request, upstream_kind, client_kind, ctx)
+        .map_err(|_| Error::new(ErrorType::Custom("gw_upstream_path_rewrite_failed")))?;
 
     // S-codec T2: initialise the codec-internal SSE accumulator now that the
     // upstream codec is known. Done here (rather than in `request_filter`)
@@ -1514,6 +1516,49 @@ fn codec_for(k: gw_core::protocol::ProtocolKind) -> AnyCodec {
     }
 }
 
+fn rewrite_cross_protocol_path(
+    upstream_request: &mut RequestHeader,
+    upstream_kind: gw_core::protocol::ProtocolKind,
+    client_kind: gw_core::protocol::ProtocolKind,
+    ctx: &ReqCtx,
+) -> Result<()> {
+    if upstream_kind == client_kind {
+        return Ok(());
+    }
+    let Some(path) = canonical_upstream_path(upstream_kind, ctx.model.as_ref(), ctx.is_stream)
+    else {
+        return Ok(());
+    };
+    let uri = path
+        .parse()
+        .map_err(|_| Error::new(ErrorType::Custom("gw_bad_canonical_upstream_path")))?;
+    upstream_request.set_uri(uri);
+    Ok(())
+}
+
+fn canonical_upstream_path(
+    upstream_kind: gw_core::protocol::ProtocolKind,
+    model: Option<&gw_core::ids::ModelName>,
+    is_stream: bool,
+) -> Option<String> {
+    use gw_core::protocol::ProtocolKind;
+    match upstream_kind {
+        ProtocolKind::OpenAi => Some("/v1/chat/completions".to_owned()),
+        ProtocolKind::Anthropic => Some("/v1/messages".to_owned()),
+        ProtocolKind::Gemini => {
+            let model = model?.as_ref();
+            let verb = if is_stream {
+                "streamGenerateContent"
+            } else {
+                "generateContent"
+            };
+            let suffix = if is_stream { "?alt=sse" } else { "" };
+            Some(format!("/v1beta/models/{model}:{verb}{suffix}"))
+        }
+        ProtocolKind::Kiro => None,
+    }
+}
+
 /// SHA-256 of request body truncated to u64 for CacheAffinity message_hash.
 ///
 /// Returns `None` for empty input (preserves degraded behavior when no body
@@ -1730,7 +1775,8 @@ mod body_hash_tests {
     use bytes::BytesMut;
     use gw_codec::ProtocolCodec;
     use gw_core::entity::KeyStatus;
-    use gw_core::ids::{KeyId, ModelName, VendorId};
+    use gw_core::ids::{KeyId, ModelName, RequestId, TraceId, VendorId};
+    use gw_core::protocol::ProtocolKind;
     use secrecy::SecretString;
     use std::collections::HashMap;
     use url::Url;
@@ -1852,6 +1898,83 @@ mod body_hash_tests {
             body.get("model").and_then(serde_json::Value::as_str),
             Some("upstream-model")
         );
+    }
+
+    #[test]
+    fn cross_protocol_path_rewrites_to_openai_chat_endpoint() {
+        let cache = Arc::new(gw_runtime::RegexCache::new(
+            gw_runtime::RegexCacheConfig::default(),
+        ));
+        let gate = Arc::new(gw_runtime::BackpressureGate::from_state(Arc::new(
+            std::sync::atomic::AtomicU8::new(0),
+        )));
+        let mut ctx = ReqCtx::new(
+            TraceId::from("0000000000000000aaaaaaaaaaaaaaaa"),
+            RequestId::from("req-path-rewrite"),
+            cache,
+            gate,
+        );
+        ctx.model = Some(ModelName::from("gemini-2.5-flash"));
+        let mut req = RequestHeader::build(
+            "POST",
+            b"/v1beta/models/gemini-2.5-flash:generateContent",
+            Some(4),
+        )
+        .unwrap();
+
+        rewrite_cross_protocol_path(&mut req, ProtocolKind::OpenAi, ProtocolKind::Gemini, &ctx)
+            .unwrap();
+
+        assert_eq!(req.uri.path(), "/v1/chat/completions");
+    }
+
+    #[test]
+    fn cross_protocol_path_rewrites_to_gemini_stream_endpoint() {
+        let cache = Arc::new(gw_runtime::RegexCache::new(
+            gw_runtime::RegexCacheConfig::default(),
+        ));
+        let gate = Arc::new(gw_runtime::BackpressureGate::from_state(Arc::new(
+            std::sync::atomic::AtomicU8::new(0),
+        )));
+        let mut ctx = ReqCtx::new(
+            TraceId::from("0000000000000000aaaaaaaaaaaaaaaa"),
+            RequestId::from("req-path-gemini-stream"),
+            cache,
+            gate,
+        );
+        ctx.model = Some(ModelName::from("gemini-2.5-flash"));
+        ctx.is_stream = true;
+        let mut req = RequestHeader::build("POST", b"/v1/chat/completions", Some(4)).unwrap();
+
+        rewrite_cross_protocol_path(&mut req, ProtocolKind::Gemini, ProtocolKind::OpenAi, &ctx)
+            .unwrap();
+
+        assert_eq!(
+            req.uri.path_and_query().map(|v| v.as_str()),
+            Some("/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse")
+        );
+    }
+
+    #[test]
+    fn same_protocol_path_is_preserved() {
+        let cache = Arc::new(gw_runtime::RegexCache::new(
+            gw_runtime::RegexCacheConfig::default(),
+        ));
+        let gate = Arc::new(gw_runtime::BackpressureGate::from_state(Arc::new(
+            std::sync::atomic::AtomicU8::new(0),
+        )));
+        let ctx = ReqCtx::new(
+            TraceId::from("0000000000000000aaaaaaaaaaaaaaaa"),
+            RequestId::from("req-path-preserve"),
+            cache,
+            gate,
+        );
+        let mut req = RequestHeader::build("POST", b"/v1/chat/completions", Some(4)).unwrap();
+
+        rewrite_cross_protocol_path(&mut req, ProtocolKind::OpenAi, ProtocolKind::OpenAi, &ctx)
+            .unwrap();
+
+        assert_eq!(req.uri.path(), "/v1/chat/completions");
     }
 }
 
