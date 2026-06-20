@@ -186,6 +186,7 @@ async fn full_primary_routes_to_overflow_and_dels_inflight_key() {
         64,
         spill_root,
         NonZeroUsize::new(DLQ_SHARDS).unwrap(),
+        ShutdownToken::new(),
     );
     ledger
         .emit(LedgerItem {
@@ -250,6 +251,7 @@ async fn closed_primary_routes_to_overflow_with_del() {
         64,
         spill_root,
         NonZeroUsize::new(DLQ_SHARDS).unwrap(),
+        ShutdownToken::new(),
     );
     drop(primary_rx);
 

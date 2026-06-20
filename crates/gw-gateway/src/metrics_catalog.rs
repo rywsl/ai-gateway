@@ -514,7 +514,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_billing_overflow_buf_rescued_total",
         kind: MetricKind::Counter,
-        help: "Overflow worker future was aborted with non-empty local buf or queued receiver items; rescued items routed to recoverable emergency DLQ file or BillingBacklog. Non-zero indicates abnormal worker termination.",
+        help: "Overflow worker future was aborted with non-empty local buf or queued receiver items; rescued items routed to recoverable emergency DLQ file or BillingBacklog. Non-zero indicates abnormal worker termination. Best-effort: receiver-lock contention can skip a rescue, in which case items recover when the worker next acquires the receiver.",
     },
     // --- Billing robustness W3-T1 ---
     MetricSpec {

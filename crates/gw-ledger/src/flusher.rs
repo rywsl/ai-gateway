@@ -306,7 +306,9 @@ impl Ledger {
     /// Construct a Ledger with a live overflow worker for deterministic tests.
     /// Holding the returned primary receiver without reading simulates a full
     /// primary channel; dropping it simulates primary closed while overflow
-    /// remains available.
+    /// remains available. The `shutdown` token is passed through to the
+    /// overflow worker so the test can trigger cancel-drain and assert late
+    /// records still land in `usage:records`.
     #[doc(hidden)]
     pub fn for_test_with_overflow(
         redis: RedisCtx,
@@ -315,6 +317,7 @@ impl Ledger {
         overflow_capacity: usize,
         spill_root: Arc<SpillRoot>,
         dlq_shards: NonZeroUsize,
+        shutdown: ShutdownToken,
     ) -> (Self, mpsc::Receiver<LedgerItem>, JoinHandle<()>) {
         let (primary_tx, primary_rx) = mpsc::channel::<LedgerItem>(primary_capacity);
         let (overflow_tx, overflow_rx) = mpsc::channel::<LedgerItem>(overflow_capacity);
@@ -334,7 +337,7 @@ impl Ledger {
             overflow_rx,
             64,
             Duration::from_millis(50),
-            ShutdownToken::new(),
+            shutdown,
             Duration::from_secs(2),
         );
         let ledger = Self {

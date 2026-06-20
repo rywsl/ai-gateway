@@ -77,6 +77,34 @@ async fn disk_spill_truncates_past_hard_cap_and_keeps_prefix() {
     assert_eq!(retained, first);
 }
 
+// Covers the path where the very first chunk already exceeds `hard_cap_bytes`:
+// `append_chunk` must take the early `truncate_in_memory_with_chunk` return
+// inside the `InMemory` arm — before any `spill_root.create` call — so the
+// state becomes `Truncated` in memory and no spill shard file is created on
+// disk. This complements `disk_spill_truncates_past_hard_cap_and_keeps_prefix`,
+// which only exercises the post-spill truncation path.
+#[tokio::test]
+async fn disk_spill_checks_hard_cap_before_first_spill() {
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 1 << 30,
+        buffer_size: 4096,
+    }));
+    root.ensure_dir().await.unwrap();
+    let mut a = ArchiveState::default();
+    let chunk = vec![7u8; 5000];
+    a.append_chunk(&chunk, &disk_caps(2048, 4096), &root, "req-hard-cap", "upstream")
+        .await;
+    assert!(a.is_truncated());
+    assert_eq!(a.len(), 4096);
+    assert_eq!(a.dropped(), 904);
+    assert!(
+        std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
+        "no spill file should be created when the first chunk exceeds hard_cap"
+    );
+}
+
 #[tokio::test]
 async fn memory_storage_never_spills_and_keeps_hard_cap_prefix() {
     let tmp = TempDir::new().unwrap();
