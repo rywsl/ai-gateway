@@ -274,6 +274,7 @@ evaluate_interval_ms = 1000
 hysteresis_healthy_ticks = 3
 
 [proxy.archive]
+storage = "memory"
 soft_cap_bytes = 4194304
 hard_cap_bytes = 8388608
 spill_dir = "/data/cnexus/spill/archive"

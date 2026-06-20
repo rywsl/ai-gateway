@@ -1,7 +1,7 @@
 use crate::usage::UsageRecord;
 use gw_runtime::spill_io::{SpillFile, SpillPolicy, SpillRoot};
 use serde::{Deserialize, Serialize};
-use std::io;
+use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -112,6 +112,29 @@ impl EmergencyDlqWriter {
         let mut buf = bytes;
         buf.push(b'\n');
         file.append(&buf).await?;
+        Ok(())
+    }
+
+    /// Synchronous rescue append for abnormal paths that cannot safely await.
+    ///
+    /// The file name still starts with `dlq.` so `BacklogRecovery::load_into`
+    /// will replay it on the next boot. This intentionally creates a separate
+    /// one-shot file instead of touching the async `SpillFile` buffers.
+    pub fn append_blocking_rescue(&self, envelope: &DlqEnvelope) -> io::Result<()> {
+        std::fs::create_dir_all(self.spill_root.root_dir())?;
+        let path = self.spill_root.root_dir().join(format!(
+            "{}.rescue.{}.jsonl",
+            self.key,
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        serde_json::to_writer(&mut file, envelope)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
         Ok(())
     }
 
@@ -247,6 +270,32 @@ mod tests {
         assert_eq!(lines.len(), 2, "two JSONL lines");
         assert!(lines[0].contains("\"dlq_layer\":\"disk\""));
         assert!(lines[1].contains("\"dlq_layer\":\"disk\""));
+    }
+
+    #[test]
+    fn blocking_rescue_file_uses_recovery_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let root = spill_root(&tmp);
+        let writer = EmergencyDlqWriter::new(root.clone(), NonZeroUsize::new(1).unwrap());
+
+        writer
+            .append_blocking_rescue(&DlqEnvelope::new(
+                record(),
+                "overflow_worker_aborted",
+                0,
+                DlqLayer::Disk,
+                101,
+            ))
+            .unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(root.root_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(
+            entries.iter().any(|name| name.starts_with("dlq.")),
+            "blocking rescue files must be picked up by BacklogRecovery: {entries:?}"
+        );
     }
 
     /// Round-trip test: append two envelopes, flush, read back, and

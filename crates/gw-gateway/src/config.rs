@@ -1543,8 +1543,17 @@ pub struct ProxyConfig {
     pub archive: ProxyArchiveConfig,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyArchiveStorage {
+    Memory,
+    DiskSpill,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProxyArchiveConfig {
+    #[serde(default = "default_proxy_archive_storage")]
+    pub storage: ProxyArchiveStorage,
     #[serde(default = "default_proxy_archive_soft_cap_bytes")]
     pub soft_cap_bytes: usize,
     #[serde(default = "default_proxy_archive_hard_cap_bytes")]
@@ -1553,6 +1562,9 @@ pub struct ProxyArchiveConfig {
     pub spill_dir: std::path::PathBuf,
 }
 
+fn default_proxy_archive_storage() -> ProxyArchiveStorage {
+    ProxyArchiveStorage::Memory
+}
 fn default_proxy_archive_soft_cap_bytes() -> usize {
     4 * 1024 * 1024
 }
@@ -1566,6 +1578,7 @@ fn default_proxy_archive_spill_dir() -> std::path::PathBuf {
 impl Default for ProxyArchiveConfig {
     fn default() -> Self {
         Self {
+            storage: default_proxy_archive_storage(),
             soft_cap_bytes: default_proxy_archive_soft_cap_bytes(),
             hard_cap_bytes: default_proxy_archive_hard_cap_bytes(),
             spill_dir: default_proxy_archive_spill_dir(),
@@ -1698,6 +1711,9 @@ impl Config {
         }
         if self.ledger.flush_interval_ms == 0 {
             anyhow::bail!("invalid config: ledger.flush_interval_ms must be > 0");
+        }
+        if self.proxy.archive.soft_cap_bytes > self.proxy.archive.hard_cap_bytes {
+            anyhow::bail!("invalid config: proxy.archive.soft_cap_bytes must be <= hard_cap_bytes");
         }
 
         if self.tunnel.enabled {
@@ -2048,6 +2064,75 @@ mod egress_cfg_tests {
             Some(std::path::PathBuf::from("/tmp/gw-egress.sock"))
         );
         assert!(cfg.egress.bind_tcp.is_none());
+    }
+
+    #[test]
+    fn proxy_archive_storage_defaults_to_memory() {
+        let defaults = include_str!("../../../config/default.toml");
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .extract()
+            .expect("default.toml parses");
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 4,
+            effective_memory_bytes: 4 * 1024 * 1024 * 1024,
+        });
+        cfg.validate().expect("default.toml validates");
+        cfg.validate_resolved_sizing().expect("sizing resolves");
+
+        assert_eq!(cfg.proxy.archive.storage, ProxyArchiveStorage::Memory);
+    }
+
+    #[test]
+    fn proxy_archive_accepts_disk_spill_storage() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+            [proxy.archive]
+            storage = "disk_spill"
+            soft_cap_bytes = 1024
+            hard_cap_bytes = 4096
+        "#;
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("config parses");
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 4,
+            effective_memory_bytes: 4 * 1024 * 1024 * 1024,
+        });
+        cfg.validate().expect("disk_spill archive config validates");
+        cfg.validate_resolved_sizing().expect("sizing resolves");
+
+        assert_eq!(cfg.proxy.archive.storage, ProxyArchiveStorage::DiskSpill);
+        assert_eq!(cfg.proxy.archive.soft_cap_bytes, 1024);
+        assert_eq!(cfg.proxy.archive.hard_cap_bytes, 4096);
+    }
+
+    #[test]
+    fn proxy_archive_rejects_soft_cap_above_hard_cap() {
+        let defaults = include_str!("../../../config/default.toml");
+        let overrides = r#"
+            [proxy.archive]
+            soft_cap_bytes = 8192
+            hard_cap_bytes = 4096
+        "#;
+        let mut cfg: Config = Figment::new()
+            .merge(Toml::string(defaults))
+            .merge(Toml::string(overrides))
+            .extract()
+            .expect("config parses");
+        cfg.apply_auto_sizing(MachineSizing {
+            effective_cpus: 4,
+            effective_memory_bytes: 4 * 1024 * 1024 * 1024,
+        });
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("proxy.archive.soft_cap_bytes must be <= hard_cap_bytes"),
+            "{err:?}"
+        );
     }
 
     #[test]

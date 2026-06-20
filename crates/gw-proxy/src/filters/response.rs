@@ -34,7 +34,7 @@
 //! terminates the stream with `GW_RESPONSE_DEADLINE_EXCEEDED` if exceeded.
 //! The check runs *before* any body processing or cross-protocol re-render.
 
-use crate::ctx::{ArchiveState, ReqCtx};
+use crate::ctx::{ArchiveState, ArchiveStorage, ReqCtx};
 use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
 use gw_codec::cross_render::{CrossRender, WireFormat};
@@ -318,6 +318,139 @@ pub async fn run(
     Ok(None)
 }
 
+pub fn run_memory_sync(
+    _session: &mut Session,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    ctx: &mut ReqCtx,
+) -> Result<Option<Duration>> {
+    debug_assert_eq!(
+        ctx.archive_caps.storage,
+        ArchiveStorage::Memory,
+        "run_memory_sync is only valid for memory archive storage"
+    );
+    check_deadline(ctx)?;
+
+    // Track bytes shipped to the client for retry-eligibility decisions.
+    if let Some(b) = body.as_ref() {
+        ctx.bytes_sent_to_client
+            .fetch_add(b.len() as u64, Ordering::Relaxed);
+    }
+
+    // W2-T4: on first non-empty body chunk, transition Sent -> Streaming.
+    if matches!(
+        ctx.vendor_exposure,
+        crate::billing_lifecycle::VendorExposure::Sent
+    ) && body.as_ref().map(|b| !b.is_empty()).unwrap_or(false)
+    {
+        crate::billing_lifecycle::transition_to(
+            ctx,
+            crate::billing_lifecycle::VendorExposure::Streaming,
+        );
+    }
+
+    if let Some(b) = body.as_ref() {
+        append_archive_sync(
+            &mut ctx.archive_upstream_response_body,
+            b,
+            &ctx.archive_caps,
+            ctx.request_id.as_ref(),
+            "upstream",
+        );
+    }
+
+    if ctx.client_shape.is_some_and(|shape| shape.is_cli()) {
+        run_cli_body_filter_sync(body, end_of_stream, ctx)?;
+        return Ok(None);
+    }
+
+    if !ctx.is_stream {
+        let cross_protocol = is_cross_protocol(ctx);
+        handle_non_stream_chunk(body.as_ref(), end_of_stream, ctx);
+        if cross_protocol {
+            if end_of_stream {
+                if let Some(buf) = ctx.pending_client_body.take() {
+                    *body = Some(buf.freeze());
+                } else if let Some(orig) = ctx.upstream_body_accum.take() {
+                    *body = Some(orig.freeze());
+                }
+            } else {
+                *body = None;
+            }
+        }
+        if let Some(b) = body.as_ref() {
+            append_archive_sync(
+                &mut ctx.archive_downstream_response_body,
+                b,
+                &ctx.archive_caps,
+                ctx.request_id.as_ref(),
+                "downstream",
+            );
+        }
+        return Ok(None);
+    }
+
+    let Some(upstream_kind) = ctx.upstream_codec.as_ref().map(AnyCodec::kind) else {
+        return Ok(None);
+    };
+    let upstream_wire = ctx.upstream_codec.as_ref().map(WireFormat::from_any_codec);
+    let client_wire = ctx.client_codec.as_ref().map(WireFormat::from_any_codec);
+    let cross_protocol = matches!((client_wire, upstream_wire), (Some(cw), Some(uw)) if cw != uw);
+    let client_kind = ctx.client_codec.as_ref().map(AnyCodec::kind);
+
+    if let Some(chunk) = body.as_ref() {
+        let _ = crate::bounded::push_bounded_vec(
+            &mut ctx.sse_leftover,
+            chunk,
+            crate::bounded::SSE_LEFTOVER_CAP_BYTES,
+            crate::bounded::SSE_LEFTOVER_LABEL,
+            gw_core::bounded_buf::OverflowPolicy::Truncate,
+        );
+    }
+
+    loop {
+        let Some((idx, sep_len)) = find_event_boundary(&ctx.sse_leftover) else {
+            break;
+        };
+        let event_bytes: Vec<u8> = ctx.sse_leftover.drain(..idx).collect();
+        ctx.sse_leftover.drain(..sep_len);
+        let codec = codec_for(upstream_kind);
+        handle_event(&codec, &event_bytes, ctx, cross_protocol, client_kind);
+    }
+
+    if end_of_stream && !ctx.sse_leftover.is_empty() {
+        let tail: Vec<u8> = std::mem::take(&mut ctx.sse_leftover);
+        let codec = codec_for(upstream_kind);
+        handle_event(&codec, &tail, ctx, cross_protocol, client_kind);
+    }
+
+    if let Some(buf) = ctx.pending_client_body.take() {
+        *body = Some(buf.freeze());
+    }
+
+    if let Some(b) = body.as_ref() {
+        append_archive_sync(
+            &mut ctx.archive_downstream_response_body,
+            b,
+            &ctx.archive_caps,
+            ctx.request_id.as_ref(),
+            "downstream",
+        );
+    }
+
+    Ok(None)
+}
+
+fn append_archive_sync(
+    archive: &mut ArchiveState,
+    chunk: &[u8],
+    caps: &crate::ctx::ArchiveCaps,
+    request_id: &str,
+    surface: &'static str,
+) {
+    archive.append_chunk_sync(chunk, caps, request_id, surface);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamParseProbe {
     Valid,
@@ -442,6 +575,58 @@ pub async fn run_cli_body_filter(
         } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
             buf.extend_from_slice(&passthrough);
         }
+    }
+    if end_of_stream && !ctx.is_stream {
+        if let Some(buf) = ctx.upstream_body_accum.take() {
+            apply_cli_full_usage(ctx.client_shape.unwrap(), &buf, ctx);
+        }
+    }
+    Ok(())
+}
+
+pub fn run_cli_body_filter_sync(
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    ctx: &mut ReqCtx,
+) -> Result<()> {
+    if let Some(chunk) = body.as_ref() {
+        let shape = ctx
+            .client_shape
+            .filter(ApiShape::is_cli)
+            .ok_or_else(|| pingora::Error::new(pingora::ErrorType::Custom("gw_not_cli_request")))?;
+        let passthrough = cli_passthrough_response_chunk(shape, chunk).into_owned();
+        if passthrough.as_slice() != chunk.as_ref() {
+            *body = Some(Bytes::copy_from_slice(&passthrough));
+        }
+        if ctx.is_stream {
+            scan_cli_stream_chunk(shape, &passthrough, ctx);
+        } else {
+            let buf = ctx.upstream_body_accum.get_or_insert_with(BytesMut::new);
+            let outcome = crate::bounded::push_bounded_bytes(
+                buf,
+                &passthrough,
+                crate::bounded::UPSTREAM_BODY_ACCUM_CAP_BYTES,
+                crate::bounded::UPSTREAM_BODY_ACCUM_LABEL,
+                gw_core::bounded_buf::OverflowPolicy::Reject,
+            );
+            if matches!(outcome, crate::bounded::PushOutcome::Rejected { .. }) {
+                return Err(pingora::Error::because(
+                    pingora::ErrorType::CustomCode("GW_UPSTREAM_BODY_TRUNCATED", 502),
+                    "upstream body exceeded bounded_buf cap",
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        "upstream_body_accum cap exceeded",
+                    )),
+                ));
+            }
+        }
+        append_archive_sync(
+            &mut ctx.archive_downstream_response_body,
+            &passthrough,
+            &ctx.archive_caps,
+            ctx.request_id.as_ref(),
+            "cli_downstream",
+        );
     }
     if end_of_stream && !ctx.is_stream {
         if let Some(buf) = ctx.upstream_body_accum.take() {

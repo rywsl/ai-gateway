@@ -313,6 +313,11 @@ pub static METRICS: &[MetricSpec] = &[
         help: "In-memory retry queue outcomes after Redis DLQ write failure; labels=outcome(enqueued|full|closed)",
     },
     MetricSpec {
+        name: "gw_usage_dlq_backlog_pushed_total",
+        kind: MetricKind::Counter,
+        help: "DLQ terminal fallback pushed envelope into BillingBacklog after retry queue/disk fallback could not accept it.",
+    },
+    MetricSpec {
         name: "gw_sticky_bind_total",
         kind: MetricKind::Counter,
         help: "sticky strategy bound a new (conversation_id -> key_id) entry",
@@ -476,16 +481,15 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Counter,
         help: "InflightLedger register() returned an error (Redis unreachable / write failed)",
     },
-    // --- Billing robustness W2-T7 ---
-    MetricSpec {
-        name: "gw_billing_mpsc_bypass_total",
-        kind: MetricKind::Counter,
-        help: "UsageRecord emits that bypassed mpsc via sync XADD (capacity-tuning signal)",
-    },
     MetricSpec {
         name: "gw_billing_emit_path_total",
         kind: MetricKind::Counter,
-        help: "UsageRecord emit attempts by path (channel / closed / sync_bypass_closed)",
+        help: "UsageRecord emit attempts at each fallback layer; a single record may increment multiple paths. Paths include channel, primary_full_attempt, primary_overflow_ok, overflow_full_dlq, overflow_closed_dlq, primary_closed_attempt, primary_closed_overflow_ok, primary_closed_overflow_full_dlq, primary_closed_overflow_closed_dlq.",
+    },
+    MetricSpec {
+        name: "gw_billing_primary_overflow_pending",
+        kind: MetricKind::Gauge,
+        help: "Approximate UsageRecord count enqueued in primary overflow but not yet committed via XADD. Counts items that have left the overflow channel but are still in worker buf.",
     },
     MetricSpec {
         name: "gw_cli_usage_extract_total",
@@ -495,17 +499,22 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_billing_inflight_clear_total",
         kind: MetricKind::Counter,
-        help: "Outcome of the DEL inflight key step in ledger flusher / sync bypass; labels=outcome(ok|del_failed|skipped_dlq|skipped_lost)",
+        help: "Outcome of the DEL inflight key step after XADD-confirmed ledger delivery; labels=outcome(ok|del_failed|skipped_dlq). skipped_lost retained only for legacy paths and should approach zero.",
     },
     MetricSpec {
         name: "gw_billing_flusher_panic_total",
         kind: MetricKind::Counter,
-        help: "Single-tick panics inside the ledger flusher captured by catch_unwind. ANY non-zero value = page on-call.",
+        help: "flush(...) panicked; the panicked batch is duplicate-routed to DLQ. ANY non-zero = page on-call.",
     },
     MetricSpec {
         name: "gw_billing_flusher_dead_total",
         kind: MetricKind::Counter,
-        help: "emit() observed a closed channel (flusher task gone); record falls back to sync XADD. ANY non-zero = page on-call.",
+        help: "Primary channel closed AND primary overflow closed simultaneously; must-deliver first layer fully down. Records still land in DLQ/backlog cascade. ANY non-zero = page on-call.",
+    },
+    MetricSpec {
+        name: "gw_billing_overflow_buf_rescued_total",
+        kind: MetricKind::Counter,
+        help: "Overflow worker future was aborted with non-empty local buf or queued receiver items; rescued items routed to recoverable emergency DLQ file or BillingBacklog. Non-zero indicates abnormal worker termination.",
     },
     // --- Billing robustness W3-T1 ---
     MetricSpec {

@@ -208,7 +208,7 @@ Rust 启动期 reconciler 只扫自己 `instance_id` 的残留。被永久下线
 | Writer | Rust `gw-ledger::flusher`，仅当主路径 `XADD usage:records` 失败时（`flusher.rs:73-105`） |
 | Reader | Go drainer（可选） |
 | 推荐 consumer group | `go-billing-dlq` |
-| MAXLEN | Rust 端写时 `MAXLEN ~ 100_000`（粗略限制；溢出 → metric `gateway_usage_records_lost_total`） |
+| MAXLEN | Rust 端写时 `MAXLEN ~ 100_000`（Redis stream 近似裁剪；写失败进入 emergency JSONL / `BillingBacklog` 级联） |
 
 ### 2.2.2 Payload schema — `dlq_meta` 包裹
 
@@ -226,11 +226,11 @@ DLQ 条目在 UsageRecord 之外再加一层元数据：
 }
 ```
 
-> Rust 当前实现为 C-δ 三层兜底：Redis DLQ → 内存 retry queue → emergency JSONL，并在不可恢复时尝试 `usage:records:dlq:permanent_failed`。Go drainer 处理统一的 `dlq_meta` + `usage_record` 包裹。
+> Rust 当前实现为 C-δ 兜底：Redis DLQ → 内存 retry queue → emergency JSONL → `BillingBacklog`。Redis DLQ 与 emergency JSONL 都失败时 envelope 回灌 `BillingBacklog`，不再写 `usage:records:dlq:permanent_failed`。Go drainer 处理统一的 `dlq_meta` + `usage_record` 包裹。
 
 ### 2.2.3 Go drainer 义务（必需）
 
-> Go drainer **必需**：Rust 三层兜底（C-δ）保证 record 最终落到 `usage:records:dlq` 或 emergency/permanent-failed surface，Go 端不实现 drainer = 资金泄漏。
+> Go drainer **必需**：Rust 兜底（C-δ）保证 record 最终落到 `usage:records:dlq`、emergency JSONL 或 `BillingBacklog` 重试路径，Go 端不实现 drainer = 资金泄漏。
 
 #### Consumer group 创建
 
@@ -406,6 +406,7 @@ payload    bytes  encoding 决定如何解码；解码后是 JSON
 - `upstream_response.body_b64`：vendor 给的**原始字节**（含 `content-encoding` 未解压形态）
 - `downstream_response.body_b64`：发给客户端的最终字节（codec 重渲染后形态）
 - 流式响应：聚合整个流的全部字节（SSE event 串接、按 wire 顺序）
+- Rust 侧 `[proxy.archive] storage = "memory"` 默认保留最多 `hard_cap_bytes` 的 body 前缀；超过 cap 时 `body_b64` 仍包含保留前缀，而不是空字符串。Go drainer 必须把该 payload 视为截断前缀归档，不能以空 body 作为截断哨兵。
 
 #### `kind = summary`
 

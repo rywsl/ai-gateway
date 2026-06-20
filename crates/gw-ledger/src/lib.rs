@@ -17,6 +17,7 @@ pub mod instance_id;
 pub mod ledger_sweep;
 pub mod metrics;
 pub mod overflow;
+pub mod primary_delivery;
 pub mod usage;
 
 pub use deduct_gc::DeductGc;

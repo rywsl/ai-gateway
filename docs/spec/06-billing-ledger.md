@@ -23,7 +23,7 @@ Rust accounts request resource consumption and protects against overdraft, but n
 - **CLI-extracted usage outranks partial and estimated usage.** CLI body/stream extractors parse usage emitted by upstream CLI wire traffic, so their dimensions are tagged `cli_extracted`. Merge and Go dedupe priority is `upstream_final > cli_extracted > upstream_partial > estimated > crash_fallback > unknown`.
 
 ### Flusher — `crates/gw-ledger/src/flusher.rs`
-`Ledger::start` / `Ledger::start_with_spill_root` spawn one background task that batches `LedgerItem`s from an mpsc channel and writes them to `usage:records` (`USAGE_STREAM`) via a pipelined `XADD`. Balance decrement is **not** performed here. `emit` is the must-deliver path: on a full channel it falls back to a synchronous direct `XADD` (`sync_xadd`); on `Closed` it likewise bypasses. Primary stream failure routes through `DlqEnvelope { dlq_meta, usage_record }` (`crates/gw-ledger/src/dlq.rs`): first to `usage:records:dlq` (`DLQ_STREAM`, `DLQ_MAXLEN = 100_000`), then to an in-memory retry queue drained every 30 s, then to a sharded `SpillFile` under `${runtime.spill_io.root_dir}/dlq.emergency.<uuid>.<shard>.jsonl` (shard ∈ `0..runtime.spill_io.dlq_shards-1`, async append via `gw_runtime::spill_io`, created with `SpillPolicy::KeepOnDrop` so the shards survive process exit and are picked up by `BacklogRecovery::load_into` on the next boot via its `starts_with("dlq.")` filter); if the emergency file write also fails, Rust attempts `usage:records:dlq:permanent_failed` before incrementing `gateway_usage_records_lost_total`. The DEL rule: an inflight key is deleted (`inflight_key`) only after the matching record's `XADD` is confirmed; DLQ / serialize-fail / queue-fail paths leave the key for the reconciler.
+`Ledger::start` / `Ledger::start_with_spill_root` spawn five supervised workers: primary flusher, primary-overflow flusher, DLQ retry, frozen-delta, and `BillingBacklog` drainer. The primary flusher batches `LedgerItem`s from the primary mpsc and writes them to `usage:records` (`USAGE_STREAM`) via pipelined `XADD`; balance decrement is **not** performed here. `emit` is the must-deliver path: on primary channel Full or Closed it first attempts a non-blocking primary-overflow enqueue. If overflow is also full or closed, the owned record enters the DLQ / emergency disk / `BillingBacklog` cascade. Primary stream failure routes through `DlqEnvelope { dlq_meta, usage_record }` (`crates/gw-ledger/src/dlq.rs`): first to an in-memory retry queue drained every 30 s; if that queue cannot accept it, to a sharded `SpillFile` under `${runtime.spill_io.root_dir}/dlq.emergency.<uuid>.<shard>.jsonl` (shard ∈ `0..runtime.spill_io.dlq_shards-1`, async append via `gw_runtime::spill_io`, created with `SpillPolicy::KeepOnDrop` so the shards survive process exit and are picked up by `BacklogRecovery::load_into` on the next boot via its `starts_with("dlq.")` filter); if retry + emergency file both fail, the envelope is pushed back into `BillingBacklog` rather than counted lost. The DLQ retry worker later attempts `XADD usage:records:dlq` (`DLQ_STREAM`, `DLQ_MAXLEN = 100_000`) for queued envelopes; retry failure falls back to emergency JSONL and then `BillingBacklog`. The DEL rule: an inflight key is deleted (`inflight_key`) only after the matching record's `XADD` is confirmed; DLQ / serialize-fail / queue-fail paths leave the key for the reconciler.
 
 ### DLQ cascade — `crates/gw-ledger/src/{flusher.rs,dlq.rs,backlog.rs}`
 
@@ -33,8 +33,8 @@ The full failure cascade for a `UsageRecord` is:
 XADD usage:records
   │ failure
   ▼
-XADD usage:records:dlq (DLQ stream, MAXLEN 100_000)
-  │ failure
+In-memory retry queue
+  │ full/closed
   ▼
 SpillFile async write (sharded, under runtime.spill_io.root_dir)
   │ failure
@@ -45,11 +45,10 @@ BillingBacklog::push (unbounded VecDeque, in-process)
 XADD usage:records (retry from backlog)
   │ failure
   ▼
-XADD usage:records:dlq:permanent_failed
-  │ failure
-  ▼
-gateway_usage_records_lost_total++
+BillingBacklog retains envelope for next drain tick
 ```
+
+The DLQ retry worker consumes the in-memory retry queue and attempts `XADD usage:records:dlq`; if that retry fails it falls back to emergency JSONL and then `BillingBacklog`.
 
 **Must-deliver boundary**: drop is acceptable only if `BackpressureGate` already rejected the request *before* a `UsageRecord` existed (i.e. the 503 at `early_request_filter` step 0). Once a `UsageRecord` is constructed (in `logging` or `on_retry`), the cascade guarantees delivery through at least `BillingBacklog` — which is unbounded by construction. The metric `gw_billing_backlog_pending_count` rising signals pressure; it never signals data loss.
 
@@ -96,7 +95,7 @@ Bootstrap resolves a stable `instance_id` (`instance_id::resolve`) before `Ledge
 `DetailedArchive` captures up to 5 per-surface `CapturedSurface`s per request (`Kind::{DownstreamRequest, UpstreamRequest, UpstreamResponse, DownstreamResponse, Summary}`), each `XADD`-ed to `usage:detailed` by a worker pool. Bodies are base64-encoded, then encoded via tiered compression `raw`/`lz4`/`zstd` (`encode` + `CompressionCfg` from `crates/gw-ledger/src/encoding.rs`). It is **drop-on-outage**: a full channel, oversize payload, compress failure, or `XADD` failure increments `gw_detailed_log_drop_total{reason,kind}` and discards the surface — there is no DLQ and no redaction.
 
 ### Archive buffer cap + spill — `crates/gw-proxy/src/ctx.rs` (ArchiveState)
-Per-request archive accumulation is capped by `[proxy.archive]` configuration. `ArchiveState` has three states: `InMemory` (below `soft_cap_bytes`), `Spilling` (between soft and hard cap — excess bytes written to `spill_dir`), and `Dropped` (above `hard_cap_bytes` — further appends are discarded). `append_chunk` returns the current state; `emit_response_surfaces` (in the logging filter) reads from whichever storage the state indicates. This prevents unbounded per-request memory consumption on large upstream responses.
+Per-request archive accumulation is capped by `[proxy.archive]` configuration. `storage = "memory"` is the default: the response hot path keeps a hard-capped prefix in memory and never performs per-request archive disk I/O. `storage = "disk_spill"` preserves the explicit spill path: `ArchiveState` moves from `InMemory` to `Spilled` after `soft_cap_bytes`, then to `Truncated` after `hard_cap_bytes`. `Truncated` retains the first `hard_cap_bytes` prefix and counts dropped bytes; `read_for_emit()` / `read_for_emit_sync()` return that retained prefix, not an empty body. This prevents unbounded per-request memory consumption while preserving enough upstream/downstream body prefix for diagnostics and error-passthrough.
 
 **Spill-file lifetime.** A spilled archive's shard files are unlinked the moment the owning `ArchiveState::Spilled` variant drops — either when the request's `ReqCtx` drops or when `reset_response_attempt_state` reassigns the accumulator on response-side failover. Unlink is synchronous (`std::fs::remove_file`) and best-effort; the `SpillRoot` LRU enforcer is the fallback. Reset on failover prevents both data contamination and disk leak across retries.
 
@@ -107,7 +106,7 @@ Per-request archive accumulation is capped by `[proxy.archive]` configuration. `
 
 - **No Rust cost math.** Rust never computes monetary cost. `UsageRecord` carries no `cost_micro`; the freeze uses either Go-pushed conservative `EstimatePricing` or the legacy flat fallback. Go owns actual cost from `usage:records`. Enforced by `no_cost_micro` (`scripts/check-invariants.sh`).
 - **Per-attempt records.** Each attempt emits its own `UsageRecord`; a failed attempt is settled (`Terminated`) and emitted before the retry register clobbers the next `attempt_index` (`crates/gw-proxy/src/billing_lifecycle.rs`).
-- **Three-tier usage DLQ → cascade.** `usage:records` failure goes to Redis DLQ, then memory retry queue, then sharded `SpillFile`, then unbounded `BillingBacklog`; only after all fallbacks including backlog drainer retry fail does `gateway_usage_records_lost_total` increment (`crates/gw-ledger/src/{flusher.rs,dlq.rs,backlog.rs}`). Drop is acceptable only if `BackpressureGate` already rejected the request before any `UsageRecord` existed.
+- **Usage DLQ → cascade.** `usage:records` failure goes to the memory retry queue, then sharded `SpillFile`, then unbounded `BillingBacklog`; the retry worker attempts Redis DLQ (`usage:records:dlq`) and re-pushes failures into the cascade instead of counting as lost (`crates/gw-ledger/src/{flusher.rs,dlq.rs,backlog.rs}`). Drop is acceptable only if `BackpressureGate` already rejected the request before any `UsageRecord` existed.
 - **BillingBacklog is unbounded.** `BillingBacklog` uses an unbounded `VecDeque`; pressure shows as `gw_billing_backlog_pending_count` rising, never as dropped envelopes. On shutdown, the backlog is serialized to `backlog_shutdown_<ts>.jsonl`; on next bootstrap, `BacklogRecovery` re-enqueues. Corrupt recovery files are quarantined to `<spill_root>/corrupt/`.
 - **Detailed-log drops on outage.** Forensic archive is best-effort; it never blocks the request and never retries (`crates/gw-ledger/src/detailed_archive.rs`).
 - **Freeze leak recovery.** A `RequestFreeze` dropped without `release()` rolls back its reservation and counts it (`gateway_freeze_leak_recovered_total`) rather than leaking frozen credits (`crates/gw-ledger/src/freeze.rs`).
@@ -119,7 +118,6 @@ Per-request archive accumulation is capped by `[proxy.archive]` configuration. `
 
 - **`usage:records` (Redis stream).** Rust `XADD`s one `UsageRecord` per attempt (field `payload`, JSON); Go consumes, computes cost, decrements balance. Schema: `crates/gw-ledger/src/usage.rs`.
 - **`usage:records:dlq` (Redis stream).** DLQ stream wrapping `{ dlq_meta, usage_record }`, where `dlq_meta` includes `first_failure_ts_ms`, `primary_failure_reason`, `retry_count_before_dlq`, and `dlq_layer` (`redis`/`mem`/`disk`) (`crates/gw-ledger/src/{flusher.rs,dlq.rs}`).
-- **`usage:records:dlq:permanent_failed` (Redis stream).** Last-chance stream for records whose Redis DLQ and emergency file fallback both fail.
 - **`usage:detailed` (Redis stream).** 5 per-surface XADDs/request with fields `ts_ms`/`request_id`/`trace_id`/`kind`/`encoding`/`payload` (`crates/gw-ledger/src/detailed_archive.rs`).
 - **`billing:inflight:<instance>:<request_id>:<attempt>` (Redis HASH).** Written/cleared by Rust; the W4 startup reconciler reads residuals on the same instance after a crash (`crates/gw-ledger/src/{inflight.rs,inflight_reconciler.rs}`).
 - **`events:counter:pod:<instance_id>` (Redis, Go → Rust push).** Namespaces consumed by `counter_handler.rs`: `user_balance` (authoritative `value_after` overwrite for local `base_micro` / `deducted_micro` when present), `protected_lease` (`lease_credits` + `lease_id` + `expires_at_ms` + optional `ttl_ms` / `policy_version`; no `mode`, no `coef_table_version`), `coef_table` (per `(version, model_id, dim)` `coef_per_token`), `coef_table_commit` (`version` + `model_count`). Each Rust pod consumes only its own stream key; Go fans out to live pods discovered through heartbeat filtering.

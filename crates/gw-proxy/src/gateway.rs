@@ -1563,10 +1563,15 @@ impl ProxyHttp for LlmGateway {
             }
         }
 
-        let res = tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(filters::response::run(session, body, end_of_stream, ctx))
-        });
+        let res = match ctx.archive_caps.storage {
+            crate::ctx::ArchiveStorage::Memory => {
+                filters::response::run_memory_sync(session, body, end_of_stream, ctx)
+            }
+            crate::ctx::ArchiveStorage::DiskSpill => tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(filters::response::run(session, body, end_of_stream, ctx))
+            }),
+        };
 
         // W6-T07: classify_final_upstream_error + emit_response_surfaces moved
         // to the async `logging` filter to eliminate the blocking wrapper. The
@@ -1587,8 +1592,10 @@ impl ProxyHttp for LlmGateway {
                 // Fall back to empty on I/O error — the is_html / JSON parse
                 // will simply fail open (no passthrough body rendered).
                 let accumulated = match &ctx.archive_upstream_response_body {
-                    crate::ctx::ArchiveState::InMemory(b) => b.to_vec(),
-                    crate::ctx::ArchiveState::Truncated { .. } => Vec::new(),
+                    crate::ctx::ArchiveState::InMemory(_)
+                    | crate::ctx::ArchiveState::Truncated { .. } => {
+                        ctx.archive_upstream_response_body.read_for_emit_sync()
+                    }
                     crate::ctx::ArchiveState::Spilled { .. } => tokio::task::block_in_place(|| {
                         let rt = tokio::runtime::Handle::current();
                         rt.block_on(async {

@@ -1,10 +1,19 @@
-use gw_proxy::ctx::{ArchiveCaps, ArchiveState};
+use gw_proxy::ctx::{ArchiveCaps, ArchiveState, ArchiveStorage};
 use gw_runtime::{SpillRoot, SpillRootConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn caps(soft: usize, hard: usize) -> ArchiveCaps {
+fn memory_caps(hard: usize) -> ArchiveCaps {
     ArchiveCaps {
+        storage: ArchiveStorage::Memory,
+        soft_cap_bytes: hard,
+        hard_cap_bytes: hard,
+    }
+}
+
+fn disk_caps(soft: usize, hard: usize) -> ArchiveCaps {
+    ArchiveCaps {
+        storage: ArchiveStorage::DiskSpill,
         soft_cap_bytes: soft,
         hard_cap_bytes: hard,
     }
@@ -21,7 +30,7 @@ async fn stays_in_memory_under_soft_cap() {
     root.ensure_dir().await.unwrap();
     let mut a = ArchiveState::default();
     let small = vec![0u8; 1024];
-    a.append_chunk(&small, &caps(4096, 8192), &root, "req1", "upstream")
+    a.append_chunk(&small, &disk_caps(4096, 8192), &root, "req1", "upstream")
         .await;
     assert!(matches!(a, ArchiveState::InMemory(_)));
     assert_eq!(a.len(), 1024);
@@ -38,7 +47,7 @@ async fn spills_to_disk_past_soft_cap() {
     root.ensure_dir().await.unwrap();
     let mut a = ArchiveState::default();
     let chunk = vec![1u8; 4096];
-    a.append_chunk(&chunk, &caps(2048, 8192), &root, "req2", "upstream")
+    a.append_chunk(&chunk, &disk_caps(2048, 8192), &root, "req2", "upstream")
         .await;
     assert!(matches!(a, ArchiveState::Spilled { .. }));
     let read_back = a.read_for_emit().await.unwrap();
@@ -46,7 +55,7 @@ async fn spills_to_disk_past_soft_cap() {
 }
 
 #[tokio::test]
-async fn truncates_past_hard_cap() {
+async fn disk_spill_truncates_past_hard_cap_and_keeps_prefix() {
     let tmp = TempDir::new().unwrap();
     let root = Arc::new(SpillRoot::new(SpillRootConfig {
         root_dir: tmp.path().to_path_buf(),
@@ -55,13 +64,63 @@ async fn truncates_past_hard_cap() {
     }));
     root.ensure_dir().await.unwrap();
     let mut a = ArchiveState::default();
-    let chunk = vec![2u8; 5000];
-    a.append_chunk(&chunk, &caps(2048, 4096), &root, "req3", "upstream")
+    let first = vec![2u8; 4096];
+    let second = vec![3u8; 5000];
+    a.append_chunk(&first, &disk_caps(2048, 4096), &root, "req3", "upstream")
         .await;
-    a.append_chunk(&chunk, &caps(2048, 4096), &root, "req3", "upstream")
+    a.append_chunk(&second, &disk_caps(2048, 4096), &root, "req3", "upstream")
         .await;
     assert!(a.is_truncated());
-    assert!(a.dropped() > 0);
+    assert_eq!(a.len(), 4096);
+    assert_eq!(a.dropped(), 5000);
+    let retained = a.read_for_emit().await.unwrap();
+    assert_eq!(retained, first);
+}
+
+#[tokio::test]
+async fn memory_storage_never_spills_and_keeps_hard_cap_prefix() {
+    let tmp = TempDir::new().unwrap();
+    let root = Arc::new(SpillRoot::new(SpillRootConfig {
+        root_dir: tmp.path().to_path_buf(),
+        max_total_bytes: 1 << 30,
+        buffer_size: 4096,
+    }));
+    root.ensure_dir().await.unwrap();
+    let mut a = ArchiveState::default();
+    let first = vec![0x11u8; 3000];
+    let second = vec![0x22u8; 2500];
+
+    a.append_chunk(&first, &memory_caps(4096), &root, "req4", "upstream")
+        .await;
+    a.append_chunk(&second, &memory_caps(4096), &root, "req4", "upstream")
+        .await;
+
+    assert!(a.is_truncated());
+    assert_eq!(a.len(), 4096);
+    assert_eq!(a.dropped(), 1404);
+    assert!(!matches!(a, ArchiveState::Spilled { .. }));
+    let retained = a.read_for_emit().await.unwrap();
+    assert_eq!(&retained[..3000], first.as_slice());
+    assert!(retained[3000..].iter().all(|b| *b == 0x22));
+    assert_eq!(a.read_for_emit_sync(), retained);
+}
+
+#[test]
+fn sync_memory_append_keeps_prefix_without_async_or_spill_root() {
+    let mut a = ArchiveState::default();
+    let first = vec![0x33u8; 1024];
+    let second = vec![0x44u8; 2048];
+    let caps = memory_caps(2048);
+
+    a.append_chunk_sync(&first, &caps, "req-sync", "upstream");
+    a.append_chunk_sync(&second, &caps, "req-sync", "upstream");
+
+    assert!(a.is_truncated());
+    assert_eq!(a.len(), 2048);
+    assert_eq!(a.dropped(), 1024);
+    let retained = a.read_for_emit_sync();
+    assert_eq!(&retained[..1024], first.as_slice());
+    assert!(retained[1024..].iter().all(|b| *b == 0x44));
 }
 
 #[tokio::test]
@@ -80,10 +139,22 @@ async fn reset_response_attempt_clears_archive_accumulators() {
     let mut downstream = ArchiveState::default();
     let chunk = vec![1u8; 4096];
     upstream
-        .append_chunk(&chunk, &caps(2048, 8192), &root, "req-test", "upstream")
+        .append_chunk(
+            &chunk,
+            &disk_caps(2048, 8192),
+            &root,
+            "req-test",
+            "upstream",
+        )
         .await;
     downstream
-        .append_chunk(&chunk, &caps(2048, 8192), &root, "req-test", "downstream")
+        .append_chunk(
+            &chunk,
+            &disk_caps(2048, 8192),
+            &root,
+            "req-test",
+            "downstream",
+        )
         .await;
     assert!(matches!(upstream, ArchiveState::Spilled { .. }));
     assert!(matches!(downstream, ArchiveState::Spilled { .. }));
@@ -142,12 +213,18 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
     // Attempt 1: write a distinctive 0xAA pattern, forcing spill.
     let attempt_1 = vec![0xAAu8; 4096];
     upstream
-        .append_chunk(&attempt_1, &caps(2048, 8192), &root, "req-iso", "upstream")
+        .append_chunk(
+            &attempt_1,
+            &disk_caps(2048, 8192),
+            &root,
+            "req-iso",
+            "upstream",
+        )
         .await;
     downstream
         .append_chunk(
             &attempt_1,
-            &caps(2048, 8192),
+            &disk_caps(2048, 8192),
             &root,
             "req-iso",
             "downstream",
@@ -164,12 +241,18 @@ async fn attempt_2_archive_contains_no_attempt_1_bytes() {
     // Attempt 2: write a different distinctive 0xBB pattern.
     let attempt_2 = vec![0xBBu8; 4096];
     upstream
-        .append_chunk(&attempt_2, &caps(2048, 8192), &root, "req-iso", "upstream")
+        .append_chunk(
+            &attempt_2,
+            &disk_caps(2048, 8192),
+            &root,
+            "req-iso",
+            "upstream",
+        )
         .await;
     downstream
         .append_chunk(
             &attempt_2,
-            &caps(2048, 8192),
+            &disk_caps(2048, 8192),
             &root,
             "req-iso",
             "downstream",

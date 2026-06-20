@@ -4,6 +4,7 @@
 //! Docker; run with `cargo test -p gw-ledger -- --ignored`.
 
 use fred::interfaces::StreamsInterface;
+use fred::types::{RedisValue, XReadResponse};
 use gw_core::ids::{KeyId, ModelName, UserId, VendorId};
 use gw_core::permissions::MarkupChainSnapshot;
 use gw_core::usage::UsageSnapshot;
@@ -69,6 +70,34 @@ fn make_record() -> UsageRecord {
     }
 }
 
+fn make_item(req_id: &str) -> LedgerItem {
+    let mut record = make_record();
+    record.request_id = req_id.to_string();
+    LedgerItem {
+        record,
+        clear: None,
+    }
+}
+
+async fn read_usage_records(redis: &RedisCtx) -> Vec<UsageRecord> {
+    let client = redis.pool.next();
+    let raw: RedisValue = client
+        .xread(None::<u64>, None::<u64>, "usage:records", "0-0")
+        .await
+        .unwrap();
+    let response: XReadResponse<String, String, String, String> =
+        raw.into_xread_response().unwrap();
+    response
+        .into_iter()
+        .flat_map(|(_stream, entries)| entries.into_iter())
+        .filter_map(|(_entry_id, fields)| {
+            fields
+                .get("payload")
+                .and_then(|payload| serde_json::from_str::<UsageRecord>(payload).ok())
+        })
+        .collect()
+}
+
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers Redis)"]
 async fn batch_flush_writes_usage_stream_no_balance_decr() {
@@ -116,11 +145,12 @@ async fn batch_flush_writes_usage_stream_no_balance_decr() {
     );
 }
 
-/// Must-deliver bypass: when the mpsc channel is full, `emit` writes via
-/// synchronous XADD rather than dropping. Requires Docker (testcontainers Redis).
+/// Must-deliver overflow: when the primary mpsc channel is full, `emit`
+/// routes through the non-blocking primary overflow worker rather than
+/// dropping or performing synchronous XADD on the request tail.
 #[tokio::test]
 #[ignore = "requires Docker (testcontainers Redis)"]
-async fn emit_bypasses_to_sync_xadd_when_channel_full() {
+async fn emit_routes_to_overflow_when_channel_full() {
     let node = Redis::default().start().await.unwrap();
     let port = node.get_host_port_ipv4(6379).await.unwrap();
     let redis = RedisCtx::connect(&format!("redis://127.0.0.1:{port}"), 4)
@@ -128,48 +158,24 @@ async fn emit_bypasses_to_sync_xadd_when_channel_full() {
         .unwrap();
 
     let (_tmp, spill_root) = make_spill_root();
-    // capacity=1 so the channel fills after the first record.
-    // The flusher worker has a 60-second flush interval — it won't drain
-    // before we overflow the channel with rapid try_send calls.
-    let (ledger, _handles) = Ledger::start(
+    let (ledger, _primary_rx_held, _overflow_handle) = Ledger::for_test_with_overflow(
         redis.clone(),
         "test-instance".to_string(),
         1,
-        100,
-        Duration::from_secs(60),
+        64,
         spill_root,
-        DLQ_SHARDS,
-        ShutdownToken::new(),
-        Duration::from_secs(5),
+        std::num::NonZeroUsize::new(DLQ_SHARDS).unwrap(),
     );
 
-    // Fill the channel: first try_send may succeed (capacity=1), subsequent
-    // ones will hit Full. We don't care about success/failure here — we just
-    // want the channel to be at capacity when emit is called.
-    for _ in 0..5 {
-        let _ = ledger.try_send(LedgerItem {
-            record: make_record(),
-            clear: None,
-        });
-    }
+    ledger.emit(make_item("req-fill")).await;
+    ledger.emit(make_item("req-overflow")).await;
 
-    // emit() must not drop the record: it should either enqueue it or bypass
-    // via sync XADD. Give the channel a moment to drain before checking.
-    ledger
-        .emit(LedgerItem {
-            record: make_record(),
-            clear: None,
-        })
-        .await;
-
-    // Allow the batch flusher a moment to drain whatever was queued normally.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Verify at least one record reached usage:records.
-    let client = redis.pool.next();
-    let len: i64 = client.xlen("usage:records").await.unwrap();
+    let records = read_usage_records(&redis).await;
     assert!(
-        len >= 1,
-        "emit must deliver at least one record to usage:records; got {len}"
+        records.iter().any(|r| r.request_id == "req-overflow"),
+        "overflow record must reach usage:records; got {:?}",
+        records.iter().map(|r| &r.request_id).collect::<Vec<_>>()
     );
 }

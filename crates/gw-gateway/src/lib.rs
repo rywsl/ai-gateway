@@ -323,6 +323,7 @@ pub(crate) async fn bootstrap_gateway() -> anyhow::Result<(
         detailed_log_workers_source = cfg.auto_sizing.detailed_log_workers.as_str(),
         egress_max_sessions = cfg.egress.max_sessions,
         egress_max_sessions_source = cfg.auto_sizing.egress_max_sessions.as_str(),
+        archive_storage = ?cfg.proxy.archive.storage,
         "gw-gateway starting"
     );
 
@@ -1078,8 +1079,9 @@ async fn bootstrap(
 
     // 4a. Ledger flusher.
     //
-    // `Ledger::start_with_spill_root` returns the JoinHandles of all four
-    // supervised workers (flusher, dlq-retry, frozen-delta, backlog-drainer).
+    // `Ledger::start_with_spill_root` returns the JoinHandles of all five
+    // supervised workers (flusher, primary-overflow, dlq-retry, frozen-delta,
+    // backlog-drainer).
     // They MUST be registered with `shutdown` so the coordinator awaits their
     // cancel-drain — otherwise revenue records emitted during phase-1 of
     // shutdown can be lost. The drain budget caps how long each worker
@@ -1121,6 +1123,13 @@ async fn bootstrap(
         billing_backlog.clone(),
         shutdown_token.clone(),
         Duration::from_millis(cfg.runtime.shutdown.billing_drain_ms),
+    );
+    let ledger_worker_count = ledger_handles.len();
+    tracing::info!(
+        target: "gw_gateway",
+        archive_storage = ?cfg.proxy.archive.storage,
+        ledger_worker_count,
+        "billing ledger workers started"
     );
     for h in ledger_handles {
         shutdown.register(h);
@@ -1796,6 +1805,12 @@ async fn bootstrap(
             supervisor_unhealthy,
             spill_root: spill_root.clone(),
             archive_caps: gw_proxy::ctx::ArchiveCaps {
+                storage: match cfg.proxy.archive.storage {
+                    config::ProxyArchiveStorage::Memory => gw_proxy::ctx::ArchiveStorage::Memory,
+                    config::ProxyArchiveStorage::DiskSpill => {
+                        gw_proxy::ctx::ArchiveStorage::DiskSpill
+                    }
+                },
                 soft_cap_bytes: cfg.proxy.archive.soft_cap_bytes,
                 hard_cap_bytes: cfg.proxy.archive.hard_cap_bytes,
             },
@@ -1983,6 +1998,18 @@ mod weighted_rr_health_observer_tests {
         );
         assert!(src.contains("if !available"));
         assert!(src.contains("strategies.reset_weighted_rr_key(key_id);"));
+    }
+}
+
+#[cfg(test)]
+mod ledger_worker_wiring_tests {
+    #[test]
+    fn bootstrap_logs_and_registers_primary_overflow_worker() {
+        let src = include_str!("lib.rs");
+
+        assert!(src.contains("let ledger_worker_count = ledger_handles.len();"));
+        assert!(src.contains("ledger_worker_count,"));
+        assert!(src.contains("billing ledger workers started"));
     }
 }
 
