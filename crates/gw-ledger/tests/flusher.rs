@@ -327,8 +327,7 @@ async fn shutdown_drain_flushes_late_overflow_items() {
 
     // Cancel immediately and let the worker drain.
     shutdown.cancel();
-    let drain_result =
-        tokio::time::timeout(Duration::from_secs(5), overflow_handle).await;
+    let drain_result = tokio::time::timeout(Duration::from_secs(5), overflow_handle).await;
     assert!(
         drain_result.is_ok(),
         "overflow worker must exit within 5 s of shutdown.cancel() (2 s drain budget + slack)"

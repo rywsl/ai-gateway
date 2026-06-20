@@ -4,7 +4,9 @@
 
 check:
 	cargo +1.88.0 fmt --all -- --check
-	cargo +1.88.0 test --workspace --lib --bins
+	cargo +1.88.0 check --workspace --lib --bins --locked
+	cargo +1.88.0 test -p gw-ledger --test dlq --test flusher --test inflight_clear_via_flusher --locked
+	cargo +1.88.0 test -p gw-proxy --test archive_state --test response_hot_path --locked
 
 CHAOS_DRY_RUN ?= 1
 CHAOS_DRY_FLAG := $(if $(filter 1 true yes,$(CHAOS_DRY_RUN)),--dry-run,)

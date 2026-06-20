@@ -94,8 +94,14 @@ async fn disk_spill_checks_hard_cap_before_first_spill() {
     root.ensure_dir().await.unwrap();
     let mut a = ArchiveState::default();
     let chunk = vec![7u8; 5000];
-    a.append_chunk(&chunk, &disk_caps(2048, 4096), &root, "req-hard-cap", "upstream")
-        .await;
+    a.append_chunk(
+        &chunk,
+        &disk_caps(2048, 4096),
+        &root,
+        "req-hard-cap",
+        "upstream",
+    )
+    .await;
     assert!(a.is_truncated());
     assert_eq!(a.len(), 4096);
     assert_eq!(a.dropped(), 904);
