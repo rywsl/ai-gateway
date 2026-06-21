@@ -287,6 +287,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires Docker (testcontainers Redis + Postgres)"]
     async fn fallback_balance_micro_reuses_balance_for_path() {
         let (_redis_container, redis) = test_redis_pool().await;
         let (_pg_container, pg) = test_pg_pool().await;

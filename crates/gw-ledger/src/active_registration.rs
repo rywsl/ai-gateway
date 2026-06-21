@@ -417,6 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Docker (testcontainers Redis)"]
     async fn write_registration_sets_membership_marker_and_ttl() {
         let (_container, pool) = redis_pool().await;
         let event = ActiveRegistrationEvent {
