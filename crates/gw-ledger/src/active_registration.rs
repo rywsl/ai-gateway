@@ -8,8 +8,9 @@ use fred::clients::RedisPool;
 use fred::interfaces::LuaInterface;
 use gw_core::ids::UserId;
 use gw_runtime::ShutdownToken;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -22,6 +23,7 @@ redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
 redis.call('EXPIRE', KEYS[1], ARGV[3])
 return 1
 "#;
+const THROTTLE_PRUNE_SCAN_LIMIT: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActiveRegistrationEnqueueResult {
@@ -30,6 +32,12 @@ pub enum ActiveRegistrationEnqueueResult {
     Full,
     Closed,
     Disabled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveRegistrationReservation {
+    Reserved { new_user: bool },
+    Throttled,
 }
 
 #[derive(Clone, Debug)]
@@ -47,6 +55,7 @@ pub struct ActiveRegistrationHandle {
     throttle_retention_ms: u64,
     queue_capacity: usize,
     last_prune_ms: Arc<AtomicU64>,
+    prune_candidates: Arc<Mutex<VecDeque<UserId>>>,
     last_enqueue_ms: Arc<dashmap::DashMap<UserId, u64>>,
     tx: Option<mpsc::Sender<ActiveRegistrationEvent>>,
 }
@@ -64,6 +73,7 @@ impl ActiveRegistrationHandle {
             throttle_retention_ms: 0,
             queue_capacity: 0,
             last_prune_ms: Arc::new(AtomicU64::new(0)),
+            prune_candidates: Arc::new(Mutex::new(VecDeque::new())),
             last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
             tx: None,
         }
@@ -84,6 +94,7 @@ impl ActiveRegistrationHandle {
                 throttle_retention_ms: min_interval_ms.saturating_mul(2).max(1),
                 queue_capacity: capacity,
                 last_prune_ms: Arc::new(AtomicU64::new(0)),
+                prune_candidates: Arc::new(Mutex::new(VecDeque::new())),
                 last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
                 tx: Some(tx),
             },
@@ -105,7 +116,8 @@ impl ActiveRegistrationHandle {
             return ActiveRegistrationEnqueueResult::Closed;
         };
 
-        if !self.reserve_enqueue(uid, admitted_at_ms) {
+        let reservation = self.reserve_enqueue(uid, admitted_at_ms);
+        if reservation == ActiveRegistrationReservation::Throttled {
             record_enqueue(
                 ActiveRegistrationEnqueueResult::Throttled,
                 Some(self.queue_depth(tx)),
@@ -120,6 +132,9 @@ impl ActiveRegistrationHandle {
         };
         match tx.try_send(event) {
             Ok(()) => {
+                if reservation == (ActiveRegistrationReservation::Reserved { new_user: true }) {
+                    self.push_prune_candidate(uid.clone());
+                }
                 record_enqueue(
                     ActiveRegistrationEnqueueResult::Queued,
                     Some(self.queue_depth(tx)),
@@ -142,22 +157,22 @@ impl ActiveRegistrationHandle {
         }
     }
 
-    fn reserve_enqueue(&self, uid: &UserId, admitted_at_ms: u64) -> bool {
+    fn reserve_enqueue(&self, uid: &UserId, admitted_at_ms: u64) -> ActiveRegistrationReservation {
         self.prune_old_throttle_entries(admitted_at_ms);
         match self.last_enqueue_ms.entry(uid.clone()) {
             Entry::Occupied(mut entry) => {
                 if self.min_interval_ms > 0
                     && admitted_at_ms.saturating_sub(*entry.get()) < self.min_interval_ms
                 {
-                    false
+                    ActiveRegistrationReservation::Throttled
                 } else {
                     entry.insert(admitted_at_ms);
-                    true
+                    ActiveRegistrationReservation::Reserved { new_user: false }
                 }
             }
             Entry::Vacant(entry) => {
                 entry.insert(admitted_at_ms);
-                true
+                ActiveRegistrationReservation::Reserved { new_user: true }
             }
         }
     }
@@ -180,9 +195,53 @@ impl ActiveRegistrationHandle {
             return;
         }
 
+        self.prune_last_enqueue_batch(now_ms);
+    }
+
+    fn prune_last_enqueue_batch(&self, now_ms: u64) -> usize {
+        let retention_ms = self.throttle_retention_ms;
+        if retention_ms == 0 {
+            return 0;
+        }
+
         let cutoff_ms = now_ms.saturating_sub(retention_ms);
-        self.last_enqueue_ms
-            .retain(|_, last_seen_ms| *last_seen_ms > cutoff_ms);
+        let mut removed = 0;
+        let mut checked = 0;
+        while checked < THROTTLE_PRUNE_SCAN_LIMIT {
+            let Some(uid) = self.pop_prune_candidate() else {
+                break;
+            };
+            checked += 1;
+            match self.last_enqueue_ms.get(&uid) {
+                Some(last_seen) if *last_seen <= cutoff_ms => {
+                    drop(last_seen);
+                    if self
+                        .last_enqueue_ms
+                        .remove_if(&uid, |_, last_seen_ms| *last_seen_ms <= cutoff_ms)
+                        .is_some()
+                    {
+                        removed += 1;
+                    }
+                }
+                Some(_) => self.push_prune_candidate(uid),
+                None => {}
+            }
+        }
+        removed
+    }
+
+    fn pop_prune_candidate(&self) -> Option<UserId> {
+        self.prune_candidates
+            .lock()
+            .expect("active prune candidates")
+            .pop_front()
+    }
+
+    fn push_prune_candidate(&self, uid: UserId) {
+        self.prune_candidates
+            .lock()
+            .expect("active prune candidates")
+            .push_back(uid);
     }
 
     fn rollback_reservation(&self, uid: &UserId, admitted_at_ms: u64) {
@@ -219,6 +278,7 @@ pub fn spawn_active_registration_worker(
             .max(1),
         queue_capacity: capacity,
         last_prune_ms: Arc::new(AtomicU64::new(0)),
+        prune_candidates: Arc::new(Mutex::new(VecDeque::new())),
         last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
         tx: Some(tx),
     };
@@ -454,17 +514,25 @@ mod tests {
     }
 
     #[test]
-    fn old_throttle_entries_are_pruned_during_enqueue() {
-        let (handle, mut rx) = ActiveRegistrationHandle::for_test("pod-a", 30_000, 8);
+    fn old_throttle_entries_are_pruned_eventually_by_bounded_passes() {
+        let stale_count = THROTTLE_PRUNE_SCAN_LIMIT + 3;
+        let (handle, mut rx) = ActiveRegistrationHandle::for_test("pod-a", 30_000, stale_count + 8);
+        for idx in 0..stale_count {
+            let old_uid = uid(&format!("old-user-{idx}"));
+            handle.last_enqueue_ms.insert(old_uid.clone(), 10_000);
+            handle.push_prune_candidate(old_uid);
+        }
 
-        assert_eq!(
-            handle.try_enqueue_activity(&uid("old-user"), 10_000),
-            ActiveRegistrationEnqueueResult::Queued
-        );
         assert_eq!(
             handle.try_enqueue_activity(&uid("fresh-user"), 70_001),
             ActiveRegistrationEnqueueResult::Queued
         );
+        assert_eq!(handle.last_enqueue_ms.len(), 4);
+        assert!(handle.last_enqueue_ms.contains_key(&uid("fresh-user")));
+
+        while handle.last_enqueue_ms.len() > 1 {
+            handle.prune_last_enqueue_batch(70_002);
+        }
 
         let users = handle
             .last_enqueue_ms
@@ -476,11 +544,34 @@ mod tests {
             std::collections::HashSet::from(["fresh-user".to_string()])
         );
 
-        let mut events = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            events.push(event);
+        let event = rx.try_recv().expect("fresh event");
+        assert_eq!(event.uid.as_ref(), "fresh-user");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn throttle_prune_pass_is_bounded() {
+        let stale_count = THROTTLE_PRUNE_SCAN_LIMIT * 2 + 5;
+        let (handle, _rx) = ActiveRegistrationHandle::for_test("pod-a", 30_000, stale_count);
+        for idx in 0..stale_count {
+            let old_uid = uid(&format!("old-user-{idx}"));
+            handle.last_enqueue_ms.insert(old_uid.clone(), 10_000);
+            handle.push_prune_candidate(old_uid);
         }
-        assert_eq!(events.len(), 2);
+
+        assert_eq!(
+            handle.prune_last_enqueue_batch(70_001),
+            THROTTLE_PRUNE_SCAN_LIMIT
+        );
+        assert_eq!(
+            handle.last_enqueue_ms.len(),
+            stale_count - THROTTLE_PRUNE_SCAN_LIMIT
+        );
+        assert_eq!(
+            handle.prune_last_enqueue_batch(70_001),
+            THROTTLE_PRUNE_SCAN_LIMIT
+        );
+        assert_eq!(handle.last_enqueue_ms.len(), 5);
     }
 
     #[tokio::test]
