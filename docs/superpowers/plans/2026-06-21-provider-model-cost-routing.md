@@ -25,6 +25,47 @@
 
 ---
 
+## Scope: Do / Don't
+
+### Do
+
+- Add `provider_models.cost_weight` (integer column, default `1000`, range `1..=1_000_000`) and project it into `vendor_keys.payload.model_cost_weights` via the existing `vendor_keys` view, exactly mirroring how `model_mapping` is projected today.
+- Add `VendorKey.model_cost_weights: HashMap<ModelName, u32>` and `VendorKeyRow.model_cost_weights` (with `#[serde(default)]`); deserialization MUST happen via `VendorKeyRow` in `gw-store`, never directly on `VendorKey` (it has no `Deserialize` derive).
+- Make `CandidateFeatures.cost_weight = key.model_cost_weights.get(ctx.model).copied().unwrap_or(1_000) as f64 * markup`. Missing entries fall back to `1000`. `CostFirstPolicy.score` and `needed_dims` keep their current pricing-aware shape: `cost_weight` is used only when `ctx.pricing.is_some()`, and `key.priority` remains the fallback when pricing is absent.
+- Replace `StrategyKind::MultiDim(String)` with `MultiDimPreset(String) + MultiDimInline(MultiDimWeights)`. Implement `Deserialize` for `StrategyKind` manually via a wire enum so the wire shapes `{ "multi_dim": "balanced" }` and `{ "multi_dim": { "health": 0.25, ... } }` both round-trip.
+- Add `StrategyChoice::{Borrowed, Owned}` plus `StrategySet::strategy_for_kind`, and switch `gw-proxy::filters::upstream` to it. Owned variant is allocated only for inline `multi_dim`; all other variants stay borrowed.
+- In Go, change `GroupUpsertInput.Strategy` from `*string` to `json.RawMessage`, change `payloadOverrides()` to return `(map[string]any, error)`, and update BOTH call sites (`Create` at `catalog.go:1229`, `Update` at `catalog.go:1456`).
+- Replace the existing `normalizeGatewayModelGroupStrategy(string) string` (`catalog.go:57`) with the new `normalizeGatewayModelGroupStrategyValue(json.RawMessage) (any, error)` + `normalizeGatewayModelGroupStrategyLiteral(string) (string, error)` pair. Delete the old function and the now-stale `TestNormalizeGatewayModelGroupStrategyKeepsRustStrategies` test it covered.
+- Validate provider-model `cost_weight` and model-group strategy in Go business layer; map both errors to HTTP `400` in `routes.go`.
+- Add `cost_weight` to provider-model frontend types/form/mocks. Add a structured strategy selector (and a `multi_dim` weights table) to the model-group dialog; submit either a string literal or `{ multi_dim: <weights | preset> }` as a typed object.
+- Update `scripts/check-migration-number.sh` and `scripts/verify-migrations-roundtrip.sh` to extend their hardcoded migration whitelists to include `00077`.
+
+### Don't
+
+- Don't add `Deserialize` to the public `gw_core::entity::VendorKey` struct — it is constructed manually from `VendorKeyRow` in `gw-store::loader::load_vendor_key`. Tests that need to verify the wire shape of cost weights MUST target `VendorKeyRow` (in a `#[cfg(test)]` block inside `crates/gw-store/src/loader.rs`, since `VendorKeyRow` is private to that crate) and use `api_key_enc: EncryptedKey`, NOT `api_key: SecretString`.
+- Don't add or change `Serialize` on `StrategyKind`. The gateway only reads strategy from Go-projected JSON; nothing serializes it. Removing the existing `Serialize` derive is intentional and required so the wire enum is the single source of deserialization truth.
+- Don't change `CostFirstPolicy.needed_dims` or `CostFirstPolicy.score`. They must keep using `features.cost_weight` only when `ctx.pricing.is_some()` and `key.priority` otherwise — the behavior change comes entirely from how `features.cost_weight` is computed in the pipeline.
+- Don't break the preset wire shape `{ "multi_dim": "balanced" }`. Don't break the legacy `"priority"` literal (normalize it to `"fixed_order"`).
+- Don't expose real provider cost, margin, vendor pricing, or commercial terms in the UI. The field is labelled **Cost pricing weight** and the help text states it is a relative weight, not a real cost.
+- Don't expose model-group strategy as a free-form JSON editor in the UI. Strategy MUST be a typed select; `multi_dim` MUST be a typed weights table.
+- Don't change the legacy `[routing.presets]` resolution path or remove the `gw_routing_unknown_preset_total` metric / `GW_ROUTING_UNKNOWN_PRESET` warn-once behavior for preset-style configs.
+- Don't widen wire DTOs beyond `cost_weight` and `strategy`. In particular, don't add `is_available` to `modelCreateWire` (it's a separate omission — out of scope here).
+- Don't auto-wire any new `events:entity ns=vendor_key` invalidation calls. `emitVendorKeyInvalidationsForProvider` is already invoked from `ModelService.Create`, `Update`, and `SoftDelete` (`catalog.go:809`, `:909`, `:926`); cost-weight changes flow through those paths and need no extra hooks.
+- Don't try to derive a numeric Rust strategy enum for `cost_weight` — `cost_first` is the existing strategy, and "cost weight" here refers to the per-model weight column, not a new strategy variant. Don't add `"cost_weight"` to `rustModelGroupStrategies`.
+- Don't change cross-process contracts beyond adding `model_cost_weights` to `vendor_keys.payload`. Don't add or rename Redis streams, counter keys, or other JSONB columns.
+- Don't add new migrations between 00076 and 00077, and don't renumber existing migrations. The next file MUST be exactly `00077_provider_model_cost_weight.sql`.
+- Don't run `cargo fmt --all -- --check` or `cargo clippy --workspace --all-targets -- -D warnings` as task-level gates inside the plan — they belong to CI. Within-task verification is the focused `cargo test -p <crate> ...` commands shown.
+
+### Out of Scope (do NOT touch in this plan)
+
+- Pre-existing `modelCreateWire` ↔ `ModelCreateInput` divergences (e.g. `is_available`).
+- Frontend visualization or analytics of cost weight (dashboards, charts, exports).
+- Gateway-side cost computation or billing — `no_cost_micro` / `no_billing_crate` lints remain authoritative.
+- Tunnel, capability, ratelimit, KMS, codec, observability, and unrelated migration cleanup.
+- Doc churn beyond the spec file directly modified by this work (no `docs/architecture.md`, `docs/workflow.md`, or `docs/spec/` changes are required by this plan — call them out as a follow-up if a touched behavior crosses the §Sync rule boundary).
+
+---
+
 ## File Structure
 
 - Modify `ailinkmax-gateway/crates/gw-core/src/entity.rs`
@@ -95,102 +136,38 @@
 
 **Files:**
 - Modify: `ailinkmax-gateway/crates/gw-core/src/entity.rs`
-- Modify: `ailinkmax-gateway/crates/gw-store/src/loader.rs`
+- Modify: `ailinkmax-gateway/crates/gw-store/src/loader.rs` (entity field + `VendorKeyRow` field + an in-file `#[cfg(test)]` test for the row's deserialization)
 - Modify: Rust files containing `VendorKey { ... }` literals reported by `rg -n "VendorKey \\{" crates tests`
-- Test: `ailinkmax-gateway/crates/gw-core/tests/vendor_key_identity.rs`
+- Test: `ailinkmax-gateway/crates/gw-core/tests/vendor_key_identity.rs` (struct-literal-only assertion)
 
 **Interfaces:**
 - Produces: `VendorKey.model_cost_weights: HashMap<ModelName, u32>`
-- Consumes: `vendor_keys.payload.model_cost_weights`
+- Consumes: `vendor_keys.payload.model_cost_weights` (via `VendorKeyRow` in `gw-store::loader`)
 - Later tasks consume `VendorKey.model_cost_weights` from `gw-routing`.
 
-- [ ] **Step 1: Write the failing deserialization test**
+**Important context (read before editing):**
+- `gw_core::entity::VendorKey` is NOT `Deserialize`. It is constructed manually by `gw_store::loader::load_vendor_key` from a private `VendorKeyRow` struct that IS `Deserialize`. All serde tests for the new field belong inside `crates/gw-store/src/loader.rs` (`#[cfg(test)] mod tests` already exists at the bottom of the file and already deserializes `VendorKeyRow` — extend it).
+- `VendorKeyRow` uses `api_key_enc: EncryptedKey`, NOT `api_key: SecretString`. Tests must follow the existing in-file test shape (see existing rows around `loader.rs:680`) — don't invent a new wire shape.
 
-Add this test to `ailinkmax-gateway/crates/gw-core/tests/vendor_key_identity.rs`:
+- [ ] **Step 1: Write the failing struct-literal test (gw-core)**
+
+Add this test to `ailinkmax-gateway/crates/gw-core/tests/vendor_key_identity.rs` (this file currently has one `vendor_key_identity_snapshot_defaults_to_none` test; append below it):
 
 ```rust
-use gw_core::entity::{KeyStatus, VendorKey};
-use gw_core::ids::{KeyId, ModelName, VendorId};
-use secrecy::SecretString;
-use std::collections::HashMap;
-
-#[test]
-fn vendor_key_model_cost_weights_default_to_empty() {
-    let raw = serde_json::json!({
-        "key_id": "vk_1",
-        "vendor_id": "v_1",
-        "api_key": "sk-test",
-        "accessible_models": ["gpt-4o"],
-        "model_mapping": {},
-        "accessible_endpoints": ["open_ai"],
-        "protocol_conversion": true,
-        "priority": 10,
-        "weight": 1,
-        "rpm_limit": 0,
-        "tpm_limit": 0,
-        "max_usage_count": null,
-        "proxy": null,
-        "ip_allowlist": null,
-        "expires_at": null,
-        "status": "active",
-        "tags": [],
-        "forced_capabilities": [],
-        "exclusive_capability_match": false,
-        "tunnel_preference": null,
-        "oauth": null,
-        "identity_snapshot": null,
-        "quota_state": {}
-    });
-
-    let key: VendorKey = serde_json::from_value(raw).expect("vendor key deserializes");
-    assert!(key.model_cost_weights.is_empty());
-}
-
-#[test]
-fn vendor_key_deserializes_model_cost_weights() {
-    let raw = serde_json::json!({
-        "key_id": "vk_1",
-        "vendor_id": "v_1",
-        "api_key": "sk-test",
-        "accessible_models": ["gpt-4o"],
-        "model_mapping": {},
-        "model_cost_weights": {"gpt-4o": 850},
-        "accessible_endpoints": ["open_ai"],
-        "protocol_conversion": true,
-        "priority": 10,
-        "weight": 1,
-        "rpm_limit": 0,
-        "tpm_limit": 0,
-        "max_usage_count": null,
-        "proxy": null,
-        "ip_allowlist": null,
-        "expires_at": null,
-        "status": "active",
-        "tags": [],
-        "forced_capabilities": [],
-        "exclusive_capability_match": false,
-        "tunnel_preference": null,
-        "oauth": null,
-        "identity_snapshot": null,
-        "quota_state": {}
-    });
-
-    let key: VendorKey = serde_json::from_value(raw).expect("vendor key deserializes");
-    assert_eq!(
-        key.model_cost_weights.get(&ModelName::from("gpt-4o")),
-        Some(&850),
-    );
-}
-
 #[test]
 fn vendor_key_struct_literal_sets_model_cost_weights() {
+    use gw_core::entity::{KeyStatus, VendorKey};
+    use gw_core::ids::{KeyId, ModelName, VendorId};
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+
     let mut weights = HashMap::new();
     weights.insert(ModelName::from("gpt-4o"), 900);
 
     let key = VendorKey {
         key_id: KeyId::from("vk_1"),
         vendor_id: VendorId::from("v_1"),
-        api_key: SecretString::from("sk-test".to_string()),
+        api_key: SecretString::new("sk-test".into()),
         accessible_models: vec![ModelName::from("gpt-4o")],
         model_mapping: HashMap::new(),
         model_cost_weights: weights,
@@ -221,25 +198,57 @@ fn vendor_key_struct_literal_sets_model_cost_weights() {
 }
 ```
 
-- [ ] **Step 2: Run the failing test**
+- [ ] **Step 1b: Write the failing `VendorKeyRow` deserialization tests (gw-store)**
+
+Inside `ailinkmax-gateway/crates/gw-store/src/loader.rs`, find the existing `#[cfg(test)] mod tests` block (it currently deserializes a `VendorKeyRow` around line 680). Add these two tests **inside** that module, mirroring the existing test's JSON shape (in particular: `api_key_enc` is an object, not a string — copy the exact shape used by the existing in-module test that exercises `VendorKeyRow`):
+
+```rust
+#[test]
+fn vendor_key_row_model_cost_weights_default_to_empty() {
+    // Copy the JSON shape from the existing VendorKeyRow test in this module
+    // (the one near the bottom of loader.rs that already builds a VendorKeyRow).
+    // Omit `model_cost_weights` from the JSON entirely so #[serde(default)] kicks in.
+    let payload = existing_vendor_key_row_json_without_cost_weights();
+    let row: VendorKeyRow = serde_json::from_value(payload).expect("row deserializes");
+    assert!(row.model_cost_weights.is_empty());
+}
+
+#[test]
+fn vendor_key_row_deserializes_model_cost_weights() {
+    let mut payload = existing_vendor_key_row_json_without_cost_weights();
+    payload["model_cost_weights"] = serde_json::json!({ "gpt-4o": 850 });
+    let row: VendorKeyRow = serde_json::from_value(payload).expect("row deserializes");
+    assert_eq!(
+        row.model_cost_weights
+            .get(&gw_core::ids::ModelName::from("gpt-4o")),
+        Some(&850),
+    );
+}
+```
+
+`existing_vendor_key_row_json_without_cost_weights()` is a small test helper you add at the top of the `mod tests` block by extracting the JSON literal already present in the file's existing VendorKeyRow test. Do not invent fields; use the exact shape the working test uses (notably `api_key_enc` as an `{ "ciphertext": "...", "nonce": "...", "kek_id": "..." }`-shaped object — match the file's existing helper EXACTLY).
+
+- [ ] **Step 2: Run the failing tests**
 
 Run:
 
 ```bash
 cd /Users/whereslow/Desktop/work/Cnewxus/ailinkmax-gateway
-cargo test -p gw-core --test vendor_key_identity vendor_key_model_cost_weights -- --nocapture
+cargo test -p gw-core --test vendor_key_identity vendor_key_struct_literal_sets_model_cost_weights -- --nocapture
+cargo test -p gw-store --lib vendor_key_row_model_cost_weights -- --nocapture
 ```
 
-Expected: compile fails because `VendorKey` has no `model_cost_weights` field.
+Expected: compile fails because neither `VendorKey` nor `VendorKeyRow` has a `model_cost_weights` field.
 
 - [ ] **Step 3: Add the Rust entity field**
 
-In `ailinkmax-gateway/crates/gw-core/src/entity.rs`, add this field immediately after `model_mapping`:
+In `ailinkmax-gateway/crates/gw-core/src/entity.rs`, add this field to the `VendorKey` struct immediately after `model_mapping`:
 
 ```rust
-    #[serde(default)]
     pub model_cost_weights: HashMap<ModelName, u32>,
 ```
+
+Note: `VendorKey` has NO `#[derive(Deserialize)]`, so don't add a `#[serde(default)]` attribute here — the attribute is meaningless on a non-serde struct. The wire-shape `#[serde(default)]` goes on `VendorKeyRow` in the next step.
 
 - [ ] **Step 4: Add loader row support**
 
@@ -283,7 +292,8 @@ Run:
 
 ```bash
 cd /Users/whereslow/Desktop/work/Cnewxus/ailinkmax-gateway
-cargo test -p gw-core --test vendor_key_identity vendor_key_model_cost_weights -- --nocapture
+cargo test -p gw-core --test vendor_key_identity vendor_key_struct_literal_sets_model_cost_weights -- --nocapture
+cargo test -p gw-store --lib vendor_key_row -- --nocapture
 ```
 
 Expected: PASS.
@@ -369,7 +379,7 @@ fn cost_first_uses_provider_model_cost_weight_when_pricing_exists() {
         model: model.clone(),
         input_price_micro_per_token: 1,
         output_price_micro_per_token: 1,
-        max_output_tokens: 4096,
+        max_output: 4096,
         model_markup: 1.0,
         connect_timeout_ms: None,
         read_timeout_ms: None,
@@ -408,7 +418,7 @@ fn cost_first_missing_provider_model_cost_weight_uses_neutral_1000() {
         model: model.clone(),
         input_price_micro_per_token: 1,
         output_price_micro_per_token: 1,
-        max_output_tokens: 4096,
+        max_output: 4096,
         model_markup: 1.0,
         connect_timeout_ms: None,
         read_timeout_ms: None,
@@ -737,6 +747,8 @@ git commit -m "feat: route by provider model cost weights"
 - Modify: `AILinkMax-Go/modules/model/business/catalog.go`
 - Modify: `AILinkMax-Go/modules/model/api/routes_advanced.go`
 - Modify: `AILinkMax-Go/modules/model/api/routes.go`
+- Modify: `AILinkMax-Go/scripts/check-migration-number.sh` (extend hardcoded migration whitelist to include 00077)
+- Modify: `AILinkMax-Go/scripts/verify-migrations-roundtrip.sh` (extend hardcoded migration whitelist to include 00077)
 - Test: `AILinkMax-Go/modules/model/business/catalog_test.go`
 - Test: `AILinkMax-Go/modules/model/api/routes_wire_test.go`
 
@@ -1139,7 +1151,9 @@ Expected: PASS.
 
 - [ ] **Step 8: Run migration static verification**
 
-Run:
+Both `scripts/check-migration-number.sh` and `scripts/verify-migrations-roundtrip.sh` currently hardcode migration whitelists that stop at `00076` (and `00075` respectively). Extend each script to include `00077_provider_model_cost_weight.sql` before running them — the change is one or two lines in each script (a number range or an explicit filename list). Read the scripts first; they're short.
+
+Then run:
 
 ```bash
 cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
@@ -1155,7 +1169,7 @@ Run:
 
 ```bash
 cd /Users/whereslow/Desktop/work/Cnewxus/AILinkMax-Go
-git add migrations/00077_provider_model_cost_weight.sql modules/model/model/queries/provider_models.sql modules/model/model/sqlcgen modules/model/business/catalog.go modules/model/api/routes.go modules/model/api/routes_advanced.go modules/model/business/catalog_test.go modules/model/api/routes_wire_test.go
+git add migrations/00077_provider_model_cost_weight.sql modules/model/model/queries/provider_models.sql modules/model/model/sqlcgen modules/model/business/catalog.go modules/model/api/routes.go modules/model/api/routes_advanced.go modules/model/business/catalog_test.go modules/model/api/routes_wire_test.go scripts/check-migration-number.sh scripts/verify-migrations-roundtrip.sh
 git commit -m "feat: add provider model cost weights"
 ```
 
@@ -1179,7 +1193,10 @@ git commit -m "feat: add provider model cost weights"
 
 - [ ] **Step 1: Write failing strategy tests**
 
-Replace `TestNormalizeGatewayModelGroupStrategyKeepsRustStrategies` in `AILinkMax-Go/modules/model/business/catalog_decode_test.go` with:
+In `AILinkMax-Go/modules/model/business/catalog_decode_test.go`:
+
+- **Delete** the existing `TestNormalizeGatewayModelGroupStrategyKeepsRustStrategies` test entirely — the function it covers (`normalizeGatewayModelGroupStrategy` at `catalog.go:57`) is being replaced in Step 3.
+- **Add** the tests below in its place.
 
 ```go
 func TestGroupUpsertPayloadOverridesAcceptsStrategyLiteral(t *testing.T) {
@@ -1278,7 +1295,12 @@ Expected: compile failure because `Strategy` is a `*string`, `ErrInvalidStrategy
 
 - [ ] **Step 3: Add strategy helpers**
 
-In `AILinkMax-Go/modules/model/business/catalog.go`, add:
+In `AILinkMax-Go/modules/model/business/catalog.go`:
+
+1. **Delete** the existing `normalizeGatewayModelGroupStrategy(strategy string) string` function (currently at `catalog.go:57`). The only caller is `payloadOverrides` at `catalog.go:1051`, which Step 4 rewrites.
+2. **Add** the new helpers shown below.
+
+Add the imports `math` and `strings` (verify both are imported; `strings` likely already is).
 
 ```go
 var ErrInvalidStrategy = errors.New("model: invalid strategy")
@@ -1357,6 +1379,8 @@ func validateMultiDimWeights(weights MultiDimWeights) error {
 ```
 
 Add `math` to imports.
+
+The plan-removed `normalizeGatewayModelGroupStrategy(string) string` function is now gone; if any leftover call site still references it, the build will fail — the only known caller is `payloadOverrides`, which Step 4 rewrites to call `normalizeGatewayModelGroupStrategyValue` instead.
 
 - [ ] **Step 4: Change `GroupUpsertInput` and payload overrides**
 
@@ -1564,13 +1588,17 @@ In create payload, add:
 
 - [ ] **Step 5: Keep mocks in sync**
 
-In `AILinkMax-Go/frontend/src/mocks/handler.ts`, add `cost_weight: 1000` to every generated provider model object in `generateMockModelsForProvider`.
+`generateMockModelsForProvider` lives in `AILinkMax-Go/frontend/src/mocks/handler.ts` (around line 4384), NOT in `data.ts`. Edit handler.ts only.
 
-In provider model create/update mock handlers, default missing values:
+In `AILinkMax-Go/frontend/src/mocks/handler.ts`, add `cost_weight: 1000` to every generated provider model object inside `generateMockModelsForProvider`.
+
+In the provider model create handler (around `handler.ts:5616`) and update handler (around `handler.ts:5628`), explicitly default missing values so the mock matches the real API contract:
 
 ```ts
     cost_weight: Number(body.cost_weight ?? 1000),
 ```
+
+`mocks/data.ts` does not need changes for Task 5 — leave it untouched.
 
 - [ ] **Step 6: Run frontend type check**
 
@@ -1823,7 +1851,7 @@ In `handleSubmit`, add:
 
 - [ ] **Step 7: Update mock model groups**
 
-In `AILinkMax-Go/frontend/src/mocks/data.ts`, add `strategy: 'round_robin'` to default groups and one inline example:
+`MOCK_MODEL_GROUPS` lives in `AILinkMax-Go/frontend/src/mocks/data.ts` (referenced from handler.ts). Add `strategy: 'round_robin'` to each default mock group, and add one mock group that exercises the inline `multi_dim` shape:
 
 ```ts
     strategy: {
@@ -1838,7 +1866,7 @@ In `AILinkMax-Go/frontend/src/mocks/data.ts`, add `strategy: 'round_robin'` to d
     },
 ```
 
-In `AILinkMax-Go/frontend/src/mocks/handler.ts`, persist `body.strategy ?? 'round_robin'` on create/update mock group bodies.
+In `AILinkMax-Go/frontend/src/mocks/handler.ts`, in the model group create handler (around `handler.ts:3464`) and update handler (around `handler.ts:5748`), persist `body.strategy ?? 'round_robin'` onto the returned object so the mock round-trips the new field.
 
 - [ ] **Step 8: Run frontend checks**
 
