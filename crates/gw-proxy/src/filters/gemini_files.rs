@@ -194,8 +194,9 @@ impl HttpGeminiFilesGateway {
             reservation_view: None,
             frequency_tracker: None,
         };
-        self.strategies
-            .pick_for(&group.value.strategy)
+        let strategy_choice = self.strategies.strategy_for_kind(&group.value.strategy);
+        strategy_choice
+            .as_strategy()
             .pick(&candidates, &self.health, &self.in_flight, &pick_ctx)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Gemini Files routing strategy returned no key"))
@@ -490,7 +491,8 @@ pub async fn select_files_vendor_key(
             message: Cow::Borrowed("no available Gemini Files channel"),
         });
     }
-    let strategy = strategies.pick_for(&group.value.strategy);
+    let strategy_choice = strategies.strategy_for_kind(&group.value.strategy);
+    let strategy = strategy_choice.as_strategy();
     let pick_ctx = PickCtx {
         user_id: &perm.effective_user_id,
         model: &model,

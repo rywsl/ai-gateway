@@ -10,12 +10,10 @@
 //!
 //! ## Dispatch shape
 //!
-//! [`Self::pick_for`] returns `&StrategyAny` (not `&dyn Strategy`) so the hot
-//! path stays on the codebase's enum-dispatch contract (see
-//! `crates/gw-routing/src/strategy/mod.rs` doc on `StrategyAny`: "Avoids
-//! heap-allocated trait objects on the hot path"). The set stores one
-//! pre-built `StrategyAny` per kind, so dispatch is a borrow + enum match,
-//! never a vtable call.
+//! [`Self::strategy_for_kind`] is the public runtime dispatch surface. It can
+//! borrow preconfigured strategies or construct inline strategies. [`Self::pick_for`]
+//! only returns borrowed/preconfigured strategies and rejects inline strategy
+//! kinds.
 //!
 //! ## T2-C migration note
 //!
@@ -153,11 +151,15 @@ impl StrategySet {
         Self::new_default()
     }
 
-    /// Dispatch by [`StrategyKind`] to the owned [`StrategyAny`] instance.
+    /// Dispatch by [`StrategyKind`] to a borrowed/preconfigured [`StrategyAny`].
     ///
     /// Returns `&StrategyAny` (not `&dyn Strategy`) to stay on enum dispatch
     /// — same shape that the legacy `strategy_for(kind) -> StrategyAny`
     /// factory in `gw-proxy/src/filters/upstream.rs` produces.
+    ///
+    /// Inline strategies are not stored in the set. Runtime callers must use
+    /// [`Self::strategy_for_kind`] so inline `multi_dim` can be constructed
+    /// instead of silently falling back to a preconfigured strategy.
     pub fn pick_for(&self, kind: &StrategyKind) -> &StrategyAny {
         match kind {
             StrategyKind::FixedOrder => &self.fixed_order,
@@ -168,7 +170,9 @@ impl StrategySet {
             StrategyKind::LatencyFirst => &self.latency_first,
             StrategyKind::CacheAffinity => &self.cache_affinity,
             StrategyKind::Sticky => &self.sticky,
-            StrategyKind::MultiDimInline(_) => &self.fixed_order,
+            StrategyKind::MultiDimInline(_) => {
+                panic!("use StrategySet::strategy_for_kind for inline multi_dim")
+            }
             StrategyKind::MultiDimPreset(preset) => {
                 self.multi_dim.get(preset).unwrap_or_else(|| {
                     // Audit 2026-05-30 §2.1: a model group may reference a multi_dim

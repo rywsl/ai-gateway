@@ -102,6 +102,22 @@ fn strategy_set_dispatches_inline_multi_dim() {
 }
 
 #[test]
+#[should_panic(expected = "use StrategySet::strategy_for_kind for inline multi_dim")]
+fn pick_for_rejects_inline_multi_dim() {
+    let set = StrategySet::new_default();
+    let _ = set.pick_for(&StrategyKind::MultiDimInline(
+        gw_core::entity::MultiDimWeights {
+            health: 0.25,
+            latency: 0.25,
+            cost: 0.25,
+            inflight: 0.15,
+            error_rate: 0.10,
+            reservation: 0.0,
+        },
+    ));
+}
+
+#[test]
 fn strategy_kind_deserializes_multi_dim_preset_and_inline_forms() {
     let preset: StrategyKind =
         serde_json::from_value(serde_json::json!({"multi_dim": "balanced"})).unwrap();
