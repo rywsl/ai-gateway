@@ -76,6 +76,7 @@ pub async fn run(
     hard_cap_cfg: &gw_auth::hard_cap::HardCapCfg,
     protection_cfg: &gw_ledger::ProtectionConfig,
     overflow_gate: &Arc<gw_ledger::overflow::OverflowGate>,
+    active_registration: &gw_ledger::ActiveRegistrationHandle,
     files_gateway: &dyn GeminiFilesGateway,
     routing_deps: Option<GeminiFilesRoutingDeps<'_>>,
 ) -> Result<bool> {
@@ -933,7 +934,13 @@ pub async fn run(
     //     snapshot is kept in sync so task/request freeze paths share the same
     //     in-process view.
     // ---------------------------------------------------------------------
-    let balance = available_balance_micro(counters, &merged.effective_user_id).await;
+    let balance = available_balance_micro_with_fallback(
+        counters,
+        overflow_gate,
+        &merged.effective_user_id,
+        !ctx.is_task && !ctx.is_gemini_files,
+    )
+    .await;
     sync_local_balance_snapshot(&merged.effective_user_id, balance);
     if balance.available <= 0 {
         let err = ErrorIR {
@@ -1386,6 +1393,7 @@ pub async fn run(
                     )
                     .increment(1);
                     ctx.lease_guard = Some(guard);
+                    register_admitted_activity(active_registration, &merged.effective_user_id, now);
                     ctx.merged_perm = Some(merged);
                     ctx.phase_end();
                     return Ok(false);
@@ -1408,6 +1416,11 @@ pub async fn run(
                         bail!(session, ctx, &err, &request_id)
                     }
                     {
+                        register_admitted_activity(
+                            active_registration,
+                            &merged.effective_user_id,
+                            now,
+                        );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1430,6 +1443,11 @@ pub async fn run(
                         bail!(session, ctx, &err, &request_id)
                     }
                     {
+                        register_admitted_activity(
+                            active_registration,
+                            &merged.effective_user_id,
+                            now,
+                        );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1456,6 +1474,11 @@ pub async fn run(
                         bail!(session, ctx, &err, &request_id)
                     }
                     {
+                        register_admitted_activity(
+                            active_registration,
+                            &merged.effective_user_id,
+                            now,
+                        );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1512,6 +1535,11 @@ pub async fn run(
         }
     };
     ctx.freeze_guard = Some(guard);
+    register_admitted_activity(
+        active_registration,
+        &merged.effective_user_id,
+        gw_ledger::now_ms(),
+    );
 
     ctx.merged_perm = Some(merged);
     ctx.phase_end();
@@ -1798,6 +1826,43 @@ async fn available_balance_micro(counters: &CounterStore, uid: &UserId) -> Avail
     }
 }
 
+async fn available_balance_micro_with_fallback(
+    counters: &CounterStore,
+    overflow_gate: &Arc<gw_ledger::overflow::OverflowGate>,
+    uid: &UserId,
+    allow_fallback: bool,
+) -> AvailableBalance {
+    let mut balance = available_balance_micro(counters, uid).await;
+    if balance.available > 0 || !allow_fallback {
+        return balance;
+    }
+
+    match overflow_gate.fallback_balance_micro(uid.as_ref()).await {
+        Ok(fallback) if fallback > 0 => {
+            balance.base_micro = fallback;
+            balance.available = fallback
+                .saturating_sub(balance.deducted_micro)
+                .saturating_sub(balance.frozen_micro);
+            balance
+        }
+        Ok(_) => balance,
+        Err(err) => {
+            tracing::warn!(
+                target: "gw_proxy::request",
+                user_id = uid.as_ref(),
+                error = ?err,
+                "cold balance fallback failed"
+            );
+            metrics::counter!(
+                gw_ledger::metrics::CREDIT_BALANCE_FALLBACK_TOTAL,
+                "result" => "error"
+            )
+            .increment(1);
+            balance
+        }
+    }
+}
+
 fn sync_local_balance_snapshot(uid: &UserId, balance: AvailableBalance) {
     use std::sync::atomic::{AtomicI64, Ordering};
     let state = DEDUCT
@@ -1984,6 +2049,20 @@ async fn run_overflow_gate(
             Err(overflow_error_for_failure(&err))
         }
     }
+}
+
+fn register_admitted_activity(
+    active_registration: &gw_ledger::ActiveRegistrationHandle,
+    uid: &UserId,
+    admitted_at_ms: u64,
+) {
+    let result = active_registration.try_enqueue_activity(uid, admitted_at_ms);
+    tracing::debug!(
+        target: "gw_proxy::request",
+        user_id = uid.as_ref(),
+        ?result,
+        "active registration enqueue result"
+    );
 }
 
 /// Emit an error via the client codec and return a short-circuit `Err` so the
@@ -2174,6 +2253,53 @@ mod non_stream_unit {
             !src.contains(&needle),
             "non-stream short-circuit must be removed in B1-2"
         );
+    }
+}
+
+#[cfg(test)]
+mod active_registration_source_order_tests {
+    #[test]
+    fn active_registration_is_after_admitted_normal_paths() {
+        let src = include_str!("request.rs");
+        let src = &src[..src.find("#[cfg(test)]").expect("test modules")];
+        let lease_success = src
+            .find("ctx.lease_guard = Some(guard);")
+            .expect("lease success");
+        let expired_success = src.find("\"expired\"").expect("expired branch");
+        let insufficient_success = src.find("\"insufficient\"").expect("insufficient branch");
+        let nolease_success = src.find("\"no_lease\"").expect("no lease branch");
+        let freeze_success = src
+            .find("ctx.freeze_guard = Some(guard);")
+            .expect("freeze success");
+        let register = src
+            .match_indices("register_admitted_activity(")
+            .filter(|(idx, _)| {
+                let line_start = src[..*idx].rfind('\n').map_or(0, |pos| pos + 1);
+                !src[line_start..*idx].trim_start().starts_with("fn ")
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+
+        assert!(register.iter().any(|idx| *idx > lease_success));
+        assert!(register.iter().any(|idx| *idx > expired_success));
+        assert!(register.iter().any(|idx| *idx > insufficient_success));
+        assert!(register.iter().any(|idx| *idx > nolease_success));
+        assert!(register.iter().any(|idx| *idx > freeze_success));
+    }
+
+    #[test]
+    fn active_registration_is_not_inside_task_or_gemini_files_short_circuit() {
+        let src = include_str!("request.rs");
+        let src = &src[..src.find("#[cfg(test)]").expect("test modules")];
+        let gemini_start = src
+            .find("if ctx.is_gemini_files")
+            .expect("gemini files branch");
+        let task_start = src.find("if ctx.is_task").expect("task branch");
+        let protected_start = src.find("8.5. Credit Lease").expect("protected branch");
+        let before_protected = &src[..protected_start];
+
+        assert!(!before_protected[gemini_start..task_start].contains("register_admitted_activity("));
+        assert!(!before_protected[task_start..].contains("register_admitted_activity("));
     }
 }
 
