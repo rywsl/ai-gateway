@@ -8,6 +8,7 @@ use fred::clients::RedisPool;
 use fred::interfaces::LuaInterface;
 use gw_core::ids::UserId;
 use gw_runtime::ShutdownToken;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -43,7 +44,9 @@ pub struct ActiveRegistrationHandle {
     enabled: bool,
     pod_id: Arc<str>,
     min_interval_ms: u64,
+    throttle_retention_ms: u64,
     queue_capacity: usize,
+    last_prune_ms: Arc<AtomicU64>,
     last_enqueue_ms: Arc<dashmap::DashMap<UserId, u64>>,
     tx: Option<mpsc::Sender<ActiveRegistrationEvent>>,
 }
@@ -58,7 +61,9 @@ impl ActiveRegistrationHandle {
             enabled: false,
             pod_id: Arc::from(""),
             min_interval_ms: 0,
+            throttle_retention_ms: 0,
             queue_capacity: 0,
+            last_prune_ms: Arc::new(AtomicU64::new(0)),
             last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
             tx: None,
         }
@@ -76,7 +81,9 @@ impl ActiveRegistrationHandle {
                 enabled: true,
                 pod_id: Arc::from(pod_id),
                 min_interval_ms,
+                throttle_retention_ms: min_interval_ms.saturating_mul(2).max(1),
                 queue_capacity: capacity,
+                last_prune_ms: Arc::new(AtomicU64::new(0)),
                 last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
                 tx: Some(tx),
             },
@@ -136,6 +143,7 @@ impl ActiveRegistrationHandle {
     }
 
     fn reserve_enqueue(&self, uid: &UserId, admitted_at_ms: u64) -> bool {
+        self.prune_old_throttle_entries(admitted_at_ms);
         match self.last_enqueue_ms.entry(uid.clone()) {
             Entry::Occupied(mut entry) => {
                 if self.min_interval_ms > 0
@@ -152,6 +160,29 @@ impl ActiveRegistrationHandle {
                 true
             }
         }
+    }
+
+    fn prune_old_throttle_entries(&self, now_ms: u64) {
+        let retention_ms = self.throttle_retention_ms;
+        if retention_ms == 0 {
+            return;
+        }
+
+        let last_prune_ms = self.last_prune_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_prune_ms) < retention_ms {
+            return;
+        }
+        if self
+            .last_prune_ms
+            .compare_exchange(last_prune_ms, now_ms, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let cutoff_ms = now_ms.saturating_sub(retention_ms);
+        self.last_enqueue_ms
+            .retain(|_, last_seen_ms| *last_seen_ms > cutoff_ms);
     }
 
     fn rollback_reservation(&self, uid: &UserId, admitted_at_ms: u64) {
@@ -181,7 +212,13 @@ pub fn spawn_active_registration_worker(
         min_interval_ms: cfg
             .active_registration_refresh_min_interval_secs
             .saturating_mul(1000),
+        throttle_retention_ms: cfg
+            .active_registration_ttl_secs
+            .max(cfg.active_registration_refresh_min_interval_secs)
+            .saturating_mul(1000)
+            .max(1),
         queue_capacity: capacity,
+        last_prune_ms: Arc::new(AtomicU64::new(0)),
         last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
         tx: Some(tx),
     };
@@ -414,6 +451,36 @@ mod tests {
         let retry = rx.try_recv().expect("retry event");
         assert_eq!(retry.uid.as_ref(), "retry-user");
         assert_eq!(retry.last_seen_ms, 10_002);
+    }
+
+    #[test]
+    fn old_throttle_entries_are_pruned_during_enqueue() {
+        let (handle, mut rx) = ActiveRegistrationHandle::for_test("pod-a", 30_000, 8);
+
+        assert_eq!(
+            handle.try_enqueue_activity(&uid("old-user"), 10_000),
+            ActiveRegistrationEnqueueResult::Queued
+        );
+        assert_eq!(
+            handle.try_enqueue_activity(&uid("fresh-user"), 70_001),
+            ActiveRegistrationEnqueueResult::Queued
+        );
+
+        let users = handle
+            .last_enqueue_ms
+            .iter()
+            .map(|entry| entry.key().as_ref().to_string())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            users,
+            std::collections::HashSet::from(["fresh-user".to_string()])
+        );
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert_eq!(events.len(), 2);
     }
 
     #[tokio::test]

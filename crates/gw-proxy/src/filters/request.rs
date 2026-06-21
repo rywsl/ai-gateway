@@ -1851,20 +1851,13 @@ async fn available_balance_micro_with_fallback(
     uid: &UserId,
     allow_fallback: bool,
 ) -> AvailableBalance {
-    let mut balance = available_balance_micro(counters, uid).await;
+    let balance = available_balance_micro(counters, uid).await;
     if balance.available > 0 || !allow_fallback {
         return balance;
     }
 
     match overflow_gate.fallback_balance_micro(uid.as_ref()).await {
-        Ok(fallback) if fallback > 0 => {
-            balance.base_micro = fallback;
-            balance.available = fallback
-                .saturating_sub(balance.deducted_micro)
-                .saturating_sub(balance.frozen_micro);
-            balance
-        }
-        Ok(_) => balance,
+        Ok(fallback) => fallback_balance_snapshot(balance, fallback),
         Err(err) => {
             tracing::warn!(
                 target: "gw_proxy::request",
@@ -1881,6 +1874,17 @@ async fn available_balance_micro_with_fallback(
             balance
         }
     }
+}
+
+fn fallback_balance_snapshot(mut balance: AvailableBalance, fallback: i64) -> AvailableBalance {
+    if fallback <= 0 {
+        return balance;
+    }
+    balance.base_micro = fallback;
+    balance.deducted_micro = 0;
+    balance.frozen_micro = 0;
+    balance.available = fallback;
+    balance
 }
 
 fn sync_local_balance_snapshot(uid: &UserId, balance: AvailableBalance) {
@@ -2378,6 +2382,49 @@ mod active_registration_boundary_tests {
             ),
             ActiveRegistrationDecision::Skip
         );
+    }
+}
+
+#[cfg(test)]
+mod available_balance_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn positive_authoritative_fallback_overrides_stale_local_counters() {
+        let stale_local = AvailableBalance {
+            base_micro: 0,
+            deducted_micro: 70,
+            frozen_micro: 50,
+            available: -120,
+        };
+
+        let snapshot = fallback_balance_snapshot(stale_local, 100);
+
+        assert_eq!(
+            snapshot,
+            AvailableBalance {
+                base_micro: 100,
+                deducted_micro: 0,
+                frozen_micro: 0,
+                available: 100,
+            }
+        );
+        assert!(snapshot.available > 0);
+    }
+
+    #[test]
+    fn zero_fallback_preserves_rejection_snapshot() {
+        let stale_local = AvailableBalance {
+            base_micro: 0,
+            deducted_micro: 70,
+            frozen_micro: 50,
+            available: -120,
+        };
+
+        let snapshot = fallback_balance_snapshot(stale_local, 0);
+
+        assert_eq!(snapshot, stale_local);
+        assert!(snapshot.available <= 0);
     }
 }
 
