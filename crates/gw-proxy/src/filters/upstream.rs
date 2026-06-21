@@ -339,7 +339,8 @@ pub async fn pick_peer(
     // G12: dispatch into the per-process StrategySet so Sticky's moka cache
     // (and any future stateful strategy) is shared across requests rather
     // than allocated per call.
-    let strategy = strategies.pick_for(&group.value.strategy);
+    let strategy_choice = strategies.strategy_for_kind(&group.value.strategy);
+    let strategy = strategy_choice.as_strategy();
     ctx.strategy_name = Some(strategy.name());
     let pick_ctx = PickCtx {
         user_id: &perm.effective_user_id,

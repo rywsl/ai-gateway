@@ -285,8 +285,18 @@ impl std::fmt::Debug for VendorKey {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+pub struct MultiDimWeights {
+    pub health: f64,
+    pub latency: f64,
+    pub cost: f64,
+    pub inflight: f64,
+    pub error_rate: f64,
+    #[serde(default)]
+    pub reservation: f64,
+}
+
+#[derive(Clone, Debug)]
 pub enum StrategyKind {
     CacheAffinity,
     FixedOrder,
@@ -296,7 +306,54 @@ pub enum StrategyKind {
     LatencyFirst,
     WeightedRr,
     Sticky,
-    MultiDim(String),
+    MultiDimPreset(String),
+    MultiDimInline(MultiDimWeights),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StrategyKindWire {
+    CacheAffinity,
+    FixedOrder,
+    RoundRobin,
+    LoadBalance,
+    CostFirst,
+    LatencyFirst,
+    WeightedRr,
+    Sticky,
+    MultiDim(MultiDimStrategy),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum MultiDimStrategy {
+    Preset(String),
+    Inline(MultiDimWeights),
+}
+
+impl<'de> Deserialize<'de> for StrategyKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = StrategyKindWire::deserialize(deserializer)?;
+        Ok(match wire {
+            StrategyKindWire::CacheAffinity => StrategyKind::CacheAffinity,
+            StrategyKindWire::FixedOrder => StrategyKind::FixedOrder,
+            StrategyKindWire::RoundRobin => StrategyKind::RoundRobin,
+            StrategyKindWire::LoadBalance => StrategyKind::LoadBalance,
+            StrategyKindWire::CostFirst => StrategyKind::CostFirst,
+            StrategyKindWire::LatencyFirst => StrategyKind::LatencyFirst,
+            StrategyKindWire::WeightedRr => StrategyKind::WeightedRr,
+            StrategyKindWire::Sticky => StrategyKind::Sticky,
+            StrategyKindWire::MultiDim(MultiDimStrategy::Preset(name)) => {
+                StrategyKind::MultiDimPreset(name)
+            }
+            StrategyKindWire::MultiDim(MultiDimStrategy::Inline(weights)) => {
+                StrategyKind::MultiDimInline(weights)
+            }
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

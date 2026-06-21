@@ -56,6 +56,33 @@ static UNKNOWN_PRESETS_WARNED: LazyLock<Cache<String, ()>> = LazyLock::new(|| {
         .build()
 });
 
+fn dim_weights_from_core(
+    weights: gw_core::entity::MultiDimWeights,
+) -> crate::pipeline::multi_dim::DimWeights {
+    crate::pipeline::multi_dim::DimWeights::raw_with_reservation(
+        weights.health,
+        weights.latency,
+        weights.cost,
+        weights.inflight,
+        weights.error_rate,
+        weights.reservation,
+    )
+}
+
+pub enum StrategyChoice<'a> {
+    Borrowed(&'a StrategyAny),
+    Owned(StrategyAny),
+}
+
+impl StrategyChoice<'_> {
+    pub fn as_strategy(&self) -> &StrategyAny {
+        match self {
+            StrategyChoice::Borrowed(strategy) => strategy,
+            StrategyChoice::Owned(strategy) => strategy,
+        }
+    }
+}
+
 /// One instance of each of the 8 strategy variants, owned for the lifetime of
 /// the process and shared across all requests via `Arc<StrategySet>`.
 ///
@@ -141,31 +168,43 @@ impl StrategySet {
             StrategyKind::LatencyFirst => &self.latency_first,
             StrategyKind::CacheAffinity => &self.cache_affinity,
             StrategyKind::Sticky => &self.sticky,
-            StrategyKind::MultiDim(preset) => self.multi_dim.get(preset).unwrap_or_else(|| {
-                // Audit 2026-05-30 §2.1: a model group may reference a multi_dim
-                // preset name that this pod's config does not define (operator
-                // typo, or a preset added to the DB but not yet rolled out to
-                // every pod's config — ordinary control-plane skew). Previously
-                // this `panic!`ed inside upstream_peer, abnormally aborting the
-                // request task. Fail-operational instead: fall back to the always-
-                // present FixedOrder strategy so the request still routes, and
-                // surface the misconfig via a warn-once + metric.
-                if UNKNOWN_PRESETS_WARNED.get(preset).is_none() {
-                    UNKNOWN_PRESETS_WARNED.insert(preset.clone(), ());
-                    tracing::warn!(
-                        code = gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
-                        preset = %preset,
-                        "unknown multi_dim routing preset referenced by a model group; \
-                         falling back to fixed_order. Add it to [routing.presets] on this pod."
-                    );
-                }
-                metrics::counter!(
-                    "gw_routing_unknown_preset_total",
-                    "code" => gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
-                )
-                .increment(1);
-                &self.fixed_order
-            }),
+            StrategyKind::MultiDimInline(_) => &self.fixed_order,
+            StrategyKind::MultiDimPreset(preset) => {
+                self.multi_dim.get(preset).unwrap_or_else(|| {
+                    // Audit 2026-05-30 §2.1: a model group may reference a multi_dim
+                    // preset name that this pod's config does not define (operator
+                    // typo, or a preset added to the DB but not yet rolled out to
+                    // every pod's config — ordinary control-plane skew). Previously
+                    // this `panic!`ed inside upstream_peer, abnormally aborting the
+                    // request task. Fail-operational instead: fall back to the always-
+                    // present FixedOrder strategy so the request still routes, and
+                    // surface the misconfig via a warn-once + metric.
+                    if UNKNOWN_PRESETS_WARNED.get(preset).is_none() {
+                        UNKNOWN_PRESETS_WARNED.insert(preset.clone(), ());
+                        tracing::warn!(
+                            code = gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
+                            preset = %preset,
+                            "unknown multi_dim routing preset referenced by a model group; \
+                             falling back to fixed_order. Add it to [routing.presets] on this pod."
+                        );
+                    }
+                    metrics::counter!(
+                        "gw_routing_unknown_preset_total",
+                        "code" => gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
+                    )
+                    .increment(1);
+                    &self.fixed_order
+                })
+            }
+        }
+    }
+
+    pub fn strategy_for_kind(&self, kind: &StrategyKind) -> StrategyChoice<'_> {
+        match kind {
+            StrategyKind::MultiDimInline(weights) => StrategyChoice::Owned(StrategyAny::MultiDim(
+                MultiDim::new("inline".to_string(), dim_weights_from_core(*weights)),
+            )),
+            _ => StrategyChoice::Borrowed(self.pick_for(kind)),
         }
     }
 
