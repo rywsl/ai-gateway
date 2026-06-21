@@ -1874,7 +1874,8 @@ async fn available_balance_micro_with_fallback(
             );
             metrics::counter!(
                 gw_ledger::metrics::CREDIT_BALANCE_FALLBACK_TOTAL,
-                "result" => "error"
+                "result" => "error",
+                "path" => "error"
             )
             .increment(1);
             balance
