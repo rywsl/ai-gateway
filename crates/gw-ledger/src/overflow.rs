@@ -21,6 +21,7 @@ pub const FETCH_BALANCE_SQL: &str = r#"
 SELECT COALESCE(recharge_balance_micros, 0) + COALESCE(gift_balance_micros, 0)
 FROM wallets
 WHERE user_id = $1 AND deleted_at IS NULL
+  AND status = 'active'
 "#;
 
 const OVERFLOW_INCR_LUA: &str = r#"
@@ -292,13 +293,13 @@ mod tests {
         let (_redis_container, redis) = test_redis_pool().await;
         let (_pg_container, pg) = test_pg_pool().await;
         sqlx::query(
-            "CREATE TABLE wallets (user_id TEXT PRIMARY KEY, recharge_balance_micros BIGINT, gift_balance_micros BIGINT, deleted_at TIMESTAMPTZ)",
+            "CREATE TABLE wallets (user_id TEXT PRIMARY KEY, recharge_balance_micros BIGINT, gift_balance_micros BIGINT, status TEXT NOT NULL DEFAULT 'active', deleted_at TIMESTAMPTZ)",
         )
         .execute(&pg)
         .await
         .expect("create wallets");
         sqlx::query(
-            "INSERT INTO wallets(user_id, recharge_balance_micros, gift_balance_micros, deleted_at) VALUES ($1, $2, $3, NULL)",
+            "INSERT INTO wallets(user_id, recharge_balance_micros, gift_balance_micros, status, deleted_at) VALUES ($1, $2, $3, 'active', NULL)",
         )
         .bind("user-positive")
         .bind(11_i64)
@@ -315,6 +316,32 @@ mod tests {
         assert_eq!(balance, 33);
     }
 
+    #[tokio::test]
+    #[ignore = "requires Docker (testcontainers Postgres)"]
+    async fn pg_fallback_balance_ignores_inactive_wallet_rows() {
+        let (_pg_container, pg) = test_pg_pool().await;
+        sqlx::query(
+            "CREATE TABLE wallets (user_id TEXT PRIMARY KEY, recharge_balance_micros BIGINT, gift_balance_micros BIGINT, status TEXT NOT NULL DEFAULT 'active', deleted_at TIMESTAMPTZ)",
+        )
+        .execute(&pg)
+        .await
+        .expect("create wallets");
+        sqlx::query(
+            "INSERT INTO wallets(user_id, recharge_balance_micros, gift_balance_micros, status, deleted_at) VALUES ($1, $2, $3, 'suspended', NULL)",
+        )
+        .bind("user-suspended")
+        .bind(11_i64)
+        .bind(22_i64)
+        .execute(&pg)
+        .await
+        .expect("insert wallet");
+
+        let balance = fetch_balance_micro(&pg, "user-suspended")
+            .await
+            .expect("fallback balance");
+        assert_eq!(balance, 0);
+    }
+
     #[test]
     fn overflow_keys_match_hard_mode_contract() {
         assert_eq!(balance_cache_key("u_1"), "credit:balance_cache:u_1");
@@ -322,11 +349,12 @@ mod tests {
     }
 
     #[test]
-    fn pg_fallback_query_uses_wallet_split_balance_columns() {
+    fn pg_fallback_query_uses_only_active_wallet_rows() {
         assert!(FETCH_BALANCE_SQL.contains("recharge_balance_micros"));
         assert!(FETCH_BALANCE_SQL.contains("gift_balance_micros"));
         assert!(!FETCH_BALANCE_SQL.contains(" balance_micro "));
         assert!(FETCH_BALANCE_SQL.contains("deleted_at IS NULL"));
+        assert!(FETCH_BALANCE_SQL.contains("status = 'active'"));
     }
 
     #[test]

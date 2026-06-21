@@ -132,7 +132,7 @@ When `[protection].enabled = true` and the user has a protected lease entry from
 If `estimate_request_credits` fails (no coefs for the lease version), the request is
 fail-closed-rejected with `GW_QUOTA_COEF_TABLE_NOT_READY`.
 
-Credit lease activation starts from an admitted Rust request. Cold funded users may pass the Redis counter gate through the read-only `OverflowGate` balance fallback, then the active-registration worker marks the user for Go renewal.
+Credit lease activation starts from an admitted normal billable Rust request. Cold funded users may pass the Redis counter gate through the read-only `OverflowGate` balance fallback, which trusts only active non-deleted wallet rows, then the active-registration worker marks the user for Go renewal. Balance/fallback rejections, task endpoints, Gemini Files endpoints, and runs with protection disabled do not register active users.
 
 Spec: [`docs/spec/06-billing-ledger.md`](spec/06-billing-ledger.md).
 

@@ -1393,7 +1393,14 @@ pub async fn run(
                     )
                     .increment(1);
                     ctx.lease_guard = Some(guard);
-                    register_admitted_activity(active_registration, &merged.effective_user_id, now);
+                    register_admitted_activity(
+                        active_registration,
+                        &merged.effective_user_id,
+                        now,
+                        protection_cfg.enabled,
+                        ActiveRegistrationEndpoint::from_ctx(ctx),
+                        ActiveRegistrationAdmission::LeaseSuccess,
+                    );
                     ctx.merged_perm = Some(merged);
                     ctx.phase_end();
                     return Ok(false);
@@ -1420,6 +1427,9 @@ pub async fn run(
                             active_registration,
                             &merged.effective_user_id,
                             now,
+                            protection_cfg.enabled,
+                            ActiveRegistrationEndpoint::from_ctx(ctx),
+                            ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
                         );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
@@ -1447,6 +1457,9 @@ pub async fn run(
                             active_registration,
                             &merged.effective_user_id,
                             now,
+                            protection_cfg.enabled,
+                            ActiveRegistrationEndpoint::from_ctx(ctx),
+                            ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
                         );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
@@ -1478,6 +1491,9 @@ pub async fn run(
                             active_registration,
                             &merged.effective_user_id,
                             now,
+                            protection_cfg.enabled,
+                            ActiveRegistrationEndpoint::from_ctx(ctx),
+                            ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
                         );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
@@ -1539,6 +1555,9 @@ pub async fn run(
         active_registration,
         &merged.effective_user_id,
         gw_ledger::now_ms(),
+        protection_cfg.enabled,
+        ActiveRegistrationEndpoint::from_ctx(ctx),
+        ActiveRegistrationAdmission::ColdFreezeAdmission,
     );
 
     ctx.merged_perm = Some(merged);
@@ -2051,11 +2070,68 @@ async fn run_overflow_gate(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveRegistrationEndpoint {
+    NormalBillable,
+    NonNormalEndpoint,
+}
+
+impl ActiveRegistrationEndpoint {
+    fn from_ctx(ctx: &ReqCtx) -> Self {
+        if ctx.is_task || ctx.is_gemini_files {
+            Self::NonNormalEndpoint
+        } else {
+            Self::NormalBillable
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveRegistrationAdmission {
+    LeaseSuccess,
+    ColdFreezeAdmission,
+    OverflowAdmittedProtectedFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveRegistrationDecision {
+    Register,
+    Skip,
+}
+
+fn active_registration_decision(
+    protection_enabled: bool,
+    endpoint: ActiveRegistrationEndpoint,
+    admission: Option<ActiveRegistrationAdmission>,
+) -> ActiveRegistrationDecision {
+    if !protection_enabled || endpoint != ActiveRegistrationEndpoint::NormalBillable {
+        return ActiveRegistrationDecision::Skip;
+    }
+
+    match admission {
+        Some(
+            ActiveRegistrationAdmission::LeaseSuccess
+            | ActiveRegistrationAdmission::ColdFreezeAdmission
+            | ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
+        ) => ActiveRegistrationDecision::Register,
+        None => ActiveRegistrationDecision::Skip,
+    }
+}
+
 fn register_admitted_activity(
     active_registration: &gw_ledger::ActiveRegistrationHandle,
     uid: &UserId,
     admitted_at_ms: u64,
+    protection_enabled: bool,
+    endpoint: ActiveRegistrationEndpoint,
+    admission: ActiveRegistrationAdmission,
 ) {
+    if active_registration_decision(protection_enabled, endpoint, Some(admission))
+        != ActiveRegistrationDecision::Register
+    {
+        return;
+    }
+
     let result = active_registration.try_enqueue_activity(uid, admitted_at_ms);
     tracing::debug!(
         target: "gw_proxy::request",
@@ -2257,49 +2333,50 @@ mod non_stream_unit {
 }
 
 #[cfg(test)]
-mod active_registration_source_order_tests {
-    #[test]
-    fn active_registration_is_after_admitted_normal_paths() {
-        let src = include_str!("request.rs");
-        let src = &src[..src.find("#[cfg(test)]").expect("test modules")];
-        let lease_success = src
-            .find("ctx.lease_guard = Some(guard);")
-            .expect("lease success");
-        let expired_success = src.find("\"expired\"").expect("expired branch");
-        let insufficient_success = src.find("\"insufficient\"").expect("insufficient branch");
-        let nolease_success = src.find("\"no_lease\"").expect("no lease branch");
-        let freeze_success = src
-            .find("ctx.freeze_guard = Some(guard);")
-            .expect("freeze success");
-        let register = src
-            .match_indices("register_admitted_activity(")
-            .filter(|(idx, _)| {
-                let line_start = src[..*idx].rfind('\n').map_or(0, |pos| pos + 1);
-                !src[line_start..*idx].trim_start().starts_with("fn ")
-            })
-            .map(|(idx, _)| idx)
-            .collect::<Vec<_>>();
+mod active_registration_boundary_tests {
+    use super::*;
 
-        assert!(register.iter().any(|idx| *idx > lease_success));
-        assert!(register.iter().any(|idx| *idx > expired_success));
-        assert!(register.iter().any(|idx| *idx > insufficient_success));
-        assert!(register.iter().any(|idx| *idx > nolease_success));
-        assert!(register.iter().any(|idx| *idx > freeze_success));
+    #[test]
+    fn active_registration_is_emitted_for_admitted_normal_paths() {
+        for admission in [
+            ActiveRegistrationAdmission::LeaseSuccess,
+            ActiveRegistrationAdmission::ColdFreezeAdmission,
+            ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
+        ] {
+            assert_eq!(
+                active_registration_decision(
+                    true,
+                    ActiveRegistrationEndpoint::NormalBillable,
+                    Some(admission)
+                ),
+                ActiveRegistrationDecision::Register,
+                "{admission:?} should register"
+            );
+        }
     }
 
     #[test]
-    fn active_registration_is_not_inside_task_or_gemini_files_short_circuit() {
-        let src = include_str!("request.rs");
-        let src = &src[..src.find("#[cfg(test)]").expect("test modules")];
-        let gemini_start = src
-            .find("if ctx.is_gemini_files")
-            .expect("gemini files branch");
-        let task_start = src.find("if ctx.is_task").expect("task branch");
-        let protected_start = src.find("8.5. Credit Lease").expect("protected branch");
-        let before_protected = &src[..protected_start];
-
-        assert!(!before_protected[gemini_start..task_start].contains("register_admitted_activity("));
-        assert!(!before_protected[task_start..].contains("register_admitted_activity("));
+    fn active_registration_is_skipped_for_rejections_non_normal_and_disabled_protection() {
+        assert_eq!(
+            active_registration_decision(true, ActiveRegistrationEndpoint::NormalBillable, None,),
+            ActiveRegistrationDecision::Skip
+        );
+        assert_eq!(
+            active_registration_decision(
+                true,
+                ActiveRegistrationEndpoint::NonNormalEndpoint,
+                Some(ActiveRegistrationAdmission::LeaseSuccess),
+            ),
+            ActiveRegistrationDecision::Skip
+        );
+        assert_eq!(
+            active_registration_decision(
+                false,
+                ActiveRegistrationEndpoint::NormalBillable,
+                Some(ActiveRegistrationAdmission::ColdFreezeAdmission),
+            ),
+            ActiveRegistrationDecision::Skip
+        );
     }
 }
 

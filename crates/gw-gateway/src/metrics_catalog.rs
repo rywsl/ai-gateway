@@ -747,7 +747,7 @@ pub static METRICS: &[MetricSpec] = &[
     MetricSpec {
         name: "gw_credit_balance_fallback_total",
         kind: MetricKind::Counter,
-        help: "OverflowGate balance fallback outcomes; label=result (positive|zero|error)",
+        help: "OverflowGate balance fallback outcomes; labels=result (positive|zero|error), path (cache|pg_fallback)",
     },
     MetricSpec {
         name: "gw_credit_lease_active_users",

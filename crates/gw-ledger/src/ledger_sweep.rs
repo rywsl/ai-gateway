@@ -69,11 +69,15 @@ pub fn spawn(shutdown: ShutdownToken, protection_cfg: ProtectionConfig) -> JoinH
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coef::{apply_coef_commit, apply_coef_entry, Dim, TEST_COEF_LOCK};
+    use crate::coef::{
+        apply_coef_commit, apply_coef_entry, CoefSnapshot, Dim, COEF_CACHE, COEF_STAGING,
+        TEST_COEF_LOCK,
+    };
     use crate::lease::{now_ms, upsert_protected, LEASE_POOL};
     use gw_core::ids::UserId;
     use gw_runtime::ShutdownCoordinator;
     use metrics_exporter_prometheus::PrometheusBuilder;
+    use std::sync::Arc;
 
     /// Cancellation via ShutdownToken must promptly exit the sweep task.
     /// Mirrors Crate 2's `spawn_respects_shutdown_token`. The actual
@@ -95,6 +99,8 @@ mod tests {
     #[test]
     fn sample_credit_gauges_sets_active_user_count_and_coef_version() {
         let _coef_lock = TEST_COEF_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        COEF_CACHE.store(Arc::new(CoefSnapshot::empty()));
+        COEF_STAGING.clear();
 
         let uid = UserId::from(format!("ledger-sweep-sample-{}", now_ms()));
         let before = lease::protected_user_count();
