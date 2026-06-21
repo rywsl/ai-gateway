@@ -725,18 +725,38 @@ pub static METRICS: &[MetricSpec] = &[
         help: "coef_table commit arrived with fewer staged models than expected",
     },
     MetricSpec {
+        name: "gw_credit_active_register_enqueue_total",
+        kind: MetricKind::Counter,
+        help: "Rust active-credit registration enqueue outcomes; label=result (queued|throttled|full|closed|disabled)",
+    },
+    MetricSpec {
+        name: "gw_credit_active_register_redis_total",
+        kind: MetricKind::Counter,
+        help: "Rust active-credit registration Redis write outcomes; label=result (success|retry_exhausted)",
+    },
+    MetricSpec {
+        name: "gw_credit_active_register_queue_depth",
+        kind: MetricKind::Gauge,
+        help: "Remaining bounded worker channel capacity for active-credit registration",
+    },
+    MetricSpec {
+        name: "gw_credit_lease_sweep_removed_total",
+        kind: MetricKind::Counter,
+        help: "Removed expired local protected leases",
+    },
+    MetricSpec {
+        name: "gw_credit_balance_fallback_total",
+        kind: MetricKind::Counter,
+        help: "OverflowGate balance fallback outcomes; labels=result (positive|zero|error), path (cache|pg_fallback)",
+    },
+    MetricSpec {
         name: "gw_credit_lease_active_users",
         kind: MetricKind::Gauge,
-        // TODO: sampler not yet wired; gauge is registered so /metrics surfaces HELP+TYPE.
-        // A follow-up task should add a background sampler that iterates LEASE_POOL and
-        // counts entries where mode() == Mode::Protected.
         help: "Number of users currently in protected mode (sampled)",
     },
     MetricSpec {
         name: "gw_credit_coef_table_version_active",
         kind: MetricKind::Gauge,
-        // TODO: sampler not yet wired; gauge is registered so /metrics surfaces HELP+TYPE.
-        // A follow-up task should call current_coef_snapshot().version and set this gauge.
         help: "Currently active coef_table_version",
     },
 ];

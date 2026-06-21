@@ -76,6 +76,7 @@ pub async fn run(
     hard_cap_cfg: &gw_auth::hard_cap::HardCapCfg,
     protection_cfg: &gw_ledger::ProtectionConfig,
     overflow_gate: &Arc<gw_ledger::overflow::OverflowGate>,
+    active_registration: &gw_ledger::ActiveRegistrationHandle,
     files_gateway: &dyn GeminiFilesGateway,
     routing_deps: Option<GeminiFilesRoutingDeps<'_>>,
 ) -> Result<bool> {
@@ -933,7 +934,13 @@ pub async fn run(
     //     snapshot is kept in sync so task/request freeze paths share the same
     //     in-process view.
     // ---------------------------------------------------------------------
-    let balance = available_balance_micro(counters, &merged.effective_user_id).await;
+    let balance = available_balance_micro_with_fallback(
+        counters,
+        overflow_gate,
+        &merged.effective_user_id,
+        !ctx.is_task && !ctx.is_gemini_files,
+    )
+    .await;
     sync_local_balance_snapshot(&merged.effective_user_id, balance);
     if balance.available <= 0 {
         let err = ErrorIR {
@@ -1386,6 +1393,14 @@ pub async fn run(
                     )
                     .increment(1);
                     ctx.lease_guard = Some(guard);
+                    register_admitted_activity(
+                        active_registration,
+                        &merged.effective_user_id,
+                        now,
+                        protection_cfg.enabled,
+                        ActiveRegistrationEndpoint::from_ctx(ctx),
+                        ActiveRegistrationAdmission::LeaseSuccess,
+                    );
                     ctx.merged_perm = Some(merged);
                     ctx.phase_end();
                     return Ok(false);
@@ -1408,6 +1423,14 @@ pub async fn run(
                         bail!(session, ctx, &err, &request_id)
                     }
                     {
+                        register_admitted_activity(
+                            active_registration,
+                            &merged.effective_user_id,
+                            now,
+                            protection_cfg.enabled,
+                            ActiveRegistrationEndpoint::from_ctx(ctx),
+                            ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
+                        );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1430,6 +1453,14 @@ pub async fn run(
                         bail!(session, ctx, &err, &request_id)
                     }
                     {
+                        register_admitted_activity(
+                            active_registration,
+                            &merged.effective_user_id,
+                            now,
+                            protection_cfg.enabled,
+                            ActiveRegistrationEndpoint::from_ctx(ctx),
+                            ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
+                        );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1456,6 +1487,14 @@ pub async fn run(
                         bail!(session, ctx, &err, &request_id)
                     }
                     {
+                        register_admitted_activity(
+                            active_registration,
+                            &merged.effective_user_id,
+                            now,
+                            protection_cfg.enabled,
+                            ActiveRegistrationEndpoint::from_ctx(ctx),
+                            ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
+                        );
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1512,6 +1551,14 @@ pub async fn run(
         }
     };
     ctx.freeze_guard = Some(guard);
+    register_admitted_activity(
+        active_registration,
+        &merged.effective_user_id,
+        gw_ledger::now_ms(),
+        protection_cfg.enabled,
+        ActiveRegistrationEndpoint::from_ctx(ctx),
+        ActiveRegistrationAdmission::ColdFreezeAdmission,
+    );
 
     ctx.merged_perm = Some(merged);
     ctx.phase_end();
@@ -1798,6 +1845,48 @@ async fn available_balance_micro(counters: &CounterStore, uid: &UserId) -> Avail
     }
 }
 
+async fn available_balance_micro_with_fallback(
+    counters: &CounterStore,
+    overflow_gate: &Arc<gw_ledger::overflow::OverflowGate>,
+    uid: &UserId,
+    allow_fallback: bool,
+) -> AvailableBalance {
+    let balance = available_balance_micro(counters, uid).await;
+    if balance.available > 0 || !allow_fallback {
+        return balance;
+    }
+
+    match overflow_gate.fallback_balance_micro(uid.as_ref()).await {
+        Ok(fallback) => fallback_balance_snapshot(balance, fallback),
+        Err(err) => {
+            tracing::warn!(
+                target: "gw_proxy::request",
+                user_id = uid.as_ref(),
+                error = ?err,
+                "cold balance fallback failed"
+            );
+            metrics::counter!(
+                gw_ledger::metrics::CREDIT_BALANCE_FALLBACK_TOTAL,
+                "result" => "error",
+                "path" => "error"
+            )
+            .increment(1);
+            balance
+        }
+    }
+}
+
+fn fallback_balance_snapshot(mut balance: AvailableBalance, fallback: i64) -> AvailableBalance {
+    if fallback <= 0 {
+        return balance;
+    }
+    balance.base_micro = fallback;
+    balance.deducted_micro = 0;
+    balance.frozen_micro = 0;
+    balance.available = fallback;
+    balance
+}
+
 fn sync_local_balance_snapshot(uid: &UserId, balance: AvailableBalance) {
     use std::sync::atomic::{AtomicI64, Ordering};
     let state = DEDUCT
@@ -1984,6 +2073,77 @@ async fn run_overflow_gate(
             Err(overflow_error_for_failure(&err))
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveRegistrationEndpoint {
+    NormalBillable,
+    NonNormalEndpoint,
+}
+
+impl ActiveRegistrationEndpoint {
+    fn from_ctx(ctx: &ReqCtx) -> Self {
+        if ctx.is_task || ctx.is_gemini_files {
+            Self::NonNormalEndpoint
+        } else {
+            Self::NormalBillable
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveRegistrationAdmission {
+    LeaseSuccess,
+    ColdFreezeAdmission,
+    OverflowAdmittedProtectedFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveRegistrationDecision {
+    Register,
+    Skip,
+}
+
+fn active_registration_decision(
+    protection_enabled: bool,
+    endpoint: ActiveRegistrationEndpoint,
+    admission: Option<ActiveRegistrationAdmission>,
+) -> ActiveRegistrationDecision {
+    if !protection_enabled || endpoint != ActiveRegistrationEndpoint::NormalBillable {
+        return ActiveRegistrationDecision::Skip;
+    }
+
+    match admission {
+        Some(
+            ActiveRegistrationAdmission::LeaseSuccess
+            | ActiveRegistrationAdmission::ColdFreezeAdmission
+            | ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
+        ) => ActiveRegistrationDecision::Register,
+        None => ActiveRegistrationDecision::Skip,
+    }
+}
+
+fn register_admitted_activity(
+    active_registration: &gw_ledger::ActiveRegistrationHandle,
+    uid: &UserId,
+    admitted_at_ms: u64,
+    protection_enabled: bool,
+    endpoint: ActiveRegistrationEndpoint,
+    admission: ActiveRegistrationAdmission,
+) {
+    if active_registration_decision(protection_enabled, endpoint, Some(admission))
+        != ActiveRegistrationDecision::Register
+    {
+        return;
+    }
+
+    let result = active_registration.try_enqueue_activity(uid, admitted_at_ms);
+    tracing::debug!(
+        target: "gw_proxy::request",
+        user_id = uid.as_ref(),
+        ?result,
+        "active registration enqueue result"
+    );
 }
 
 /// Emit an error via the client codec and return a short-circuit `Err` so the
@@ -2174,6 +2334,97 @@ mod non_stream_unit {
             !src.contains(&needle),
             "non-stream short-circuit must be removed in B1-2"
         );
+    }
+}
+
+#[cfg(test)]
+mod active_registration_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn active_registration_is_emitted_for_admitted_normal_paths() {
+        for admission in [
+            ActiveRegistrationAdmission::LeaseSuccess,
+            ActiveRegistrationAdmission::ColdFreezeAdmission,
+            ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
+        ] {
+            assert_eq!(
+                active_registration_decision(
+                    true,
+                    ActiveRegistrationEndpoint::NormalBillable,
+                    Some(admission)
+                ),
+                ActiveRegistrationDecision::Register,
+                "{admission:?} should register"
+            );
+        }
+    }
+
+    #[test]
+    fn active_registration_is_skipped_for_rejections_non_normal_and_disabled_protection() {
+        assert_eq!(
+            active_registration_decision(true, ActiveRegistrationEndpoint::NormalBillable, None,),
+            ActiveRegistrationDecision::Skip
+        );
+        assert_eq!(
+            active_registration_decision(
+                true,
+                ActiveRegistrationEndpoint::NonNormalEndpoint,
+                Some(ActiveRegistrationAdmission::LeaseSuccess),
+            ),
+            ActiveRegistrationDecision::Skip
+        );
+        assert_eq!(
+            active_registration_decision(
+                false,
+                ActiveRegistrationEndpoint::NormalBillable,
+                Some(ActiveRegistrationAdmission::ColdFreezeAdmission),
+            ),
+            ActiveRegistrationDecision::Skip
+        );
+    }
+}
+
+#[cfg(test)]
+mod available_balance_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn positive_authoritative_fallback_overrides_stale_local_counters() {
+        let stale_local = AvailableBalance {
+            base_micro: 0,
+            deducted_micro: 70,
+            frozen_micro: 50,
+            available: -120,
+        };
+
+        let snapshot = fallback_balance_snapshot(stale_local, 100);
+
+        assert_eq!(
+            snapshot,
+            AvailableBalance {
+                base_micro: 100,
+                deducted_micro: 0,
+                frozen_micro: 0,
+                available: 100,
+            }
+        );
+        assert!(snapshot.available > 0);
+    }
+
+    #[test]
+    fn zero_fallback_preserves_rejection_snapshot() {
+        let stale_local = AvailableBalance {
+            base_micro: 0,
+            deducted_micro: 70,
+            frozen_micro: 50,
+            available: -120,
+        };
+
+        let snapshot = fallback_balance_snapshot(stale_local, 0);
+
+        assert_eq!(snapshot, stale_local);
+        assert!(snapshot.available <= 0);
     }
 }
 

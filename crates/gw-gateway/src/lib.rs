@@ -137,6 +137,7 @@ struct Wired {
     /// via the lease branch or fall through to the legacy soft-defense path.
     protection_cfg: gw_ledger::ProtectionConfig,
     overflow_gate: Arc<gw_ledger::overflow::OverflowGate>,
+    active_registration: gw_ledger::ActiveRegistrationHandle,
     classifier: Arc<dyn gw_core::error::ErrorClassifier>,
     adapter_registry: Arc<gw_adapter::AdapterRegistry>,
     oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime>,
@@ -416,6 +417,7 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.hard_cap_cfg,
                 wired.protection_cfg.clone(),
                 wired.overflow_gate,
+                wired.active_registration,
                 wired.classifier,
                 wired.adapter_registry,
                 wired.oauth_runtime,
@@ -1185,10 +1187,11 @@ async fn bootstrap(
     let deduct_gc_handle = gw_ledger::DeductGc::spawn(shutdown_token.clone());
     shutdown.register(deduct_gc_handle);
 
-    // ledger_sweep: periodic sweep of LEASE_POOL (Unprotected/idle) +
+    // ledger_sweep: periodic sweep of LEASE_POOL (expired protected leases) +
     // COEF_STAGING (orphan versions). Supervisor-wrapped; registered with
     // the ShutdownCoordinator like the other ledger-side background tasks.
-    let ledger_sweep_handle = gw_ledger::ledger_sweep::spawn(shutdown_token.clone());
+    let ledger_sweep_handle =
+        gw_ledger::ledger_sweep::spawn(shutdown_token.clone(), cfg.protection.clone());
     shutdown.register(ledger_sweep_handle);
 
     // 4d. InflightLedger + background tasks (W2-T6).
@@ -1243,6 +1246,14 @@ async fn bootstrap(
         pg.clone(),
         gw_ledger::overflow::OverflowConfig::default(),
     ));
+    let (active_registration, active_registration_handle) =
+        gw_ledger::active_registration::spawn_active_registration_worker(
+            (*redis.pool).clone(),
+            instance_id.clone(),
+            &cfg.protection,
+            shutdown_token.clone(),
+        );
+    shutdown.register(active_registration_handle);
 
     // W4-T4 — Startup reconciler: scan billing:inflight:<instance_id>:* for
     // residuals from the previous boot and emit CrashFallback UsageRecords.
@@ -1775,6 +1786,7 @@ async fn bootstrap(
             },
             protection_cfg: cfg.protection.clone(),
             overflow_gate,
+            active_registration,
             classifier: Arc::new(gw_core::error::DefaultClassifier),
             adapter_registry,
             oauth_runtime,

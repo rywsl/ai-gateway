@@ -123,13 +123,16 @@ When `[protection].enabled = true` and the user has a protected lease entry from
 2. Read the lease's `coef_table_version` and call `estimate_request_credits` to compute the
    reserved credits for this request (input + max_output, 2-dim).
 3. `LeaseGuard::try_acquire`:
-   - `Expired` → 503 `GW_QUOTA_BALANCE_CACHE_UNAVAILABLE` (balance/lease cache unavailable).
-   - `Insufficient` → 402 `GW_QUOTA_BALANCE_INSUFFICIENT`.
-   - `NoLease` (warmup/race) → fall through to legacy soft defense (step 9/10).
+   - `Expired`, `Insufficient`, or `NoLease` (warmup/race) → route through the read-only `OverflowGate` balance fallback before any legacy soft-defense path.
+   - Overflow balance available → admit the request without a `LeaseGuard`; later billing still emits normal usage.
+   - Overflow balance insufficient → 402 `GW_QUOTA_BALANCE_INSUFFICIENT`.
+   - Overflow Redis/PG fallback unavailable → 503 `GW_QUOTA_BALANCE_CACHE_UNAVAILABLE`.
    - `Ok(guard)` → store `lease_guard` on `ReqCtx` and **skip step 16** `RequestFreeze`.
 
 If `estimate_request_credits` fails (no coefs for the lease version), the request is
 fail-closed-rejected with `GW_QUOTA_COEF_TABLE_NOT_READY`.
+
+Credit lease activation starts from an admitted normal billable Rust request. Cold funded users may pass the Redis counter gate through the read-only `OverflowGate` balance fallback, which trusts only active non-deleted wallet rows, then the active-registration worker marks the user for Go renewal. Balance/fallback rejections, task endpoints, Gemini Files endpoints, and runs with protection disabled do not register active users.
 
 Spec: [`docs/spec/06-billing-ledger.md`](spec/06-billing-ledger.md).
 

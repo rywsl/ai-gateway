@@ -67,10 +67,37 @@ impl LeaseState {
 
 pub static LEASE_POOL: Lazy<DashMap<UserId, Arc<LeaseState>>> = Lazy::new(DashMap::new);
 
-/// LeasePool has no idle unprotected state in hard mode. Keep the sweep hook so
-/// the periodic ledger task remains a stable owner for future protected cleanup.
-pub fn sweep_leases() -> u64 {
-    0
+pub fn sweep_cutoff_ms(
+    expires_at_ms: u64,
+    lease_grace_ms: u64,
+    active_registration_ttl_secs: u64,
+) -> u64 {
+    expires_at_ms
+        .saturating_add(lease_grace_ms)
+        .saturating_add(active_registration_ttl_secs.saturating_mul(1000))
+}
+
+/// Remove protected leases only after the Go-pushed lease expiry, local grace,
+/// and Rust active-registration TTL have all elapsed.
+pub fn sweep_leases(
+    now_ms_val: u64,
+    lease_grace_ms: u64,
+    active_registration_ttl_secs: u64,
+) -> u64 {
+    let mut removed = 0_u64;
+    LEASE_POOL.retain(|_, state| {
+        let expires_at = state.expires_at_ms.load(Ordering::Acquire);
+        let keep =
+            now_ms_val <= sweep_cutoff_ms(expires_at, lease_grace_ms, active_registration_ttl_secs);
+        if !keep {
+            removed += 1;
+        }
+        keep
+    });
+    if removed > 0 {
+        metrics::counter!(crate::metrics::CREDIT_LEASE_SWEEP_REMOVED_TOTAL).increment(removed);
+    }
+    removed
 }
 
 /// Count users currently in protected mode. Used by the ledger_sweep sampler to
@@ -364,21 +391,24 @@ mod tests {
     }
 
     #[test]
-    fn protected_entries_are_not_swept_by_ledger_sweep() {
+    fn protected_entries_are_swept_after_grace_and_active_ttl() {
         let _lock = SERIAL.lock().unwrap();
-        let uid = fresh_uid("sweep_protected");
-        upsert_protected(&uid, 1000, "lease-x".into(), 9, now_ms() + 60_000);
-        // Backdate last_seen heavily. In hard mode, lease sweep must not remove
-        // protected entries because there is no unprotected idle mode.
-        let s = LEASE_POOL.get(&uid).unwrap();
-        let old_ts = now_ms().saturating_sub(60 * 60 * 1000);
-        s.last_seen_at_ms.store(old_ts, Ordering::Release);
-        drop(s);
+        LEASE_POOL.clear();
+        let uid = fresh_uid("sweep-old-protected");
+        upsert_protected(&uid, 100, "lease-old".to_string(), 7, 1_000);
 
-        let removed = sweep_leases();
-        assert_eq!(removed, 0);
+        let removed_before = sweep_leases(1_000 + 30_000 + 300_000, 30_000, 300);
+        assert_eq!(removed_before, 0);
         assert!(LEASE_POOL.contains_key(&uid));
-        LEASE_POOL.remove(&uid);
+
+        let removed_after = sweep_leases(1_000 + 30_000 + 300_000 + 1, 30_000, 300);
+        assert_eq!(removed_after, 1);
+        assert!(!LEASE_POOL.contains_key(&uid));
+    }
+
+    #[test]
+    fn sweep_cutoff_saturates_on_large_values() {
+        assert_eq!(sweep_cutoff_ms(u64::MAX - 5, 30_000, 300), u64::MAX);
     }
 
     #[test]

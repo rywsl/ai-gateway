@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::metrics::{
-    CREDIT_OVERFLOW_CONSUMED_WINDOW, CREDIT_OVERFLOW_GATE_TOTAL, CREDIT_OVERFLOW_LATENCY_MS,
-    PG_FALLBACK_TOTAL,
+    CREDIT_BALANCE_FALLBACK_TOTAL, CREDIT_OVERFLOW_CONSUMED_WINDOW, CREDIT_OVERFLOW_GATE_TOTAL,
+    CREDIT_OVERFLOW_LATENCY_MS, PG_FALLBACK_TOTAL,
 };
 
 pub const BALANCE_CACHE_PREFIX: &str = "credit:balance_cache";
@@ -21,6 +21,7 @@ pub const FETCH_BALANCE_SQL: &str = r#"
 SELECT COALESCE(recharge_balance_micros, 0) + COALESCE(gift_balance_micros, 0)
 FROM wallets
 WHERE user_id = $1 AND deleted_at IS NULL
+  AND status = 'active'
 "#;
 
 const OVERFLOW_INCR_LUA: &str = r#"
@@ -136,6 +137,18 @@ impl OverflowGate {
             return Ok(());
         };
         self.incr_consumed(user_id, delta).await
+    }
+
+    pub async fn fallback_balance_micro(&self, user_id: &str) -> Result<i64, OverflowError> {
+        let (balance, path) = self.balance_for(user_id).await?;
+        let result = if balance > 0 { "positive" } else { "zero" };
+        metrics::counter!(
+            CREDIT_BALANCE_FALLBACK_TOTAL,
+            "result" => result,
+            "path" => path
+        )
+        .increment(1);
+        Ok(balance)
     }
 
     async fn balance_for(&self, user_id: &str) -> Result<(i64, &'static str), OverflowError> {
@@ -274,6 +287,61 @@ pub fn record_actual_delta(reserved_credits: i64, actual_credits: i64) -> Option
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "requires Docker (testcontainers Redis + Postgres)"]
+    async fn fallback_balance_micro_reuses_balance_for_path() {
+        let (_redis_container, redis) = test_redis_pool().await;
+        let (_pg_container, pg) = test_pg_pool().await;
+        sqlx::query(
+            "CREATE TABLE wallets (user_id TEXT PRIMARY KEY, recharge_balance_micros BIGINT, gift_balance_micros BIGINT, status TEXT NOT NULL DEFAULT 'active', deleted_at TIMESTAMPTZ)",
+        )
+        .execute(&pg)
+        .await
+        .expect("create wallets");
+        sqlx::query(
+            "INSERT INTO wallets(user_id, recharge_balance_micros, gift_balance_micros, status, deleted_at) VALUES ($1, $2, $3, 'active', NULL)",
+        )
+        .bind("user-positive")
+        .bind(11_i64)
+        .bind(22_i64)
+        .execute(&pg)
+        .await
+        .expect("insert wallet");
+
+        let gate = OverflowGate::new(redis, pg, OverflowConfig::default());
+        let balance = gate
+            .fallback_balance_micro("user-positive")
+            .await
+            .expect("fallback balance");
+        assert_eq!(balance, 33);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker (testcontainers Postgres)"]
+    async fn pg_fallback_balance_ignores_inactive_wallet_rows() {
+        let (_pg_container, pg) = test_pg_pool().await;
+        sqlx::query(
+            "CREATE TABLE wallets (user_id TEXT PRIMARY KEY, recharge_balance_micros BIGINT, gift_balance_micros BIGINT, status TEXT NOT NULL DEFAULT 'active', deleted_at TIMESTAMPTZ)",
+        )
+        .execute(&pg)
+        .await
+        .expect("create wallets");
+        sqlx::query(
+            "INSERT INTO wallets(user_id, recharge_balance_micros, gift_balance_micros, status, deleted_at) VALUES ($1, $2, $3, 'suspended', NULL)",
+        )
+        .bind("user-suspended")
+        .bind(11_i64)
+        .bind(22_i64)
+        .execute(&pg)
+        .await
+        .expect("insert wallet");
+
+        let balance = fetch_balance_micro(&pg, "user-suspended")
+            .await
+            .expect("fallback balance");
+        assert_eq!(balance, 0);
+    }
+
     #[test]
     fn overflow_keys_match_hard_mode_contract() {
         assert_eq!(balance_cache_key("u_1"), "credit:balance_cache:u_1");
@@ -281,11 +349,12 @@ mod tests {
     }
 
     #[test]
-    fn pg_fallback_query_uses_wallet_split_balance_columns() {
+    fn pg_fallback_query_uses_only_active_wallet_rows() {
         assert!(FETCH_BALANCE_SQL.contains("recharge_balance_micros"));
         assert!(FETCH_BALANCE_SQL.contains("gift_balance_micros"));
         assert!(!FETCH_BALANCE_SQL.contains(" balance_micro "));
         assert!(FETCH_BALANCE_SQL.contains("deleted_at IS NULL"));
+        assert!(FETCH_BALANCE_SQL.contains("status = 'active'"));
     }
 
     #[test]
@@ -334,5 +403,54 @@ mod tests {
             src.contains("Ok(0)"),
             "consumed_for fail-open path must treat failed consumed reads as zero"
         );
+    }
+
+    async fn test_redis_pool() -> (
+        testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
+        RedisPool,
+    ) {
+        use fred::interfaces::ClientLike;
+        use fred::types::{ConnectionConfig, PerformanceConfig, ReconnectPolicy, RedisConfig};
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::redis::Redis;
+
+        let container = Redis::default().start().await.expect("redis");
+        let port = container
+            .get_host_port_ipv4(6379)
+            .await
+            .expect("redis port");
+        let pool = RedisPool::new(
+            RedisConfig::from_url(&format!("redis://127.0.0.1:{port}")).expect("redis config"),
+            Some(PerformanceConfig::default()),
+            Some(ConnectionConfig::default()),
+            Some(ReconnectPolicy::new_constant(0, 100)),
+            1,
+        )
+        .expect("RedisPool");
+        pool.init().await.expect("redis init");
+        (container, pool)
+    }
+
+    async fn test_pg_pool() -> (
+        testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+        PgPool,
+    ) {
+        use sqlx::postgres::PgPoolOptions;
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::postgres::Postgres;
+
+        let container = Postgres::default().start().await.expect("postgres");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("postgres port");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{port}/postgres"
+            ))
+            .await
+            .expect("pg pool");
+        (container, pool)
     }
 }

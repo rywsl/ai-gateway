@@ -2,6 +2,7 @@
 //! (ADR-004 + C-γ §ADR-Cγ-2), mpsc-backed usage-record flusher with Redis
 //! pipeline, and detailed-archive writer.
 
+pub mod active_registration;
 pub mod backlog;
 pub mod deduct_gc;
 pub mod dlq;
@@ -29,6 +30,9 @@ pub use freeze::{
 pub use gw_core::permissions::MarkupChainSnapshot;
 pub use usage::{UsageRecord, UsageStatus, VendorExposureState};
 
+pub use active_registration::{
+    active_user_key, ActiveRegistrationEnqueueResult, ActiveRegistrationHandle,
+};
 pub mod detailed_archive;
 pub mod protection_config;
 pub use protection_config::ProtectionConfig;

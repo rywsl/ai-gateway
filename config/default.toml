@@ -240,6 +240,10 @@ lease_grace_ms = 30000
 # Fallback `max_tokens` ceiling for credit estimation when the request has no
 # explicit `max_tokens` and the model's entity config also lacks a default.
 default_output_ceiling_tokens = 8192
+# Rust active-registration markers consumed by Go lease renewal.
+active_registration_ttl_secs = 300
+active_registration_refresh_min_interval_secs = 30
+active_registration_queue_capacity = 8192
 
 # ---------------------------------------------------------------------------
 # Shared runtime primitives (resilience-fixes T2.1)
