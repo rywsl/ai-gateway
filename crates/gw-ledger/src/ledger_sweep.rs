@@ -5,7 +5,7 @@
 //! Supervised by `gw_runtime::Supervisor` (catch_unwind +
 //! exponential-backoff restart). Registered with `ShutdownCoordinator`.
 
-use crate::{coef, lease};
+use crate::{coef, lease, ProtectionConfig};
 use gw_runtime::{RestartPolicy, ShutdownToken, Supervisor};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -29,7 +29,7 @@ fn sample_credit_gauges() {
 /// (catch_unwind + exponential-backoff restart) so a sweep iteration
 /// panicking does not silently disable the loop. Returns the JoinHandle
 /// so the caller can register it with the ShutdownCoordinator.
-pub fn spawn(shutdown: ShutdownToken) -> JoinHandle<()> {
+pub fn spawn(shutdown: ShutdownToken, protection_cfg: ProtectionConfig) -> JoinHandle<()> {
     Supervisor::new("ledger_sweep", RestartPolicy::default(), shutdown).spawn(
         move |tok| async move {
             // Populate the credit gauges immediately so /metrics surfaces a real
@@ -45,7 +45,11 @@ pub fn spawn(shutdown: ShutdownToken) -> JoinHandle<()> {
                     }
                     _ = tick.tick() => {
                         sample_credit_gauges();
-                        let lease_removed = lease::sweep_leases();
+                        let lease_removed = lease::sweep_leases(
+                            lease::now_ms(),
+                            protection_cfg.lease_grace_ms,
+                            protection_cfg.active_registration_ttl_secs,
+                        );
                         let coef_removed = coef::sweep_orphans();
                         if lease_removed > 0 || coef_removed > 0 {
                             debug!(
@@ -79,7 +83,7 @@ mod tests {
     async fn spawn_respects_shutdown_token() {
         let coord = ShutdownCoordinator::default();
         let token = coord.token();
-        let handle = spawn(token);
+        let handle = spawn(token, crate::ProtectionConfig::default());
         coord.token().cancel();
         let exit = tokio::time::timeout(Duration::from_secs(5), handle).await;
         assert!(

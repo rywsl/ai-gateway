@@ -92,6 +92,10 @@ PgSQL 同步表则携带 `version BIGINT`（详见 Part 03）。
 - **Go 写 counter**：先 `INCRBY counter:user:<uid>:<field>`，再 `XADD events:counter` 携带 `value_after`。Rust 用 `value_after` 覆盖本地缓存，**不**做 delta 累加。
 - **Rust 反向写 entity**：仅限白名单（`vendor_key.status_change`、`ipblock.upsert`），见 Part 02。`v` 字段 Rust 不能伪造单调，**必须**通过 Go 中转或使用 Go 预留的"反向写入 op"枚举。
 
+### 3.4.1 Rust active credit lease markers
+
+Rust writes `credit:active_users` and `credit:active_user:<uid>` with marker value `<last_seen_ms>|<pod_id>`. Go treats the marker key as authoritative liveness and may remove stale set members when the marker is missing.
+
 ### 3.5 失败语义
 
 | 场景 | Rust 行为 | Go 行为 |

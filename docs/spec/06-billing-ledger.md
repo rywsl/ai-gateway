@@ -87,7 +87,12 @@ Bootstrap resolves a stable `instance_id` (`instance_id::resolve`) before `Ledge
 - `metrics.rs`: hard-mode metric names: `gw_credit_lease_acquire_total`, `gw_credit_lease_estimate_credits`, `gw_credit_overflow_gate_total`, `gw_credit_overflow_latency_ms`, `gw_credit_overflow_consumed_window`, `gw_pg_fallback_total`, `gw_coef_table_active_version`, `gw_heartbeat_sadd_total`.
 
 **Ledger sweep cadence.** A `ledger_sweep` background task (Supervisor-wrapped, 60s tick, ShutdownCoordinator-registered) periodically evicts:
-- `COEF_STAGING` entries whose version is strictly less than `active_version - COEF_STAGING_SAFETY_MARGIN` (100 default). `apply_coef_commit`'s existing `Stale` and `Incomplete` branches remain unchanged; this sweep covers the orphan case (entries inserted by `apply_coef_entry` whose commit event never arrives). `LEASE_POOL` no longer has an unprotected idle state to evict.
+- `COEF_STAGING` entries whose version is strictly less than `active_version - COEF_STAGING_SAFETY_MARGIN` (100 default). `apply_coef_commit`'s existing `Stale` and `Incomplete` branches remain unchanged; this sweep covers the orphan case (entries inserted by `apply_coef_entry` whose commit event never arrives).
+- `LEASE_POOL` protected entries only after `now_ms > expires_at_ms + lease_grace_ms + active_registration_ttl_secs * 1000`, so a recently active Rust request keeps enough time for Go renewal before local cleanup.
+
+### Rust-Initiated Active Credit Lease Registration
+
+After a normal billable LLM proxy request is admitted, Rust enqueues an active-registration event without awaiting Redis. The worker atomically writes `credit:active_users` and `credit:active_user:<uid>` so Go can renew leases for recently active funded users. Task endpoints and Gemini Files endpoints do not write active registration in this phase.
 
 **BillingBacklog observability.** In addition to the existing `gw_billing_backlog_pending_bytes` and `gw_billing_backlog_pending_count` gauges, `push` now emits `gw_billing_backlog_high_watermark_count` (the maximum pending count seen) and `gw_billing_backlog_over_threshold_total` (a counter that fires once per upward crossing of `BILLING_BACKLOG_OVER_THRESHOLD`, default 10_000). The crossing flag resets when `pop` drops the count below the threshold, so subsequent crossings count again.
 

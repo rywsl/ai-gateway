@@ -131,6 +131,8 @@ When `[protection].enabled = true` and the user has a protected lease entry from
 If `estimate_request_credits` fails (no coefs for the lease version), the request is
 fail-closed-rejected with `GW_QUOTA_COEF_TABLE_NOT_READY`.
 
+Credit lease activation starts from an admitted Rust request. Cold funded users may pass the Redis counter gate through the read-only `OverflowGate` balance fallback, then the active-registration worker marks the user for Go renewal.
+
 Spec: [`docs/spec/06-billing-ledger.md`](spec/06-billing-ledger.md).
 
 9. **Cross-protocol non-stream** — cross-protocol non-stream requests now round-trip end-to-end: `upstream_peer` lets the request through, the upstream body is accumulated in `response_body_filter` (§2.6), `parse_response` produces the IR, and `CrossRender` re-renders into `ctx.pending_client_body` (`gw_codec_cross_render_nonstream_total{from,to}`). The pre-S-codec-v2 `503 GW_REQUEST_CROSS_PROTOCOL_NONSTREAM_NOT_SUPPORTED` short-circuit is gone. Same-protocol non-stream stays zero-copy on the response side (body is forwarded as-is; only `parse_response` runs to populate `ctx.usage`).
