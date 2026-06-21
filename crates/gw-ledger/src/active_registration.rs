@@ -3,6 +3,7 @@ use crate::metrics::{
     CREDIT_ACTIVE_REGISTER_REDIS_TOTAL,
 };
 use crate::ProtectionConfig;
+use dashmap::mapref::entry::Entry;
 use fred::clients::RedisPool;
 use fred::interfaces::LuaInterface;
 use gw_core::ids::UserId;
@@ -42,6 +43,7 @@ pub struct ActiveRegistrationHandle {
     enabled: bool,
     pod_id: Arc<str>,
     min_interval_ms: u64,
+    queue_capacity: usize,
     last_enqueue_ms: Arc<dashmap::DashMap<UserId, u64>>,
     tx: Option<mpsc::Sender<ActiveRegistrationEvent>>,
 }
@@ -56,6 +58,7 @@ impl ActiveRegistrationHandle {
             enabled: false,
             pod_id: Arc::from(""),
             min_interval_ms: 0,
+            queue_capacity: 0,
             last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
             tx: None,
         }
@@ -73,6 +76,7 @@ impl ActiveRegistrationHandle {
                 enabled: true,
                 pod_id: Arc::from(pod_id),
                 min_interval_ms,
+                queue_capacity: capacity,
                 last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
                 tx: Some(tx),
             },
@@ -86,21 +90,20 @@ impl ActiveRegistrationHandle {
         admitted_at_ms: u64,
     ) -> ActiveRegistrationEnqueueResult {
         if !self.enabled {
-            record_enqueue(ActiveRegistrationEnqueueResult::Disabled, 0);
+            record_enqueue(ActiveRegistrationEnqueueResult::Disabled, None);
             return ActiveRegistrationEnqueueResult::Disabled;
         }
         let Some(tx) = &self.tx else {
-            record_enqueue(ActiveRegistrationEnqueueResult::Closed, 0);
+            record_enqueue(ActiveRegistrationEnqueueResult::Closed, None);
             return ActiveRegistrationEnqueueResult::Closed;
         };
 
-        if self.min_interval_ms > 0 {
-            if let Some(last) = self.last_enqueue_ms.get(uid) {
-                if admitted_at_ms.saturating_sub(*last) < self.min_interval_ms {
-                    record_enqueue(ActiveRegistrationEnqueueResult::Throttled, tx.capacity());
-                    return ActiveRegistrationEnqueueResult::Throttled;
-                }
-            }
+        if !self.reserve_enqueue(uid, admitted_at_ms) {
+            record_enqueue(
+                ActiveRegistrationEnqueueResult::Throttled,
+                Some(self.queue_depth(tx)),
+            );
+            return ActiveRegistrationEnqueueResult::Throttled;
         }
 
         let event = ActiveRegistrationEvent {
@@ -110,19 +113,54 @@ impl ActiveRegistrationHandle {
         };
         match tx.try_send(event) {
             Ok(()) => {
-                self.last_enqueue_ms.insert(uid.clone(), admitted_at_ms);
-                record_enqueue(ActiveRegistrationEnqueueResult::Queued, tx.capacity());
+                record_enqueue(
+                    ActiveRegistrationEnqueueResult::Queued,
+                    Some(self.queue_depth(tx)),
+                );
                 ActiveRegistrationEnqueueResult::Queued
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                record_enqueue(ActiveRegistrationEnqueueResult::Full, tx.capacity());
+                self.rollback_reservation(uid, admitted_at_ms);
+                record_enqueue(
+                    ActiveRegistrationEnqueueResult::Full,
+                    Some(self.queue_depth(tx)),
+                );
                 ActiveRegistrationEnqueueResult::Full
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                record_enqueue(ActiveRegistrationEnqueueResult::Closed, tx.capacity());
+                self.rollback_reservation(uid, admitted_at_ms);
+                record_enqueue(ActiveRegistrationEnqueueResult::Closed, None);
                 ActiveRegistrationEnqueueResult::Closed
             }
         }
+    }
+
+    fn reserve_enqueue(&self, uid: &UserId, admitted_at_ms: u64) -> bool {
+        match self.last_enqueue_ms.entry(uid.clone()) {
+            Entry::Occupied(mut entry) => {
+                if self.min_interval_ms > 0
+                    && admitted_at_ms.saturating_sub(*entry.get()) < self.min_interval_ms
+                {
+                    false
+                } else {
+                    entry.insert(admitted_at_ms);
+                    true
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(admitted_at_ms);
+                true
+            }
+        }
+    }
+
+    fn rollback_reservation(&self, uid: &UserId, admitted_at_ms: u64) {
+        self.last_enqueue_ms
+            .remove_if(uid, |_, last| *last == admitted_at_ms);
+    }
+
+    fn queue_depth(&self, tx: &mpsc::Sender<ActiveRegistrationEvent>) -> usize {
+        self.queue_capacity.saturating_sub(tx.capacity())
     }
 }
 
@@ -143,6 +181,7 @@ pub fn spawn_active_registration_worker(
         min_interval_ms: cfg
             .active_registration_refresh_min_interval_secs
             .saturating_mul(1000),
+        queue_capacity: capacity,
         last_enqueue_ms: Arc::new(dashmap::DashMap::new()),
         tx: Some(tx),
     };
@@ -215,7 +254,7 @@ async fn write_registration_once(
     Ok(())
 }
 
-fn record_enqueue(result: ActiveRegistrationEnqueueResult, remaining_capacity: usize) {
+fn record_enqueue(result: ActiveRegistrationEnqueueResult, queue_depth: Option<usize>) {
     let result_label = match result {
         ActiveRegistrationEnqueueResult::Queued => "queued",
         ActiveRegistrationEnqueueResult::Throttled => "throttled",
@@ -228,7 +267,9 @@ fn record_enqueue(result: ActiveRegistrationEnqueueResult, remaining_capacity: u
         "result" => result_label
     )
     .increment(1);
-    metrics::gauge!(CREDIT_ACTIVE_REGISTER_QUEUE_DEPTH).set(remaining_capacity as f64);
+    if let Some(queue_depth) = queue_depth {
+        metrics::gauge!(CREDIT_ACTIVE_REGISTER_QUEUE_DEPTH).set(queue_depth as f64);
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +279,8 @@ mod tests {
     use fred::interfaces::{ClientLike, KeysInterface, SetsInterface};
     use fred::types::{ConnectionConfig, PerformanceConfig, ReconnectPolicy, RedisConfig};
     use gw_core::ids::UserId;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use testcontainers::{runners::AsyncRunner, ContainerAsync};
     use testcontainers_modules::redis::Redis;
 
@@ -301,6 +344,76 @@ mod tests {
             handle.try_enqueue_activity(&uid("user-b"), 10_001),
             ActiveRegistrationEnqueueResult::Full
         );
+    }
+
+    #[test]
+    fn concurrent_same_user_activity_queues_once_inside_interval() {
+        const THREADS: usize = 128;
+
+        let (handle, mut rx) = ActiveRegistrationHandle::for_test("pod-a", 30_000, THREADS);
+        let handle = Arc::new(handle);
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let user = uid("user-concurrent");
+
+        let threads = (0..THREADS)
+            .map(|_| {
+                let handle = Arc::clone(&handle);
+                let barrier = Arc::clone(&barrier);
+                let user = user.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    handle.try_enqueue_activity(&user, 10_000)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("thread"))
+            .collect::<Vec<_>>();
+        let queued = results
+            .iter()
+            .filter(|result| **result == ActiveRegistrationEnqueueResult::Queued)
+            .count();
+        let throttled = results
+            .iter()
+            .filter(|result| **result == ActiveRegistrationEnqueueResult::Throttled)
+            .count();
+
+        assert_eq!(queued, 1, "results={results:?}");
+        assert_eq!(throttled, THREADS - 1, "results={results:?}");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].uid.as_ref(), "user-concurrent");
+        assert_eq!(events[0].last_seen_ms, 10_000);
+    }
+
+    #[test]
+    fn full_queue_rolls_back_same_user_reservation() {
+        let (handle, mut rx) = ActiveRegistrationHandle::for_test("pod-a", 30_000, 1);
+        assert_eq!(
+            handle.try_enqueue_activity(&uid("queued-user"), 10_000),
+            ActiveRegistrationEnqueueResult::Queued
+        );
+        assert_eq!(
+            handle.try_enqueue_activity(&uid("retry-user"), 10_001),
+            ActiveRegistrationEnqueueResult::Full
+        );
+
+        let queued = rx.try_recv().expect("queued event");
+        assert_eq!(queued.uid.as_ref(), "queued-user");
+
+        assert_eq!(
+            handle.try_enqueue_activity(&uid("retry-user"), 10_002),
+            ActiveRegistrationEnqueueResult::Queued
+        );
+        let retry = rx.try_recv().expect("retry event");
+        assert_eq!(retry.uid.as_ref(), "retry-user");
+        assert_eq!(retry.last_seen_ms, 10_002);
     }
 
     #[tokio::test]
