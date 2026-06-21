@@ -1598,6 +1598,7 @@ mod affinity_tests {
             api_key: SecretString::new("sk-test".into()),
             accessible_models: vec![ModelName::from("m1")],
             model_mapping: Default::default(),
+            model_cost_weights: Default::default(),
             accessible_endpoints,
             protocol_conversion,
             priority: 0,
@@ -1791,6 +1792,7 @@ mod body_hash_tests {
                 .iter()
                 .map(|(from, to)| (ModelName::from(*from), (*to).to_owned()))
                 .collect::<HashMap<_, _>>(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
             protocol_conversion: true,
             priority: 0,
@@ -2205,6 +2207,7 @@ mod regression_baseline_tests {
             api_key: SecretString::new("sk-vendor-secret".into()),
             accessible_models: Vec::new(),
             model_mapping: HashMap::new(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
             protocol_conversion: false,
             priority: 0,
@@ -2508,6 +2511,7 @@ mod regression_baseline_tests {
             api_key: SecretString::new("sk-vendor-secret".into()),
             accessible_models: Vec::new(),
             model_mapping: HashMap::new(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
             protocol_conversion: false,
             priority: 0,

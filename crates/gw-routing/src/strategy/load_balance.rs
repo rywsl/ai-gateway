@@ -69,6 +69,7 @@ mod tests {
             api_key: SecretString::from("sk".to_string()),
             accessible_models: vec![],
             model_mapping: Default::default(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![],
             protocol_conversion: false,
             priority: 0,

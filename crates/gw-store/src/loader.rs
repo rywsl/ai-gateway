@@ -219,6 +219,8 @@ struct VendorKeyRow {
     #[serde(default)]
     model_mapping: std::collections::HashMap<ModelName, String>,
     #[serde(default)]
+    model_cost_weights: std::collections::HashMap<ModelName, u32>,
+    #[serde(default)]
     accessible_endpoints: Vec<gw_core::protocol::ProtocolKind>,
     #[serde(default)]
     protocol_conversion: bool,
@@ -392,6 +394,7 @@ pub async fn load_vendor_key(ctx: &LoaderCtx, id: &KeyId) -> anyhow::Result<Vers
             api_key: secret,
             accessible_models: row.accessible_models,
             model_mapping: row.model_mapping,
+            model_cost_weights: row.model_cost_weights,
             accessible_endpoints: row.accessible_endpoints,
             protocol_conversion: row.protocol_conversion,
             priority: row.priority,
@@ -658,6 +661,34 @@ mod oauth_row_tests {
             "auth_tag": [0xaa, 0xbb, 0xcc, 0xdd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             "kek_kid": "kid-1"
         })
+    }
+
+    fn existing_vendor_key_row_json_without_cost_weights() -> serde_json::Value {
+        json!({
+            "key_id": "key-123",
+            "vendor_id": "v-1",
+            "api_key_enc": enc_key_json(),
+            "status": "active"
+        })
+    }
+
+    #[test]
+    fn vendor_key_row_model_cost_weights_default_to_empty() {
+        let payload = existing_vendor_key_row_json_without_cost_weights();
+        let row: VendorKeyRow = serde_json::from_value(payload).expect("row deserializes");
+        assert!(row.model_cost_weights.is_empty());
+    }
+
+    #[test]
+    fn vendor_key_row_deserializes_model_cost_weights() {
+        let mut payload = existing_vendor_key_row_json_without_cost_weights();
+        payload["model_cost_weights"] = serde_json::json!({ "gpt-4o": 850 });
+        let row: VendorKeyRow = serde_json::from_value(payload).expect("row deserializes");
+        assert_eq!(
+            row.model_cost_weights
+                .get(&gw_core::ids::ModelName::from("gpt-4o")),
+            Some(&850),
+        );
     }
 
     #[test]

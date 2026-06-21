@@ -56,6 +56,7 @@ fn vendor_key(api_key: &str, oauth: Option<OAuthCredentials>) -> Arc<VendorKey> 
         api_key: SecretString::from(api_key.to_owned()),
         accessible_models: Vec::new(),
         model_mapping: HashMap::new(),
+        model_cost_weights: Default::default(),
         accessible_endpoints: vec![ProtocolKind::OpenAi],
         protocol_conversion: false,
         priority: 0,

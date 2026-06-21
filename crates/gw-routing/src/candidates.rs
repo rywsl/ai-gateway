@@ -85,6 +85,7 @@ pub async fn get_candidate_keys(
             api_key: SecretString::from(key.api_key.expose_secret().to_owned()),
             accessible_models: key.accessible_models.clone(),
             model_mapping: key.model_mapping.clone(),
+            model_cost_weights: key.model_cost_weights.clone(),
             accessible_endpoints: key.accessible_endpoints.clone(),
             protocol_conversion: key.protocol_conversion,
             priority: key.priority,

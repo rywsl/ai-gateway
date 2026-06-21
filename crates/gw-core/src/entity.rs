@@ -226,6 +226,7 @@ pub struct VendorKey {
     pub api_key: SecretString,
     pub accessible_models: Vec<ModelName>,
     pub model_mapping: HashMap<ModelName, String>,
+    pub model_cost_weights: HashMap<ModelName, u32>,
     pub accessible_endpoints: Vec<ProtocolKind>,
     pub protocol_conversion: bool,
     pub priority: i32,

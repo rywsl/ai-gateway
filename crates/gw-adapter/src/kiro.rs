@@ -244,6 +244,7 @@ mod tests {
             api_key: SecretString::from(secret.to_owned()),
             accessible_models: Vec::new(),
             model_mapping: HashMap::new(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![ProtocolKind::Kiro],
             protocol_conversion: false,
             priority: 0,
