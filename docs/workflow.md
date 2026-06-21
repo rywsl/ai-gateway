@@ -123,9 +123,10 @@ When `[protection].enabled = true` and the user has a protected lease entry from
 2. Read the lease's `coef_table_version` and call `estimate_request_credits` to compute the
    reserved credits for this request (input + max_output, 2-dim).
 3. `LeaseGuard::try_acquire`:
-   - `Expired` → 503 `GW_QUOTA_BALANCE_CACHE_UNAVAILABLE` (balance/lease cache unavailable).
-   - `Insufficient` → 402 `GW_QUOTA_BALANCE_INSUFFICIENT`.
-   - `NoLease` (warmup/race) → fall through to legacy soft defense (step 9/10).
+   - `Expired`, `Insufficient`, or `NoLease` (warmup/race) → route through the read-only `OverflowGate` balance fallback before any legacy soft-defense path.
+   - Overflow balance available → admit the request without a `LeaseGuard`; later billing still emits normal usage.
+   - Overflow balance insufficient → 402 `GW_QUOTA_BALANCE_INSUFFICIENT`.
+   - Overflow Redis/PG fallback unavailable → 503 `GW_QUOTA_BALANCE_CACHE_UNAVAILABLE`.
    - `Ok(guard)` → store `lease_guard` on `ReqCtx` and **skip step 16** `RequestFreeze`.
 
 If `estimate_request_credits` fails (no coefs for the lease version), the request is

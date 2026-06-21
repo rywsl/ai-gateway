@@ -166,3 +166,30 @@ docs/go-contracts/main.md:97:Rust writes `credit:active_users` and `credit:activ
 ## Concerns
 
 None.
+
+## Review Fix: OverflowGate Docs and Protection Config Fields
+
+Updated `docs/workflow.md` so `Expired`, `Insufficient`, and `NoLease` route through `OverflowGate`; rejection now occurs only when overflow reports insufficient balance or Redis/PG fallback is unavailable. Updated `docs/spec/06-billing-ledger.md` to document the active-registration protection config fields and defaults.
+
+Validation:
+
+```bash
+rg -n "Expired|Insufficient|NoLease|legacy soft|active_registration_ttl_secs|active_registration_refresh_min_interval_secs|active_registration_queue_capacity" docs/workflow.md docs/spec/06-billing-ledger.md
+```
+
+```text
+docs/spec/06-billing-ledger.md:78:- `lease.rs`: `LEASE_POOL` (global `DashMap<UserId, Arc<LeaseState>>`). `LeaseGuard::try_acquire(uid, requested, now_ms_val, grace_ms)` returns `LeaseError::NoLease` (no entry), `LeaseError::Expired` (`now_ms_val > expires_at.saturating_add(grace_ms)`), or `LeaseError::Insufficient` (pool `< requested`); on success CAS-decrements `credits`. `settle_actual(actual)` refunds `reserved - actual` only when `actual ≤ reserved` (no double-charge on over-spend; over-spend is reconciled by Go via `credits_consumed`). `now_ms()` returns `0` on a pre-1970 clock (fail-closed: a 0 timestamp makes any lease read as expired). `upsert_protected` overwrites the user's protected lease state; there is no Rust-side unprotected mode. `protected_user_count()` (count of `Mode::Protected` entries) feeds the observability gauges.
+docs/spec/06-billing-ledger.md:83:- `protection_config.rs`: `[protection]` table — `enabled` (default `true`, kill switch), `lease_grace_ms` (default 30000), `default_output_ceiling_tokens` (default 8192), `active_registration_ttl_secs` (default 300), `active_registration_refresh_min_interval_secs` (default 30), `active_registration_queue_capacity` (default 8192).
+docs/spec/06-billing-ledger.md:86:- Admission (`crates/gw-proxy/src/filters/request.rs` step 8.5/8.6): only when `protection_cfg.enabled` and the user's `LEASE_POOL` mode is `Protected`. Resolves `max_out` (request `max_tokens` else `default_output_ceiling_tokens`, bumping `gw_credit_default_ceiling_used_total`), estimates credits at the lease's `coef_table_version`, and acquires with `protection_cfg.lease_grace_ms`. **Fail-closed**: missing coefs (`estimate_request_credits` error) hard-reject with HTTP 503 `GW_QUOTA_COEF_TABLE_NOT_READY`. `LeaseError::Expired`, `LeaseError::Insufficient`, and `LeaseError::NoLease` all route to overflow step 8.6 before any legacy soft-defense path. Overflow balance-insufficient maps to HTTP 402 `GW_QUOTA_BALANCE_INSUFFICIENT`; overflow Redis/PG failure maps to HTTP 503 `GW_QUOTA_BALANCE_CACHE_UNAVAILABLE`. On direct lease success the `LeaseGuard` parks on `ctx.lease_guard` and steps 9–10 are bypassed. On overflow allow, the request proceeds without a `LeaseGuard`; logging later still emits normal billing usage. Codes are defined in `crates/gw-core/src/error/codes.rs`.
+docs/spec/06-billing-ledger.md:91:- `LEASE_POOL` protected entries only after `now_ms > expires_at_ms + lease_grace_ms + active_registration_ttl_secs * 1000`, so a recently active Rust request keeps enough time for Go renewal before local cleanup.
+docs/spec/06-billing-ledger.md:118:- **Credit-lease fail-closed.** Protected mode without coefficient data hard-rejects rather than admitting; lease expiry includes `lease_grace_ms` for small clock skew; a pre-1970 clock reads every lease as expired; `Expired`, `Insufficient`, and `NoLease` all require overflow admission before the request can proceed (`crates/gw-ledger/src/{lease.rs,overflow.rs}`, `crates/gw-proxy/src/filters/request.rs`).
+docs/workflow.md:126:   - `Expired`, `Insufficient`, or `NoLease` (warmup/race) → route through the read-only `OverflowGate` balance fallback before any legacy soft-defense path.
+```
+
+```bash
+git diff --check
+```
+
+```text
+# exit 0
+```
