@@ -188,6 +188,7 @@ fn seeded_vendor_key() -> Arc<VendorKey> {
         status: gw_core::entity::KeyStatus::Active,
         accessible_models: vec![ModelName::from("gpt-4o")],
         model_mapping: std::collections::HashMap::new(),
+        model_cost_weights: Default::default(),
         accessible_endpoints: vec![],
         protocol_conversion: false,
         priority: 0,

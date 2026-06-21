@@ -339,7 +339,8 @@ pub async fn pick_peer(
     // G12: dispatch into the per-process StrategySet so Sticky's moka cache
     // (and any future stateful strategy) is shared across requests rather
     // than allocated per call.
-    let strategy = strategies.pick_for(&group.value.strategy);
+    let strategy_choice = strategies.strategy_for_kind(&group.value.strategy);
+    let strategy = strategy_choice.as_strategy();
     ctx.strategy_name = Some(strategy.name());
     let pick_ctx = PickCtx {
         user_id: &perm.effective_user_id,
@@ -1598,6 +1599,7 @@ mod affinity_tests {
             api_key: SecretString::new("sk-test".into()),
             accessible_models: vec![ModelName::from("m1")],
             model_mapping: Default::default(),
+            model_cost_weights: Default::default(),
             accessible_endpoints,
             protocol_conversion,
             priority: 0,
@@ -1791,6 +1793,7 @@ mod body_hash_tests {
                 .iter()
                 .map(|(from, to)| (ModelName::from(*from), (*to).to_owned()))
                 .collect::<HashMap<_, _>>(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
             protocol_conversion: true,
             priority: 0,
@@ -2205,6 +2208,7 @@ mod regression_baseline_tests {
             api_key: SecretString::new("sk-vendor-secret".into()),
             accessible_models: Vec::new(),
             model_mapping: HashMap::new(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
             protocol_conversion: false,
             priority: 0,
@@ -2508,6 +2512,7 @@ mod regression_baseline_tests {
             api_key: SecretString::new("sk-vendor-secret".into()),
             accessible_models: Vec::new(),
             model_mapping: HashMap::new(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![gw_core::protocol::ProtocolKind::OpenAi],
             protocol_conversion: false,
             priority: 0,

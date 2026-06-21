@@ -10,12 +10,10 @@
 //!
 //! ## Dispatch shape
 //!
-//! [`Self::pick_for`] returns `&StrategyAny` (not `&dyn Strategy`) so the hot
-//! path stays on the codebase's enum-dispatch contract (see
-//! `crates/gw-routing/src/strategy/mod.rs` doc on `StrategyAny`: "Avoids
-//! heap-allocated trait objects on the hot path"). The set stores one
-//! pre-built `StrategyAny` per kind, so dispatch is a borrow + enum match,
-//! never a vtable call.
+//! [`Self::strategy_for_kind`] is the public runtime dispatch surface. It can
+//! borrow preconfigured strategies or construct inline strategies. [`Self::pick_for`]
+//! only returns borrowed/preconfigured strategies and rejects inline strategy
+//! kinds.
 //!
 //! ## T2-C migration note
 //!
@@ -55,6 +53,33 @@ static UNKNOWN_PRESETS_WARNED: LazyLock<Cache<String, ()>> = LazyLock::new(|| {
         .max_capacity(UNKNOWN_PRESETS_WARNED_CAPACITY)
         .build()
 });
+
+fn dim_weights_from_core(
+    weights: gw_core::entity::MultiDimWeights,
+) -> crate::pipeline::multi_dim::DimWeights {
+    crate::pipeline::multi_dim::DimWeights::raw_with_reservation(
+        weights.health,
+        weights.latency,
+        weights.cost,
+        weights.inflight,
+        weights.error_rate,
+        weights.reservation,
+    )
+}
+
+pub enum StrategyChoice<'a> {
+    Borrowed(&'a StrategyAny),
+    Owned(StrategyAny),
+}
+
+impl StrategyChoice<'_> {
+    pub fn as_strategy(&self) -> &StrategyAny {
+        match self {
+            StrategyChoice::Borrowed(strategy) => strategy,
+            StrategyChoice::Owned(strategy) => strategy,
+        }
+    }
+}
 
 /// One instance of each of the 8 strategy variants, owned for the lifetime of
 /// the process and shared across all requests via `Arc<StrategySet>`.
@@ -126,11 +151,15 @@ impl StrategySet {
         Self::new_default()
     }
 
-    /// Dispatch by [`StrategyKind`] to the owned [`StrategyAny`] instance.
+    /// Dispatch by [`StrategyKind`] to a borrowed/preconfigured [`StrategyAny`].
     ///
     /// Returns `&StrategyAny` (not `&dyn Strategy`) to stay on enum dispatch
     /// — same shape that the legacy `strategy_for(kind) -> StrategyAny`
     /// factory in `gw-proxy/src/filters/upstream.rs` produces.
+    ///
+    /// Inline strategies are not stored in the set. Runtime callers must use
+    /// [`Self::strategy_for_kind`] so inline `multi_dim` can be constructed
+    /// instead of silently falling back to a preconfigured strategy.
     pub fn pick_for(&self, kind: &StrategyKind) -> &StrategyAny {
         match kind {
             StrategyKind::FixedOrder => &self.fixed_order,
@@ -141,31 +170,45 @@ impl StrategySet {
             StrategyKind::LatencyFirst => &self.latency_first,
             StrategyKind::CacheAffinity => &self.cache_affinity,
             StrategyKind::Sticky => &self.sticky,
-            StrategyKind::MultiDim(preset) => self.multi_dim.get(preset).unwrap_or_else(|| {
-                // Audit 2026-05-30 §2.1: a model group may reference a multi_dim
-                // preset name that this pod's config does not define (operator
-                // typo, or a preset added to the DB but not yet rolled out to
-                // every pod's config — ordinary control-plane skew). Previously
-                // this `panic!`ed inside upstream_peer, abnormally aborting the
-                // request task. Fail-operational instead: fall back to the always-
-                // present FixedOrder strategy so the request still routes, and
-                // surface the misconfig via a warn-once + metric.
-                if UNKNOWN_PRESETS_WARNED.get(preset).is_none() {
-                    UNKNOWN_PRESETS_WARNED.insert(preset.clone(), ());
-                    tracing::warn!(
-                        code = gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
-                        preset = %preset,
-                        "unknown multi_dim routing preset referenced by a model group; \
-                         falling back to fixed_order. Add it to [routing.presets] on this pod."
-                    );
-                }
-                metrics::counter!(
-                    "gw_routing_unknown_preset_total",
-                    "code" => gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
-                )
-                .increment(1);
-                &self.fixed_order
-            }),
+            StrategyKind::MultiDimInline(_) => {
+                panic!("use StrategySet::strategy_for_kind for inline multi_dim")
+            }
+            StrategyKind::MultiDimPreset(preset) => {
+                self.multi_dim.get(preset).unwrap_or_else(|| {
+                    // Audit 2026-05-30 §2.1: a model group may reference a multi_dim
+                    // preset name that this pod's config does not define (operator
+                    // typo, or a preset added to the DB but not yet rolled out to
+                    // every pod's config — ordinary control-plane skew). Previously
+                    // this `panic!`ed inside upstream_peer, abnormally aborting the
+                    // request task. Fail-operational instead: fall back to the always-
+                    // present FixedOrder strategy so the request still routes, and
+                    // surface the misconfig via a warn-once + metric.
+                    if UNKNOWN_PRESETS_WARNED.get(preset).is_none() {
+                        UNKNOWN_PRESETS_WARNED.insert(preset.clone(), ());
+                        tracing::warn!(
+                            code = gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
+                            preset = %preset,
+                            "unknown multi_dim routing preset referenced by a model group; \
+                             falling back to fixed_order. Add it to [routing.presets] on this pod."
+                        );
+                    }
+                    metrics::counter!(
+                        "gw_routing_unknown_preset_total",
+                        "code" => gw_core::error::codes::GW_ROUTING_UNKNOWN_PRESET,
+                    )
+                    .increment(1);
+                    &self.fixed_order
+                })
+            }
+        }
+    }
+
+    pub fn strategy_for_kind(&self, kind: &StrategyKind) -> StrategyChoice<'_> {
+        match kind {
+            StrategyKind::MultiDimInline(weights) => StrategyChoice::Owned(StrategyAny::MultiDim(
+                MultiDim::new("inline".to_string(), dim_weights_from_core(*weights)),
+            )),
+            _ => StrategyChoice::Borrowed(self.pick_for(kind)),
         }
     }
 

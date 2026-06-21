@@ -280,7 +280,12 @@ fn extract_features(
             health_score: 1.0,
             latency_p50: p50,
             in_flight: inflight,
-            cost_weight: key.priority as f64 * markup,
+            cost_weight: key
+                .model_cost_weights
+                .get(ctx.model)
+                .copied()
+                .unwrap_or(1_000) as f64
+                * markup,
             error_rate_30s: error_rate,
             reservation_pressure: ctx
                 .reservation_view

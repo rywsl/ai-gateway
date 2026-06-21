@@ -194,8 +194,9 @@ impl HttpGeminiFilesGateway {
             reservation_view: None,
             frequency_tracker: None,
         };
-        self.strategies
-            .pick_for(&group.value.strategy)
+        let strategy_choice = self.strategies.strategy_for_kind(&group.value.strategy);
+        strategy_choice
+            .as_strategy()
             .pick(&candidates, &self.health, &self.in_flight, &pick_ctx)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Gemini Files routing strategy returned no key"))
@@ -490,7 +491,8 @@ pub async fn select_files_vendor_key(
             message: Cow::Borrowed("no available Gemini Files channel"),
         });
     }
-    let strategy = strategies.pick_for(&group.value.strategy);
+    let strategy_choice = strategies.strategy_for_kind(&group.value.strategy);
+    let strategy = strategy_choice.as_strategy();
     let pick_ctx = PickCtx {
         user_id: &perm.effective_user_id,
         model: &model,
@@ -556,6 +558,7 @@ pub fn skeleton_vendor_key() -> Arc<VendorKey> {
         api_key: SecretString::from("skeleton"),
         accessible_models: Vec::new(),
         model_mapping: HashMap::new(),
+        model_cost_weights: Default::default(),
         accessible_endpoints: vec![ProtocolKind::Gemini],
         protocol_conversion: false,
         priority: 0,
@@ -677,6 +680,7 @@ fn clone_vendor_key(key: &VendorKey) -> Arc<VendorKey> {
         api_key: SecretString::from(key.api_key.expose_secret().to_owned()),
         accessible_models: key.accessible_models.clone(),
         model_mapping: key.model_mapping.clone(),
+        model_cost_weights: key.model_cost_weights.clone(),
         accessible_endpoints: key.accessible_endpoints.clone(),
         protocol_conversion: key.protocol_conversion,
         priority: key.priority,
@@ -835,6 +839,7 @@ mod tests {
             api_key: SecretString::from("real-secret"),
             accessible_models: vec![ModelName::from(GEMINI_FILES_MODEL)],
             model_mapping: HashMap::new(),
+            model_cost_weights: Default::default(),
             accessible_endpoints: vec![ProtocolKind::Gemini],
             protocol_conversion: false,
             priority: 0,

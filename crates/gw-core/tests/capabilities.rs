@@ -53,6 +53,7 @@ fn vendor_key_capability_fields_default_construction() {
         api_key: SecretString::from(String::from("plaintext-secret")),
         accessible_models: Vec::new(),
         model_mapping: HashMap::new(),
+        model_cost_weights: Default::default(),
         accessible_endpoints: Vec::<ProtocolKind>::new(),
         protocol_conversion: false,
         priority: 0,

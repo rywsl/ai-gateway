@@ -95,6 +95,7 @@ fn seed_key(id: &str, forced: &[&str], exclusive: bool) -> VendorKey {
         api_key: SecretString::from("sk".to_string()),
         accessible_models: vec![ModelName::from("m1")],
         model_mapping: Default::default(),
+        model_cost_weights: Default::default(),
         accessible_endpoints: vec![ProtocolKind::OpenAi],
         protocol_conversion: false,
         priority: 0,
