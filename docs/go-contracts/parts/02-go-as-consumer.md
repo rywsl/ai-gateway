@@ -358,6 +358,7 @@ v2 三层兜底（C-δ）下，record 落入 DLQ 之前可能经过不同的缓�
 ts_ms      i64    UTC wall-clock 毫秒
 request_id text   r_*
 trace_id   text   t_*
+attempt_index u32 0 = 首次；回退/重试递增。旧 entry 缺失时 Go 兼容为 0
 kind       enum   downstream_request | upstream_request | upstream_response | downstream_response | summary
 encoding   enum   raw+json | lz4+json | zstd+json
 payload    bytes  encoding 决定如何解码；解码后是 JSON
@@ -432,11 +433,12 @@ payload    bytes  encoding 决定如何解码；解码后是 JSON
 
 1. **消费**：`XREADGROUP GROUP go-archive-drainer <consumer_id> COUNT N BLOCK <ms> STREAMS usage:detailed >`，起始位置 `0`（消费全量）
 2. **按 kind 分支解码**：根据 `encoding` 字段选择解压算法，再解析 JSON
-3. **索引与重组**：按 `(request_id, kind)` 建立索引。一个请求的完整快照 = 5 条 entry：`downstream_request` + `upstream_request` + `upstream_response` + `downstream_response` + `summary`
+3. **索引与重组**：按 `(request_id, attempt_index, kind)` 建立索引。一个请求可能包含多个 attempt；每个 attempt 最多包含 `downstream_request` + `upstream_request` + `upstream_response` + `downstream_response` + `summary`。`downstream_request` 通常只在首次请求体读完时出现，Go 可把它作为客户端原始请求补到后续 attempt 的详情展示中。
 4. **缺失语义**：
    - 某 surface 缺失 = 该 surface 在 Rust 侧未归档成功（mpsc 满 / 压缩失败 / XADD 失败 / 进程崩溃）。**不**表示请求该 surface 不存在
    - `summary` 缺失 = 请求未到达 logging filter（进程崩溃 / mpsc 满）。建议 Go 设置 fallback 超时（收到首个 surface 后 60 秒内 `summary` 未到 → 标记该 request_id 为不完整快照）
-   - 全部 5 个都缺 = 请求未触发任何归档（早期 filter 抛错 / mpsc 全满）
+   - 某 attempt 的 response surface 缺失 = 该 attempt 未收到上游响应、归档失败，或还未到可 flush 的触发点。响应侧回退在 reset 前会 best-effort flush 已捕获的失败 attempt response surface
+   - 全部 surface 都缺 = 请求未触发任何归档（早期 filter 抛错 / mpsc 全满）
 5. **长期归档**：批量将 entry 落到长期存储（S3 / GCS / parquet / lakehouse，任选），保留期 180 天
 6. **XACK**：成功归档后 ack；失败由 Go 自决重试或落 Go 侧 DLQ（**不走 Rust DLQ**）
 

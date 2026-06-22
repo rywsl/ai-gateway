@@ -31,6 +31,7 @@ fn surface(kind: Kind) -> CapturedSurface {
         ts_ms: 1,
         request_id: RequestId::from("r_test"),
         trace_id: TraceId::from("t_test"),
+        attempt_index: 0,
         kind,
         payload: SurfacePayload::Request(
             RequestPayload {
