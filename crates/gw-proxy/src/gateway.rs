@@ -707,6 +707,7 @@ impl LlmGateway {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
+                attempt_index: ctx.attempt_index,
                 kind: Kind::UpstreamResponse,
                 payload: SurfacePayload::Response(
                     ResponsePayload {
@@ -723,15 +724,18 @@ impl LlmGateway {
             ctx.archive_upstream_response_body = ArchiveState::default();
         }
 
-        // downstream_response — v1 approximates headers from upstream snapshot
-        let downstream_meta = ctx
-            .archive_downstream_response_meta
-            .take()
-            .unwrap_or_else(|| ResponseMeta {
-                status: ctx.upstream_status.unwrap_or(0),
-                headers: Vec::new(),
-            });
-        {
+        // downstream_response — v1 approximates headers from upstream snapshot.
+        let downstream_meta = ctx.archive_downstream_response_meta.take().or_else(|| {
+            if !force_flush_partial || ctx.upstream_status.is_some() {
+                Some(ResponseMeta {
+                    status: ctx.upstream_status.unwrap_or(0),
+                    headers: Vec::new(),
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(downstream_meta) = downstream_meta {
             let body_bytes = match ctx.archive_downstream_response_body.read_for_emit().await {
                 Ok(b) => Bytes::from(b),
                 Err(e) => {
@@ -752,6 +756,7 @@ impl LlmGateway {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
+                attempt_index: ctx.attempt_index,
                 kind: Kind::DownstreamResponse,
                 payload: SurfacePayload::Response(
                     ResponsePayload {
@@ -765,6 +770,119 @@ impl LlmGateway {
                 ),
             });
             // Release spill file / reset accumulator.
+            ctx.archive_downstream_response_body = ArchiveState::default();
+        }
+    }
+
+    fn read_archive_for_emit_blocking(
+        state: &ArchiveState,
+        request_id: &RequestId,
+        surface: &'static str,
+    ) -> Bytes {
+        let bytes = match state {
+            ArchiveState::InMemory(_) | ArchiveState::Truncated { .. } => {
+                state.read_for_emit_sync()
+            }
+            ArchiveState::Spilled { .. } => tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
+                    match state.read_for_emit().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "gw_proxy::archive",
+                                request_id = %request_id,
+                                surface,
+                                error = %e,
+                                "archive_emit_read_failed"
+                            );
+                            Vec::new()
+                        }
+                    }
+                })
+            }),
+        };
+        Bytes::from(bytes)
+    }
+
+    fn emit_response_surfaces_sync(&self, ctx: &mut ReqCtx, force_flush_partial: bool) {
+        use crate::ctx::ResponseMeta;
+        use gw_ledger::detailed_archive::{CapturedSurface, Kind, ResponsePayload, SurfacePayload};
+        let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000;
+
+        let upstream_meta = ctx.archive_upstream_response_meta.take().or_else(|| {
+            if force_flush_partial {
+                Some(ResponseMeta {
+                    status: ctx.upstream_status.unwrap_or(0),
+                    headers: Vec::new(),
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(meta) = upstream_meta {
+            let body = std::sync::Arc::new(Self::read_archive_for_emit_blocking(
+                &ctx.archive_upstream_response_body,
+                &ctx.request_id,
+                "upstream",
+            ));
+            let truncated = ctx.archive_upstream_response_body.is_truncated();
+            let dropped = ctx.archive_upstream_response_body.dropped();
+            self.detailed_archive.try_send(CapturedSurface {
+                ts_ms: now_ms,
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                attempt_index: ctx.attempt_index,
+                kind: Kind::UpstreamResponse,
+                payload: SurfacePayload::Response(
+                    ResponsePayload {
+                        status: meta.status,
+                        headers: redact_loopback_headers(meta.headers),
+                        body_b64: String::new(),
+                        archive_truncated: truncated,
+                        archive_dropped: dropped,
+                    },
+                    body,
+                ),
+            });
+            ctx.archive_upstream_response_body = ArchiveState::default();
+        }
+
+        let downstream_meta = ctx.archive_downstream_response_meta.take().or_else(|| {
+            if !force_flush_partial || ctx.upstream_status.is_some() {
+                Some(ResponseMeta {
+                    status: ctx.upstream_status.unwrap_or(0),
+                    headers: Vec::new(),
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(meta) = downstream_meta {
+            let body = std::sync::Arc::new(Self::read_archive_for_emit_blocking(
+                &ctx.archive_downstream_response_body,
+                &ctx.request_id,
+                "downstream",
+            ));
+            let truncated = ctx.archive_downstream_response_body.is_truncated();
+            let dropped = ctx.archive_downstream_response_body.dropped();
+            self.detailed_archive.try_send(CapturedSurface {
+                ts_ms: now_ms,
+                request_id: ctx.request_id.clone(),
+                trace_id: ctx.trace_id.clone(),
+                attempt_index: ctx.attempt_index,
+                kind: Kind::DownstreamResponse,
+                payload: SurfacePayload::Response(
+                    ResponsePayload {
+                        status: meta.status,
+                        headers: redact_loopback_headers(meta.headers),
+                        body_b64: String::new(),
+                        archive_truncated: truncated,
+                        archive_dropped: dropped,
+                    },
+                    body,
+                ),
+            });
             ctx.archive_downstream_response_body = ArchiveState::default();
         }
     }
@@ -798,6 +916,7 @@ impl LlmGateway {
 
         match decision {
             FailoverDecision::Retry(new_key) => {
+                self.emit_response_surfaces_sync(ctx, true);
                 crate::billing_lifecycle::settle_prior_attempt_spawn(
                     ctx,
                     self.inflight.clone(),
@@ -965,6 +1084,7 @@ impl ProxyHttp for LlmGateway {
                 ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
+                attempt_index: ctx.attempt_index,
                 kind: Kind::DownstreamRequest,
                 payload: SurfacePayload::Request(
                     RequestPayload {
@@ -1091,6 +1211,7 @@ impl ProxyHttp for LlmGateway {
                 ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
+                attempt_index: ctx.attempt_index,
                 kind: Kind::UpstreamRequest,
                 payload: SurfacePayload::Request(
                     RequestPayload {
@@ -1267,6 +1388,7 @@ impl ProxyHttp for LlmGateway {
                             // clobbering this attempt's) and emits its UsageRecord —
                             // build_attempt_record reads ctx.picked_vendor_key, so this
                             // MUST run before picked_vendor_key is overwritten below.
+                            self.emit_response_surfaces(ctx, true).await;
                             crate::billing_lifecycle::settle_prior_attempt_spawn(
                                 ctx,
                                 self.inflight.clone(),
@@ -1350,6 +1472,7 @@ impl ProxyHttp for LlmGateway {
                                 // Audit 2026-05-30 §1.2: settle the prior attempt
                                 // before mutating ctx (see egress arm above). Must
                                 // run before picked_vendor_key is overwritten.
+                                self.emit_response_surfaces(ctx, true).await;
                                 crate::billing_lifecycle::settle_prior_attempt_spawn(
                                     ctx,
                                     self.inflight.clone(),
@@ -2103,6 +2226,7 @@ impl ProxyHttp for LlmGateway {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
                 trace_id: ctx.trace_id.clone(),
+                attempt_index: ctx.attempt_index,
                 kind: Kind::Summary,
                 payload: SurfacePayload::Summary(summary),
             });

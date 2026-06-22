@@ -5,6 +5,7 @@
 //! with a [`CapturedSurface`]; a background flusher pool encodes (raw/lz4/zstd)
 //! and XADDs to `usage:detailed`.
 
+use crate::encoding::Encoding;
 use bytes::Bytes;
 use gw_core::ids::{ApiKeyId, ModelName, RequestId, TraceId, UserId};
 use serde::Serialize;
@@ -85,6 +86,7 @@ pub struct CapturedSurface {
     pub ts_ms: i64,
     pub request_id: RequestId,
     pub trace_id: TraceId,
+    pub attempt_index: u32,
     pub kind: Kind,
     pub payload: SurfacePayload,
 }
@@ -196,6 +198,7 @@ async fn handle(surface: CapturedSurface, redis: &RedisPool, cfg: &DetailedArchi
         ts_ms,
         request_id,
         trace_id,
+        attempt_index,
         kind,
         payload,
     } = surface;
@@ -235,22 +238,20 @@ async fn handle(surface: CapturedSurface, redis: &RedisPool, cfg: &DetailedArchi
     )
     .record(encoded.len() as f64);
 
-    let ts_ms_str = ts_ms.to_string();
-    let fields: Vec<(&'static str, String)> = vec![
-        ("ts_ms", ts_ms_str),
-        ("request_id", request_id.as_ref().to_string()),
-        ("trace_id", trace_id.as_ref().to_string()),
-        ("kind", kind_label.to_string()),
-        ("encoding", encoding.as_str().to_string()),
-    ];
     // Payload is binary; use a separate xadd call shape if needed, but
     // for now encode as base64 string so all fields stay string-typed.
     // The consumer already expects binary in `encoded`; we keep it as bytes
     // by using the Vec<(K, V)> where V: Into<RedisValue> — fred 9.x accepts
     // Vec<(&str, Vec<u8>)> for the fields argument.
-    let mut fields_with_payload: Vec<(&'static str, fred::types::RedisValue)> =
-        fields.into_iter().map(|(k, v)| (k, v.into())).collect();
-    fields_with_payload.push(("payload", encoded.as_slice().into()));
+    let fields_with_payload = stream_fields(
+        ts_ms,
+        &request_id,
+        &trace_id,
+        attempt_index,
+        kind,
+        encoding,
+        encoded.as_slice(),
+    );
 
     let client = redis.next();
     let r: Result<String, _> = client
@@ -283,6 +284,26 @@ async fn handle(surface: CapturedSurface, redis: &RedisPool, cfg: &DetailedArchi
         )
         .increment(1);
     }
+}
+
+fn stream_fields(
+    ts_ms: i64,
+    request_id: &RequestId,
+    trace_id: &TraceId,
+    attempt_index: u32,
+    kind: Kind,
+    encoding: Encoding,
+    payload: &[u8],
+) -> Vec<(&'static str, fred::types::RedisValue)> {
+    vec![
+        ("ts_ms", ts_ms.to_string().into()),
+        ("request_id", request_id.as_ref().to_string().into()),
+        ("trace_id", trace_id.as_ref().to_string().into()),
+        ("attempt_index", attempt_index.to_string().into()),
+        ("kind", kind.as_str().to_string().into()),
+        ("encoding", encoding.as_str().to_string().into()),
+        ("payload", payload.into()),
+    ]
 }
 
 fn serialize_payload(
@@ -348,4 +369,35 @@ impl DetailedArchive {
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoding::Encoding;
+
+    fn field_value<'a>(
+        fields: &'a [(&'static str, fred::types::RedisValue)],
+        name: &str,
+    ) -> Option<&'a fred::types::RedisValue> {
+        fields.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
+    }
+
+    #[test]
+    fn stream_fields_include_attempt_index() {
+        let fields = stream_fields(
+            1716345678901,
+            &RequestId::from("req-1"),
+            &TraceId::from("trace-1"),
+            2,
+            Kind::UpstreamResponse,
+            Encoding::Raw,
+            b"{}".as_slice(),
+        );
+
+        assert_eq!(
+            field_value(&fields, "attempt_index"),
+            Some(&fred::types::RedisValue::from("2"))
+        );
+    }
 }

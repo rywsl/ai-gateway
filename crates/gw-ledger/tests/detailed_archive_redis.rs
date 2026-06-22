@@ -68,6 +68,7 @@ async fn five_surfaces_round_trip_through_redis() {
         ts_ms: 1,
         request_id: req_id.clone(),
         trace_id: trace.clone(),
+        attempt_index: 0,
         kind: Kind::DownstreamRequest,
         payload: SurfacePayload::Request(
             RequestPayload {
@@ -85,6 +86,7 @@ async fn five_surfaces_round_trip_through_redis() {
         ts_ms: 2,
         request_id: req_id.clone(),
         trace_id: trace.clone(),
+        attempt_index: 0,
         kind: Kind::UpstreamRequest,
         payload: SurfacePayload::Request(
             RequestPayload {
@@ -103,6 +105,7 @@ async fn five_surfaces_round_trip_through_redis() {
         ts_ms: 3,
         request_id: req_id.clone(),
         trace_id: trace.clone(),
+        attempt_index: 0,
         kind: Kind::UpstreamResponse,
         payload: SurfacePayload::Response(
             ResponsePayload {
@@ -121,6 +124,7 @@ async fn five_surfaces_round_trip_through_redis() {
         ts_ms: 4,
         request_id: req_id.clone(),
         trace_id: trace.clone(),
+        attempt_index: 0,
         kind: Kind::DownstreamResponse,
         payload: SurfacePayload::Response(
             ResponsePayload {
@@ -138,6 +142,7 @@ async fn five_surfaces_round_trip_through_redis() {
         ts_ms: 5,
         request_id: req_id.clone(),
         trace_id: trace.clone(),
+        attempt_index: 0,
         kind: Kind::Summary,
         payload: SurfacePayload::Summary(SummaryPayload {
             user_id: None,
