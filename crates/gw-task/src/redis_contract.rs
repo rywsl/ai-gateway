@@ -638,10 +638,21 @@ fn task_usage_payload(
         "user_id": record.user_id.clone(),
         "child_id": record.child_id.clone(),
         "api_key_id": record.api_key_id.clone(),
-        "client_protocol": record.client_protocol.clone(),
+        "client_mode": record.client_mode,
+        "upstream_mode": record.upstream_mode,
         "model": record.model.clone(),
         "vendor_id": record.vendor_id.clone(),
-        "vendor_key_id": record.vendor_key_hint.clone(),
+        "vendor_key_id": record.provider_key_id.clone(),
+        "global_model_id": record.global_model_id.clone(),
+        "provider_model_id": record.provider_model_id.clone(),
+        "endpoint_id": record.endpoint_id.clone(),
+        "profile_id": record.profile_id.clone(),
+        "profile_revision_id": record.profile_revision_id.clone(),
+        "profile_version": record.profile_version,
+        "binding_id": record.binding_id.clone(),
+        "binding_revision_id": record.binding_revision_id.clone(),
+        "binding_version": record.binding_version,
+        "effective_template_hash": record.effective_template_hash.clone(),
         "status": status_wire(terminal_status)?,
         "task_kind": kind_wire(record.kind)?,
         "provider_task_id": record.provider_task_id.clone(),
@@ -657,6 +668,14 @@ fn task_usage_payload(
 }
 
 fn fields_to_record(fields: HashMap<String, String>) -> Result<TaskRecord, TaskError> {
+    match fields.get("schema_version").map(String::as_str) {
+        Some("2") => {}
+        _ => {
+            return Err(TaskError::InvalidPayload(
+                "task schema_version must be 2".to_string(),
+            ));
+        }
+    }
     let mut object = serde_json::Map::new();
     for field in REQUIRED_FIELDS {
         let value = fields
@@ -671,15 +690,29 @@ fn fields_to_record(fields: HashMap<String, String>) -> Result<TaskRecord, TaskE
 fn decode_field(field: &str, value: &str) -> Result<serde_json::Value, TaskError> {
     if matches!(
         field,
-        "id" | "kind" | "status" | "user_id" | "api_key_id" | "client_protocol" | "vendor_id"
+        "id" | "kind"
+            | "status"
+            | "user_id"
+            | "api_key_id"
+            | "vendor_id"
+            | "client_mode"
+            | "upstream_mode"
     ) {
         return Ok(serde_json::Value::String(value.to_string()));
     }
     if matches!(
         field,
         "child_id"
-            | "vendor_key_hint"
             | "model"
+            | "global_model_id"
+            | "provider_model_id"
+            | "endpoint_id"
+            | "provider_key_id"
+            | "profile_id"
+            | "profile_revision_id"
+            | "binding_id"
+            | "binding_revision_id"
+            | "effective_template_hash"
             | "worker_id"
             | "trace_id"
             | "request_id"
@@ -709,10 +742,22 @@ const REQUIRED_FIELDS: &[&str] = &[
     "user_id",
     "child_id",
     "api_key_id",
-    "client_protocol",
     "vendor_id",
-    "vendor_key_hint",
     "model",
+    "client_mode",
+    "upstream_mode",
+    "global_model_id",
+    "provider_model_id",
+    "endpoint_id",
+    "provider_key_id",
+    "profile_id",
+    "profile_revision_id",
+    "profile_version",
+    "binding_id",
+    "binding_revision_id",
+    "binding_version",
+    "effective_template_hash",
+    "poll_context",
     "created_at_ms",
     "updated_at_ms",
     "submitted_ts_ms",
@@ -733,3 +778,21 @@ const REQUIRED_FIELDS: &[&str] = &[
     "duration_seconds",
     "billing_record_id",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fields_to_record_rejects_legacy_schema_version() {
+        let mut fields = HashMap::new();
+        fields.insert("schema_version".to_string(), "1".to_string());
+
+        let err = fields_to_record(fields).expect_err("legacy v1 must fail");
+
+        assert_eq!(
+            err,
+            TaskError::InvalidPayload("task schema_version must be 2".to_string())
+        );
+    }
+}

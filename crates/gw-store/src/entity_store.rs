@@ -10,10 +10,11 @@
 //! cold-loader on cache miss when a [`LoaderCtx`] has been wired in.
 
 use crate::loader::{
-    load_apikey, load_apikey_by_hash, load_auth_config, load_estimate_pricing, load_ipblock,
-    load_jwks, load_mgmt_token, load_model, load_model_group, load_module_enabled, load_pricing,
-    load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
-    load_vendor_key, LoaderCtx,
+    load_apikey, load_apikey_by_hash, load_async_task_binding_index,
+    load_async_task_binding_revision, load_async_task_profile_revision, load_auth_config,
+    load_estimate_pricing, load_ipblock, load_jwks, load_mgmt_token, load_model, load_model_group,
+    load_module_enabled, load_pricing, load_proxy_node, load_proxy_nodes_list, load_user,
+    load_user_group, load_vendor, load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -133,6 +134,14 @@ pub struct EntityStore {
     /// Populated by [`EntityStore::proxy_node_or_load`]; invalidated by the
     /// stream consumer on `proxy_node` namespace events (T1 / T5-B).
     pub proxy_node: Cache<String, Arc<Versioned<ProxyNode>>>,
+    /// Published async-task profile revision cache. Go owns writes and emits
+    /// `events:entity ns=async_task_profile_revision` for invalidation.
+    pub async_task_profile_revision: Cache<String, Arc<Versioned<AsyncTaskProfileRevision>>>,
+    /// Published async-task binding revision cache. Go owns writes and emits
+    /// `events:entity ns=async_task_binding_revision` for invalidation.
+    pub async_task_binding_revision: Cache<String, Arc<Versioned<AsyncTaskBindingRevision>>>,
+    /// Async-task binding index keyed as `<global_model_id>:<task_kind>`.
+    pub async_task_binding_index: Cache<String, Arc<Versioned<AsyncTaskBindingIndex>>>,
     /// Management-token entity cache (B2 / ADR-B2-1). 300s TTL, matching
     /// `apikey` (auth-surface cache bucket). Populated by
     /// [`EntityStore::mgmt_token_or_load`]; invalidated by the stream consumer
@@ -227,6 +236,18 @@ impl EntityStore {
                 .build(),
             proxy_node: Cache::builder()
                 .max_capacity(1_000)
+                .time_to_live(Duration::from_secs(1800))
+                .build(),
+            async_task_profile_revision: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(1800))
+                .build(),
+            async_task_binding_revision: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(1800))
+                .build(),
+            async_task_binding_index: Cache::builder()
+                .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(1800))
                 .build(),
             mgmt_token: Cache::builder()
@@ -606,6 +627,87 @@ impl EntityStore {
     /// (T1-D). Next `mgmt_token_or_load` will cold-load the new version.
     pub async fn invalidate_mgmt_token(&self, token_id: &str) {
         self.mgmt_token.invalidate(token_id).await;
+    }
+
+    pub async fn async_task_profile_revision_or_load(
+        &self,
+        id: &str,
+    ) -> Option<Arc<Versioned<AsyncTaskProfileRevision>>> {
+        if let Some(hit) = self.async_task_profile_revision.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.to_owned();
+        let deadline = self.cold_load_timeout;
+        self.async_task_profile_revision
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("async_task_profile_revision", deadline, async move {
+                    load_async_task_profile_revision(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn invalidate_async_task_profile_revision(&self, id: &str) {
+        self.async_task_profile_revision.invalidate(id).await;
+    }
+
+    pub async fn async_task_binding_revision_or_load(
+        &self,
+        id: &str,
+    ) -> Option<Arc<Versioned<AsyncTaskBindingRevision>>> {
+        if let Some(hit) = self.async_task_binding_revision.get(id).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let id2 = id.to_owned();
+        let deadline = self.cold_load_timeout;
+        self.async_task_binding_revision
+            .try_get_with_by_ref(id, async move {
+                with_cold_load_timeout("async_task_binding_revision", deadline, async move {
+                    load_async_task_binding_revision(&loader, &id2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn invalidate_async_task_binding_revision(&self, id: &str) {
+        self.async_task_binding_revision.invalidate(id).await;
+    }
+
+    pub async fn async_task_binding_index_or_load(
+        &self,
+        key: &str,
+    ) -> Option<Arc<Versioned<AsyncTaskBindingIndex>>> {
+        if let Some(hit) = self.async_task_binding_index.get(key).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let key2 = key.to_owned();
+        let deadline = self.cold_load_timeout;
+        self.async_task_binding_index
+            .try_get_with_by_ref(key, async move {
+                with_cold_load_timeout("async_task_binding_index", deadline, async move {
+                    load_async_task_binding_index(&loader, &key2).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn invalidate_async_task_binding_index(&self, key: &str) {
+        self.async_task_binding_index.invalidate(key).await;
     }
 
     pub async fn module_enabled_or_load(&self, name: &str) -> bool {

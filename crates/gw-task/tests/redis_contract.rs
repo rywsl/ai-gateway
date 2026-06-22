@@ -2,7 +2,8 @@ use fred::clients::RedisPool;
 use fred::interfaces::{ClientLike, HashesInterface, KeysInterface, StreamsInterface};
 use fred::types::{ConnectionConfig, PerformanceConfig, ReconnectPolicy, RedisConfig, RedisValue};
 use gw_task::{
-    redis_contract::RedisTaskContract, TaskContract, TaskId, TaskKind, TaskRecord, TaskStatus,
+    redis_contract::RedisTaskContract, ClientMode, TaskContract, TaskId, TaskKind, TaskRecord,
+    TaskStatus, UpstreamMode,
 };
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -33,16 +34,28 @@ fn sample_record() -> TaskRecord {
     let now = 1_700_000_000_000;
     TaskRecord {
         id: TaskId::new_v4(),
-        schema_version: 1,
+        schema_version: 2,
         kind: TaskKind::Generic,
         status: TaskStatus::Queued,
         user_id: "user-1".to_string(),
         child_id: None,
         api_key_id: "key-1".to_string(),
-        client_protocol: "openai".to_string(),
         vendor_id: "vendor-1".to_string(),
-        vendor_key_hint: Some("vk-1".to_string()),
         model: Some("model-1".to_string()),
+        client_mode: ClientMode::Async,
+        upstream_mode: UpstreamMode::AsyncLro,
+        global_model_id: Some("model-1".to_string()),
+        provider_model_id: Some("provider-model-1".to_string()),
+        endpoint_id: Some("endpoint-1".to_string()),
+        provider_key_id: Some("vk-1".to_string()),
+        profile_id: Some("profile-1".to_string()),
+        profile_revision_id: Some("profile-rev-1".to_string()),
+        profile_version: Some(1),
+        binding_id: Some("binding-1".to_string()),
+        binding_revision_id: Some("binding-rev-1".to_string()),
+        binding_version: Some(1),
+        effective_template_hash: Some("sha256:test".to_string()),
+        poll_context: None,
         created_at_ms: now,
         updated_at_ms: now,
         submitted_ts_ms: now,
@@ -85,7 +98,7 @@ async fn test_submit_stores_and_queues() {
         .await
         .unwrap();
     assert_eq!(hash.get("id"), Some(&record.id.to_string()));
-    assert_eq!(hash.get("schema_version"), Some(&"1".to_string()));
+    assert_eq!(hash.get("schema_version"), Some(&"2".to_string()));
     assert_eq!(hash.get("status"), Some(&"queued".to_string()));
     let stored_payload: serde_json::Value =
         serde_json::from_str(hash.get("input_payload").expect("input_payload hash field"))

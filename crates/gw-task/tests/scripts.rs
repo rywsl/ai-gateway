@@ -56,6 +56,7 @@ fn test_settle_lua_terminal_status_guard_precedes_mutations() {
     assert!(SETTLE_LUA.contains("cur == 'settled'"));
     assert!(SETTLE_LUA.contains("cur == 'cancelled'"));
     assert!(SETTLE_LUA.contains("cur == 'expired'"));
+    assert!(SETTLE_LUA.contains("cur == 'timed_out'"));
     assert!(guard_pos < noop_pos);
     assert!(noop_pos < hset_pos);
     assert!(noop_pos < incrby_pos);

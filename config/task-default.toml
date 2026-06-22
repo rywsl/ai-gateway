@@ -12,6 +12,19 @@ metrics_port = 9091
 url = "redis://localhost:6379"
 pool_size = 8
 
+[pgsql]
+# Used only for EntityStore cold-loads of Go-published async-task profile and
+# binding revisions. Worker Phase 1 still uses NotWired transport for upstream
+# execution; this does not duplicate gateway routing/auth logic.
+url = "postgres://postgres:postgres@localhost:5432/postgres"
+max_connections = 4
+
+[entity_stream]
+# Subscribe to events:entity so profile/binding/index cache invalidations land
+# in the worker process.
+enabled = true
+instance_id = "task-worker"
+
 [worker]
 # Stable worker identity defaults for local/dev. Real deployments can override
 # these with GW_TASK_WORKER__* env vars per replica; no gateway address belongs

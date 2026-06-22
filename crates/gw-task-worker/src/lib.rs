@@ -15,6 +15,8 @@ use fred::types::{
 };
 use futures::FutureExt;
 use gw_runtime::{RestartPolicy, ShutdownToken, Supervisor};
+use gw_store::encrypt::KekCache;
+use gw_store::stream_consumer::StreamConsumer;
 use gw_task::redis_contract::RedisTaskContract;
 use gw_task_runtime::cancel_loop::{
     CancelLoop, CancelLoopConfig, RedisCancelSource, RunningTaskRegistry,
@@ -189,6 +191,10 @@ pub struct WorkerConfig {
     #[serde(default)]
     pub redis: RedisConfig,
     #[serde(default)]
+    pub pgsql: PgsqlConfig,
+    #[serde(default)]
+    pub entity_stream: EntityStreamConfig,
+    #[serde(default)]
     pub worker: WorkerIdentityConfig,
     #[serde(default)]
     pub loops: LoopConfig,
@@ -208,6 +214,18 @@ pub struct ServerConfig {
 pub struct RedisConfig {
     pub url: String,
     pub pool_size: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PgsqlConfig {
+    pub url: String,
+    pub max_connections: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EntityStreamConfig {
+    pub enabled: bool,
+    pub instance_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -266,6 +284,15 @@ impl WorkerConfig {
         if self.redis.pool_size == 0 {
             anyhow::bail!("worker redis.pool_size must be non-zero");
         }
+        if self.pgsql.max_connections == 0 {
+            anyhow::bail!("worker pgsql.max_connections must be non-zero");
+        }
+        if self.pgsql.url.trim().is_empty() {
+            anyhow::bail!("worker pgsql.url must be non-empty");
+        }
+        if self.entity_stream.enabled && self.entity_stream.instance_id.trim().is_empty() {
+            anyhow::bail!("worker entity_stream.instance_id must be non-empty when enabled");
+        }
         if self.worker.id.trim().is_empty() {
             anyhow::bail!("worker id must be non-empty");
         }
@@ -315,6 +342,24 @@ impl Default for RedisConfig {
         Self {
             url: "redis://localhost:6379".to_string(),
             pool_size: 8,
+        }
+    }
+}
+
+impl Default for PgsqlConfig {
+    fn default() -> Self {
+        Self {
+            url: "postgres://postgres:postgres@localhost:5432/postgres".to_string(),
+            max_connections: 4,
+        }
+    }
+}
+
+impl Default for EntityStreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            instance_id: "task-worker".to_string(),
         }
     }
 }
@@ -378,6 +423,18 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
 
     let pool = connect_redis(&cfg.redis.url, cfg.redis.pool_size).await?;
+    let loader_redis = gw_store::redis_client::RedisCtx::connect(&cfg.redis.url, 2)
+        .await
+        .context("connect task worker loader redis")?;
+    let pg = gw_store::pg_client::connect(&cfg.pgsql.url, cfg.pgsql.max_connections)
+        .await
+        .context("connect task worker postgres")?;
+    let loader = gw_store::LoaderCtx {
+        redis: loader_redis,
+        pg,
+        kek: KekCache::empty(),
+    };
+    let entity_store = std::sync::Arc::new(gw_store::EntityStore::with_loader(loader));
     let worker_id = generate_worker_id();
     let consumer_name = format!("{}-{worker_id}", cfg.worker.id);
     let registration = WorkerRegistration::new(worker_id, now_ms(), resolve_hostname()?);
@@ -457,7 +514,45 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
         },
     );
 
-    let handles: Vec<JoinHandle<()>> = vec![
+    let entity_consumer_handle = if cfg.entity_stream.enabled {
+        let redis = gw_store::redis_client::RedisCtx {
+            pool: std::sync::Arc::new(pool.clone()),
+        };
+        let consumer = std::sync::Arc::new(StreamConsumer {
+            redis,
+            store: entity_store,
+            instance_id: cfg.entity_stream.instance_id.clone(),
+        });
+        Some(
+            Supervisor::new(
+                "task_entity_stream_consumer",
+                RestartPolicy::default(),
+                shutdown.clone(),
+            )
+            .spawn(move |tok| {
+                let inner = consumer.clone();
+                async move {
+                    let mut handle = inner.start();
+                    let abort = handle.abort_handle();
+                    tokio::select! {
+                        _ = tok.cancelled() => {
+                            abort.abort();
+                            let _ = handle.await;
+                            Ok(())
+                        }
+                        joined = &mut handle => {
+                            joined.context("entity stream consumer join")?;
+                            Ok(())
+                        }
+                    }
+                }
+            }),
+        )
+    } else {
+        None
+    };
+
+    let mut handles: Vec<JoinHandle<()>> = vec![
         Supervisor::new("task_exec_loop", RestartPolicy::default(), shutdown.clone()).spawn(
             move |tok| {
                 let inner = exec_loop.clone();
@@ -535,6 +630,9 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
             async move { run_health_server(port, tok).await }
         }),
     ];
+    if let Some(handle) = entity_consumer_handle {
+        handles.push(handle);
+    }
 
     tokio::signal::ctrl_c()
         .await
@@ -660,6 +758,14 @@ mod tests {
             url = "redis://localhost:6379"
             pool_size = 4
 
+            [pgsql]
+            url = "postgres://postgres:postgres@localhost:5432/postgres"
+            max_connections = 4
+
+            [entity_stream]
+            enabled = true
+            instance_id = "worker-stream-a"
+
             [worker]
             id = "worker-a"
             redis_prefix = "test:"
@@ -688,6 +794,13 @@ mod tests {
         assert_eq!(cfg.server.health_port, 8081);
         assert_eq!(cfg.server.metrics_port, 9091);
         assert_eq!(cfg.redis.pool_size, 4);
+        assert_eq!(
+            cfg.pgsql.url,
+            "postgres://postgres:postgres@localhost:5432/postgres"
+        );
+        assert_eq!(cfg.pgsql.max_connections, 4);
+        assert!(cfg.entity_stream.enabled);
+        assert_eq!(cfg.entity_stream.instance_id, "worker-stream-a");
         assert_eq!(cfg.worker.id, "worker-a");
         assert_eq!(cfg.worker.redis_prefix, "test:");
         assert_eq!(cfg.concurrency.global, 128);
@@ -701,6 +814,8 @@ mod tests {
         assert_eq!(cfg.server.health_port, 8081);
         assert_eq!(cfg.server.metrics_port, 9091);
         assert_eq!(cfg.redis.pool_size, 8);
+        assert_eq!(cfg.pgsql.max_connections, 4);
+        assert!(cfg.entity_stream.enabled);
         assert_eq!(cfg.worker.redis_prefix, "");
         assert_eq!(cfg.loops.lease_seconds, 60);
     }

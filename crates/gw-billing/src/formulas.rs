@@ -47,7 +47,7 @@ const fn kind_multiplier(kind: TaskKind) -> u32 {
         TaskKind::Video => 6,
         TaskKind::Audio => 3,
         TaskKind::Batch => 2,
-        TaskKind::LroResponses | TaskKind::Generic => 1,
+        TaskKind::LroResponses | TaskKind::Generic | TaskKind::Embedding => 1,
     }
 }
 
@@ -57,7 +57,7 @@ const fn settle_base_micro(kind: TaskKind) -> i64 {
         TaskKind::Video => 1_000,
         TaskKind::Audio => 750,
         TaskKind::Batch => 500,
-        TaskKind::LroResponses | TaskKind::Generic => 250,
+        TaskKind::LroResponses | TaskKind::Generic | TaskKind::Embedding => 250,
     }
 }
 

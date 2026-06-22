@@ -530,6 +530,77 @@ pub struct ModelMapping {
     pub pricing_strategy_ref: Option<String>,
 }
 
+/// Published async-task profile revision, owned by Go control plane and
+/// consumed by the Rust template runtime.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AsyncTaskProfileRevision {
+    pub id: String,
+    pub profile_id: String,
+    pub version: i64,
+    #[serde(default)]
+    pub schema_version: String,
+    pub task_kind: String,
+    #[serde(alias = "published_snapshot", default)]
+    pub profile: serde_json::Value,
+    pub template_hash: String,
+    #[serde(default)]
+    pub published_by: String,
+    #[serde(default)]
+    pub published_at: i64,
+}
+
+/// Published async-task binding revision. Keeps both target and effective
+/// template snapshots so runtime selection never depends on mutable drafts.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AsyncTaskBindingRevision {
+    pub id: String,
+    pub binding_id: String,
+    pub version: i64,
+    pub profile_id: String,
+    pub profile_revision_id: String,
+    pub profile_version: i64,
+    #[serde(default)]
+    pub task_kind: String,
+    #[serde(default)]
+    pub global_model_id: String,
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub provider_model_id: String,
+    #[serde(default)]
+    pub endpoint_id: String,
+    #[serde(default)]
+    pub api_format: String,
+    #[serde(default)]
+    pub provider_key_id: String,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub target_snapshot: serde_json::Value,
+    #[serde(default)]
+    pub overrides_snapshot: serde_json::Value,
+    #[serde(default)]
+    pub effective_template_snapshot: serde_json::Value,
+    pub effective_template_hash: String,
+    pub specificity_key: String,
+    #[serde(default)]
+    pub published_by: String,
+    #[serde(default)]
+    pub published_at: i64,
+}
+
+/// Binding index keyed as `<global_model_id>:<task_kind>` in Redis. It is a
+/// compact runtime projection over published binding revisions.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AsyncTaskBindingIndex {
+    pub global_model_id: String,
+    pub task_kind: String,
+    #[serde(default)]
+    pub binding_revision_ids: Vec<String>,
+    #[serde(default)]
+    pub endpoint_registry: Vec<serde_json::Value>,
+}
+
 /// Per-model availability gate (T4-A / G-β.4).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]

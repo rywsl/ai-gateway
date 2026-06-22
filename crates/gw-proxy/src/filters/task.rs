@@ -2,7 +2,10 @@ use crate::ctx::ReqCtx;
 use bytes::Bytes;
 use gw_billing::formulas::{calculate_freeze_amount, TaskBillingConfig};
 use gw_core::error::codes;
-use gw_task::{CancelReason, TaskContract, TaskError, TaskId, TaskKind, TaskRecord, TaskStatus};
+use gw_task::{
+    CancelReason, ClientMode, TaskContract, TaskError, TaskId, TaskKind, TaskRecord, TaskStatus,
+    UpstreamMode,
+};
 use pingora::http::ResponseHeader;
 use pingora::Result;
 use pingora_proxy::Session;
@@ -17,6 +20,14 @@ pub enum TaskAction {
     Load,
     Watch,
     Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointRegistryEntry {
+    pub method: String,
+    pub path: String,
+    pub task_kind: String,
+    pub global_model_id: String,
 }
 
 pub fn detect_task_shape(
@@ -39,25 +50,18 @@ pub fn detect_task_shape(
         ("POST", ["v1", "tasks", task_id, "cancel"]) if !task_id.is_empty() => {
             Some(TaskAction::Cancel)
         }
-        ("POST", ["v1", "images", "generations"]) => Some(TaskAction::Submit),
-        ("POST", ["v1", "responses"]) if body_has_background_true(_body) => {
-            Some(TaskAction::Submit)
-        }
         _ => None,
     }
 }
 
-fn body_has_background_true(body: Option<&[u8]>) -> bool {
-    let Some(body) = body else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return false;
-    };
-    value
-        .get("background")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+pub fn detect_published_task_endpoint<'a>(
+    registry: &'a [EndpointRegistryEntry],
+    method: &str,
+    path: &str,
+) -> Option<&'a EndpointRegistryEntry> {
+    registry
+        .iter()
+        .find(|entry| entry.method == method && entry.path == path)
 }
 
 pub fn mark_task_context(
@@ -186,26 +190,67 @@ async fn submit_endpoint_impl<C: TaskContract + Sync>(
     }
     let record = TaskRecord {
         id: task_id,
-        schema_version: 1,
+        schema_version: 2,
         kind,
         status: TaskStatus::Queued,
         user_id: request.user_id.to_string(),
         child_id: None,
         api_key_id: request.api_key_id.unwrap_or_default().to_string(),
-        client_protocol: request.client_protocol.to_string(),
         vendor_id: input_payload
             .get("vendor_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        vendor_key_hint: input_payload
-            .get("vendor_key_hint")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
         model: input_payload
             .get("model")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        client_mode: ClientMode::Async,
+        upstream_mode: UpstreamMode::AsyncLro,
+        global_model_id: input_payload
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        provider_model_id: input_payload
+            .get("provider_model_id")
+            .or_else(|| input_payload.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        endpoint_id: input_payload
+            .get("endpoint_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        provider_key_id: input_payload
+            .get("provider_key_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        profile_id: input_payload
+            .get("profile_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        profile_revision_id: input_payload
+            .get("profile_revision_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        profile_version: input_payload
+            .get("profile_version")
+            .and_then(serde_json::Value::as_u64),
+        binding_id: input_payload
+            .get("binding_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        binding_revision_id: input_payload
+            .get("binding_revision_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        binding_version: input_payload
+            .get("binding_version")
+            .and_then(serde_json::Value::as_u64),
+        effective_template_hash: input_payload
+            .get("effective_template_hash")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        poll_context: input_payload.get("poll_context").cloned(),
         created_at_ms: now_ms,
         updated_at_ms: now_ms,
         submitted_ts_ms: now_ms,

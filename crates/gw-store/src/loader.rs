@@ -12,9 +12,9 @@ use secrecy::SecretString;
 use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
-    ApiKeyEntry, AuthConfig, EstimatePricing, IpBlockEntry, JwksEntry, ManagementTokenEntry, Model,
-    ModelGroup, OAuthCredentials, Pricing, ProxyNode, QuotaState, UserEntry, UserGroup, Vendor,
-    VendorKey,
+    ApiKeyEntry, AsyncTaskBindingIndex, AsyncTaskBindingRevision, AsyncTaskProfileRevision,
+    AuthConfig, EstimatePricing, IpBlockEntry, JwksEntry, ManagementTokenEntry, Model, ModelGroup,
+    OAuthCredentials, Pricing, ProxyNode, QuotaState, UserEntry, UserGroup, Vendor, VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -151,8 +151,16 @@ fn redis_value_to_bytes(value: &RedisValue) -> Option<&[u8]> {
 fn ttl_for(ns: &str) -> u64 {
     match ns {
         "user" | "user_group" | "apikey" | "ipblock" | "management_token" => 300,
-        "vendor" | "vendor_key" | "model_group" | "pricing" | "estimate_pricing" | "model"
-        | "proxy_node" => 1800,
+        "vendor"
+        | "vendor_key"
+        | "model_group"
+        | "pricing"
+        | "estimate_pricing"
+        | "model"
+        | "proxy_node"
+        | "async_task_profile_revision"
+        | "async_task_binding_revision"
+        | "async_task_binding_index" => 1800,
         "jwks" | "auth_config" => 3600,
         _ => 300,
     }
@@ -313,6 +321,9 @@ const MODULE_ENABLED_SQL: &str = "SELECT value::text FROM system_configs WHERE k
 // bootstrap warn path in gw-gateway::lib falls back to the legacy validator.
 const AUTH_CONFIG_SQL: &str =
     "SELECT payload, version FROM auth_configs WHERE id = $1 AND deleted_at IS NULL";
+const ASYNC_TASK_PROFILE_REVISION_SQL: &str = "SELECT jsonb_build_object('id', id, 'profile_id', profile_id, 'version', version, 'schema_version', schema_version, 'task_kind', task_kind, 'published_snapshot', published_snapshot, 'template_hash', template_hash, 'published_by', published_by, 'published_at', published_at) AS payload, version FROM async_task_profile_revisions WHERE id = $1";
+const ASYNC_TASK_BINDING_REVISION_SQL: &str = "SELECT jsonb_build_object('id', id, 'binding_id', binding_id, 'version', version, 'profile_id', profile_id, 'profile_revision_id', profile_revision_id, 'profile_version', profile_version, 'global_model_id', global_model_id, 'provider_id', provider_id, 'provider_model_id', provider_model_id, 'endpoint_id', endpoint_id, 'api_format', api_format, 'provider_key_id', provider_key_id, 'priority', priority, 'target_snapshot', target_snapshot, 'overrides_snapshot', overrides_snapshot, 'effective_template_snapshot', effective_template_snapshot, 'effective_template_hash', effective_template_hash, 'specificity_key', specificity_key, 'published_by', published_by, 'published_at', published_at) AS payload, version FROM async_task_binding_revisions WHERE id = $1";
+const ASYNC_TASK_BINDING_INDEX_SQL: &str = "WITH parts AS (SELECT split_part($1, ':', 1) AS global_model_id, split_part($1, ':', 2) AS task_kind), rows AS (SELECT abr.id, abr.version, apr.published_snapshot FROM async_task_binding_revisions abr JOIN async_task_profile_revisions apr ON apr.id = abr.profile_revision_id JOIN parts p ON TRUE WHERE abr.global_model_id = p.global_model_id AND apr.task_kind = p.task_kind ORDER BY abr.priority DESC, abr.version DESC) SELECT jsonb_build_object('global_model_id', (SELECT global_model_id FROM parts), 'task_kind', (SELECT task_kind FROM parts), 'binding_revision_ids', COALESCE(jsonb_agg(id ORDER BY version DESC), '[]'::jsonb), 'endpoint_registry', COALESCE(jsonb_agg(published_snapshot->'client_request_template') FILTER (WHERE published_snapshot ? 'client_request_template'), '[]'::jsonb)) AS payload, COALESCE(MAX(version), 0)::BIGINT AS version FROM rows";
 
 pub async fn load_user(ctx: &LoaderCtx, id: &UserId) -> anyhow::Result<Versioned<UserEntry>> {
     load_entity(ctx, "user", id.as_ref(), USER_SQL, |v| {
@@ -472,6 +483,48 @@ pub async fn load_auth_config(ctx: &LoaderCtx, id: &str) -> anyhow::Result<Versi
     .await
 }
 
+pub async fn load_async_task_profile_revision(
+    ctx: &LoaderCtx,
+    id: &str,
+) -> anyhow::Result<Versioned<AsyncTaskProfileRevision>> {
+    load_entity(
+        ctx,
+        "async_task_profile_revision",
+        id,
+        ASYNC_TASK_PROFILE_REVISION_SQL,
+        |v| serde_json::from_value::<AsyncTaskProfileRevision>(v.clone()).map_err(Into::into),
+    )
+    .await
+}
+
+pub async fn load_async_task_binding_revision(
+    ctx: &LoaderCtx,
+    id: &str,
+) -> anyhow::Result<Versioned<AsyncTaskBindingRevision>> {
+    load_entity(
+        ctx,
+        "async_task_binding_revision",
+        id,
+        ASYNC_TASK_BINDING_REVISION_SQL,
+        |v| serde_json::from_value::<AsyncTaskBindingRevision>(v.clone()).map_err(Into::into),
+    )
+    .await
+}
+
+pub async fn load_async_task_binding_index(
+    ctx: &LoaderCtx,
+    id: &str,
+) -> anyhow::Result<Versioned<AsyncTaskBindingIndex>> {
+    load_entity(
+        ctx,
+        "async_task_binding_index",
+        id,
+        ASYNC_TASK_BINDING_INDEX_SQL,
+        |v| serde_json::from_value::<AsyncTaskBindingIndex>(v.clone()).map_err(Into::into),
+    )
+    .await
+}
+
 pub fn module_enabled_from_value(raw: &str) -> bool {
     let trimmed = raw.trim();
     let unquoted = trimmed
@@ -566,6 +619,84 @@ mod tests {
                 "expected {raw:?} to disable module"
             );
         }
+    }
+
+    #[test]
+    fn async_task_profile_revision_decodes_go_projection() {
+        let payload = serde_json::json!({
+            "id": "profile-rev-1",
+            "profile_id": "profile-1",
+            "version": 3,
+            "schema_version": "v1",
+            "task_kind": "embedding",
+            "published_snapshot": {
+                "client_modes": ["sync", "async"],
+                "upstream_mode": "async_lro"
+            },
+            "template_hash": "sha256:profile",
+            "published_by": "admin",
+            "published_at": 1700000000
+        });
+
+        let decoded: AsyncTaskProfileRevision =
+            serde_json::from_value(payload).expect("profile revision decodes");
+
+        assert_eq!(decoded.task_kind, "embedding");
+        assert_eq!(decoded.profile["upstream_mode"], "async_lro");
+    }
+
+    #[test]
+    fn async_task_binding_revision_decodes_go_projection() {
+        let payload = serde_json::json!({
+            "id": "binding-rev-1",
+            "binding_id": "binding-1",
+            "version": 5,
+            "profile_id": "profile-1",
+            "profile_revision_id": "profile-rev-1",
+            "profile_version": 3,
+            "global_model_id": "gpt-image",
+            "provider_id": "provider-1",
+            "provider_model_id": "pm-1",
+            "endpoint_id": "endpoint-1",
+            "api_format": "openai",
+            "provider_key_id": "key-1",
+            "priority": 100,
+            "target_snapshot": {"provider_id": "provider-1"},
+            "overrides_snapshot": {},
+            "effective_template_snapshot": {"upstream_request_template": {"path": "/v1/images/generations"}},
+            "effective_template_hash": "sha256:binding",
+            "specificity_key": "image|gpt-image|pm-1|endpoint-1|openai|key-1",
+            "published_by": "admin",
+            "published_at": 1700000000
+        });
+
+        let decoded: AsyncTaskBindingRevision =
+            serde_json::from_value(payload).expect("binding revision decodes");
+
+        assert_eq!(decoded.provider_model_id, "pm-1");
+        assert_eq!(
+            decoded.effective_template_snapshot["upstream_request_template"]["path"],
+            "/v1/images/generations"
+        );
+    }
+
+    #[test]
+    fn async_task_binding_index_decodes_runtime_projection() {
+        let payload = serde_json::json!({
+            "global_model_id": "gpt-image",
+            "task_kind": "image",
+            "binding_revision_ids": ["binding-rev-1"],
+            "endpoint_registry": [{"method": "POST", "path": "/v1/images/generations"}]
+        });
+
+        let decoded: AsyncTaskBindingIndex =
+            serde_json::from_value(payload).expect("binding index decodes");
+
+        assert_eq!(decoded.binding_revision_ids, vec!["binding-rev-1"]);
+        assert_eq!(
+            decoded.endpoint_registry[0]["path"],
+            "/v1/images/generations"
+        );
     }
 }
 

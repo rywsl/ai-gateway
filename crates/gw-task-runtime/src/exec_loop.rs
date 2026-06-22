@@ -240,20 +240,31 @@ where
                     .increment(1);
             }
             Ok(Err(err)) => {
+                let message = err.to_string();
+                let terminal_status = if is_timeout_error(&message) {
+                    TaskStatus::TimedOut
+                } else {
+                    TaskStatus::Failed
+                };
+                let metric_status = if terminal_status == TaskStatus::TimedOut {
+                    "timed_out"
+                } else {
+                    "failed"
+                };
                 self.contract
-                    .settle(&task_id, TaskStatus::Failed, None, Some(err.to_string()), 0)
+                    .settle(&task_id, terminal_status, None, Some(message), 0)
                     .await
                     .map_err(|settle_err| {
                         anyhow!("settle failed task after {err}: {settle_err}")
                     })?;
-                metrics::counter!(task_metrics::TASK_SETTLED_TOTAL, "status" => "failed")
+                metrics::counter!(task_metrics::TASK_SETTLED_TOTAL, "status" => metric_status)
                     .increment(1);
             }
             Err(_) => {
                 self.contract
                     .settle(
                         &task_id,
-                        TaskStatus::Failed,
+                        TaskStatus::TimedOut,
                         None,
                         Some(format!(
                             "task execution timeout after {} ms",
@@ -263,7 +274,7 @@ where
                     )
                     .await
                     .map_err(|err| anyhow!("settle timed-out task: {err}"))?;
-                metrics::counter!(task_metrics::TASK_SETTLED_TOTAL, "status" => "failed")
+                metrics::counter!(task_metrics::TASK_SETTLED_TOTAL, "status" => "timed_out")
                     .increment(1);
             }
         }
@@ -378,6 +389,10 @@ where
             }
         }
     }
+}
+
+fn is_timeout_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("timeout")
 }
 
 fn settle_amount(record: &TaskRecord, succeeded: bool, elapsed: Duration) -> i64 {
@@ -539,8 +554,8 @@ fn upstream_url(record: &TaskRecord) -> anyhow::Result<String> {
         .get("upstream_url")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
-        .or_else(|| record.vendor_key_hint.clone())
-        .ok_or_else(|| anyhow!("task {} missing upstream_url/vendor_key_hint", record.id))
+        .or_else(|| record.provider_key_id.clone())
+        .ok_or_else(|| anyhow!("task {} missing upstream_url/provider_key_id", record.id))
 }
 
 struct UpstreamBody {

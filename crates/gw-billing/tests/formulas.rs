@@ -37,6 +37,29 @@ fn test_settle_amount_calculation() {
 }
 
 #[test]
+fn test_embedding_uses_generic_task_billing_until_specific_formula_exists() {
+    let config = TaskBillingConfig {
+        base_micro: 1_000,
+        vendor_multiplier: 1.0,
+        estimated_duration_secs: 60,
+    };
+    let result = TaskBillingResult {
+        actual_duration_secs: 60,
+        succeeded: true,
+        vendor_multiplier: 1.0,
+    };
+
+    assert_eq!(
+        calculate_freeze_amount(TaskKind::Embedding, &config),
+        calculate_freeze_amount(TaskKind::Generic, &config)
+    );
+    assert_eq!(
+        calculate_settle_amount(TaskKind::Embedding, &result),
+        calculate_settle_amount(TaskKind::Generic, &result)
+    );
+}
+
+#[test]
 fn vendor_multiplier_math_clamps_without_wrapping() {
     let config = TaskBillingConfig {
         base_micro: i64::MAX,
