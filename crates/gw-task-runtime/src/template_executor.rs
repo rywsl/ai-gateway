@@ -126,6 +126,15 @@ impl TemplateExecutor {
         request: ExecutionRequest,
         inline: bool,
     ) -> Result<ExecutionResult, TemplateError> {
+        if inline && request.client_mode == ClientMode::Async {
+            return Ok(ExecutionResult::Submitted {
+                response: render_submit_response(&request)?,
+                events: vec![ExecutionEvent {
+                    status: "submitted".to_string(),
+                }],
+            });
+        }
+
         let mut events = vec![
             ExecutionEvent {
                 status: "submitted".to_string(),
@@ -140,9 +149,7 @@ impl TemplateExecutor {
             .submit(rendered)
             .await
             .map_err(|err| TemplateError::RenderFailed(err.to_string()))?;
-        let final_response = if request.upstream_mode == UpstreamMode::AsyncLro
-            && provider_task_pending(&upstream_response.body)
-        {
+        let final_response = if request.upstream_mode == UpstreamMode::AsyncLro {
             let poll = self
                 .transport
                 .poll(PollContext {
@@ -162,17 +169,10 @@ impl TemplateExecutor {
             status: "succeeded".to_string(),
         });
 
-        if inline || request.client_mode == ClientMode::Sync {
-            Ok(ExecutionResult::Completed {
-                response: client_final,
-                events,
-            })
-        } else {
-            Ok(ExecutionResult::Submitted {
-                response: client_final,
-                events,
-            })
-        }
+        Ok(ExecutionResult::Completed {
+            response: client_final,
+            events,
+        })
     }
 }
 
@@ -263,6 +263,26 @@ fn render_client_response(
     render(&ctx, tmpl, RenderLimits::default())
 }
 
+fn render_submit_response(request: &ExecutionRequest) -> Result<Value, TemplateError> {
+    let client = normalize_client(
+        request
+            .profile
+            .get("client_request_template")
+            .ok_or_else(|| {
+                TemplateError::Invalid("client_request_template is required".to_string())
+            })?,
+        &request.client_request,
+    )?;
+    let ctx = context_for(request, Value::Object(client), Value::Null);
+    let tmpl = request
+        .profile
+        .get("client_async_submit_response_template")
+        .ok_or_else(|| {
+            TemplateError::Invalid("client_async_submit_response_template is required".to_string())
+        })?;
+    render(&ctx, tmpl, RenderLimits::default())
+}
+
 fn context_for(request: &ExecutionRequest, client: Value, result: Value) -> Context {
     let mut ctx = Context::new();
     ctx.insert("binding".to_string(), request.binding.clone());
@@ -333,15 +353,6 @@ fn set_dotted(out: &mut Map<String, Value>, path: &str, value: Value) {
         }
         cur = entry.as_object_mut().expect("object inserted");
     }
-}
-
-fn provider_task_pending(value: &Value) -> bool {
-    value
-        .get("status")
-        .or_else(|| value.get("state"))
-        .and_then(Value::as_str)
-        .map(|status| matches!(status, "queued" | "pending" | "running" | "processing"))
-        .unwrap_or(false)
 }
 
 fn provider_task_id(value: &Value) -> Option<String> {
