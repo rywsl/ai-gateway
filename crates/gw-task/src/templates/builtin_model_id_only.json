@@ -1,0 +1,78 @@
+{
+  "name": "builtin model id only",
+  "profile": {
+    "id": "atp_builtin_model_id_only",
+    "name": "Built-in model id only",
+    "task_kind": "image",
+    "client_modes": ["sync"],
+    "default_client_mode": "sync",
+    "upstream_mode": "sync",
+    "client_request_template": {
+      "required": ["model", "prompt"],
+      "normalize": {
+        "client.model": "$.model",
+        "client.prompt": "$.prompt",
+        "client.size": {"value": "$.size", "default": "1024x1024"}
+      }
+    },
+    "upstream_request_template": {
+      "method": "POST",
+      "path": "/v1/images/generations",
+      "headers": {"Content-Type": "application/json"},
+      "body": {
+        "model": "{{binding.provider_model_name}}",
+        "prompt": "{{client.prompt}}",
+        "size": "{{client.size}}"
+      }
+    },
+    "upstream_response_template": {
+      "result": {
+        "images": "$.data[*].b64_json"
+      }
+    },
+    "client_sync_response_template": {
+      "object": "list",
+      "data": {
+        "$map": {
+          "source": "{{result.images}}",
+          "as": "image",
+          "template": {"b64_json": "{{image}}"}
+        }
+      }
+    }
+  },
+  "binding": {
+    "id": "atb_builtin_model_id_only",
+    "profile_id": "atp_builtin_model_id_only",
+    "global_model_id": "gpt-image-2",
+    "provider_id": "openai_compatible",
+    "provider_model_id": "pm_gpt_image_2_max",
+    "provider_model_name": "gpt-image-2-max",
+    "endpoint_id": "pe_openai",
+    "api_format": "openai"
+  },
+  "client_request": {
+    "model": "gpt-image-2",
+    "prompt": "a small red cube",
+    "size": "1024x1024"
+  },
+  "mock_upstream_submit_response": {
+    "data": [{"b64_json": "aW1hZ2U="}]
+  },
+  "expected": {
+    "rendered_upstream_request": {
+      "method": "POST",
+      "path": "/v1/images/generations",
+      "headers": {"Content-Type": "application/json"},
+      "body": {
+        "model": "gpt-image-2-max",
+        "prompt": "a small red cube",
+        "size": "1024x1024"
+      }
+    },
+    "client_sync_response": {
+      "object": "list",
+      "data": [{"b64_json": "aW1hZ2U="}]
+    }
+  }
+}

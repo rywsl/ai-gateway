@@ -1,6 +1,7 @@
 pub mod contract;
 pub mod redis_contract;
 pub mod scripts;
+pub mod template;
 pub mod types;
 
 pub use contract::{CancelReason, ClaimedTask, SettleOutcome, TaskContract, TaskError};

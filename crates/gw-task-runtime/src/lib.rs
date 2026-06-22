@@ -3,7 +3,9 @@
 //! Provides a Redis-backed implementation ([`RedisTaskFreezeRelease`]) of
 //! [`TaskFreezeRelease`] for releasing frozen task balances.
 
+pub mod binding_selector;
 pub mod cancel_loop;
+pub mod client_mode;
 pub mod exec_loop;
 pub mod heartbeat_loop;
 pub mod task_metrics;

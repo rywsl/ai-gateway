@@ -2222,8 +2222,10 @@ name = "gw-task"
 version = "0.1.0"
 dependencies = [
  "fred",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "testcontainers-modules",
  "thiserror 1.0.69",
  "tokio",
