@@ -2264,6 +2264,7 @@ dependencies = [
  "futures",
  "gw-billing",
  "gw-runtime",
+ "gw-store",
  "gw-task",
  "gw-task-runtime",
  "hostname",

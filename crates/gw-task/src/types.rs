@@ -60,12 +60,16 @@ pub enum TaskStatus {
     Failed,
     Cancelled,
     Cancelling,
+    TimedOut,
 }
 
 impl TaskStatus {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::TimedOut
+        )
     }
 
     #[must_use]
@@ -78,8 +82,10 @@ impl TaskStatus {
                 | (Self::Running, Self::Failed)
                 | (Self::Running, Self::Cancelled)
                 | (Self::Running, Self::Cancelling)
+                | (Self::Running, Self::TimedOut)
                 | (Self::Cancelling, Self::Cancelled)
                 | (Self::Cancelling, Self::Succeeded)
+                | (Self::Cancelling, Self::TimedOut)
         )
     }
 }
@@ -93,6 +99,21 @@ pub enum TaskKind {
     Batch,
     LroResponses,
     Generic,
+    Embedding,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientMode {
+    Sync,
+    Async,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamMode {
+    Sync,
+    AsyncLro,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -104,10 +125,22 @@ pub struct TaskRecord {
     pub user_id: String,
     pub child_id: Option<String>,
     pub api_key_id: String,
-    pub client_protocol: String,
     pub vendor_id: String,
-    pub vendor_key_hint: Option<String>,
     pub model: Option<String>,
+    pub client_mode: ClientMode,
+    pub upstream_mode: UpstreamMode,
+    pub global_model_id: Option<String>,
+    pub provider_model_id: Option<String>,
+    pub endpoint_id: Option<String>,
+    pub provider_key_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub profile_revision_id: Option<String>,
+    pub profile_version: Option<u64>,
+    pub binding_id: Option<String>,
+    pub binding_revision_id: Option<String>,
+    pub binding_version: Option<u64>,
+    pub effective_template_hash: Option<String>,
+    pub poll_context: Option<serde_json::Value>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub submitted_ts_ms: u64,

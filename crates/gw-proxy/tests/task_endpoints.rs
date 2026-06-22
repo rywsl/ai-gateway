@@ -6,21 +6,35 @@ use gw_codec::AnyCodec;
 use gw_core::ids::UserId;
 use gw_store::deduction::{DeductionState, DEDUCT};
 use gw_task::contract::{CancelReason, ClaimedTask, SettleOutcome};
-use gw_task::{TaskContract, TaskError, TaskId, TaskKind, TaskRecord, TaskStatus};
+use gw_task::{
+    ClientMode, TaskContract, TaskError, TaskId, TaskKind, TaskRecord, TaskStatus, UpstreamMode,
+};
 
 fn task_record(id: TaskId, status: TaskStatus) -> TaskRecord {
     TaskRecord {
         id,
-        schema_version: 1,
+        schema_version: 2,
         kind: TaskKind::Generic,
         status,
         user_id: "user_task".to_string(),
         child_id: None,
         api_key_id: "ak_task".to_string(),
-        client_protocol: "openai".to_string(),
         vendor_id: "vendor_task".to_string(),
-        vendor_key_hint: None,
         model: Some("gpt-task".to_string()),
+        client_mode: ClientMode::Async,
+        upstream_mode: UpstreamMode::AsyncLro,
+        global_model_id: Some("gpt-task".to_string()),
+        provider_model_id: Some("provider-gpt-task".to_string()),
+        endpoint_id: Some("endpoint-task".to_string()),
+        provider_key_id: Some("provider-key-task".to_string()),
+        profile_id: Some("profile-task".to_string()),
+        profile_revision_id: Some("profile-rev-task".to_string()),
+        profile_version: Some(1),
+        binding_id: Some("binding-task".to_string()),
+        binding_revision_id: Some("binding-rev-task".to_string()),
+        binding_version: Some(1),
+        effective_template_hash: Some("sha256:test".to_string()),
+        poll_context: None,
         created_at_ms: 1_000,
         updated_at_ms: 1_000,
         submitted_ts_ms: 1_000,
@@ -385,7 +399,6 @@ async fn test_submit_endpoint_skips_ir_attachment_for_cli_protocol_with_response
     let submitted = contract.submitted.lock().unwrap();
     assert_eq!(submitted.len(), 1);
     let payload = &submitted[0].input_payload;
-    assert_eq!(submitted[0].client_protocol, "openai:cli");
     assert_eq!(payload["model"], "gpt-5");
     assert_eq!(payload["metadata"]["cli"], "codex");
     assert!(payload.get("ir_request").is_none());
@@ -419,7 +432,6 @@ async fn test_submit_endpoint_preserves_direct_submit_for_cli_body_marker() {
     assert_eq!(response.status, 201);
     let submitted = contract.submitted.lock().unwrap();
     let payload = &submitted[0].input_payload;
-    assert_eq!(submitted[0].client_protocol, "openai:cli");
     assert_eq!(payload["background"], true);
     assert_eq!(payload["metadata"]["cli"], "codex");
     assert!(payload.get("ir_request").is_none());
@@ -453,7 +465,6 @@ async fn test_submit_endpoint_stores_full_ir_for_responses_background() {
     assert_eq!(response.status, 201);
     let submitted = contract.submitted.lock().unwrap();
     let payload = &submitted[0].input_payload;
-    assert_eq!(submitted[0].client_protocol, "openai:responses");
     assert_eq!(payload["ir_wire_format"], "openai:responses");
     assert_eq!(payload["ir_request"]["protocol"], "openai:responses");
     assert_eq!(payload["ir_request"]["kind"], "request");
@@ -495,7 +506,6 @@ async fn test_submit_endpoint_attaches_responses_ir_for_direct_submit_without_cl
     assert_eq!(response.status, 201);
     let submitted = contract.submitted.lock().unwrap();
     let payload = &submitted[0].input_payload;
-    assert_eq!(submitted[0].client_protocol, "openai:cli");
     assert_eq!(payload["ir_wire_format"], "openai:responses");
     assert_eq!(payload["ir_request"]["protocol"], "openai:responses");
     let rendered = payload["ir_wire_body"].as_str().expect("rendered body");

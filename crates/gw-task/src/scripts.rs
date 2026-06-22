@@ -65,7 +65,7 @@ local deducted_micro = tonumber(ARGV[5]) or 0
 local usage_payload = ARGV[6]
 
 local cur = redis.call('HGET', KEYS[1], 'status')
-if cur == 'settled' or cur == 'cancelled' or cur == 'expired' then
+if cur == 'settled' or cur == 'cancelled' or cur == 'expired' or cur == 'timed_out' then
     return 'noop'
 end
 

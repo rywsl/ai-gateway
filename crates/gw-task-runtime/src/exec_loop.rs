@@ -539,8 +539,8 @@ fn upstream_url(record: &TaskRecord) -> anyhow::Result<String> {
         .get("upstream_url")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
-        .or_else(|| record.vendor_key_hint.clone())
-        .ok_or_else(|| anyhow!("task {} missing upstream_url/vendor_key_hint", record.id))
+        .or_else(|| record.provider_key_id.clone())
+        .ok_or_else(|| anyhow!("task {} missing upstream_url/provider_key_id", record.id))
 }
 
 struct UpstreamBody {

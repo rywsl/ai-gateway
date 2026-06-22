@@ -254,6 +254,15 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "management_token" => {
             store.invalidate_mgmt_token(id).await;
         }
+        "async_task_profile_revision" => {
+            store.invalidate_async_task_profile_revision(id).await;
+        }
+        "async_task_binding_revision" => {
+            store.invalidate_async_task_binding_revision(id).await;
+        }
+        "async_task_binding_index" => {
+            store.invalidate_async_task_binding_index(id).await;
+        }
         "model_mapping" => {
             // id format: "alias|protocol", with protocol matching ProtocolKind's
             // snake_case serde tag ("openai" | "anthropic" | "gemini").
@@ -605,6 +614,124 @@ mod mgmt_token_tests {
             store.mgmt_token.get("tk-1").await.is_none(),
             "cache entry must be absent after invalidation"
         );
+    }
+}
+
+#[cfg(test)]
+mod async_task_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use gw_core::entity::{
+        AsyncTaskBindingIndex, AsyncTaskBindingRevision, AsyncTaskProfileRevision,
+    };
+    use gw_core::versioned::Versioned;
+    use std::sync::Arc;
+
+    fn versioned<T>(value: T) -> Arc<Versioned<T>> {
+        Arc::new(Versioned {
+            version: 1,
+            value: Arc::new(value),
+        })
+    }
+
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_async_task_profile_revision() {
+        let store = Arc::new(EntityStore::new());
+        store
+            .async_task_profile_revision
+            .insert(
+                "profile-rev-1".to_string(),
+                versioned(AsyncTaskProfileRevision {
+                    id: "profile-rev-1".to_string(),
+                    profile_id: "profile-1".to_string(),
+                    version: 1,
+                    schema_version: "v1".to_string(),
+                    task_kind: "image".to_string(),
+                    profile: serde_json::json!({"name": "image default"}),
+                    template_hash: "sha256:profile".to_string(),
+                    published_by: "admin".to_string(),
+                    published_at: 1_700_000_000,
+                }),
+            )
+            .await;
+
+        apply_entity_event(&store, "async_task_profile_revision", "profile-rev-1").await;
+
+        assert!(store
+            .async_task_profile_revision
+            .get("profile-rev-1")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_async_task_binding_revision() {
+        let store = Arc::new(EntityStore::new());
+        store
+            .async_task_binding_revision
+            .insert(
+                "binding-rev-1".to_string(),
+                versioned(AsyncTaskBindingRevision {
+                    id: "binding-rev-1".to_string(),
+                    binding_id: "binding-1".to_string(),
+                    version: 1,
+                    profile_id: "profile-1".to_string(),
+                    profile_revision_id: "profile-rev-1".to_string(),
+                    profile_version: 1,
+                    global_model_id: "gpt-image".to_string(),
+                    task_kind: "image".to_string(),
+                    provider_id: "p1".to_string(),
+                    target_snapshot: serde_json::json!({"provider_id": "p1"}),
+                    provider_model_id: "pm1".to_string(),
+                    endpoint_id: "endpoint-1".to_string(),
+                    api_format: "openai".to_string(),
+                    provider_key_id: "key-1".to_string(),
+                    overrides_snapshot: serde_json::json!({}),
+                    effective_template_snapshot: serde_json::json!({"request": {}}),
+                    effective_template_hash: "sha256:binding".to_string(),
+                    specificity_key: "image|gpt-image|pm1|*|*|*".to_string(),
+                    priority: 10,
+                    published_by: "admin".to_string(),
+                    published_at: 1_700_000_000,
+                }),
+            )
+            .await;
+
+        apply_entity_event(&store, "async_task_binding_revision", "binding-rev-1").await;
+
+        assert!(store
+            .async_task_binding_revision
+            .get("binding-rev-1")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_async_task_binding_index() {
+        let store = Arc::new(EntityStore::new());
+        store
+            .async_task_binding_index
+            .insert(
+                "gpt-image:image".to_string(),
+                versioned(AsyncTaskBindingIndex {
+                    global_model_id: "gpt-image".to_string(),
+                    task_kind: "image".to_string(),
+                    binding_revision_ids: vec!["binding-rev-1".to_string()],
+                    endpoint_registry: vec![serde_json::json!({
+                        "method": "POST",
+                        "path": "/v1/images/generations"
+                    })],
+                }),
+            )
+            .await;
+
+        apply_entity_event(&store, "async_task_binding_index", "gpt-image:image").await;
+
+        assert!(store
+            .async_task_binding_index
+            .get("gpt-image:image")
+            .await
+            .is_none());
     }
 }
 

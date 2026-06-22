@@ -18,6 +18,7 @@ gw-task = { path = "../gw-task" }
 gw-task-runtime = { path = "../gw-task-runtime" }
 gw-billing = { path = "../gw-billing" }
 gw-runtime = { path = "../gw-runtime" }
+gw-store = { path = "../gw-store" }
 tokio.workspace = true
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

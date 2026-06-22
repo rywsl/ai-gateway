@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gw_task::contract::{CancelReason, ClaimedTask, SettleOutcome};
-use gw_task::{TaskContract, TaskError, TaskId, TaskKind, TaskRecord, TaskStatus};
+use gw_task::{
+    ClientMode, TaskContract, TaskError, TaskId, TaskKind, TaskRecord, TaskStatus, UpstreamMode,
+};
 use gw_task_runtime::exec_loop::{ExecLoop, ExecLoopConfig, TaskTimeoutKey, TaskTimeouts};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -205,16 +207,28 @@ fn sample_record(upstream_url: String) -> TaskRecord {
     let now = 1_700_000_000_000;
     TaskRecord {
         id: TaskId::new_v4(),
-        schema_version: 1,
+        schema_version: 2,
         kind: TaskKind::Generic,
         status: TaskStatus::Queued,
         user_id: "user-1".to_string(),
         child_id: None,
         api_key_id: "api-key-1".to_string(),
-        client_protocol: "openai".to_string(),
         vendor_id: "vendor-1".to_string(),
-        vendor_key_hint: Some("vendor-key-1".to_string()),
         model: Some("model-1".to_string()),
+        client_mode: ClientMode::Async,
+        upstream_mode: UpstreamMode::AsyncLro,
+        global_model_id: Some("model-1".to_string()),
+        provider_model_id: Some("provider-model-1".to_string()),
+        endpoint_id: Some("endpoint-1".to_string()),
+        provider_key_id: Some("vendor-key-1".to_string()),
+        profile_id: Some("profile-1".to_string()),
+        profile_revision_id: Some("profile-rev-1".to_string()),
+        profile_version: Some(1),
+        binding_id: Some("binding-1".to_string()),
+        binding_revision_id: Some("binding-rev-1".to_string()),
+        binding_version: Some(1),
+        effective_template_hash: Some("sha256:test".to_string()),
+        poll_context: None,
         created_at_ms: now,
         updated_at_ms: now,
         submitted_ts_ms: now,
