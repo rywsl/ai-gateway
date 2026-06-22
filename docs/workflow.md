@@ -246,6 +246,17 @@ After parsing, the loop decides how to forward the chunk to the client. If `ctx.
 
 `error_passthrough::render_error_to_client(client_kind, &PassthroughBody, error_class)` produces a structured protocol-specific error envelope from the upstream error body. Activated when `[error.passthrough].enabled = true` — the `response_body_filter` replaces the final body chunk at EOS. HTML upstream bodies bypass passthrough (always wrapped as JSON). Every envelope (stream `event: error` frame and non-stream alike) carries a stable `GW_...` gateway code (P0 #16): OpenAI/Anthropic in `error.code`, Gemini/Kiro in an additive `gateway_code` field (their `code` stays the numeric/vendor value). The code is derived from any upstream-supplied `GW_...` code, else mapped from `upstream_status`/`error_class`; message allow/deny masking never touches it.
 
+Error-message rewrite rules layer on top of passthrough rendering. The gateway
+bootstraps `gw-store::error_message_rules::ErrorMessageRuleStore`, cold-loads
+the Go-published `entity:error_message_rules:global` snapshot once, and
+`response_body_filter` reads only the local `ArcSwap` snapshot. A matched rule
+replaces the rendered client-visible `message` after the stable gateway code is
+derived; it never changes `GW_*` code, protocol type/status, HTTP status, or SSE
+wrapping. Rule matching uses the fixed dimension order
+provider/model/endpoint/api-format/request-path/client-protocol/gateway-code/http-status
+plus bounded upstream-message substring checks. If a reload or compile fails,
+the previous snapshot remains active.
+
 ### 3.1 Connect-failure retry path (billing emit)
 
 On `fail_to_connect` with retry budget remaining:
@@ -262,6 +273,10 @@ Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 ke
 
 - `user`, `apikey`, `user_group`, `vendor`, `vendor_key`, `model_group`, `pricing`, `jwks`, `ipblock` → the corresponding Moka cache eviction. `vendor_key` invalidation also runs registered hooks; gateway bootstrap registers `adaptive_rpm.evict(key_id)` so learned RPM state is cleared when a key rotates or its configured RPM changes.
 - `gemini_file_mapping`, `model_mapping` → file-mapping / model-alias cache eviction (entity loaders pending — T6-E + A-T2).
+- `error_message_rules` with `id=global` → `ErrorMessageRuleStore::reload()`.
+  This is a special global snapshot path: StreamConsumer does not invalidate a
+  Moka entity; it spawns a reload, recompiles the rule tree, and atomically swaps
+  the local snapshot only on success.
 
 `events:counter` is consumed and ACKed; `gw-ledger::counter_handler` handles `user_balance` (`op=incrby`, `base_micro` / `deducted_micro`), `protected_lease`, `coef_table`, and `coef_table_commit`. Unknown namespaces remain observability-only.
 
@@ -288,6 +303,13 @@ Before dispatching to the per-`ns` invalidate, the consumer DELs the Redis L1 ke
 | Health `/healthz/circuits`, `/healthz/key/{id}`, `/healthz/resilience`, `/healthz/strategies` | Mgmt-verified (`Authorization: Mgmt mt_<id>.<secret>`, scope ≥ `AdminRead`, FailClosed blacklist). 200 returns the `snapshot_json` body; verify failures map to `GW_AUTH_MGMT_TOKEN_*`. `/healthz/strategies` returns per-(key, format) p50 TTFT for `LatencyFirst` debugging. | `gw-gateway::health` |
 
 For synchronous requests, `FreezeGuard::release` (in logging) is the point where Rust mutates `frozen_micro` downward. Go (the billing service) writes request-path `deducted_micro` / `balance_micro` based on `usage:records`. The async task path is separate: `RedisTaskContract::settle` releases `task_frozen_micro`, increments scalar `deducted_micro` by task-domain `actual_micro`, and emits `task_usage_v1` on `usage:records`.
+
+Error-message rule observability is registered in the same catalog:
+`gw_error_message_rules_snapshot_version`,
+`gw_error_message_rules_reload_total{result}`,
+`gw_error_message_rule_match_total{rule_id}`,
+`gw_error_message_rule_no_match_total`, and
+`gw_error_message_rule_compile_error_total`.
 
 ### 6.1 Task metrics
 

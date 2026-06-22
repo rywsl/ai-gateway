@@ -146,6 +146,7 @@ struct Wired {
     error_failover_total_budget_ms: u64,
     error_passthrough_enabled: bool,
     error_passthrough_rules: std::sync::Arc<Vec<gw_core::error::rules::PassthroughRule>>,
+    error_message_rules: Arc<gw_store::error_message_rules::ErrorMessageRuleStore>,
     body_rules: Arc<gw_proxy::filters::upstream::BodyRulesMap>,
     /// Egress impersonation loopback handle (Task 4.6). Constructed in the
     /// bootstrap runtime because `EgressHandle::start` calls `tokio::spawn`.
@@ -425,6 +426,7 @@ fn serve_gateway(wired: Wired) -> anyhow::Result<std::thread::JoinHandle<()>> {
                 wired.retryable_codes,
                 wired.error_passthrough_enabled,
                 wired.error_passthrough_rules,
+                wired.error_message_rules,
                 wired.reservation_view,
                 wired.frequency_tracker,
                 wired.pg.clone(),
@@ -771,6 +773,17 @@ async fn bootstrap(
     // same in-process KekCache the loader/decrypt hot path observes.
     let control_plane_kek = loader.kek.clone();
     let tunnel_kek = loader.kek.clone();
+    let error_message_rules = Arc::new(gw_store::error_message_rules::ErrorMessageRuleStore::new(
+        loader.redis.clone(),
+        pg.clone(),
+    ));
+    if let Err(err) = error_message_rules.reload().await {
+        tracing::warn!(
+            target: "gw_gateway::bootstrap",
+            error = %err,
+            "error message rules cold load failed; starting with empty snapshot"
+        );
+    }
     let adaptive_rpm = Arc::new(AdaptiveRpmManager::new(map_adaptive_rpm_cfg(
         &cfg.adaptive_rpm,
     )));
@@ -1301,6 +1314,7 @@ async fn bootstrap(
     let consumer = Arc::new(gw_store::stream_consumer::StreamConsumer {
         redis: redis.clone(),
         store: store.clone(),
+        error_message_rules: Some(error_message_rules.clone()),
         instance_id: instance_id.clone(),
     });
     // start() is sync and infallible: Supervisor::spawn handles ensure() on boot
@@ -1804,6 +1818,7 @@ async fn bootstrap(
             error_failover_total_budget_ms: cfg.error.classification.failover_total_budget_ms,
             error_passthrough_enabled: cfg.error.passthrough.enabled,
             error_passthrough_rules: std::sync::Arc::new(cfg.error.passthrough.compiled_rules()),
+            error_message_rules,
             body_rules: Arc::new(convert_body_rules(&cfg.body_rules)),
             egress,
             egress_disabled: cfg.egress.disabled,

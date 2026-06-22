@@ -636,6 +636,8 @@ pub async fn pick_peer(
 
     // Stash on ctx for upstream_request_filter + logging.
     ctx.picked_vendor_key = Some(picked_arc.clone());
+    // TODO(error_message_rules): wire endpoint id once VendorKey projection adds it.
+    ctx.selected_endpoint_id = None;
     ctx.picked_vendor = Some(vendor);
     ctx.forced_params = group.value.forced_params.clone();
 

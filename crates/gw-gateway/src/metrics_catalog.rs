@@ -759,6 +759,31 @@ pub static METRICS: &[MetricSpec] = &[
         kind: MetricKind::Gauge,
         help: "Currently active coef_table_version",
     },
+    MetricSpec {
+        name: "gw_error_message_rules_snapshot_version",
+        kind: MetricKind::Gauge,
+        help: "Current loaded error message rules snapshot version",
+    },
+    MetricSpec {
+        name: "gw_error_message_rules_reload_total",
+        kind: MetricKind::Counter,
+        help: "Error message rules reload attempts; label=result(ok|error)",
+    },
+    MetricSpec {
+        name: "gw_error_message_rule_match_total",
+        kind: MetricKind::Counter,
+        help: "Error message rule matches; label=rule_id",
+    },
+    MetricSpec {
+        name: "gw_error_message_rule_no_match_total",
+        kind: MetricKind::Counter,
+        help: "Error message rule misses (no rule matched the request context)",
+    },
+    MetricSpec {
+        name: "gw_error_message_rule_compile_error_total",
+        kind: MetricKind::Counter,
+        help: "Error message rule snapshot compile failures (snapshot rejected)",
+    },
 ];
 
 pub fn describe_all() {

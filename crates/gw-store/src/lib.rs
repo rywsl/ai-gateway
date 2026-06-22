@@ -6,6 +6,7 @@ pub mod counter_store;
 pub mod deduction;
 pub mod encrypt;
 pub mod entity_store;
+pub mod error_message_rules;
 pub mod identity_persist;
 pub mod loader;
 pub mod managed_loop;

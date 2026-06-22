@@ -35,6 +35,7 @@ Migrations 位于 `crates/gw-store/migrations/`，**不**自动应用——开�
 | `0008_signature_secret.sql` | `api_keys.signature_secret BYTEA`（HMAC 独立密钥列；当前实现按原始 BYTEA 明文读取，**不是** KEK 加密 at rest；S-proxy-core H-1 的加密迁移需 Go+Rust 同 PR 定义 envelope） |
 | `0009_egress_impersonation.sql` | `vendors.egress_mode` JSONB + `vendor_keys.identity_snapshot` JSONB（egress-impersonate 身份持久化） |
 | `0010_vendor_key_quota_state.sql` | `vendor_keys.quota_*` 结构化列（Rust 运行时写入 quota snapshot，Go 只读/管理展示） |
+| Go `00080_error_message_rules.sql` | `error_message_rules`（Go 管理面写入，Rust 只读全局 snapshot） |
 
 ### 3.1.1 公共控制列（所有 entity 表）
 
@@ -56,6 +57,10 @@ deleted_at  TIMESTAMPTZ NULL
 
 - **`gemini_file_mapping`**（0002）：Gemini 文件去重映射。Writer：**Go**（`/api/admin/gemini-files/*` 端点接收上传 → 推送 Gemini File API → 写入）。Reader：Rust（多模态请求时按 `(sha256_hex, user_id)` PK 校验 `file_uri` 归属）。无 `events:entity` ns（非 entity 表）；Rust 直接查 PgSQL，命中即用。
 - **`model_mapping`**（0003）：用户 alias → 上游真实 model 名映射。Writer：Go（管理面 UI）。Reader：Rust `gw-codec` model alias 解析。详见 §3.2.11。
+- **`error_message_rules`**（Go migration 00080）：可配置错误消息改写规则。Writer：**Go**
+  `errormessage` module。Reader：Rust `ErrorMessageRuleStore`，启动冷加载并在
+  `events:entity ns=error_message_rules id=global` 后整表 reload + compile。
+  这是全局 snapshot 表，不是普通 `EntityStore` Moka entity。
 
 ### 3.1.3 `vendor_keys` 生产形态：可写 VIEW over `provider_keys`（CNxus-Rust #11）
 
@@ -80,6 +85,67 @@ Key-health 熔断 / cooldown 状态是 **per-replica、纯内存**的（`crates/
 每个表的 `payload` JSONB 字段对应 Rust 端类型，权威定义在 `crates/gw-core/src/entity.rs`。Go 写入时**必须**保持字段名 / 类型与 Rust 端一致；新增字段必须在两边同 PR 落。
 
 > **关键约束**：Rust 端用 `serde` 反序列化，未知字段被 `serde(default)` 兜底或忽略；缺失必填字段直接 deserialize 失败 → Rust 视为该 entity 不可用。Go 端禁止删除任何已存在字段，除非 Rust 同 PR 移除使用。
+
+### 3.2.0 `error_message_rules` — global error-message rewrite snapshot
+
+This table is Go-owned and Rust read-only:
+
+```sql
+CREATE TABLE error_message_rules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  priority INTEGER NOT NULL DEFAULT 1000,
+  match_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  message TEXT NOT NULL,
+  notes TEXT,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  deleted_at BIGINT
+);
+```
+
+`match_json` has this wire shape. Empty arrays mean wildcard for that dimension:
+
+```json
+{
+  "provider_ids": ["provider_openai"],
+  "models": ["gpt-4o"],
+  "endpoint_ids": [],
+  "api_formats": ["openai:chat"],
+  "request_paths": ["/v1/chat/completions"],
+  "client_protocols": ["openai:chat"],
+  "gateway_codes": ["GW_UPSTREAM_INVALID_REQUEST"],
+  "http_statuses": [400],
+  "upstream_message_contains": ["image"]
+}
+```
+
+Go publishes Redis HASH `entity:error_message_rules:global`:
+
+```json
+{
+  "v": "42",
+  "enc": "json",
+  "d": "[{\"id\":\"emr_...\",\"enabled\":true,\"priority\":10,\"match\":{...},\"message\":\"...\",\"version\":42}]"
+}
+```
+
+`d` is a JSON array of enabled, non-deleted rules sorted by
+`priority ASC, id ASC`. Rust repeats validation during compile: max 5000 enabled
+rules, max 50 values per exact-match dimension, max 10 message substrings, max
+256 bytes per substring, max 1000 bytes per replacement message, bounded
+expanded tree branches, no regex/script/expression markers. Runtime matching is
+a fixed-dimension tree followed by bounded case-insensitive substring checks over
+the first 8 KiB of the upstream message. A match rewrites only the client-visible
+`message`; gateway code, error type, protocol envelope, and HTTP status remain
+unchanged.
+
+`endpoint_ids` is an active schema field, but Rust first version only matches it
+when `selected_endpoint_id` is available in request context. Current
+`VendorKey` projection does not carry endpoint row identity, so the gateway
+sets it to `None` until that projection is extended.
 
 ### 3.2.1 `users.payload` — `UserEntry`
 

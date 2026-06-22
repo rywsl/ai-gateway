@@ -55,6 +55,7 @@ async fn entity_event_invalidates_cache_entry() {
     let consumer = Arc::new(StreamConsumer {
         redis: redis.clone(),
         store: store.clone(),
+        error_message_rules: None,
         instance_id: "test-instance".into(),
     });
     let _h = consumer.clone().start();

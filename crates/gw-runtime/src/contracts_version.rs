@@ -11,7 +11,7 @@
 /// Legacy name kept for `scripts/check-rustpact-pv.sh` and
 /// `scripts/check-deploy-order.sh` which grep this symbol. Bumped in lockstep
 /// with `CURRENT_PV` (WS-8). New code should prefer `CURRENT_PV`.
-pub const RUSTPACT_PROTOCOL_VERSION: u32 = 2;
+pub const RUSTPACT_PROTOCOL_VERSION: u32 = 3;
 
 /// Legacy name kept for `scripts/check-deploy-order.sh`. New code should
 /// prefer `MIN_SUPPORTED_PV`.
@@ -20,7 +20,7 @@ pub const RUSTPACT_MIN_SUPPORTED_VERSION: u32 = 1;
 /// Current protocol version emitted by new `UsageSnapshot` records. Bump in
 /// lockstep with Go `shared/rustpact/version.go::RustpactCurrentPV` and
 /// `crates/gw-core/src/usage.rs::UsageSnapshot::CURRENT_PV`. WS-8 REV-FINAL-H8.1.
-pub const CURRENT_PV: u32 = 2;
+pub const CURRENT_PV: u32 = 3;
 
 /// Oldest rustpact protocol version this Rust build accepts. Stays at 1 so
 /// pre-WS-8 records continue to decode during the rollout. Mirrors Go

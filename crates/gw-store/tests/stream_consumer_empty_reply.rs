@@ -45,6 +45,7 @@ async fn empty_streams_produce_zero_warn_logs_over_1s() {
     let consumer = Arc::new(StreamConsumer {
         redis,
         store,
+        error_message_rules: None,
         instance_id: "test-empty-reply".into(),
     });
     let _h = consumer.start();

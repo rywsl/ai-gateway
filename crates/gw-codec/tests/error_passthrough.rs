@@ -1,4 +1,9 @@
-use gw_codec::error_passthrough::render_error_to_client;
+use gw_codec::error_passthrough::{
+    render_error_to_client, render_error_to_client_with_message_rules,
+};
+use gw_core::error::message_rules::{
+    CompiledErrorMessageRules, ErrorMessageMatchCtx, ErrorMessageMatcher, ErrorMessageRule,
+};
 use gw_core::error::rules::{PassthroughRule, RuleEffect};
 use gw_core::error::{ErrorClass, PassthroughBody};
 use gw_core::protocol::ProtocolKind;
@@ -294,4 +299,137 @@ fn upstream_supplied_gateway_code_is_preserved() {
     );
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["error"]["code"], "GW_UPSTREAM_OVERLOADED");
+}
+
+#[test]
+fn message_rule_rewrites_openai_message_but_keeps_gateway_code() {
+    let body = body(
+        400,
+        json!({"error":{"message":"image unsupported on chat"}}),
+        false,
+    );
+    let compiled = image_wrong_endpoint_rules();
+    let ctx = image_wrong_endpoint_ctx();
+    let out = render_error_to_client_with_message_rules(
+        ProtocolKind::OpenAi,
+        &body,
+        ErrorClass::UpstreamTransient,
+        NO_RULES,
+        Some(&ctx),
+        Some(&compiled),
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["error"]["code"], "GW_UPSTREAM_4XX");
+    assert_eq!(
+        v["error"]["message"],
+        "该模型是生图模型，请使用图片生成接口提交任务，不要通过文本对话接口调用。"
+    );
+}
+
+#[test]
+fn message_rule_rewrites_anthropic_sse_message_but_keeps_shape() {
+    let body = body(
+        400,
+        json!({"type":"error","error":{"message":"image unsupported on chat"}}),
+        true,
+    );
+    let compiled = image_wrong_endpoint_rules();
+    let ctx = image_wrong_endpoint_ctx();
+    let out = render_error_to_client_with_message_rules(
+        ProtocolKind::Anthropic,
+        &body,
+        ErrorClass::UpstreamTransient,
+        NO_RULES,
+        Some(&ctx),
+        Some(&compiled),
+    );
+    let v = parse_sse_data(&out);
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["error"]["code"], "GW_UPSTREAM_4XX");
+    assert_eq!(
+        v["error"]["message"],
+        "该模型是生图模型，请使用图片生成接口提交任务，不要通过文本对话接口调用。"
+    );
+}
+
+#[test]
+fn message_rule_rewrites_gemini_message_but_keeps_numeric_status() {
+    let body = body(400, json!({"message":"image unsupported on chat"}), false);
+    let compiled = image_wrong_endpoint_rules();
+    let ctx = image_wrong_endpoint_ctx();
+    let out = render_error_to_client_with_message_rules(
+        ProtocolKind::Gemini,
+        &body,
+        ErrorClass::UpstreamTransient,
+        NO_RULES,
+        Some(&ctx),
+        Some(&compiled),
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["error"]["code"], 400);
+    assert_eq!(v["error"]["gateway_code"], "GW_UPSTREAM_4XX");
+    assert_eq!(
+        v["error"]["message"],
+        "该模型是生图模型，请使用图片生成接口提交任务，不要通过文本对话接口调用。"
+    );
+}
+
+#[test]
+fn message_rule_rewrites_kiro_message_but_keeps_gateway_code() {
+    let body = body(400, json!({"message":"image unsupported on chat"}), false);
+    let compiled = image_wrong_endpoint_rules();
+    let ctx = image_wrong_endpoint_ctx();
+    let out = render_error_to_client_with_message_rules(
+        ProtocolKind::Kiro,
+        &body,
+        ErrorClass::UpstreamTransient,
+        NO_RULES,
+        Some(&ctx),
+        Some(&compiled),
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["gateway_code"], "GW_UPSTREAM_4XX");
+    assert_eq!(
+        v["message"],
+        "该模型是生图模型，请使用图片生成接口提交任务，不要通过文本对话接口调用。"
+    );
+}
+
+fn body(upstream_status: u16, body_json: serde_json::Value, is_sse: bool) -> PassthroughBody {
+    PassthroughBody {
+        upstream_status,
+        body_json,
+        is_sse,
+    }
+}
+
+fn image_wrong_endpoint_rules() -> CompiledErrorMessageRules {
+    CompiledErrorMessageRules::compile(vec![ErrorMessageRule {
+        id: "emr_image_wrong_endpoint".to_string(),
+        enabled: true,
+        priority: 100,
+        matcher: ErrorMessageMatcher {
+            provider_ids: vec!["v_openai".to_string()],
+            models: vec!["gpt-image-2-max".to_string()],
+            request_paths: vec!["/v1/chat/completions".to_string()],
+            gateway_codes: vec!["GW_UPSTREAM_4XX".to_string()],
+            http_statuses: vec![400],
+            upstream_message_contains: vec!["unsupported".to_string()],
+            ..Default::default()
+        },
+        message: "该模型是生图模型，请使用图片生成接口提交任务，不要通过文本对话接口调用。"
+            .to_string(),
+    }])
+    .unwrap()
+}
+
+fn image_wrong_endpoint_ctx<'a>() -> ErrorMessageMatchCtx<'a> {
+    ErrorMessageMatchCtx {
+        provider_id: Some("v_openai"),
+        model: Some("gpt-image-2-max"),
+        request_path: Some("/v1/chat/completions"),
+        gateway_code: Some("GW_UPSTREAM_4XX"),
+        http_status: Some(400),
+        ..Default::default()
+    }
 }

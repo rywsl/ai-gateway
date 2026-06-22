@@ -7,4 +7,5 @@ pub use classify_default::{ConfigurableClassifier, DefaultClassifier};
 pub use ir::{ErrorCategory, ErrorIR};
 
 pub mod codes;
+pub mod message_rules;
 pub mod rules;

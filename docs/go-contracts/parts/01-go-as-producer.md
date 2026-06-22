@@ -64,6 +64,7 @@ XADD 字段（key-value 列表）：
 | `management_token` | `management_tokens`（0007 migration） | `EntityStore.mgmt_token` | `ManagementTokenEntry` | 5 min TTL；ID 前缀 `mt_` |
 | `proxy_node` | `proxy_nodes`（0005 migration,已 merged）| `EntityStore.proxy_node` | `ProxyNodeEntry` | 30 min TTL;支撑 tunnel client 节点视图;详见 [parts/04](04-proxy-nodes.md) |
 | `estimate_pricing` | `estimate_pricings`（Go 负责建表/写入） | `EntityStore.estimate_pricing` | `EstimatePricing`（见 §1.5） | 30 min TTL |
+| `error_message_rules` | `error_message_rules`（Go 负责建表/写入） | `ErrorMessageRuleStore` 全局 `ArcSwap` snapshot | `CompiledErrorMessageRules` | ID 固定为 `"global"`；Rust 收到事件后整表 reload + compile，失败保留旧 snapshot |
 
 未知 ns Rust 端 warn 后丢弃。新增 ns **必须**同步：本表 + `crates/gw-store/src/stream_consumer.rs::apply_entity_event` + `crates/gw-store/src/entity_store.rs::EntityStore`。
 
@@ -114,6 +115,32 @@ UPDATE vendor_keys
 ```
 
 随后按本节写顺序发出 `XADD events:entity * ns vendor_key id <id> v <new_version> op upsert`。Rust 收到事件后 DEL `entity:vendor_key:<id>` + invalidate Moka；下一次请求冷加载到 `identity_snapshot = NULL`，通过 `ensure_identity` 重新派生并由 Rust lazy-persist 在 `IS NULL` guard 下回写。完整契约见 [`contract-change/2026-05-29-vendor-validation.md`](../contract-change/2026-05-29-vendor-validation.md)。
+
+### 1.2.4.2 Error-message rules global snapshot
+
+Error-message rules are Go-owned control-plane data, but Rust consumes them as
+one immutable global snapshot rather than per-row Moka entries:
+
+1. Go writes `error_message_rules` rows in PgSQL and soft-deletes by setting
+   `deleted_at`.
+2. Go publishes Redis HASH `entity:error_message_rules:global` with fields:
+   `v=<max enabled row version>`, `enc=json`, `d=<json array of enabled rules>`.
+3. Go emits `XADD events:entity * ns error_message_rules id global v <snapshot_version> op upsert`.
+
+Rust bootstrap cold-loads the same snapshot once. Runtime `events:entity`
+delivery triggers `ErrorMessageRuleStore::reload()`: read Redis first, fall back
+to PgSQL, validate all limits again, compile the fixed-dimension rule tree, then
+atomically replace the `ArcSwap` snapshot. If Redis/PG read or compilation
+fails, Rust logs and keeps serving with the previous snapshot; the request hot
+path never calls Redis/PgSQL and never runs regex, scripts, callbacks, or
+configurable loops.
+
+The rule dimensions are fixed in order: `provider_id`, `model`, `endpoint_id`,
+`api_format`, `request_path`, `client_protocol`, `gateway_code`, `http_status`,
+then bounded upstream-message substring checks. `endpoint_id` participates only
+when the request context has `selected_endpoint_id`; first-version routing keeps
+it `None` because the current `VendorKey` projection does not expose endpoint
+row identity.
 
 ### 1.2.5 删除语义
 

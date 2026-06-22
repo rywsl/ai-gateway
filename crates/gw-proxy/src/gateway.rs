@@ -135,6 +135,7 @@ fn next_failover_decision(
 fn reset_response_attempt_state(ctx: &mut ReqCtx, new_key: Arc<gw_core::entity::VendorKey>) {
     ctx.inflight_guard = None;
     ctx.picked_vendor_key = Some(new_key);
+    ctx.selected_endpoint_id = None;
     ctx.picked_vendor = None;
     ctx.upstream_codec = None;
     ctx.upstream_status = None;
@@ -430,6 +431,7 @@ pub struct LlmGateway {
     /// Ordered allow/deny rules over the upstream error message (audit §3.8).
     /// Empty = pass every message through when enabled (prior behavior).
     pub(crate) error_passthrough_rules: Arc<Vec<gw_core::error::rules::PassthroughRule>>,
+    pub(crate) error_message_rules: Arc<gw_store::error_message_rules::ErrorMessageRuleStore>,
     pub files_gateway: Arc<dyn GeminiFilesGateway>,
     pub reservation_view: Option<Arc<ReservationGlobalView>>,
     pub frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
@@ -506,6 +508,7 @@ impl LlmGateway {
         retryable_codes: Arc<std::collections::HashSet<u16>>,
         error_passthrough_enabled: bool,
         error_passthrough_rules: Arc<Vec<gw_core::error::rules::PassthroughRule>>,
+        error_message_rules: Arc<gw_store::error_message_rules::ErrorMessageRuleStore>,
         reservation_view: Option<Arc<ReservationGlobalView>>,
         frequency_tracker: Option<Arc<ModelFrequencyTracker>>,
         pg: sqlx::PgPool,
@@ -570,6 +573,7 @@ impl LlmGateway {
             retryable_codes,
             error_passthrough_enabled,
             error_passthrough_rules,
+            error_message_rules,
             files_gateway,
             reservation_view,
             frequency_tracker,
@@ -1760,12 +1764,42 @@ impl ProxyHttp for LlmGateway {
                             .error_outcome
                             .as_ref()
                             .map_or(gw_core::error::ErrorClass::Internal, |o| o.class);
-                        let rendered = gw_codec::error_passthrough::render_error_to_client(
-                            client_kind,
+                        let derived_gateway_code = gw_codec::error_passthrough::derive_gateway_code(
                             &passthrough,
                             error_class,
-                            &self.error_passthrough_rules,
                         );
+                        let provider_id = ctx
+                            .picked_vendor_key
+                            .as_ref()
+                            .map(|key| key.vendor_id.as_ref());
+                        let model = ctx.model.as_ref().map(|model| model.as_ref());
+                        let endpoint_id = ctx.selected_endpoint_id.as_deref();
+                        let api_format = ctx.upstream_shape.map(|shape| shape.format_id());
+                        let client_protocol =
+                            ctx.client_shape.map(|shape| shape.format_id()).or_else(|| {
+                                ctx.client_codec.as_ref().map(|codec| codec.kind().as_str())
+                            });
+                        let request_path = Some(session.req_header().uri.path());
+                        let match_ctx = gw_core::error::message_rules::ErrorMessageMatchCtx {
+                            provider_id,
+                            model,
+                            endpoint_id,
+                            api_format,
+                            request_path,
+                            client_protocol,
+                            http_status: ctx.upstream_status,
+                            gateway_code: Some(derived_gateway_code.as_str()),
+                        };
+                        let snapshot = self.error_message_rules.snapshot();
+                        let rendered =
+                            gw_codec::error_passthrough::render_error_to_client_with_message_rules(
+                                client_kind,
+                                &passthrough,
+                                error_class,
+                                &self.error_passthrough_rules,
+                                Some(&match_ctx),
+                                Some(&snapshot),
+                            );
                         *body = Some(rendered);
                     }
                 }
