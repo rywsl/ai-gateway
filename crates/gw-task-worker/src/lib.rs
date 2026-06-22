@@ -521,6 +521,7 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
         let consumer = std::sync::Arc::new(StreamConsumer {
             redis,
             store: entity_store,
+            error_message_rules: None,
             instance_id: cfg.entity_stream.instance_id.clone(),
         });
         Some(
