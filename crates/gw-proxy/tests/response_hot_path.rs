@@ -55,3 +55,38 @@ fn response_memory_filter_is_sync() {
         "run_memory_sync must not call `block_on`"
     );
 }
+
+#[test]
+fn response_body_filter_uses_rule_snapshot_without_io() {
+    let src = include_str!("../src/gateway.rs");
+    let body = function_body(src, "fn response_body_filter");
+    assert!(
+        body.contains("error_message_rules.snapshot()"),
+        "must read snapshot"
+    );
+    assert!(
+        body.contains("render_error_to_client_with_message_rules"),
+        "must call rule-aware renderer"
+    );
+    for forbidden in [
+        "reload().await",
+        "sqlx::",
+        "hgetall",
+        "xread",
+        "tokio::spawn",
+    ] {
+        assert!(
+            !body.contains(forbidden),
+            "response_body_filter must not contain `{forbidden}` (hot path I/O guard)"
+        );
+    }
+    for line in body
+        .lines()
+        .filter(|line| line.contains("error_message_rules"))
+    {
+        assert!(
+            !line.contains("block_on"),
+            "error_message_rules hot path line must not contain block_on: {line}"
+        );
+    }
+}

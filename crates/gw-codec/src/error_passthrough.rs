@@ -14,6 +14,7 @@
 //! For SSE responses, wrap as `event: error\ndata: <json>\n\n`.
 
 use bytes::Bytes;
+use gw_core::error::message_rules::{CompiledErrorMessageRules, ErrorMessageMatchCtx};
 use gw_core::error::rules::{message_allowed, PassthroughRule};
 use gw_core::error::{codes, ErrorClass, PassthroughBody};
 use gw_core::protocol::ProtocolKind;
@@ -25,7 +26,18 @@ pub fn render_error_to_client(
     fallback: ErrorClass,
     rules: &[PassthroughRule],
 ) -> Bytes {
-    let v = json_for_protocol(client, body, fallback, rules);
+    render_error_to_client_with_message_rules(client, body, fallback, rules, None, None)
+}
+
+pub fn render_error_to_client_with_message_rules(
+    client: ProtocolKind,
+    body: &PassthroughBody,
+    fallback: ErrorClass,
+    rules: &[PassthroughRule],
+    match_ctx: Option<&ErrorMessageMatchCtx<'_>>,
+    message_rules: Option<&CompiledErrorMessageRules>,
+) -> Bytes {
+    let v = json_for_protocol(client, body, fallback, rules, match_ctx, message_rules);
     if body.is_sse {
         let s = format!(
             "event: error\ndata: {}\n\n",
@@ -42,6 +54,8 @@ fn json_for_protocol(
     b: &PassthroughBody,
     fb: ErrorClass,
     rules: &[PassthroughRule],
+    match_ctx: Option<&ErrorMessageMatchCtx<'_>>,
+    message_rules: Option<&CompiledErrorMessageRules>,
 ) -> Value {
     let typ = error_type_for(p, b.upstream_status);
     let gw_code = gateway_code(b, fb);
@@ -51,11 +65,27 @@ fn json_for_protocol(
     // surfaces as a clean, status-appropriate client error rather than leaking
     // internal detail.
     let raw_msg = extract_message(&b.body_json);
-    let msg = if message_allowed(&raw_msg, rules) {
-        raw_msg
+    let base_msg = if message_allowed(&raw_msg, rules) {
+        raw_msg.clone()
     } else {
         metrics::counter!("gw_error_passthrough_masked_total").increment(1);
         "upstream error".to_string()
+    };
+    let msg = match (match_ctx, message_rules) {
+        (Some(ctx), Some(rules)) => {
+            if let Some(matched) = rules.match_rule(ctx, &raw_msg) {
+                metrics::counter!(
+                    "gw_error_message_rule_match_total",
+                    "rule_id" => matched.rule_id.to_string()
+                )
+                .increment(1);
+                matched.message.to_string()
+            } else {
+                metrics::counter!("gw_error_message_rule_no_match_total").increment(1);
+                base_msg
+            }
+        }
+        _ => base_msg,
     };
     match p {
         ProtocolKind::OpenAi => json!({
@@ -85,6 +115,10 @@ fn json_for_protocol(
 /// 2. Otherwise map from the upstream HTTP status, falling back to the
 ///    [`ErrorClass`] when the status is unknown.
 fn gateway_code(b: &PassthroughBody, fb: ErrorClass) -> String {
+    derive_gateway_code(b, fb)
+}
+
+pub fn derive_gateway_code(b: &PassthroughBody, fb: ErrorClass) -> String {
     if let Some(c) = extract_gateway_code(&b.body_json) {
         return c;
     }

@@ -538,6 +538,7 @@ pub struct ReqCtx {
 
     // --- Routing / vendor ---
     pub picked_vendor_key: Option<Arc<VendorKey>>,
+    pub selected_endpoint_id: Option<String>,
     pub picked_vendor: Option<Arc<Versioned<Vendor>>>,
     pub pricing: Option<Arc<Versioned<Pricing>>>,
     /// Name of the strategy used for this request. Emitted on failover metrics.
@@ -833,6 +834,7 @@ impl ReqCtx {
             body: None,
             conversation_id: None,
             picked_vendor_key: None,
+            selected_endpoint_id: None,
             picked_vendor: None,
             pricing: None,
             strategy_name: None,

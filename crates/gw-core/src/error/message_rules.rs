@@ -154,6 +154,15 @@ impl CompiledErrorMessageRules {
         ctx: &ErrorMessageMatchCtx<'_>,
         upstream_message: &str,
     ) -> Option<&'a str> {
+        self.match_rule(ctx, upstream_message)
+            .map(|matched| matched.message)
+    }
+
+    pub fn match_rule<'a>(
+        &'a self,
+        ctx: &ErrorMessageMatchCtx<'_>,
+        upstream_message: &str,
+    ) -> Option<MatchedErrorMessageRule<'a>> {
         if self.rules.is_empty() {
             return None;
         }
@@ -203,7 +212,10 @@ impl CompiledErrorMessageRules {
                 }
             }
         }
-        best.map(|rule| rule.message.as_str())
+        best.map(|rule| MatchedErrorMessageRule {
+            rule_id: rule.id.as_str(),
+            message: rule.message.as_str(),
+        })
     }
 
     pub fn rule_count(&self) -> usize {
@@ -213,6 +225,12 @@ impl CompiledErrorMessageRules {
     pub fn node_count(&self) -> usize {
         self.node_count
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchedErrorMessageRule<'a> {
+    pub rule_id: &'a str,
+    pub message: &'a str,
 }
 
 fn default_enabled() -> bool {
