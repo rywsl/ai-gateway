@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 pub struct StreamConsumer {
     pub redis: RedisCtx,
     pub store: Arc<EntityStore>,
+    pub error_message_rules: Option<Arc<crate::error_message_rules::ErrorMessageRuleStore>>,
     pub instance_id: String,
 }
 
@@ -100,6 +101,9 @@ impl StreamConsumer {
                 return;
             }
         };
+        if apply_error_message_rules_event(self.error_message_rules.clone(), ns, id).await {
+            return;
+        }
         apply_entity_event(&self.store, ns, id).await;
     }
 
@@ -426,6 +430,42 @@ impl ManagedLoop for StreamConsumer {
 #[doc(hidden)]
 pub async fn apply_inline_for_test_helper(store: &Arc<EntityStore>, ns: &str, id: &str) {
     apply_entity_event(store, ns, id).await;
+}
+
+async fn apply_error_message_rules_event(
+    rules: Option<Arc<crate::error_message_rules::ErrorMessageRuleStore>>,
+    ns: &str,
+    id: &str,
+) -> bool {
+    if ns != "error_message_rules" || id != "global" {
+        return false;
+    }
+    if let Some(rules) = rules {
+        tokio::spawn(async move {
+            if let Err(err) = rules.reload().await {
+                tracing::warn!(
+                    target: "gw_store::error_message_rules",
+                    error = %err,
+                    "reload failed; keeping old snapshot"
+                );
+            }
+        });
+    } else {
+        tracing::debug!(
+            target: "gw_store::stream_consumer",
+            "error_message_rules event received but store not wired; ignoring"
+        );
+    }
+    true
+}
+
+#[doc(hidden)]
+pub async fn apply_error_message_rules_event_for_test(
+    rules: Option<Arc<crate::error_message_rules::ErrorMessageRuleStore>>,
+    ns: &str,
+    id: &str,
+) -> bool {
+    apply_error_message_rules_event(rules, ns, id).await
 }
 
 #[cfg(test)]
