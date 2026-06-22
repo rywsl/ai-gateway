@@ -1,5 +1,8 @@
 use gw_proxy::ctx::ReqCtx;
-use gw_proxy::filters::task::{detect_task_shape, mark_task_context, TaskAction};
+use gw_proxy::filters::task::{
+    detect_published_task_endpoint, detect_task_shape, mark_task_context, EndpointRegistryEntry,
+    TaskAction,
+};
 
 #[test]
 fn test_task_shape_detector_identifies_task() {
@@ -19,6 +22,10 @@ fn test_task_shape_detector_identifies_task() {
         detect_task_shape(true, "POST", "/v1/tasks/task_123/cancel", None),
         Some(TaskAction::Cancel)
     );
+}
+
+#[test]
+fn test_legacy_model_paths_are_not_tasks_without_endpoint_registry() {
     assert_eq!(
         detect_task_shape(
             true,
@@ -26,12 +33,37 @@ fn test_task_shape_detector_identifies_task() {
             "/v1/responses",
             Some(br#"{"model":"gpt-4.1","background":true}"#)
         ),
-        Some(TaskAction::Submit)
+        None
     );
     assert_eq!(
         detect_task_shape(true, "POST", "/v1/images/generations", Some(br#"{}"#)),
-        Some(TaskAction::Submit)
+        None
     );
+}
+
+#[test]
+fn test_published_endpoint_registry_identifies_template_task() {
+    let registry = [
+        EndpointRegistryEntry {
+            method: "POST".to_string(),
+            path: "/v1/images/generations".to_string(),
+            task_kind: "image".to_string(),
+            global_model_id: "gpt-image".to_string(),
+        },
+        EndpointRegistryEntry {
+            method: "POST".to_string(),
+            path: "/v1/embeddings".to_string(),
+            task_kind: "embedding".to_string(),
+            global_model_id: "text-embedding-3-large".to_string(),
+        },
+    ];
+
+    let hit = detect_published_task_endpoint(&registry, "POST", "/v1/images/generations")
+        .expect("registry hit");
+
+    assert_eq!(hit.task_kind, "image");
+    assert_eq!(hit.global_model_id, "gpt-image");
+    assert!(detect_published_task_endpoint(&registry, "GET", "/v1/images/generations").is_none());
 }
 
 #[test]

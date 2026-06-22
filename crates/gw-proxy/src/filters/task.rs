@@ -22,6 +22,14 @@ pub enum TaskAction {
     Cancel,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointRegistryEntry {
+    pub method: String,
+    pub path: String,
+    pub task_kind: String,
+    pub global_model_id: String,
+}
+
 pub fn detect_task_shape(
     task_enabled: bool,
     method: &str,
@@ -42,25 +50,18 @@ pub fn detect_task_shape(
         ("POST", ["v1", "tasks", task_id, "cancel"]) if !task_id.is_empty() => {
             Some(TaskAction::Cancel)
         }
-        ("POST", ["v1", "images", "generations"]) => Some(TaskAction::Submit),
-        ("POST", ["v1", "responses"]) if body_has_background_true(_body) => {
-            Some(TaskAction::Submit)
-        }
         _ => None,
     }
 }
 
-fn body_has_background_true(body: Option<&[u8]>) -> bool {
-    let Some(body) = body else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return false;
-    };
-    value
-        .get("background")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+pub fn detect_published_task_endpoint<'a>(
+    registry: &'a [EndpointRegistryEntry],
+    method: &str,
+    path: &str,
+) -> Option<&'a EndpointRegistryEntry> {
+    registry
+        .iter()
+        .find(|entry| entry.method == method && entry.path == path)
 }
 
 pub fn mark_task_context(

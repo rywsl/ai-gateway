@@ -572,7 +572,7 @@ async fn test_exec_loop_respects_timeout() {
 
     let settlements = contract.settlements().await;
     assert_eq!(settlements.len(), 1);
-    assert_eq!(settlements[0].0, TaskStatus::Failed);
+    assert_eq!(settlements[0].0, TaskStatus::TimedOut);
     assert!(settlements[0]
         .2
         .as_deref()
