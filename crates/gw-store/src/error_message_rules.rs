@@ -55,7 +55,8 @@ impl ErrorMessageRuleStore {
         match CompiledErrorMessageRules::compile(rules) {
             Ok(compiled) => {
                 self.current.store(Arc::new(compiled));
-                metrics::gauge!("gw_error_message_rules_snapshot_version").set(version as f64);
+                let metric_version = u32::try_from(version).unwrap_or(u32::MAX);
+                metrics::gauge!("gw_error_message_rules_snapshot_version").set(metric_version);
                 metrics::counter!("gw_error_message_rules_reload_total", "result" => "ok")
                     .increment(1);
                 Ok(version)
@@ -98,11 +99,11 @@ impl ErrorMessageRuleStore {
             let matcher: serde_json::Value = row.try_get("match_json")?;
             let message: String = row.try_get("message")?;
             let row_version: i64 = row.try_get("version")?;
-            version = version.max(row_version.max(0) as u64);
+            version = version.max(u64::try_from(row_version).unwrap_or(0));
             rules.push(ErrorMessageRule {
                 id,
                 enabled,
-                priority: priority.max(0) as u32,
+                priority: u32::try_from(priority).unwrap_or(0),
                 matcher: serde_json::from_value(matcher)?,
                 message,
             });

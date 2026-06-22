@@ -441,15 +441,19 @@ async fn apply_error_message_rules_event(
         return false;
     }
     if let Some(rules) = rules {
-        tokio::spawn(async move {
-            if let Err(err) = rules.reload().await {
-                tracing::warn!(
-                    target: "gw_store::error_message_rules",
-                    error = %err,
-                    "reload failed; keeping old snapshot"
-                );
-            }
-        });
+        drop(gw_runtime::supervisor::one_shot_spawn(
+            "error_message_rules_reload",
+            move || async move {
+                if let Err(err) = rules.reload().await {
+                    tracing::warn!(
+                        target: "gw_store::error_message_rules",
+                        error = %err,
+                        "reload failed; keeping old snapshot"
+                    );
+                }
+                Ok(())
+            },
+        ));
     } else {
         tracing::debug!(
             target: "gw_store::stream_consumer",
