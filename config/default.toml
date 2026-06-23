@@ -164,7 +164,7 @@ max_streams_per_conn = 256
 
 [billing]
 cancel_grace_ms = 200             # 上游 cancel 后等待 final usage frame 的窗口 (ms)
-response_deadline_ms = 300_000    # 上游响应总超时, 默认 5min
+response_deadline_ms = 900_000    # 上游响应总超时, 默认 15min
 reaper_interval_secs = 30         # InflightLedger T0 watchdog 周期
 emit_lag_t0_secs = 60             # ts_settled_ms 后未清 key 视为 T0 bug 的阈值
 heartbeat_interval_secs = 60      # instance heartbeat 续期周期

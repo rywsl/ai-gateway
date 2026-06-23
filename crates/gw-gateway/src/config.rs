@@ -1314,7 +1314,7 @@ fn default_cancel_grace_ms() -> u64 {
     200
 }
 fn default_response_deadline_ms() -> u64 {
-    300_000
+    900_000
 }
 fn default_reaper_interval_secs() -> u64 {
     30
@@ -2358,7 +2358,7 @@ mod billing_cfg_tests {
             .extract()
             .expect("default.toml parses");
         assert_eq!(cfg.billing.cancel_grace_ms, 200);
-        assert_eq!(cfg.billing.response_deadline_ms, 300_000);
+        assert_eq!(cfg.billing.response_deadline_ms, 900_000);
         assert_eq!(cfg.billing.reaper_interval_secs, 30);
         assert_eq!(cfg.billing.emit_lag_t0_secs, 60);
         assert_eq!(cfg.billing.heartbeat_interval_secs, 60);

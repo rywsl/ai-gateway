@@ -221,10 +221,10 @@ sets it to `None` until that projection is extended.
   "base_urls": ["https://api.anthropic.com"],
   "auth_template": "x-api-key: {api_key}",  // 模板，{api_key} 占位
   "timeout_overrides": {
-    "connect_ms": 5000,
-    "read_ms": 30000,
-    "total_ms": 60000,
-    "stream_total_ms": 600000
+    "connect_ms": 30000,
+    "read_ms": 180000,
+    "total_ms": 900000,
+    "stream_total_ms": 1800000
   },
   "default_proxy": null,         // Option<Url>
   "contact": null,

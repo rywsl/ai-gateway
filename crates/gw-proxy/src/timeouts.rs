@@ -15,15 +15,15 @@ pub struct Timeouts {
 }
 
 impl Timeouts {
-    /// Conservative defaults sized for OpenAI-style non-stream completions.
-    /// Streaming responses extend `total` to `stream_total` (10 minutes by
+    /// Conservative defaults sized for long-running LLM completions.
+    /// Streaming responses extend `total` to `stream_total` (30 minutes by
     /// default) when [`apply_to_peer`] is called with `is_stream = true`.
     pub fn default_for_nonstream() -> Self {
         Self {
-            connect: Duration::from_secs(5),
-            read: Duration::from_secs(30),
-            total: Duration::from_secs(60),
-            stream_total: Duration::from_secs(600),
+            connect: Duration::from_secs(30),
+            read: Duration::from_secs(180),
+            total: Duration::from_secs(900),
+            stream_total: Duration::from_secs(1800),
         }
     }
 
@@ -38,5 +38,20 @@ impl Timeouts {
         } else {
             self.total
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_timeouts_match_long_running_llm_policy() {
+        let t = Timeouts::default_for_nonstream();
+
+        assert_eq!(t.connect, Duration::from_secs(30));
+        assert_eq!(t.read, Duration::from_secs(180));
+        assert_eq!(t.total, Duration::from_secs(900));
+        assert_eq!(t.stream_total, Duration::from_secs(1800));
     }
 }
