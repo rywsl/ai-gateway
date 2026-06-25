@@ -9,6 +9,10 @@ use gw_task::{ClientMode, TaskKind, TaskRecord, UpstreamMode};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+const DEFAULT_POLL_WAIT_MS: u64 = 1_000;
+const MIN_POLL_WAIT_MS: u64 = 50;
+const MAX_POLL_WAIT_MS: u64 = 60_000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionIdentity {
     pub user_id: String,
@@ -275,15 +279,12 @@ impl TemplateExecutor {
                     )))
                 }
                 PollState::Pending => {
-                    if let Some(wait_ms) = poll_wait_ms(&poll_response.headers, poll_template) {
-                        events.push(ExecutionEvent {
-                            status: "poll_wait".to_string(),
-                            poll_wait_ms: Some(wait_ms),
-                        });
-                        if wait_ms > 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                        }
-                    }
+                    let wait_ms = poll_wait_ms(&poll_response.headers, poll_template);
+                    events.push(ExecutionEvent {
+                        status: "poll_wait".to_string(),
+                        poll_wait_ms: Some(wait_ms),
+                    });
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     previous_poll_response = poll_response.body;
                 }
             }
@@ -545,7 +546,7 @@ fn classify_poll_response(
     })
 }
 
-fn poll_wait_ms(headers: &BTreeMap<String, String>, poll_template: &Value) -> Option<u64> {
+fn poll_wait_ms(headers: &BTreeMap<String, String>, poll_template: &Value) -> u64 {
     let header_name = poll_template
         .get("next_poll_after_header")
         .and_then(Value::as_str)
@@ -559,6 +560,9 @@ fn poll_wait_ms(headers: &BTreeMap<String, String>, poll_template: &Value) -> Op
                 .get("poll_interval_ms")
                 .and_then(Value::as_u64)
         })
+        .or_else(|| poll_template.get("poll_wait_ms").and_then(Value::as_u64))
+        .unwrap_or(DEFAULT_POLL_WAIT_MS)
+        .clamp(MIN_POLL_WAIT_MS, MAX_POLL_WAIT_MS)
 }
 
 fn status_values_match(spec: Option<&Value>, value: &Value) -> bool {

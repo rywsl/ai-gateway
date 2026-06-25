@@ -782,7 +782,11 @@ pub fn detect_openai_compatible_task_endpoint(
 }
 
 fn openai_video_resource_path(path: &str) -> bool {
-    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let segments: Vec<&str> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     matches!(
         segments.as_slice(),
         ["v1", "videos", video_id] if !video_id.is_empty()
@@ -793,7 +797,11 @@ fn openai_video_resource_path(path: &str) -> bool {
 }
 
 fn openai_video_remix_path(path: &str) -> bool {
-    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let segments: Vec<&str> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     matches!(
         segments.as_slice(),
         ["v1", "videos", video_id, "remix"] if !video_id.is_empty()

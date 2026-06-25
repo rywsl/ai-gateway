@@ -506,8 +506,55 @@ async fn sync_async_lro_waits_between_pending_poll_attempts() {
 
     assert!(matches!(result, ExecutionResult::Completed { .. }));
     assert!(
-        started.elapsed() >= Duration::from_millis(20),
-        "poll loop should wait between pending attempts"
+        started.elapsed() >= Duration::from_millis(45),
+        "poll loop should clamp very small intervals before pending attempts"
+    );
+}
+
+#[tokio::test]
+async fn sync_async_lro_uses_default_poll_wait_when_unconfigured() {
+    let mut request = fixture_request(
+        "custom-lro-google-veo.json",
+        ClientMode::Sync,
+        UpstreamMode::AsyncLro,
+    );
+    request.profile["upstream_poll_template"]
+        .as_object_mut()
+        .expect("poll template object")
+        .remove("poll_interval_ms");
+    let transport = MemoryTransport::with_responses(vec![
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({"name": "operations/video-789"}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({"name": "operations/video-789", "done": false}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({
+                "name": "operations/video-789",
+                "done": true,
+                "response": {"videos": [{"uri": "gs://bucket/video-789.mp4"}]}
+            }),
+        },
+    ]);
+    let executor = TemplateExecutor::new(Arc::new(transport));
+
+    let started = Instant::now();
+    let result = executor
+        .execute_inline(request)
+        .await
+        .expect("execute lro with default wait");
+
+    assert!(matches!(result, ExecutionResult::Completed { .. }));
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "poll loop should use a non-zero default wait between pending attempts"
     );
 }
 
