@@ -11,6 +11,7 @@
 //! - [`logging`] — release freeze, record key-health outcome, emit UsageRecord
 //!   and DetailedLog.
 
+pub mod debug_task;
 pub mod early;
 pub mod gemini_files;
 pub mod logging;
