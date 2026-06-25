@@ -47,6 +47,75 @@ async fn http_transport_posts_json_to_relative_path() {
 }
 
 #[tokio::test]
+async fn http_transport_applies_default_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .and(header("authorization", "Bearer upstream-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": []
+        })))
+        .mount(&server)
+        .await;
+
+    let transport = HttpTemplateTransport::with_headers(
+        reqwest::Client::new(),
+        Some(server.uri()),
+        [(
+            "Authorization".to_string(),
+            "Bearer upstream-secret".to_string(),
+        )],
+    );
+    let response = transport
+        .submit(UpstreamRequest {
+            method: "POST".to_string(),
+            path: "/v1/images/generations".to_string(),
+            headers: BTreeMap::new(),
+            body: serde_json::json!({}),
+        })
+        .await
+        .expect("submit");
+
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn http_transport_explicit_header_overrides_default_header_case_insensitively() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .and(header("authorization", "Bearer template-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": []
+        })))
+        .mount(&server)
+        .await;
+
+    let transport = HttpTemplateTransport::with_headers(
+        reqwest::Client::new(),
+        Some(server.uri()),
+        [(
+            "Authorization".to_string(),
+            "Bearer upstream-secret".to_string(),
+        )],
+    );
+    let response = transport
+        .submit(UpstreamRequest {
+            method: "POST".to_string(),
+            path: "/v1/images/generations".to_string(),
+            headers: BTreeMap::from([(
+                "authorization".to_string(),
+                "Bearer template-secret".to_string(),
+            )]),
+            body: serde_json::json!({}),
+        })
+        .await
+        .expect("submit");
+
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
 async fn http_transport_preserves_non_success_response_body() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

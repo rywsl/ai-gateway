@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Method;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::template_executor::{
@@ -12,12 +13,32 @@ use crate::template_executor::{
 pub struct HttpTemplateTransport {
     client: reqwest::Client,
     base_url: Option<String>,
+    default_headers: BTreeMap<String, String>,
 }
 
 impl HttpTemplateTransport {
     #[must_use]
     pub fn new(client: reqwest::Client, base_url: Option<String>) -> Self {
-        Self { client, base_url }
+        Self {
+            client,
+            base_url,
+            default_headers: Default::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_headers(
+        client: reqwest::Client,
+        base_url: Option<String>,
+        default_headers: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        let mut transport = Self {
+            client,
+            base_url,
+            default_headers: Default::default(),
+        };
+        transport.default_headers = default_headers.into_iter().collect();
+        transport
     }
 
     pub fn with_default_timeout(base_url: Option<String>) -> Result<Self, reqwest::Error> {
@@ -25,7 +46,26 @@ impl HttpTemplateTransport {
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(900))
             .build()?;
-        Ok(Self { client, base_url })
+        Ok(Self {
+            client,
+            base_url,
+            default_headers: Default::default(),
+        })
+    }
+
+    pub fn with_default_timeout_and_headers(
+        base_url: Option<String>,
+        default_headers: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(900))
+            .build()?;
+        Ok(Self {
+            client,
+            base_url,
+            default_headers: default_headers.into_iter().collect(),
+        })
     }
 
     async fn send_request(
@@ -36,6 +76,11 @@ impl HttpTemplateTransport {
             .map_err(|err| TransportError::Failed(format!("invalid upstream method: {err}")))?;
         let url = self.resolve_url(&request.path)?;
         let mut builder = self.client.request(method, url);
+        for (name, value) in &self.default_headers {
+            if !has_header_ignore_ascii_case(&request.headers, name) {
+                builder = builder.header(name, value);
+            }
+        }
         for (name, value) in request.headers {
             builder = builder.header(name, value);
         }
@@ -98,6 +143,12 @@ impl HttpTemplateTransport {
             .map(|url| url.to_string())
             .map_err(|err| TransportError::Failed(format!("resolve upstream path: {err}")))
     }
+}
+
+fn has_header_ignore_ascii_case(headers: &BTreeMap<String, String>, name: &str) -> bool {
+    headers
+        .keys()
+        .any(|header_name| header_name.eq_ignore_ascii_case(name))
 }
 
 fn multipart_form(body: &Value) -> Result<Option<reqwest::multipart::Form>, TransportError> {

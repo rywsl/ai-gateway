@@ -447,7 +447,11 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
             .map_err(|err| anyhow::anyhow!("initialize redis task contract: {err}"))?;
 
     let registry = RunningTaskRegistry::default();
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .connect_timeout(cfg.submit_timeout())
+        .timeout(cfg.total_timeout())
+        .build()
+        .context("build task worker upstream http client")?;
 
     let exec_loop = ExecLoop::new(
         contract.clone(),
@@ -466,7 +470,8 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
             cancellation_token: cancel.clone(),
             ..ExecLoopConfig::default()
         },
-    );
+    )
+    .with_entity_store(entity_store.clone());
 
     let cancel_loop = CancelLoop::new(
         contract.clone(),

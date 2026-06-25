@@ -25,6 +25,7 @@ tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time", "macr
 tokio-util.workspace = true
 tracing.workspace = true
 metrics.workspace = true
+secrecy.workspace = true
 
 [dev-dependencies]
 testcontainers.workspace = true

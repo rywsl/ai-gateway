@@ -12,8 +12,11 @@ use gw_codec::{
     anthropic::Anthropic, gemini::Gemini, kiro::Kiro, openai::responses::OpenAiResponsesCodec,
     openai::OpenAi, AnyCodec,
 };
+use gw_core::ids::KeyId;
+use gw_store::EntityStore;
 use gw_task::contract::ClaimedTask;
 use gw_task::{TaskContract, TaskKind, TaskRecord, TaskStatus};
+use secrecy::ExposeSecret;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -105,6 +108,7 @@ pub struct ExecLoop<C> {
     http: reqwest::Client,
     cfg: ExecLoopConfig,
     limits: Arc<ConcurrencyLimits>,
+    entity_store: Option<Arc<EntityStore>>,
 }
 
 struct ConcurrencyLimits {
@@ -173,7 +177,14 @@ where
             http,
             cfg,
             limits,
+            entity_store: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_entity_store(mut self, entity_store: Arc<EntityStore>) -> Self {
+        self.entity_store = Some(entity_store);
+        self
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -408,9 +419,13 @@ where
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let executor = TemplateExecutor::new(Arc::new(HttpTemplateTransport::new(
+        let default_headers =
+            default_upstream_headers_for_binding(self.entity_store.as_ref(), &request.binding)
+                .await?;
+        let executor = TemplateExecutor::new(Arc::new(HttpTemplateTransport::with_headers(
             self.http.clone(),
             upstream_base_url,
+            default_headers,
         )));
         let result = executor
             .execute_background(request)
@@ -442,6 +457,64 @@ fn template_events_payload(events: Vec<ExecutionEvent>) -> Vec<serde_json::Value
         .into_iter()
         .map(|event| serde_json::json!({ "status": event.status }))
         .collect()
+}
+
+async fn default_upstream_headers_for_binding(
+    entity_store: Option<&Arc<EntityStore>>,
+    binding: &serde_json::Value,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let Some(entity_store) = entity_store else {
+        return Ok(Vec::new());
+    };
+    let Some(provider_key_id) = binding
+        .get("provider_key_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+    let vendor_key_id = KeyId::from(provider_key_id);
+    let vendor_key = entity_store
+        .vendor_key_or_load(&vendor_key_id)
+        .await
+        .with_context(|| format!("provider key {provider_key_id} not found for task runtime"))?;
+    if vendor_key.value.oauth.is_some() {
+        anyhow::bail!(
+            "oauth provider key {provider_key_id} is not supported by task runtime auth injection"
+        );
+    }
+    let vendor = entity_store
+        .vendor_or_load(&vendor_key.value.vendor_id)
+        .await
+        .with_context(|| {
+            format!(
+                "provider {} not found for task runtime",
+                vendor_key.value.vendor_id
+            )
+        })?;
+    Ok(render_upstream_auth_headers(
+        vendor.value.auth_template.as_str(),
+        vendor_key.value.api_key.expose_secret(),
+    ))
+}
+
+fn render_upstream_auth_headers(auth_template: &str, api_key: &str) -> Vec<(String, String)> {
+    let (header_name, value_template) = match auth_template.split_once(':') {
+        Some((name, rest)) if is_header_token(name.trim()) => (name.trim(), rest.trim_start()),
+        Some(_) | None => ("authorization", auth_template),
+    };
+    vec![(
+        header_name.to_string(),
+        value_template.replace("{api_key}", api_key),
+    )]
+}
+
+fn is_header_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 fn is_timeout_error(message: &str) -> bool {

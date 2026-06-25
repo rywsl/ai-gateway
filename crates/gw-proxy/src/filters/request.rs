@@ -115,105 +115,51 @@ pub async fn run(
             req_content_type.as_deref(),
         );
     }
-    if gw_auth::mgmt::is_management_path(&req_path) {
+    if crate::filters::debug_task::is_debug_task_runtime_path(&req_method, &req_path) {
         ctx.mgmt = true;
-        let req_id_for_mgmt = ctx.request_id.0.clone();
-        let mgmt_auth_hdr = session
-            .req_header()
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        macro_rules! mgmt_bail {
-            ($outcome:expr, $internal_outcome:expr) => {{
-                tracing::warn!(
-                    target: "gw_proxy::mgmt_auth",
-                    outcome = ?$outcome,
-                    internal_outcome = $internal_outcome,
-                    "management token authentication failed"
-                );
-                let (status, code) = gw_auth::mgmt::public_error_for_outcome(&$outcome)
-                    .expect("mgmt_bail requires non-ok outcome");
-                let err = ErrorIR {
-                    category: ErrorCategory::ClientAuth,
-                    status,
-                    upstream_status: None,
-                    code: Cow::Borrowed(code),
-                    message: Cow::Borrowed(""),
-                    retryable: false,
-                    upstream_raw: None,
-                    request_id: "",
-                    retry_after_secs: None,
-                };
-                emit_and_bail(session, ctx, &err, &req_id_for_mgmt).await?;
-                unreachable!()
-            }};
-        }
-
-        // 1. Authorization: Mgmt <token>
-        let Some(parsed_auth) = gw_auth::mgmt::parse_mgmt_authorization(mgmt_auth_hdr) else {
-            mgmt_bail!(
-                gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat,
-                "missing_authorization"
-            );
+        verify_management_request(
+            session,
+            ctx,
+            store,
+            mgmt_blacklist,
+            "gateway_debug_task_runtime",
+            gw_core::entity::MgmtScope::AdminFull,
+        )
+        .await?;
+        let body_bytes = match read_debug_body_bytes(session).await {
+            Ok(body_bytes) => body_bytes,
+            Err(err) => {
+                err.write(session).await?;
+                ctx.phase_end();
+                return Ok(true);
+            }
         };
-
-        // 2. Split mt_<id>.<secret>
-        let Some(parts) = gw_auth::mgmt::split_mgmt_token_payload(&parsed_auth.token) else {
-            mgmt_bail!(
-                gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat,
-                "invalid_format"
-            );
-        };
-
-        // 3. Load entry via Moka L1 → cold load. Miss → INVALID (same code as
-        //    hash mismatch, by design — see spec §1.3 step 4).
-        let Some(entry) = store.mgmt_token_or_load(parts.token_id).await else {
-            mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Invalid, "not_found");
-        };
-
-        // 4. Mgmt-token blacklist. FailClosed: a Redis outage rejects the
-        //    request rather than serving stale-allow.
-        if mgmt_blacklist
-            .check_mgmt(
-                parts.token_id,
-                gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed,
-            )
+        ctx.downstream_request_body = Some(Arc::new(body_bytes.clone()));
+        match crate::filters::debug_task::handle_task_runtime_debug(session, store, &body_bytes)
             .await
         {
-            mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Disabled, "revoked");
+            Ok(()) => {
+                ctx.phase_end();
+                return Ok(true);
+            }
+            Err(err) => {
+                err.write(session).await?;
+                ctx.phase_end();
+                return Ok(true);
+            }
         }
-
-        // 5. Constant-time secret compare + status / expiry / scope.
-        //    Gateway requires AdminRead at minimum; fine-grained admin-full vs
-        //    admin-read splits are enforced by the Go control plane.
-        match gw_auth::mgmt::verify_mgmt_token_secret(
-            &entry,
-            parts.secret,
+    }
+    if gw_auth::mgmt::is_management_path(&req_path) {
+        ctx.mgmt = true;
+        verify_management_request(
+            session,
+            ctx,
+            store,
+            mgmt_blacklist,
+            "management_path",
             gw_core::entity::MgmtScope::AdminRead,
-        ) {
-            gw_auth::mgmt::MgmtVerifyOutcome::Ok => {
-                ctx.mgmt_user_id = Some(entry.value.user_id.clone());
-                ctx.mgmt_scope = Some(entry.value.scope);
-            }
-            gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat
-            | gw_auth::mgmt::MgmtVerifyOutcome::Invalid => {
-                mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Invalid, "invalid_secret");
-            }
-            gw_auth::mgmt::MgmtVerifyOutcome::Expired => {
-                mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Expired, "expired");
-            }
-            gw_auth::mgmt::MgmtVerifyOutcome::Disabled => {
-                mgmt_bail!(gw_auth::mgmt::MgmtVerifyOutcome::Disabled, "disabled");
-            }
-            gw_auth::mgmt::MgmtVerifyOutcome::ScopeDenied => {
-                mgmt_bail!(
-                    gw_auth::mgmt::MgmtVerifyOutcome::ScopeDenied,
-                    "scope_denied"
-                );
-            }
-        }
+        )
+        .await?;
 
         // Token verified; ctx.mgmt_user_id / mgmt_scope are populated.
         // Continue to `upstream_peer`, which routes management traffic to the
@@ -1634,6 +1580,7 @@ pub async fn run(
                         execute_openai_compatible_submit_after_admission(
                             session,
                             ctx,
+                            store,
                             runtime,
                             modes,
                             client_request,
@@ -1684,6 +1631,7 @@ pub async fn run(
                             execute_openai_compatible_submit_after_admission(
                                 session,
                                 ctx,
+                                store,
                                 runtime,
                                 modes,
                                 client_request,
@@ -1734,6 +1682,7 @@ pub async fn run(
                             execute_openai_compatible_submit_after_admission(
                                 session,
                                 ctx,
+                                store,
                                 runtime,
                                 modes,
                                 client_request,
@@ -1788,6 +1737,7 @@ pub async fn run(
                             execute_openai_compatible_submit_after_admission(
                                 session,
                                 ctx,
+                                store,
                                 runtime,
                                 modes,
                                 client_request,
@@ -1871,6 +1821,7 @@ pub async fn run(
         execute_openai_compatible_submit_after_admission(
             session,
             ctx,
+            store,
             runtime,
             modes,
             client_request,
@@ -2123,6 +2074,7 @@ fn task_error_ir(err: crate::filters::task::TaskHttpError) -> ErrorIR<'static> {
 async fn execute_openai_compatible_submit_after_admission(
     session: &mut Session,
     ctx: &mut ReqCtx,
+    store: &Arc<EntityStore>,
     runtime: crate::filters::task::ResolvedTaskRuntime,
     modes: crate::filters::task::ResolvedExecutionModes,
     client_request: serde_json::Value,
@@ -2164,9 +2116,23 @@ async fn execute_openai_compatible_submit_after_admission(
         .await
     } else {
         let upstream_base_url = runtime.upstream_base_url.clone();
+        let default_headers = match crate::filters::task::default_upstream_headers_for_binding(
+            store,
+            &runtime.binding,
+        )
+        .await
+        {
+            Ok(headers) => headers,
+            Err(err) => {
+                let error_ir = task_error_ir(err);
+                emit_and_bail(session, ctx, &error_ir, &request_id).await?;
+                unreachable!("emit_and_bail always returns Err; see fn doc")
+            }
+        };
         let transport =
-            match gw_task_runtime::http_transport::HttpTemplateTransport::with_default_timeout(
+            match gw_task_runtime::http_transport::HttpTemplateTransport::with_default_timeout_and_headers(
                 upstream_base_url,
+                default_headers,
             ) {
                 Ok(transport) => Arc::new(transport),
                 Err(err) => {
@@ -2641,6 +2607,192 @@ async fn emit_and_bail(
     error_emit::send_error(session, &codec, &scoped).await;
     ctx.phase_end();
     Err(short_circuit(err.status))
+}
+
+async fn read_debug_body_bytes(
+    session: &mut Session,
+) -> std::result::Result<bytes::Bytes, crate::filters::debug_task::DebugTaskHttpError> {
+    const BODY_CAP: usize = 16 * 1024 * 1024;
+    let mut body_buf: Vec<u8> = Vec::new();
+    session.as_mut().enable_retry_buffering();
+    while let Some(chunk) = session.read_request_body().await.map_err(|err| {
+        crate::filters::debug_task::DebugTaskHttpError::internal(format!(
+            "read debug request body: {err}"
+        ))
+    })? {
+        if body_buf.len() + chunk.len() > BODY_CAP {
+            return Err(
+                crate::filters::debug_task::DebugTaskHttpError::payload_too_large(
+                    "debug task runtime request body exceeds 16MiB".to_string(),
+                ),
+            );
+        }
+        body_buf.extend_from_slice(&chunk);
+    }
+    Ok(bytes::Bytes::from(body_buf))
+}
+
+async fn verify_management_request(
+    session: &mut Session,
+    ctx: &mut ReqCtx,
+    store: &Arc<EntityStore>,
+    mgmt_blacklist: &Arc<RedisJwtBlacklist>,
+    internal_route: &'static str,
+    required_scope: gw_core::entity::MgmtScope,
+) -> Result<()> {
+    let req_id_for_mgmt = ctx.request_id.0.clone();
+    let mgmt_auth_hdr = session
+        .req_header()
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let Some(parsed_auth) = gw_auth::mgmt::parse_mgmt_authorization(mgmt_auth_hdr) else {
+        emit_management_auth_error(
+            session,
+            ctx,
+            &req_id_for_mgmt,
+            gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat,
+            "missing_authorization",
+            internal_route,
+        )
+        .await?;
+        unreachable!("emit_and_bail always returns Err; see fn doc")
+    };
+
+    let Some(parts) = gw_auth::mgmt::split_mgmt_token_payload(&parsed_auth.token) else {
+        emit_management_auth_error(
+            session,
+            ctx,
+            &req_id_for_mgmt,
+            gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat,
+            "invalid_format",
+            internal_route,
+        )
+        .await?;
+        unreachable!("emit_and_bail always returns Err; see fn doc")
+    };
+
+    let Some(entry) = store.mgmt_token_or_load(parts.token_id).await else {
+        emit_management_auth_error(
+            session,
+            ctx,
+            &req_id_for_mgmt,
+            gw_auth::mgmt::MgmtVerifyOutcome::Invalid,
+            "not_found",
+            internal_route,
+        )
+        .await?;
+        unreachable!("emit_and_bail always returns Err; see fn doc")
+    };
+
+    if mgmt_blacklist
+        .check_mgmt(
+            parts.token_id,
+            gw_auth::jwt_blacklist::BlacklistFailMode::FailClosed,
+        )
+        .await
+    {
+        emit_management_auth_error(
+            session,
+            ctx,
+            &req_id_for_mgmt,
+            gw_auth::mgmt::MgmtVerifyOutcome::Disabled,
+            "revoked",
+            internal_route,
+        )
+        .await?;
+        unreachable!("emit_and_bail always returns Err; see fn doc")
+    }
+
+    match gw_auth::mgmt::verify_mgmt_token_secret(&entry, parts.secret, required_scope) {
+        gw_auth::mgmt::MgmtVerifyOutcome::Ok => {
+            ctx.mgmt_user_id = Some(entry.value.user_id.clone());
+            ctx.mgmt_scope = Some(entry.value.scope);
+            Ok(())
+        }
+        gw_auth::mgmt::MgmtVerifyOutcome::InvalidFormat
+        | gw_auth::mgmt::MgmtVerifyOutcome::Invalid => {
+            emit_management_auth_error(
+                session,
+                ctx,
+                &req_id_for_mgmt,
+                gw_auth::mgmt::MgmtVerifyOutcome::Invalid,
+                "invalid_secret",
+                internal_route,
+            )
+            .await?;
+            unreachable!("emit_and_bail always returns Err; see fn doc")
+        }
+        gw_auth::mgmt::MgmtVerifyOutcome::Expired => {
+            emit_management_auth_error(
+                session,
+                ctx,
+                &req_id_for_mgmt,
+                gw_auth::mgmt::MgmtVerifyOutcome::Expired,
+                "expired",
+                internal_route,
+            )
+            .await?;
+            unreachable!("emit_and_bail always returns Err; see fn doc")
+        }
+        gw_auth::mgmt::MgmtVerifyOutcome::Disabled => {
+            emit_management_auth_error(
+                session,
+                ctx,
+                &req_id_for_mgmt,
+                gw_auth::mgmt::MgmtVerifyOutcome::Disabled,
+                "disabled",
+                internal_route,
+            )
+            .await?;
+            unreachable!("emit_and_bail always returns Err; see fn doc")
+        }
+        gw_auth::mgmt::MgmtVerifyOutcome::ScopeDenied => {
+            emit_management_auth_error(
+                session,
+                ctx,
+                &req_id_for_mgmt,
+                gw_auth::mgmt::MgmtVerifyOutcome::ScopeDenied,
+                "scope_denied",
+                internal_route,
+            )
+            .await?;
+            unreachable!("emit_and_bail always returns Err; see fn doc")
+        }
+    }
+}
+
+async fn emit_management_auth_error(
+    session: &mut Session,
+    ctx: &mut ReqCtx,
+    request_id: &str,
+    outcome: gw_auth::mgmt::MgmtVerifyOutcome,
+    internal_outcome: &'static str,
+    internal_route: &'static str,
+) -> Result<()> {
+    tracing::warn!(
+        target: "gw_proxy::mgmt_auth",
+        outcome = ?outcome,
+        internal_outcome = internal_outcome,
+        internal_route = internal_route,
+        "management token authentication failed"
+    );
+    let (status, code) = gw_auth::mgmt::public_error_for_outcome(&outcome)
+        .expect("management auth error requires non-ok outcome");
+    let err = ErrorIR {
+        category: ErrorCategory::ClientAuth,
+        status,
+        upstream_status: None,
+        code: Cow::Borrowed(code),
+        message: Cow::Borrowed(""),
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    };
+    emit_and_bail(session, ctx, &err, request_id).await
 }
 
 #[cfg(test)]

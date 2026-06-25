@@ -203,6 +203,27 @@ fn test_openai_compatible_task_endpoint_detector_identifies_first_class_surfaces
 }
 
 #[test]
+fn test_openai_video_resource_paths_ignore_empty_segments() {
+    let cases = [
+        ("GET", "/v1/videos//video_123", "video", None),
+        ("GET", "/v1/videos/video_123//content", "video", None),
+        (
+            "POST",
+            "/v1/videos//video_123/remix",
+            "video",
+            Some("$.model"),
+        ),
+    ];
+
+    for (method, path, task_kind, model_path) in cases {
+        let hit = detect_openai_compatible_task_endpoint(true, method, path, "")
+            .unwrap_or_else(|| panic!("expected endpoint candidate for {method} {path}"));
+        assert_eq!(hit.task_kind, task_kind);
+        assert_eq!(hit.model_path.as_deref(), model_path);
+    }
+}
+
+#[test]
 fn test_openai_compatible_task_endpoint_detector_respects_task_gate_and_methods() {
     assert!(detect_openai_compatible_task_endpoint(
         false,
