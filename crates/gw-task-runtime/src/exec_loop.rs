@@ -479,6 +479,11 @@ async fn default_upstream_headers_for_binding(
         .vendor_key_or_load(&vendor_key_id)
         .await
         .with_context(|| format!("provider key {provider_key_id} not found for task runtime"))?;
+    if vendor_key.value.oauth.is_some() {
+        anyhow::bail!(
+            "oauth provider key {provider_key_id} is not supported by task runtime auth injection"
+        );
+    }
     let vendor = entity_store
         .vendor_or_load(&vendor_key.value.vendor_id)
         .await

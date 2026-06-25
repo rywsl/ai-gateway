@@ -36,7 +36,7 @@ use gw_core::versioned::Versioned;
 use gw_store::counter_store::daily_tokens_key;
 use gw_store::deduction::{DeductionState, UserCircuit, DEDUCT, USER_CIRCUIT};
 use gw_store::{CounterStore, EntityStore};
-use pingora::{ErrorType, Result};
+use pingora::Result;
 use pingora_proxy::Session;
 use std::borrow::Cow;
 use std::net::IpAddr;
@@ -123,9 +123,17 @@ pub async fn run(
             store,
             mgmt_blacklist,
             "gateway_debug_task_runtime",
+            gw_core::entity::MgmtScope::AdminFull,
         )
         .await?;
-        let body_bytes = read_debug_body_bytes(session).await?;
+        let body_bytes = match read_debug_body_bytes(session).await {
+            Ok(body_bytes) => body_bytes,
+            Err(err) => {
+                err.write(session).await?;
+                ctx.phase_end();
+                return Ok(true);
+            }
+        };
         ctx.downstream_request_body = Some(Arc::new(body_bytes.clone()));
         match crate::filters::debug_task::handle_task_runtime_debug(session, store, &body_bytes)
             .await
@@ -143,7 +151,15 @@ pub async fn run(
     }
     if gw_auth::mgmt::is_management_path(&req_path) {
         ctx.mgmt = true;
-        verify_management_request(session, ctx, store, mgmt_blacklist, "management_path").await?;
+        verify_management_request(
+            session,
+            ctx,
+            store,
+            mgmt_blacklist,
+            "management_path",
+            gw_core::entity::MgmtScope::AdminRead,
+        )
+        .await?;
 
         // Token verified; ctx.mgmt_user_id / mgmt_scope are populated.
         // Continue to `upstream_peer`, which routes management traffic to the
@@ -2593,15 +2609,23 @@ async fn emit_and_bail(
     Err(short_circuit(err.status))
 }
 
-async fn read_debug_body_bytes(session: &mut Session) -> Result<bytes::Bytes> {
+async fn read_debug_body_bytes(
+    session: &mut Session,
+) -> std::result::Result<bytes::Bytes, crate::filters::debug_task::DebugTaskHttpError> {
     const BODY_CAP: usize = 16 * 1024 * 1024;
     let mut body_buf: Vec<u8> = Vec::new();
     session.as_mut().enable_retry_buffering();
-    while let Some(chunk) = session.read_request_body().await? {
+    while let Some(chunk) = session.read_request_body().await.map_err(|err| {
+        crate::filters::debug_task::DebugTaskHttpError::internal(format!(
+            "read debug request body: {err}"
+        ))
+    })? {
         if body_buf.len() + chunk.len() > BODY_CAP {
-            return Err(pingora::Error::new(ErrorType::Custom(
-                "gw_debug_body_too_large",
-            )));
+            return Err(
+                crate::filters::debug_task::DebugTaskHttpError::payload_too_large(
+                    "debug task runtime request body exceeds 16MiB".to_string(),
+                ),
+            );
         }
         body_buf.extend_from_slice(&chunk);
     }
@@ -2614,6 +2638,7 @@ async fn verify_management_request(
     store: &Arc<EntityStore>,
     mgmt_blacklist: &Arc<RedisJwtBlacklist>,
     internal_route: &'static str,
+    required_scope: gw_core::entity::MgmtScope,
 ) -> Result<()> {
     let req_id_for_mgmt = ctx.request_id.0.clone();
     let mgmt_auth_hdr = session
@@ -2681,11 +2706,7 @@ async fn verify_management_request(
         unreachable!("emit_and_bail always returns Err; see fn doc")
     }
 
-    match gw_auth::mgmt::verify_mgmt_token_secret(
-        &entry,
-        parts.secret,
-        gw_core::entity::MgmtScope::AdminRead,
-    ) {
+    match gw_auth::mgmt::verify_mgmt_token_secret(&entry, parts.secret, required_scope) {
         gw_auth::mgmt::MgmtVerifyOutcome::Ok => {
             ctx.mgmt_user_id = Some(entry.value.user_id.clone());
             ctx.mgmt_scope = Some(entry.value.scope);

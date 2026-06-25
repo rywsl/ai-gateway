@@ -61,14 +61,24 @@ pub async fn handle_task_runtime_debug(
     let req: DebugTaskRuntimeRequest = serde_json::from_slice(body).map_err(|err| {
         DebugTaskHttpError::bad_request(format!("invalid debug task runtime json: {err}"))
     })?;
-    let base_url = req.upstream_base_url.clone();
-    let default_headers =
-        crate::filters::task::default_upstream_headers_for_binding(store, &req.binding)
-            .await
-            .map_err(|err| DebugTaskHttpError::internal(err.message.into_owned()))?;
-    let transport =
-        HttpTemplateTransport::with_default_timeout_and_headers(base_url, default_headers)
-            .map_err(|err| DebugTaskHttpError::internal(format!("build task transport: {err}")))?;
+    let requested_base_url = req.upstream_base_url.clone();
+    let upstream_auth = crate::filters::task::task_upstream_auth_for_binding(store, &req.binding)
+        .await
+        .map_err(|err| DebugTaskHttpError::internal(err.message.into_owned()))?;
+    let base_url = upstream_auth
+        .base_url
+        .clone()
+        .or(requested_base_url)
+        .ok_or_else(|| {
+            DebugTaskHttpError::bad_request(
+                "upstream_base_url is required when binding has no provider_key_id".to_string(),
+            )
+        })?;
+    let transport = HttpTemplateTransport::with_default_timeout_and_headers(
+        Some(base_url.clone()),
+        upstream_auth.headers,
+    )
+    .map_err(|err| DebugTaskHttpError::internal(format!("build task transport: {err}")))?;
     let executor = TemplateExecutor::new(Arc::new(transport));
     let request_id = req
         .request_id
@@ -100,11 +110,13 @@ pub async fn handle_task_runtime_debug(
     let body = match result {
         ExecutionResult::Completed { response, events } => json!({
             "status": "completed",
+            "upstream_base_url": base_url,
             "client_response": response,
             "events": debug_events(events),
         }),
         ExecutionResult::Submitted { response, events } => json!({
             "status": "submitted",
+            "upstream_base_url": base_url,
             "client_response": response,
             "events": debug_events(events),
         }),
@@ -127,6 +139,14 @@ impl DebugTaskHttpError {
         Self {
             status: 400,
             code: "GW_TASK_DEBUG_INVALID_REQUEST",
+            message,
+        }
+    }
+
+    pub(crate) fn payload_too_large(message: String) -> Self {
+        Self {
+            status: 413,
+            code: "GW_TASK_DEBUG_PAYLOAD_TOO_LARGE",
             message,
         }
     }

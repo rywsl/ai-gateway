@@ -363,13 +363,31 @@ pub async fn default_upstream_headers_for_binding(
     store: &Arc<EntityStore>,
     binding: &serde_json::Value,
 ) -> std::result::Result<Vec<(String, String)>, TaskHttpError> {
+    task_upstream_auth_for_binding(store, binding)
+        .await
+        .map(|auth| auth.headers)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskUpstreamAuth {
+    pub headers: Vec<(String, String)>,
+    pub base_url: Option<String>,
+}
+
+pub async fn task_upstream_auth_for_binding(
+    store: &Arc<EntityStore>,
+    binding: &serde_json::Value,
+) -> std::result::Result<TaskUpstreamAuth, TaskHttpError> {
     let Some(provider_key_id) = binding
         .get("provider_key_id")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return Ok(Vec::new());
+        return Ok(TaskUpstreamAuth {
+            headers: Vec::new(),
+            base_url: None,
+        });
     };
     let vendor_key_id = KeyId::from(provider_key_id);
     let Some(vendor_key) = store.vendor_key_or_load(&vendor_key_id).await else {
@@ -377,16 +395,28 @@ pub async fn default_upstream_headers_for_binding(
             "provider key {provider_key_id} not found for task runtime"
         )));
     };
+    if vendor_key.value.oauth.is_some() {
+        return Err(TaskHttpError::submit_failed(format!(
+            "oauth provider key {provider_key_id} is not supported by task runtime auth injection"
+        )));
+    }
     let Some(vendor) = store.vendor_or_load(&vendor_key.value.vendor_id).await else {
         return Err(TaskHttpError::submit_failed(format!(
             "provider {} not found for task runtime",
             vendor_key.value.vendor_id
         )));
     };
-    Ok(render_upstream_auth_headers(
-        vendor.value.auth_template.as_str(),
-        vendor_key.value.api_key.expose_secret(),
-    ))
+    Ok(TaskUpstreamAuth {
+        headers: render_upstream_auth_headers(
+            vendor.value.auth_template.as_str(),
+            vendor_key.value.api_key.expose_secret(),
+        ),
+        base_url: vendor
+            .value
+            .base_urls
+            .first()
+            .map(|url| url.as_str().trim_end_matches('/').to_string()),
+    })
 }
 
 fn render_upstream_auth_headers(auth_template: &str, api_key: &str) -> Vec<(String, String)> {
