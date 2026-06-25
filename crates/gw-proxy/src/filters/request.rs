@@ -846,24 +846,29 @@ pub async fn run(
     } else {
         None
     };
-    let (model_name, is_stream, est_input_tokens, req_max_tokens) = if ctx.is_gemini_files {
-        (ModelName::from("gemini-files"), false, 1, None)
-    } else if let (Some(candidate), Some(client_request)) = (
+    let openai_task_request_key = if let (Some(candidate), Some(client_request)) = (
         ctx.task_endpoint_candidate.as_ref(),
         openai_task_client_request.as_ref(),
     ) {
         match crate::filters::task::resolve_task_request_key(candidate, client_request) {
-            Ok(key) => (
-                ModelName::from(key.global_model_id.as_str()),
-                false,
-                1,
-                None,
-            ),
+            Ok(key) => Some(key),
             Err(err) => {
                 let error_ir = task_error_ir(err);
                 bail!(session, ctx, &error_ir, &request_id)
             }
         }
+    } else {
+        None
+    };
+    let (model_name, is_stream, est_input_tokens, req_max_tokens) = if ctx.is_gemini_files {
+        (ModelName::from("gemini-files"), false, 1, None)
+    } else if let Some(key) = openai_task_request_key.as_ref() {
+        (
+            ModelName::from(key.global_model_id.as_str()),
+            false,
+            1,
+            None,
+        )
     } else if ctx.is_task {
         let model = if matches!(
             ctx.task_action,
@@ -1195,18 +1200,10 @@ pub async fn run(
         }
     }
 
-    let mut openai_compatible_submit = if let (Some(candidate), Some(client_request)) = (
-        ctx.task_endpoint_candidate.clone(),
+    let mut openai_compatible_submit = if let (Some(key), Some(client_request)) = (
+        openai_task_request_key.as_ref(),
         openai_task_client_request.clone(),
     ) {
-        let key = match crate::filters::task::resolve_task_request_key(&candidate, &client_request)
-        {
-            Ok(key) => key,
-            Err(err) => {
-                let error_ir = task_error_ir(err);
-                bail!(session, ctx, &error_ir, &request_id)
-            }
-        };
         let runtime = match crate::filters::task::resolve_task_runtime(store, &key).await {
             Ok(runtime) => runtime,
             Err(err) => {
