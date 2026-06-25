@@ -214,6 +214,31 @@ async fn test_submit_endpoint_creates_task() {
 }
 
 #[tokio::test]
+async fn test_submit_endpoint_infers_embedding_task_kind() {
+    let contract = MemoryTaskContract::default();
+
+    gw_proxy::filters::task::submit_endpoint(
+        &contract,
+        gw_proxy::filters::task::SubmitTaskRequest {
+            body: br#"{"task_type":"embedding","model":"text-embedding-3-large","input":"hello"}"#,
+            user_id: "user_task",
+            api_key_id: Some("ak_task"),
+            client_protocol: "openai",
+            client_codec: None,
+            trace_id: "trace_task",
+            request_id: "request_task",
+            billing_config: None,
+            available_balance_micro: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let submitted = contract.submitted.lock().unwrap();
+    assert_eq!(submitted[0].kind, TaskKind::Embedding);
+}
+
+#[tokio::test]
 async fn test_freeze_guard_freezes_on_submit() {
     let contract = MemoryTaskContract::default();
     let user_id = "user_task_freeze";
@@ -300,6 +325,130 @@ async fn test_load_endpoint_returns_task() {
     assert_eq!(response.status, 200);
     assert_eq!(response.body["id"], id.to_string());
     assert_eq!(response.body["status"], "queued");
+}
+
+#[tokio::test]
+async fn test_load_openai_video_endpoint_maps_task_statuses() {
+    let id = TaskId::new_v4();
+    let mut record = task_record(id, TaskStatus::Succeeded);
+    record.kind = TaskKind::Video;
+    record.model = Some("sora-2".to_string());
+    record.input_payload = serde_json::json!({
+        "client_request": {"model": "sora-2", "prompt": "city at night"}
+    });
+    record.output_payload = Some(serde_json::json!({
+        "client_final_response": {
+            "data": [{"url": "https://example.test/video.mp4"}]
+        }
+    }));
+    let contract = MemoryTaskContract::with_record(record);
+
+    let response = gw_proxy::filters::task::load_openai_video_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body["id"], id.to_string());
+    assert_eq!(response.body["object"], "video");
+    assert_eq!(response.body["status"], "completed");
+    assert_eq!(response.body["model"], "sora-2");
+    assert_eq!(response.body["prompt"], "city at night");
+    assert_eq!(response.body["progress"], 100);
+    assert_eq!(
+        response.body["content_url"],
+        "https://example.test/video.mp4"
+    );
+}
+
+#[tokio::test]
+async fn test_load_openai_video_endpoint_maps_failed_state() {
+    let id = TaskId::new_v4();
+    let mut record = task_record(id, TaskStatus::TimedOut);
+    record.kind = TaskKind::Video;
+    record.error_message = Some("provider timeout".to_string());
+    let contract = MemoryTaskContract::with_record(record);
+
+    let response = gw_proxy::filters::task::load_openai_video_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.body["status"], "failed");
+    assert_eq!(response.body["error"]["message"], "provider timeout");
+}
+
+#[tokio::test]
+async fn test_load_openai_video_content_endpoint_redirects_to_artifact_url() {
+    let id = TaskId::new_v4();
+    let mut record = task_record(id, TaskStatus::Succeeded);
+    record.kind = TaskKind::Video;
+    record.output_payload = Some(serde_json::json!({
+        "client_final_response": {
+            "data": [{"url": "https://example.test/video.mp4"}]
+        }
+    }));
+    let contract = MemoryTaskContract::with_record(record);
+
+    let response = gw_proxy::filters::task::load_openai_video_content_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status, 302);
+    assert_eq!(
+        response.headers["Location"],
+        "https://example.test/video.mp4"
+    );
+    assert!(response.body.is_null());
+}
+
+#[tokio::test]
+async fn test_load_openai_video_content_endpoint_reports_missing_artifact() {
+    let id = TaskId::new_v4();
+    let mut record = task_record(id, TaskStatus::Succeeded);
+    record.kind = TaskKind::Video;
+    let contract = MemoryTaskContract::with_record(record);
+
+    let err = gw_proxy::filters::task::load_openai_video_content_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, 404);
+    assert_eq!(err.code, gw_core::error::codes::GW_TASK_ARTIFACT_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_load_openai_video_endpoint_rejects_cross_user_task() {
+    let id = TaskId::new_v4();
+    let mut record = task_record(id, TaskStatus::Succeeded);
+    record.kind = TaskKind::Video;
+    record.user_id = "other_user".to_string();
+    let contract = MemoryTaskContract::with_record(record);
+
+    let err = gw_proxy::filters::task::load_openai_video_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, 404);
+    assert_eq!(err.code, gw_core::error::codes::GW_TASK_NOT_FOUND);
 }
 
 #[tokio::test]

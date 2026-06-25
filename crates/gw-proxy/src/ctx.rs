@@ -11,7 +11,7 @@
 //! cancellation paths.
 
 use crate::filters::gemini_files::GeminiFilesAction;
-use crate::filters::task::TaskAction;
+use crate::filters::task::{TaskAction, TaskEndpointCandidate};
 use bytes::{Bytes, BytesMut};
 use gw_auth::ratelimit::StreamSlot;
 use gw_codec::AnyCodec;
@@ -524,6 +524,7 @@ pub struct ReqCtx {
     pub is_task: bool,
     pub is_gemini_files: bool,
     pub task_action: Option<TaskAction>,
+    pub task_endpoint_candidate: Option<TaskEndpointCandidate>,
     pub gemini_files_action: Option<GeminiFilesAction>,
     pub idempotent: bool,
     /// Phase B: explicit three-state body lifecycle. Replaces the retired
@@ -829,6 +830,7 @@ impl ReqCtx {
             is_task: false,
             is_gemini_files: false,
             task_action: None,
+            task_endpoint_candidate: None,
             gemini_files_action: None,
             idempotent: true,
             body: None,

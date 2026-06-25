@@ -251,6 +251,70 @@ fn sample_record(upstream_url: String) -> TaskRecord {
     }
 }
 
+fn template_snapshot_record(upstream_base_url: String, upstream_path: String) -> TaskRecord {
+    let mut record = sample_record(String::new());
+    record.kind = TaskKind::Image;
+    record.client_mode = ClientMode::Async;
+    record.upstream_mode = UpstreamMode::Sync;
+    record.vendor_id = "openai".to_string();
+    record.model = Some("gpt-image-2".to_string());
+    record.global_model_id = Some("gpt-image-2".to_string());
+    record.provider_model_id = Some("gpt-image-2".to_string());
+    record.provider_key_id = None;
+    record.profile_id = Some("profile_image".to_string());
+    record.profile_revision_id = Some("profile_image:v1".to_string());
+    record.binding_id = Some("binding_image".to_string());
+    record.binding_revision_id = Some("binding_image:v1".to_string());
+    record.effective_template_hash = Some("sha256:image".to_string());
+    record.input_payload = serde_json::json!({
+        "client_request": {"model": "gpt-image-2", "prompt": "glass sphere"},
+        "upstream_base_url": upstream_base_url,
+        "profile": {
+            "id": "profile_image",
+            "task_kind": "image",
+            "client_modes": ["async"],
+            "default_client_mode": "async",
+            "upstream_mode": "sync",
+            "client_request_template": {
+                "normalize": {
+                    "client.model": "$.model",
+                    "client.prompt": "$.prompt"
+                }
+            },
+            "upstream_request_template": {
+                "method": "POST",
+                "path": upstream_path,
+                "headers": {"Content-Type": "application/json"},
+                "body": {
+                    "model": "{{binding.provider_model_name}}",
+                    "prompt": "{{client.prompt}}"
+                }
+            },
+            "upstream_response_template": {
+                "result": {"images": "$.data[*].b64_json"}
+            },
+            "client_sync_response_template": {
+                "data": {
+                    "$map": {
+                        "source": "{{result.images}}",
+                        "as": "image",
+                        "template": {"b64_json": "{{image}}"}
+                    }
+                }
+            }
+        },
+        "binding": {
+            "id": "binding_image",
+            "global_model_id": "gpt-image-2",
+            "provider_model_name": "gpt-image-2"
+        },
+        "profile_revision_id": "profile_image:v1",
+        "binding_revision_id": "binding_image:v1",
+        "effective_template_hash": "sha256:image"
+    });
+    record
+}
+
 async fn http_server(status: u16, body: &'static str, delay: Duration) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -447,6 +511,34 @@ async fn test_exec_loop_claims_and_executes() {
         contract.loaded().await.provider_task_id.as_deref(),
         Some("provider-1")
     );
+}
+
+#[tokio::test]
+async fn test_exec_loop_executes_template_snapshot_without_legacy_upstream_url() {
+    let (addr, captured) = capture_body_http_server(r#"{"data":[{"b64_json":"Zmlyc3Q="}]}"#).await;
+    let contract = MemoryContract::enqueue(template_snapshot_record(
+        format!("http://{addr}"),
+        "/v1/images/generations".to_string(),
+    ))
+    .await;
+    let loop_ = ExecLoop::new(contract.clone(), reqwest::Client::new(), config());
+
+    loop_.run_once().await.expect("run once");
+
+    let request_body: serde_json::Value =
+        serde_json::from_slice(&captured.lock().await).expect("captured body json");
+    assert_eq!(request_body["model"], "gpt-image-2");
+    assert_eq!(request_body["prompt"], "glass sphere");
+
+    let settlements = contract.settlements().await;
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].0, TaskStatus::Succeeded);
+    let output = settlements[0].1.as_ref().expect("output payload");
+    assert_eq!(
+        output["client_final_response"]["data"][0]["b64_json"],
+        "Zmlyc3Q="
+    );
+    assert_eq!(output["template_events"][2]["status"], "succeeded");
 }
 
 #[tokio::test]

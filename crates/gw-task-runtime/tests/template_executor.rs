@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use gw_task::template::TemplateError;
-use gw_task::{ClientMode, TaskKind, UpstreamMode};
+use gw_task::{ClientMode, TaskId, TaskKind, TaskRecord, TaskStatus, UpstreamMode};
 use gw_task_runtime::template_executor::{
-    ExecutionIdentity, ExecutionRequest, ExecutionResult, TemplateExecutor, TransportError,
-    UpstreamRequest, UpstreamResponse, UpstreamTransport,
+    execution_request_from_task_record, ExecutionIdentity, ExecutionRequest, ExecutionResult,
+    TemplateExecutor, TransportError, UpstreamRequest, UpstreamResponse, UpstreamTransport,
 };
 use serde_json::json;
 
@@ -69,7 +70,7 @@ fn fixture_request(
     upstream_mode: UpstreamMode,
 ) -> ExecutionRequest {
     let path = format!(
-        "{}/../../../async-task-template-routing-go/docs/contracts/async-task-template/v1/fixtures/{}",
+        "{}/../../../AILinkMax-Go/docs/contracts/async-task-template/v1/fixtures/{}",
         env!("CARGO_MANIFEST_DIR"),
         fixture_name
     );
@@ -95,6 +96,101 @@ fn fixture_request(
         client_request: fixture["client_request"].clone(),
         task: json!({"id": "task_1", "status": "queued"}),
     }
+}
+
+fn template_task_record() -> TaskRecord {
+    let now = 1_700_000_000_000;
+    TaskRecord {
+        id: TaskId::new_v4(),
+        schema_version: 2,
+        kind: TaskKind::Image,
+        status: TaskStatus::Queued,
+        user_id: "user_1".to_string(),
+        child_id: None,
+        api_key_id: "ak_1".to_string(),
+        vendor_id: "openai".to_string(),
+        model: Some("gpt-image-2".to_string()),
+        client_mode: ClientMode::Async,
+        upstream_mode: UpstreamMode::Sync,
+        global_model_id: Some("gpt-image-2".to_string()),
+        provider_model_id: Some("gpt-image-2".to_string()),
+        endpoint_id: Some("endpoint_openai".to_string()),
+        provider_key_id: Some("key_openai".to_string()),
+        profile_id: Some("profile_image".to_string()),
+        profile_revision_id: Some("profile_image:v1".to_string()),
+        profile_version: Some(1),
+        binding_id: Some("binding_image".to_string()),
+        binding_revision_id: Some("binding_image:v1".to_string()),
+        binding_version: Some(1),
+        effective_template_hash: Some("sha256:image".to_string()),
+        poll_context: None,
+        created_at_ms: now,
+        updated_at_ms: now,
+        submitted_ts_ms: now,
+        expires_at_ms: now + 86_400_000,
+        claimed_ts_ms: None,
+        ended_ts_ms: None,
+        lease_until_ms: None,
+        worker_id: None,
+        trace_id: Some("trace_1".to_string()),
+        request_id: Some("req_1".to_string()),
+        provider_task_id: None,
+        provider_first_response_ms: None,
+        input_payload: serde_json::json!({
+            "client_request": {"model": "gpt-image-2", "prompt": "glass sphere"},
+            "profile": {
+                "id": "profile_image",
+                "task_kind": "image",
+                "client_modes": ["async"],
+                "default_client_mode": "async",
+                "upstream_mode": "sync",
+                "client_request_template": {"normalize": {"client.model": "$.model", "client.prompt": "$.prompt"}},
+                "upstream_request_template": {
+                    "method": "POST",
+                    "path": "/v1/images/generations",
+                    "body": {"model": "{{binding.provider_model_name}}", "prompt": "{{client.prompt}}"}
+                },
+                "upstream_response_template": {"result": {"images": "$.data[*].b64_json"}},
+                "client_sync_response_template": {
+                    "data": {
+                        "$map": {
+                            "source": "{{result.images}}",
+                            "as": "image",
+                            "template": {"b64_json": "{{image}}"}
+                        }
+                    }
+                }
+            },
+            "binding": {
+                "id": "binding_image",
+                "global_model_id": "gpt-image-2",
+                "provider_model_name": "gpt-image-2"
+            }
+        }),
+        output_payload: None,
+        error_message: None,
+        frozen_micro: 0,
+        actual_micro: None,
+        duration_seconds: None,
+        billing_record_id: None,
+    }
+}
+
+#[test]
+fn execution_request_from_task_record_rehydrates_template_snapshot() {
+    let record = template_task_record();
+    let request = execution_request_from_task_record(&record).expect("execution request");
+
+    assert_eq!(request.identity.user_id, "user_1");
+    assert_eq!(request.identity.api_key_id, "ak_1");
+    assert_eq!(request.identity.request_id, "req_1");
+    assert_eq!(request.task_kind, TaskKind::Image);
+    assert_eq!(request.client_mode, ClientMode::Async);
+    assert_eq!(request.upstream_mode, UpstreamMode::Sync);
+    assert_eq!(request.profile["id"], "profile_image");
+    assert_eq!(request.binding["id"], "binding_image");
+    assert_eq!(request.client_request["prompt"], "glass sphere");
+    assert_eq!(request.task["id"], record.id.to_string());
 }
 
 #[tokio::test]
@@ -180,8 +276,239 @@ async fn sync_async_lro_polls_and_returns_final_response() {
         }
         other => panic!("expected completed result, got {other:?}"),
     }
-    assert_eq!(transport.request_count(), 1);
-    assert_eq!(transport.poll_count(), 1);
+    assert_eq!(transport.request_count(), 2);
+    assert_eq!(transport.poll_count(), 0);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/v1/operations/video-123");
+}
+
+#[tokio::test]
+async fn sync_async_lro_uses_openai_style_poll_template_status_mapping() {
+    let request = ExecutionRequest {
+        identity: ExecutionIdentity {
+            user_id: "user_1".to_string(),
+            api_key_id: "ak_1".to_string(),
+            request_id: "req_1".to_string(),
+            trace_id: "trace_1".to_string(),
+        },
+        task_kind: TaskKind::Video,
+        client_mode: ClientMode::Sync,
+        upstream_mode: UpstreamMode::AsyncLro,
+        profile: json!({
+            "id": "profile_video",
+            "task_kind": "video",
+            "client_modes": ["sync"],
+            "default_client_mode": "sync",
+            "upstream_mode": "async_lro",
+            "client_request_template": {
+                "normalize": {
+                    "client.model": "$.model",
+                    "client.prompt": "$.prompt"
+                }
+            },
+            "upstream_request_template": {
+                "method": "POST",
+                "path": "/v1/videos",
+                "headers": {"Content-Type": "application/json"},
+                "body": {
+                    "model": "{{binding.provider_model_name}}",
+                    "prompt": "{{client.prompt}}"
+                }
+            },
+            "upstream_poll_template": {
+                "method": "GET",
+                "path": "/v1/videos/{{result.provider_task_id}}",
+                "headers": {"X-Poll": "{{result.provider_task_id}}"},
+                "status": {
+                    "path": "$.status",
+                    "pending": ["queued", "in_progress"],
+                    "succeeded": ["completed"],
+                    "failed": ["failed", "cancelled"]
+                },
+                "provider_task_id": "$.id"
+            },
+            "upstream_response_template": {
+                "result": {
+                    "video_id": "$.id",
+                    "status": "$.status",
+                    "url": "$.content_url"
+                }
+            },
+            "client_sync_response_template": {
+                "id": "{{result.video_id}}",
+                "object": "video",
+                "status": "{{result.status}}",
+                "url": "{{result.url}}"
+            }
+        }),
+        binding: json!({
+            "id": "binding_video",
+            "provider_model_name": "sora-2"
+        }),
+        client_request: json!({
+            "model": "sora-2",
+            "prompt": "city at night"
+        }),
+        task: json!({"id": "task_1", "status": "queued"}),
+    };
+    let transport = MemoryTransport::with_responses(vec![
+        UpstreamResponse {
+            status: 202,
+            headers: Default::default(),
+            body: json!({"id": "video_123", "status": "queued"}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({
+                "id": "video_123",
+                "status": "completed",
+                "content_url": "https://example.test/video.mp4"
+            }),
+        },
+    ]);
+    let executor = TemplateExecutor::new(Arc::new(transport.clone()));
+
+    let result = executor
+        .execute_inline(request)
+        .await
+        .expect("execute openai video poll");
+
+    match result {
+        ExecutionResult::Completed { response, .. } => {
+            assert_eq!(response["id"], "video_123");
+            assert_eq!(response["status"], "completed");
+            assert_eq!(response["url"], "https://example.test/video.mp4");
+        }
+        other => panic!("expected completed result, got {other:?}"),
+    }
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/v1/videos/video_123");
+    assert_eq!(requests[1].headers["X-Poll"], "video_123");
+}
+
+#[tokio::test]
+async fn sync_async_lro_records_openai_poll_after_header_as_wait_event() {
+    let request = ExecutionRequest {
+        identity: ExecutionIdentity {
+            user_id: "user_1".to_string(),
+            api_key_id: "ak_1".to_string(),
+            request_id: "req_1".to_string(),
+            trace_id: "trace_1".to_string(),
+        },
+        task_kind: TaskKind::Video,
+        client_mode: ClientMode::Sync,
+        upstream_mode: UpstreamMode::AsyncLro,
+        profile: json!({
+            "id": "profile_video",
+            "task_kind": "video",
+            "client_modes": ["sync"],
+            "default_client_mode": "sync",
+            "upstream_mode": "async_lro",
+            "client_request_template": {"normalize": {"client.model": "$.model"}},
+            "upstream_request_template": {
+                "method": "POST",
+                "path": "/v1/videos",
+                "body": {"model": "{{binding.provider_model_name}}"}
+            },
+            "upstream_poll_template": {
+                "method": "GET",
+                "path": "/v1/videos/{{result.provider_task_id}}",
+                "status": {
+                    "path": "$.status",
+                    "pending": ["queued", "in_progress"],
+                    "succeeded": ["completed"],
+                    "failed": ["failed"]
+                },
+                "provider_task_id": "$.id"
+            },
+            "upstream_response_template": {"result": {"video_id": "$.id"}},
+            "client_sync_response_template": {"id": "{{result.video_id}}"}
+        }),
+        binding: json!({"provider_model_name": "sora-2"}),
+        client_request: json!({"model": "sora-2"}),
+        task: json!({"id": "task_1", "status": "queued"}),
+    };
+    let transport = MemoryTransport::with_responses(vec![
+        UpstreamResponse {
+            status: 202,
+            headers: Default::default(),
+            body: json!({"id": "video_123", "status": "queued"}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: [("openai-poll-after-ms".to_string(), "250".to_string())].into(),
+            body: json!({"id": "video_123", "status": "queued"}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({"id": "video_123", "status": "completed"}),
+        },
+    ]);
+    let executor = TemplateExecutor::new(Arc::new(transport));
+
+    let result = executor
+        .execute_inline(request)
+        .await
+        .expect("execute openai video poll");
+
+    match result {
+        ExecutionResult::Completed { events, .. } => {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter_map(|event| event.poll_wait_ms)
+                    .collect::<Vec<_>>(),
+                vec![250]
+            );
+        }
+        other => panic!("expected completed result, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sync_async_lro_waits_between_pending_poll_attempts() {
+    let mut request = fixture_request(
+        "custom-lro-google-veo.json",
+        ClientMode::Sync,
+        UpstreamMode::AsyncLro,
+    );
+    request.profile["upstream_poll_template"]["poll_interval_ms"] = json!(25);
+    let transport = MemoryTransport::with_responses(vec![
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({"name": "operations/video-789"}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({"name": "operations/video-789", "done": false}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({
+                "name": "operations/video-789",
+                "done": true,
+                "response": {"videos": [{"uri": "gs://bucket/video-789.mp4"}]}
+            }),
+        },
+    ]);
+    let executor = TemplateExecutor::new(Arc::new(transport));
+
+    let started = Instant::now();
+    let result = executor.execute_inline(request).await.expect("execute lro");
+
+    assert!(matches!(result, ExecutionResult::Completed { .. }));
+    assert!(
+        started.elapsed() >= Duration::from_millis(20),
+        "poll loop should wait between pending attempts"
+    );
 }
 
 #[tokio::test]
@@ -283,8 +610,8 @@ async fn async_async_lro_background_polls_to_completion() {
         }
         other => panic!("expected completed result, got {other:?}"),
     }
-    assert_eq!(transport.request_count(), 1);
-    assert_eq!(transport.poll_count(), 1);
+    assert_eq!(transport.request_count(), 2);
+    assert_eq!(transport.poll_count(), 0);
 }
 
 #[tokio::test]

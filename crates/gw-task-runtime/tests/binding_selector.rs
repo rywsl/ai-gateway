@@ -25,6 +25,7 @@ fn rev(
         global_model_id: global_model_id.to_owned(),
         provider_id: "provider_openai".to_owned(),
         provider_model_id: provider_model_id.to_owned(),
+        provider_model_name: provider_model_id.to_owned(),
         endpoint_id: endpoint_id.to_owned(),
         api_format: api_format.to_owned(),
         provider_key_id: provider_key_id.to_owned(),

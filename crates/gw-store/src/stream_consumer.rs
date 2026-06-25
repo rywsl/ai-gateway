@@ -267,6 +267,9 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "async_task_binding_index" => {
             store.invalidate_async_task_binding_index(id).await;
         }
+        "async_task_endpoint_registry" => {
+            store.invalidate_async_task_endpoint_registry(id).await;
+        }
         "model_mapping" => {
             // id format: "alias|protocol", with protocol matching ProtocolKind's
             // snake_case serde tag ("openai" | "anthropic" | "gemini").
@@ -666,7 +669,8 @@ mod async_task_tests {
     use super::*;
     use crate::entity_store::EntityStore;
     use gw_core::entity::{
-        AsyncTaskBindingIndex, AsyncTaskBindingRevision, AsyncTaskProfileRevision,
+        AsyncTaskBindingIndex, AsyncTaskBindingRevision, AsyncTaskEndpointRegistry,
+        AsyncTaskProfileRevision,
     };
     use gw_core::versioned::Versioned;
     use std::sync::Arc;
@@ -727,6 +731,7 @@ mod async_task_tests {
                     provider_id: "p1".to_string(),
                     target_snapshot: serde_json::json!({"provider_id": "p1"}),
                     provider_model_id: "pm1".to_string(),
+                    provider_model_name: "provider-model-1".to_string(),
                     endpoint_id: "endpoint-1".to_string(),
                     api_format: "openai".to_string(),
                     provider_key_id: "key-1".to_string(),
@@ -774,6 +779,33 @@ mod async_task_tests {
         assert!(store
             .async_task_binding_index
             .get("gpt-image:image")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_async_task_endpoint_registry() {
+        let store = Arc::new(EntityStore::new());
+        store
+            .async_task_endpoint_registry
+            .insert(
+                "global".to_string(),
+                versioned(AsyncTaskEndpointRegistry {
+                    routes: vec![serde_json::json!({
+                        "method": "POST",
+                        "path": "/v1/videos/extensions",
+                        "task_kind": "video",
+                        "model_path": "$.model"
+                    })],
+                }),
+            )
+            .await;
+
+        apply_entity_event(&store, "async_task_endpoint_registry", "global").await;
+
+        assert!(store
+            .async_task_endpoint_registry
+            .get("global")
             .await
             .is_none());
     }

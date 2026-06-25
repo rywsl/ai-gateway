@@ -1007,6 +1007,7 @@ impl ProxyHttp for LlmGateway {
                 ip_allowlist_mode: self.ip_allowlist_mode,
                 trust_xff: self.trust_xff,
                 trusted_proxies: &self.trusted_proxies,
+                task_enabled: self.task_enabled,
             },
         )
         .await

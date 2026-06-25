@@ -16,6 +16,7 @@ gw-ledger = { path = "../gw-ledger" }
 gw-capability = { path = "../gw-capability" }
 gw-billing = { path = "../gw-billing" }
 gw-task = { path = "../gw-task" }
+gw-task-runtime = { path = "../gw-task-runtime" }
 gw-adapter = { path = "../gw-adapter" }
 gw-tunnel-client = { path = "../gw-tunnel-client" }
 tokio-rustls = { workspace = true }
@@ -25,6 +26,9 @@ gw-runtime = { path = "../gw-runtime" }
 async-trait.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+multer.workspace = true
 pingora.workspace = true
 pingora-proxy.workspace = true
 percent-encoding.workspace = true

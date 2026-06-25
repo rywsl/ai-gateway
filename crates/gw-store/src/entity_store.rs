@@ -11,10 +11,11 @@
 
 use crate::loader::{
     load_apikey, load_apikey_by_hash, load_async_task_binding_index,
-    load_async_task_binding_revision, load_async_task_profile_revision, load_auth_config,
-    load_estimate_pricing, load_ipblock, load_jwks, load_mgmt_token, load_model, load_model_group,
-    load_module_enabled, load_pricing, load_proxy_node, load_proxy_nodes_list, load_user,
-    load_user_group, load_vendor, load_vendor_key, LoaderCtx,
+    load_async_task_binding_revision, load_async_task_endpoint_registry,
+    load_async_task_profile_revision, load_auth_config, load_estimate_pricing, load_ipblock,
+    load_jwks, load_mgmt_token, load_model, load_model_group, load_module_enabled, load_pricing,
+    load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
+    load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -142,6 +143,9 @@ pub struct EntityStore {
     pub async_task_binding_revision: Cache<String, Arc<Versioned<AsyncTaskBindingRevision>>>,
     /// Async-task binding index keyed as `<global_model_id>:<task_kind>`.
     pub async_task_binding_index: Cache<String, Arc<Versioned<AsyncTaskBindingIndex>>>,
+    /// Async-task route registry keyed by `"global"` for pre-codec endpoint
+    /// admission.
+    pub async_task_endpoint_registry: Cache<String, Arc<Versioned<AsyncTaskEndpointRegistry>>>,
     /// Management-token entity cache (B2 / ADR-B2-1). 300s TTL, matching
     /// `apikey` (auth-surface cache bucket). Populated by
     /// [`EntityStore::mgmt_token_or_load`]; invalidated by the stream consumer
@@ -248,6 +252,10 @@ impl EntityStore {
                 .build(),
             async_task_binding_index: Cache::builder()
                 .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(1800))
+                .build(),
+            async_task_endpoint_registry: Cache::builder()
+                .max_capacity(16)
                 .time_to_live(Duration::from_secs(1800))
                 .build(),
             mgmt_token: Cache::builder()
@@ -708,6 +716,32 @@ impl EntityStore {
 
     pub async fn invalidate_async_task_binding_index(&self, key: &str) {
         self.async_task_binding_index.invalidate(key).await;
+    }
+
+    pub async fn async_task_endpoint_registry_or_load(
+        &self,
+    ) -> Option<Arc<Versioned<AsyncTaskEndpointRegistry>>> {
+        const KEY: &str = "global";
+        if let Some(hit) = self.async_task_endpoint_registry.get(KEY).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let deadline = self.cold_load_timeout;
+        self.async_task_endpoint_registry
+            .try_get_with_by_ref(KEY, async move {
+                with_cold_load_timeout("async_task_endpoint_registry", deadline, async move {
+                    load_async_task_endpoint_registry(&loader, KEY).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn invalidate_async_task_endpoint_registry(&self, key: &str) {
+        self.async_task_endpoint_registry.invalidate(key).await;
     }
 
     pub async fn module_enabled_or_load(&self, name: &str) -> bool {
