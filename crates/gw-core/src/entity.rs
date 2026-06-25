@@ -601,6 +601,15 @@ pub struct AsyncTaskBindingIndex {
     pub endpoint_registry: Vec<serde_json::Value>,
 }
 
+/// Route-level registry used before model extraction. Go publishes this from
+/// async-task profile endpoint metadata so configured OpenAI-compatible paths
+/// can bypass codec detection without adding media/embedding support to codec.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AsyncTaskEndpointRegistry {
+    #[serde(default)]
+    pub routes: Vec<serde_json::Value>,
+}
+
 /// Per-model availability gate (T4-A / G-β.4).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]

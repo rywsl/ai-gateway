@@ -100,7 +100,21 @@ pub async fn run(
         ctx.is_gemini_files = true;
         ctx.gemini_files_action = Some(action);
     }
-    crate::filters::task::mark_task_context(ctx, task_enabled, &req_method, &req_path, None);
+    let req_content_type = session
+        .req_header()
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if !ctx.is_task {
+        crate::filters::task::mark_task_context(
+            ctx,
+            task_enabled,
+            &req_method,
+            &req_path,
+            req_content_type.as_deref(),
+        );
+    }
     if gw_auth::mgmt::is_management_path(&req_path) {
         ctx.mgmt = true;
         let req_id_for_mgmt = ctx.request_id.0.clone();
@@ -557,13 +571,15 @@ pub async fn run(
         body_bytes.clone(),
         ctx.req_content_encoding,
     ));
-    crate::filters::task::mark_task_context(
-        ctx,
-        task_enabled,
-        &req_method,
-        &req_path,
-        Some(&body_bytes),
-    );
+    if !ctx.is_task {
+        crate::filters::task::mark_task_context(
+            ctx,
+            task_enabled,
+            &req_method,
+            &req_path,
+            req_content_type.as_deref(),
+        );
+    }
 
     // Wire-fidelity archive: snapshot the raw downstream request. The body
     // view's outbound_or_raw() may be overwritten by upstream::rewrite_request
@@ -750,7 +766,8 @@ pub async fn run(
     // ---------------------------------------------------------------------
     let cli_shape = ctx.client_shape.filter(ApiShape::is_cli);
     let codec = match ctx.client_codec.as_ref() {
-        Some(c) => c,
+        Some(c) => Some(c),
+        None if ctx.is_task => None,
         None => {
             // Should never happen — early_request_filter sets this.
             let err = ErrorIR {
@@ -784,14 +801,75 @@ pub async fn run(
         }
     };
     let path_str = session.req_header().uri.path();
+    let openai_task_client_request = if ctx
+        .task_endpoint_candidate
+        .as_ref()
+        .is_some_and(|candidate| candidate.model_path.is_some())
+    {
+        let candidate = ctx
+            .task_endpoint_candidate
+            .as_ref()
+            .expect("checked task endpoint candidate");
+        match crate::filters::task::parse_openai_compatible_client_request(
+            candidate,
+            req_content_type.as_deref(),
+            &parse_body,
+        )
+        .await
+        {
+            Ok(value) => Some(value),
+            Err(err) => {
+                let error_ir = task_error_ir(err);
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        }
+    } else {
+        None
+    };
     let (model_name, is_stream, est_input_tokens, req_max_tokens) = if ctx.is_gemini_files {
         (ModelName::from("gemini-files"), false, 1, None)
+    } else if let (Some(candidate), Some(client_request)) = (
+        ctx.task_endpoint_candidate.as_ref(),
+        openai_task_client_request.as_ref(),
+    ) {
+        match crate::filters::task::resolve_task_request_key(candidate, client_request) {
+            Ok(key) => (
+                ModelName::from(key.global_model_id.as_str()),
+                false,
+                1,
+                None,
+            ),
+            Err(err) => {
+                let error_ir = task_error_ir(err);
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        }
+    } else if ctx.is_task {
+        let model = if matches!(
+            ctx.task_action,
+            Some(crate::filters::task::TaskAction::Submit)
+        ) {
+            serde_json::from_slice::<serde_json::Value>(&parse_body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "task".to_string())
+        } else {
+            "task".to_string()
+        };
+        (ModelName::from(model.as_str()), false, 1, None)
     } else if let Some(shape) = cli_shape {
         let hints = extract_cli_request_hints(shape, path_str, Some(&parse_body));
         let model = hints.model.unwrap_or_default();
         let is_stream = hints.stream.unwrap_or(false);
         (ModelName::from(model.as_str()), is_stream, 1, None)
     } else {
+        let codec = codec.expect("codec present for non-task request");
         let parsed = codec.parse_request(&parse_body);
         let (model_name, is_stream, est_input_tokens, max_tokens) = match parsed {
             Ok(ir) => {
@@ -856,7 +934,11 @@ pub async fn run(
     // ---------------------------------------------------------------------
     // 6. Model permission check.
     // ---------------------------------------------------------------------
-    if !merged.allowed_models.is_empty() && !merged.allowed_models.contains(&model_name) {
+    let enforce_model_permissions = task_request_requires_model_permission(ctx);
+    if enforce_model_permissions
+        && !merged.allowed_models.is_empty()
+        && !merged.allowed_models.contains(&model_name)
+    {
         let err = ErrorIR {
             category: ErrorCategory::ClientAuth,
             status: 403,
@@ -870,14 +952,16 @@ pub async fn run(
         };
         bail!(session, ctx, &err, &request_id)
     }
-    if let Err(err) = check_model_whitelist_regex(
-        &model_name,
-        merged.model_whitelist_regex.as_deref(),
-        api_key_id.as_ref().map(ApiKeyId::as_ref),
-        model_regex_redos_tracker(),
-        &ctx.regex_cache,
-    ) {
-        bail!(session, ctx, &err, &request_id)
+    if enforce_model_permissions {
+        if let Err(err) = check_model_whitelist_regex(
+            &model_name,
+            merged.model_whitelist_regex.as_deref(),
+            api_key_id.as_ref().map(ApiKeyId::as_ref),
+            model_regex_redos_tracker(),
+            &ctx.regex_cache,
+        ) {
+            bail!(session, ctx, &err, &request_id)
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1057,6 +1141,151 @@ pub async fn run(
                     request_id: "",
                     retry_after_secs: None,
                 };
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        }
+    }
+
+    if let (Some(candidate), Some(client_request)) = (
+        ctx.task_endpoint_candidate.clone(),
+        openai_task_client_request.clone(),
+    ) {
+        let key = match crate::filters::task::resolve_task_request_key(&candidate, &client_request)
+        {
+            Ok(key) => key,
+            Err(err) => {
+                let error_ir = task_error_ir(err);
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        };
+        let runtime = match crate::filters::task::resolve_task_runtime(store, &key).await {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let error_ir = task_error_ir(err);
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        };
+        let headers = reqwest_header_map_from_session(session);
+        let query = session.req_header().uri.query().unwrap_or_default();
+        let modes = match crate::filters::task::resolve_execution_modes(
+            &runtime.profile,
+            &req_method,
+            &req_path,
+            &headers,
+            query,
+            Some(&client_request),
+        ) {
+            Ok(modes) => modes,
+            Err(err) => {
+                let error_ir = task_error_ir(err);
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        };
+        let task_result = if modes.client_mode == gw_task::ClientMode::Async {
+            let Some(contract) = task_contract else {
+                let err = ErrorIR {
+                    category: ErrorCategory::GatewayInternal,
+                    status: 500,
+                    upstream_status: None,
+                    code: Cow::Borrowed(codes::GW_TASK_SUBMIT_FAILED),
+                    message: Cow::Borrowed("task contract unavailable"),
+                    retryable: false,
+                    upstream_raw: None,
+                    request_id: "",
+                    retry_after_secs: None,
+                };
+                bail!(session, ctx, &err, &request_id)
+            };
+            crate::filters::task::submit_openai_compatible_task(
+                contract,
+                runtime,
+                modes,
+                client_request,
+                user_id.as_ref(),
+                api_key_id.as_ref().map(ApiKeyId::as_ref),
+                ctx.trace_id.as_ref(),
+                ctx.request_id.as_ref(),
+                task_billing_config,
+                Some(balance.available),
+            )
+            .await
+        } else {
+            let upstream_base_url = runtime.upstream_base_url.clone();
+            let transport = Arc::new(gw_task_runtime::http_transport::HttpTemplateTransport::new(
+                reqwest::Client::new(),
+                upstream_base_url,
+            ));
+            crate::filters::task::handle_openai_compatible_submit(
+                runtime,
+                modes,
+                client_request,
+                transport,
+                user_id.as_ref(),
+                api_key_id.as_ref().map(ApiKeyId::as_ref),
+                ctx.trace_id.as_ref(),
+                ctx.request_id.as_ref(),
+            )
+            .await
+        };
+        match task_result {
+            Ok(response) => {
+                crate::filters::task::write_task_response(session, response).await?;
+                ctx.phase_end();
+                return Ok(true);
+            }
+            Err(err) => {
+                let error_ir = task_error_ir(err);
+                bail!(session, ctx, &error_ir, &request_id)
+            }
+        }
+    }
+
+    if ctx
+        .task_endpoint_candidate
+        .as_ref()
+        .is_some_and(|candidate| candidate.method == "GET" && candidate.task_kind == "video")
+    {
+        let Some(contract) = task_contract else {
+            let err = ErrorIR {
+                category: ErrorCategory::GatewayInternal,
+                status: 500,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_TASK_SUBMIT_FAILED),
+                message: Cow::Borrowed("task contract unavailable"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            bail!(session, ctx, &err, &request_id)
+        };
+        let Some(video_id) = openai_video_id_from_path(&req_path) else {
+            let err = ErrorIR {
+                category: ErrorCategory::ClientBadRequest,
+                status: 404,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_TASK_NOT_FOUND),
+                message: Cow::Borrowed("task not found"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            bail!(session, ctx, &err, &request_id)
+        };
+        let task_result = if req_path.ends_with("/content") {
+            crate::filters::task::load_openai_video_content_endpoint(contract, video_id).await
+        } else {
+            crate::filters::task::load_openai_video_endpoint(contract, video_id).await
+        };
+        match task_result {
+            Ok(response) => {
+                crate::filters::task::write_task_response(session, response).await?;
+                ctx.phase_end();
+                return Ok(true);
+            }
+            Err(err) => {
+                let error_ir = task_error_ir(err);
                 bail!(session, ctx, &error_ir, &request_id)
             }
         }
@@ -1739,6 +1968,65 @@ fn task_id_from_path(path: &str, trailing_action: bool) -> Option<&str> {
         (true, ["v1", "tasks", task_id, _]) if !task_id.is_empty() => Some(task_id),
         _ => None,
     }
+}
+
+fn openai_video_id_from_path(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.as_slice() {
+        ["v1", "videos", video_id] if !video_id.is_empty() => Some(video_id),
+        ["v1", "videos", video_id, "content"] if !video_id.is_empty() => Some(video_id),
+        _ => None,
+    }
+}
+
+fn task_request_requires_model_permission(ctx: &ReqCtx) -> bool {
+    if !ctx.is_task {
+        return true;
+    }
+    if ctx
+        .task_endpoint_candidate
+        .as_ref()
+        .is_some_and(|candidate| candidate.model_path.is_some())
+    {
+        return true;
+    }
+    matches!(
+        ctx.task_action,
+        Some(crate::filters::task::TaskAction::Submit)
+    )
+}
+
+fn task_error_ir(err: crate::filters::task::TaskHttpError) -> ErrorIR<'static> {
+    let category = match err.status {
+        400 | 404 => ErrorCategory::ClientBadRequest,
+        402 => ErrorCategory::ClientQuota,
+        _ => ErrorCategory::GatewayInternal,
+    };
+    ErrorIR {
+        category,
+        status: err.status,
+        upstream_status: None,
+        code: Cow::Borrowed(err.code),
+        message: err.message,
+        retryable: false,
+        upstream_raw: None,
+        request_id: "",
+        retry_after_secs: None,
+    }
+}
+
+fn reqwest_header_map_from_session(session: &Session) -> reqwest::header::HeaderMap {
+    let mut out = reqwest::header::HeaderMap::new();
+    for (name, value) in &session.req_header().headers {
+        let Ok(name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) else {
+            continue;
+        };
+        out.append(name, value);
+    }
+    out
 }
 
 fn task_wait_ms(session: &Session) -> u64 {

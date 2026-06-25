@@ -17,6 +17,11 @@ use gw_task::{TaskContract, TaskKind, TaskRecord, TaskStatus};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use crate::http_transport::HttpTemplateTransport;
+use crate::template_executor::{
+    execution_request_from_task_record, ExecutionEvent, ExecutionResult, TemplateExecutor,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaskTimeouts {
     pub total: Duration,
@@ -294,6 +299,10 @@ where
         record: &TaskRecord,
         submit_timeout: Duration,
     ) -> anyhow::Result<UpstreamSuccess> {
+        if is_template_snapshot_record(record) {
+            return self.call_template(record).await;
+        }
+
         let url = upstream_url(record)?;
         let request_body = upstream_body(record)?;
         let response = self
@@ -389,6 +398,50 @@ where
             }
         }
     }
+
+    async fn call_template(&self, record: &TaskRecord) -> anyhow::Result<UpstreamSuccess> {
+        let request = execution_request_from_task_record(record)
+            .map_err(|err| anyhow!("build template execution request: {}: {err}", err.code()))?;
+        let upstream_base_url = record
+            .input_payload
+            .get("upstream_base_url")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let executor = TemplateExecutor::new(Arc::new(HttpTemplateTransport::new(
+            self.http.clone(),
+            upstream_base_url,
+        )));
+        let result = executor
+            .execute_background(request)
+            .await
+            .map_err(|err| anyhow!("execute task template: {}: {err}", err.code()))?;
+        match result {
+            ExecutionResult::Completed { response, events } => Ok(UpstreamSuccess {
+                provider_task_id: provider_task_id(&response),
+                payload: serde_json::json!({
+                    "client_final_response": response,
+                    "template_events": template_events_payload(events),
+                }),
+            }),
+            ExecutionResult::Submitted { .. } => {
+                Err(anyhow!("background template execution returned submitted"))
+            }
+        }
+    }
+}
+
+fn is_template_snapshot_record(record: &TaskRecord) -> bool {
+    record.input_payload.get("profile").is_some()
+        && record.input_payload.get("binding").is_some()
+        && record.input_payload.get("client_request").is_some()
+}
+
+fn template_events_payload(events: Vec<ExecutionEvent>) -> Vec<serde_json::Value> {
+    events
+        .into_iter()
+        .map(|event| serde_json::json!({ "status": event.status }))
+        .collect()
 }
 
 fn is_timeout_error(message: &str) -> bool {

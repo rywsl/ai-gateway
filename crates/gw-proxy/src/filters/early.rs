@@ -62,6 +62,7 @@ pub struct EarlyFilterDeps<'a> {
     pub ip_allowlist_mode: IpAllowlistMode,
     pub trust_xff: bool,
     pub trusted_proxies: &'a Arc<Vec<IpNet>>,
+    pub task_enabled: bool,
 }
 
 pub async fn run(session: &mut Session, ctx: &mut ReqCtx, deps: EarlyFilterDeps<'_>) -> Result<()> {
@@ -84,6 +85,7 @@ async fn run_impl(
         .map(|(n, v)| (n.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
         .collect();
     let request_id = ctx.request_id.0.clone();
+    let content_type = header_lookup(&headers_vec, "content-type").unwrap_or_default();
 
     // -----------------------------------------------------------------
     // 0. Backpressure gate (T7.1) — first check, before we spend any
@@ -168,6 +170,43 @@ async fn run_impl(
     //    in the caller's wire format.
     // -----------------------------------------------------------------
     let head_slice: &Headers = &headers_vec;
+    if deps.task_enabled {
+        let dynamic_candidate =
+            if let Some(registry) = deps.store.async_task_endpoint_registry_or_load().await {
+                crate::filters::task::published_task_endpoint_candidate(
+                    &registry.value,
+                    session.req_header().method.as_str(),
+                    &path,
+                    content_type,
+                )
+            } else {
+                None
+            };
+        if let Some(candidate) = dynamic_candidate.or_else(|| {
+            crate::filters::task::detect_openai_compatible_task_endpoint(
+                deps.task_enabled,
+                session.req_header().method.as_str(),
+                &path,
+                content_type,
+            )
+        }) {
+            ctx.is_task = true;
+            ctx.task_endpoint_candidate = Some(candidate);
+            ctx.phase_end();
+            return Ok(());
+        }
+    }
+    if let Some(action) = crate::filters::task::detect_task_shape(
+        deps.task_enabled,
+        session.req_header().method.as_str(),
+        &path,
+        None,
+    ) {
+        ctx.is_task = true;
+        ctx.task_action = Some(action);
+        ctx.phase_end();
+        return Ok(());
+    }
     let cli_shape = gw_codec::cli::detect_cli(&path, head_slice);
     let codec = if let Some(cli_shape) = cli_shape {
         ctx.client_shape = Some(cli_shape);

@@ -12,9 +12,10 @@ use secrecy::SecretString;
 use sqlx::{PgPool, Row};
 
 use gw_core::entity::{
-    ApiKeyEntry, AsyncTaskBindingIndex, AsyncTaskBindingRevision, AsyncTaskProfileRevision,
-    AuthConfig, EstimatePricing, IpBlockEntry, JwksEntry, ManagementTokenEntry, Model, ModelGroup,
-    OAuthCredentials, Pricing, ProxyNode, QuotaState, UserEntry, UserGroup, Vendor, VendorKey,
+    ApiKeyEntry, AsyncTaskBindingIndex, AsyncTaskBindingRevision, AsyncTaskEndpointRegistry,
+    AsyncTaskProfileRevision, AuthConfig, EstimatePricing, IpBlockEntry, JwksEntry,
+    ManagementTokenEntry, Model, ModelGroup, OAuthCredentials, Pricing, ProxyNode, QuotaState,
+    UserEntry, UserGroup, Vendor, VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -160,7 +161,8 @@ fn ttl_for(ns: &str) -> u64 {
         | "proxy_node"
         | "async_task_profile_revision"
         | "async_task_binding_revision"
-        | "async_task_binding_index" => 1800,
+        | "async_task_binding_index"
+        | "async_task_endpoint_registry" => 1800,
         "jwks" | "auth_config" => 3600,
         _ => 300,
     }
@@ -324,6 +326,7 @@ const AUTH_CONFIG_SQL: &str =
 const ASYNC_TASK_PROFILE_REVISION_SQL: &str = "SELECT jsonb_build_object('id', id, 'profile_id', profile_id, 'version', version, 'schema_version', schema_version, 'task_kind', task_kind, 'published_snapshot', published_snapshot, 'template_hash', template_hash, 'published_by', published_by, 'published_at', published_at) AS payload, version FROM async_task_profile_revisions WHERE id = $1";
 const ASYNC_TASK_BINDING_REVISION_SQL: &str = "SELECT jsonb_build_object('id', id, 'binding_id', binding_id, 'version', version, 'profile_id', profile_id, 'profile_revision_id', profile_revision_id, 'profile_version', profile_version, 'global_model_id', global_model_id, 'provider_id', provider_id, 'provider_model_id', provider_model_id, 'endpoint_id', endpoint_id, 'api_format', api_format, 'provider_key_id', provider_key_id, 'priority', priority, 'target_snapshot', target_snapshot, 'overrides_snapshot', overrides_snapshot, 'effective_template_snapshot', effective_template_snapshot, 'effective_template_hash', effective_template_hash, 'specificity_key', specificity_key, 'published_by', published_by, 'published_at', published_at) AS payload, version FROM async_task_binding_revisions WHERE id = $1";
 const ASYNC_TASK_BINDING_INDEX_SQL: &str = "WITH parts AS (SELECT split_part($1, ':', 1) AS global_model_id, split_part($1, ':', 2) AS task_kind), rows AS (SELECT abr.id, abr.version, apr.published_snapshot FROM async_task_binding_revisions abr JOIN async_task_profile_revisions apr ON apr.id = abr.profile_revision_id JOIN parts p ON TRUE WHERE abr.global_model_id = p.global_model_id AND apr.task_kind = p.task_kind ORDER BY abr.priority DESC, abr.version DESC) SELECT jsonb_build_object('global_model_id', (SELECT global_model_id FROM parts), 'task_kind', (SELECT task_kind FROM parts), 'binding_revision_ids', COALESCE(jsonb_agg(id ORDER BY version DESC), '[]'::jsonb), 'endpoint_registry', COALESCE(jsonb_agg(published_snapshot->'client_request_template') FILTER (WHERE published_snapshot ? 'client_request_template'), '[]'::jsonb)) AS payload, COALESCE(MAX(version), 0)::BIGINT AS version FROM rows";
+const ASYNC_TASK_ENDPOINT_REGISTRY_SQL: &str = "WITH routes AS (SELECT DISTINCT ON ((published_snapshot->'client_request_template'->'endpoint'->>'method'), (published_snapshot->'client_request_template'->'endpoint'->>'path')) published_snapshot->'client_request_template'->'endpoint' AS endpoint, version FROM async_task_profile_revisions WHERE published_snapshot ? 'client_request_template' AND published_snapshot->'client_request_template' ? 'endpoint' AND published_snapshot->'client_request_template'->'endpoint' ? 'method' AND published_snapshot->'client_request_template'->'endpoint' ? 'path' ORDER BY (published_snapshot->'client_request_template'->'endpoint'->>'method'), (published_snapshot->'client_request_template'->'endpoint'->>'path'), version DESC) SELECT jsonb_build_object('routes', COALESCE(jsonb_agg(endpoint ORDER BY endpoint->>'method', endpoint->>'path'), '[]'::jsonb)) AS payload, COALESCE(MAX(version), 0)::BIGINT AS version FROM routes WHERE $1 = 'global'";
 
 pub async fn load_user(ctx: &LoaderCtx, id: &UserId) -> anyhow::Result<Versioned<UserEntry>> {
     load_entity(ctx, "user", id.as_ref(), USER_SQL, |v| {
@@ -525,6 +528,20 @@ pub async fn load_async_task_binding_index(
     .await
 }
 
+pub async fn load_async_task_endpoint_registry(
+    ctx: &LoaderCtx,
+    id: &str,
+) -> anyhow::Result<Versioned<AsyncTaskEndpointRegistry>> {
+    load_entity(
+        ctx,
+        "async_task_endpoint_registry",
+        id,
+        ASYNC_TASK_ENDPOINT_REGISTRY_SQL,
+        |v| serde_json::from_value::<AsyncTaskEndpointRegistry>(v.clone()).map_err(Into::into),
+    )
+    .await
+}
+
 pub fn module_enabled_from_value(raw: &str) -> bool {
     let trimmed = raw.trim();
     let unquoted = trimmed
@@ -697,6 +714,25 @@ mod tests {
             decoded.endpoint_registry[0]["path"],
             "/v1/images/generations"
         );
+    }
+
+    #[test]
+    fn async_task_endpoint_registry_decodes_route_projection() {
+        let payload = serde_json::json!({
+            "routes": [{
+                "method": "POST",
+                "path": "/v1/videos/extensions",
+                "content_type": "multipart/form-data",
+                "task_kind": "video",
+                "model_path": "$.model"
+            }]
+        });
+
+        let decoded: AsyncTaskEndpointRegistry =
+            serde_json::from_value(payload).expect("endpoint registry decodes");
+
+        assert_eq!(decoded.routes[0]["path"], "/v1/videos/extensions");
+        assert_eq!(decoded.routes[0]["task_kind"], "video");
     }
 }
 
