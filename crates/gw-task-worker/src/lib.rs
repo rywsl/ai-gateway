@@ -470,7 +470,8 @@ pub async fn run(shutdown: ShutdownToken) -> anyhow::Result<()> {
             cancellation_token: cancel.clone(),
             ..ExecLoopConfig::default()
         },
-    );
+    )
+    .with_entity_store(entity_store.clone());
 
     let cancel_loop = CancelLoop::new(
         contract.clone(),

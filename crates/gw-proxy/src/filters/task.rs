@@ -21,6 +21,7 @@ use pingora::http::ResponseHeader;
 use pingora::Result;
 use pingora_proxy::Session;
 use reqwest::header::HeaderMap;
+use secrecy::ExposeSecret;
 use serde_json::{json, Map};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -356,6 +357,54 @@ async fn resolve_upstream_base_url(
         .base_urls
         .first()
         .map(|url| url.as_str().trim_end_matches('/').to_string())
+}
+
+pub async fn default_upstream_headers_for_binding(
+    store: &Arc<EntityStore>,
+    binding: &serde_json::Value,
+) -> std::result::Result<Vec<(String, String)>, TaskHttpError> {
+    let Some(provider_key_id) = binding
+        .get("provider_key_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+    let vendor_key_id = KeyId::from(provider_key_id);
+    let Some(vendor_key) = store.vendor_key_or_load(&vendor_key_id).await else {
+        return Err(TaskHttpError::submit_failed(format!(
+            "provider key {provider_key_id} not found for task runtime"
+        )));
+    };
+    let Some(vendor) = store.vendor_or_load(&vendor_key.value.vendor_id).await else {
+        return Err(TaskHttpError::submit_failed(format!(
+            "provider {} not found for task runtime",
+            vendor_key.value.vendor_id
+        )));
+    };
+    Ok(render_upstream_auth_headers(
+        vendor.value.auth_template.as_str(),
+        vendor_key.value.api_key.expose_secret(),
+    ))
+}
+
+fn render_upstream_auth_headers(auth_template: &str, api_key: &str) -> Vec<(String, String)> {
+    let (header_name, value_template) = match auth_template.split_once(':') {
+        Some((name, rest)) if is_header_token(name.trim()) => (name.trim(), rest.trim_start()),
+        Some(_) | None => ("authorization", auth_template),
+    };
+    vec![(
+        header_name.to_string(),
+        value_template.replace("{api_key}", api_key),
+    )]
+}
+
+fn is_header_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 pub fn resolve_execution_modes(
@@ -1458,4 +1507,25 @@ fn has_openai_responses_cli_body_marker(payload: &serde_json::Value) -> bool {
 
 fn now_ms() -> u64 {
     (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_upstream_auth_headers;
+
+    #[test]
+    fn renders_default_authorization_auth_template() {
+        assert_eq!(
+            render_upstream_auth_headers("Bearer {api_key}", "sk-test"),
+            vec![("authorization".to_string(), "Bearer sk-test".to_string())]
+        );
+    }
+
+    #[test]
+    fn renders_custom_header_auth_template() {
+        assert_eq!(
+            render_upstream_auth_headers("x-api-key: key {api_key}", "sk-test"),
+            vec![("x-api-key".to_string(), "key sk-test".to_string())]
+        );
+    }
 }

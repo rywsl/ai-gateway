@@ -2290,6 +2290,7 @@ dependencies = [
  "gw-task",
  "metrics",
  "reqwest",
+ "secrecy",
  "serde",
  "serde_json",
  "testcontainers",

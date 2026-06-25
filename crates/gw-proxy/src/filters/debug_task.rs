@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use gw_store::EntityStore;
 use gw_task::{ClientMode, TaskKind, UpstreamMode};
 use gw_task_runtime::http_transport::HttpTemplateTransport;
 use gw_task_runtime::template_executor::{
@@ -54,14 +55,20 @@ pub fn is_debug_task_runtime_path(method: &str, path: &str) -> bool {
 
 pub async fn handle_task_runtime_debug(
     session: &mut Session,
+    store: &Arc<EntityStore>,
     body: &[u8],
 ) -> std::result::Result<(), DebugTaskHttpError> {
     let req: DebugTaskRuntimeRequest = serde_json::from_slice(body).map_err(|err| {
         DebugTaskHttpError::bad_request(format!("invalid debug task runtime json: {err}"))
     })?;
     let base_url = req.upstream_base_url.clone();
-    let transport = HttpTemplateTransport::with_default_timeout(base_url)
-        .map_err(|err| DebugTaskHttpError::internal(format!("build task transport: {err}")))?;
+    let default_headers =
+        crate::filters::task::default_upstream_headers_for_binding(store, &req.binding)
+            .await
+            .map_err(|err| DebugTaskHttpError::internal(err.message.into_owned()))?;
+    let transport =
+        HttpTemplateTransport::with_default_timeout_and_headers(base_url, default_headers)
+            .map_err(|err| DebugTaskHttpError::internal(format!("build task transport: {err}")))?;
     let executor = TemplateExecutor::new(Arc::new(transport));
     let request_id = req
         .request_id

@@ -127,7 +127,9 @@ pub async fn run(
         .await?;
         let body_bytes = read_debug_body_bytes(session).await?;
         ctx.downstream_request_body = Some(Arc::new(body_bytes.clone()));
-        match crate::filters::debug_task::handle_task_runtime_debug(session, &body_bytes).await {
+        match crate::filters::debug_task::handle_task_runtime_debug(session, store, &body_bytes)
+            .await
+        {
             Ok(()) => {
                 ctx.phase_end();
                 return Ok(true);
@@ -1562,6 +1564,7 @@ pub async fn run(
                         execute_openai_compatible_submit_after_admission(
                             session,
                             ctx,
+                            store,
                             runtime,
                             modes,
                             client_request,
@@ -1612,6 +1615,7 @@ pub async fn run(
                             execute_openai_compatible_submit_after_admission(
                                 session,
                                 ctx,
+                                store,
                                 runtime,
                                 modes,
                                 client_request,
@@ -1662,6 +1666,7 @@ pub async fn run(
                             execute_openai_compatible_submit_after_admission(
                                 session,
                                 ctx,
+                                store,
                                 runtime,
                                 modes,
                                 client_request,
@@ -1716,6 +1721,7 @@ pub async fn run(
                             execute_openai_compatible_submit_after_admission(
                                 session,
                                 ctx,
+                                store,
                                 runtime,
                                 modes,
                                 client_request,
@@ -1799,6 +1805,7 @@ pub async fn run(
         execute_openai_compatible_submit_after_admission(
             session,
             ctx,
+            store,
             runtime,
             modes,
             client_request,
@@ -2051,6 +2058,7 @@ fn task_error_ir(err: crate::filters::task::TaskHttpError) -> ErrorIR<'static> {
 async fn execute_openai_compatible_submit_after_admission(
     session: &mut Session,
     ctx: &mut ReqCtx,
+    store: &Arc<EntityStore>,
     runtime: crate::filters::task::ResolvedTaskRuntime,
     modes: crate::filters::task::ResolvedExecutionModes,
     client_request: serde_json::Value,
@@ -2092,9 +2100,23 @@ async fn execute_openai_compatible_submit_after_admission(
         .await
     } else {
         let upstream_base_url = runtime.upstream_base_url.clone();
+        let default_headers = match crate::filters::task::default_upstream_headers_for_binding(
+            store,
+            &runtime.binding,
+        )
+        .await
+        {
+            Ok(headers) => headers,
+            Err(err) => {
+                let error_ir = task_error_ir(err);
+                emit_and_bail(session, ctx, &error_ir, &request_id).await?;
+                unreachable!("emit_and_bail always returns Err; see fn doc")
+            }
+        };
         let transport =
-            match gw_task_runtime::http_transport::HttpTemplateTransport::with_default_timeout(
+            match gw_task_runtime::http_transport::HttpTemplateTransport::with_default_timeout_and_headers(
                 upstream_base_url,
+                default_headers,
             ) {
                 Ok(transport) => Arc::new(transport),
                 Err(err) => {
