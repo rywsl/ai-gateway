@@ -731,6 +731,7 @@ mod async_task_tests {
                     provider_id: "p1".to_string(),
                     target_snapshot: serde_json::json!({"provider_id": "p1"}),
                     provider_model_id: "pm1".to_string(),
+                    provider_model_name: "provider-model-1".to_string(),
                     endpoint_id: "endpoint-1".to_string(),
                     api_format: "openai".to_string(),
                     provider_key_id: "key-1".to_string(),

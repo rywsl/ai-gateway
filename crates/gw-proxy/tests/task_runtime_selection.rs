@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use gw_core::entity::{AsyncTaskBindingIndex, AsyncTaskBindingRevision, AsyncTaskProfileRevision};
 use gw_core::versioned::Versioned;
-use gw_proxy::filters::task::{resolve_execution_modes, resolve_task_runtime, TaskRequestKey};
+use gw_proxy::filters::task::{
+    parse_openai_compatible_client_request, resolve_execution_modes, resolve_task_request_key,
+    resolve_task_runtime, should_parse_openai_compatible_client_request, TaskEndpointCandidate,
+    TaskRequestKey,
+};
 use gw_store::EntityStore;
 use reqwest::header::{HeaderMap, HeaderValue};
 
@@ -46,6 +50,7 @@ fn binding_revision_with_target(
         global_model_id: global_model_id.to_string(),
         provider_id: "openai".to_string(),
         provider_model_id: global_model_id.to_string(),
+        provider_model_name: global_model_id.to_string(),
         endpoint_id: "endpoint-openai".to_string(),
         api_format: "openai".to_string(),
         provider_key_id: String::new(),
@@ -64,6 +69,93 @@ fn binding_revision_with_target(
         published_by: "admin".to_string(),
         published_at: 1,
     }
+}
+
+#[tokio::test]
+async fn resolves_binding_provider_model_name_for_template_rendering() {
+    let store = Arc::new(EntityStore::new());
+    store
+        .async_task_binding_index
+        .insert(
+            "gpt-image-2:image".to_string(),
+            versioned(AsyncTaskBindingIndex {
+                global_model_id: "gpt-image-2".to_string(),
+                task_kind: "image".to_string(),
+                binding_revision_ids: vec!["binding-image:v1".to_string()],
+                endpoint_registry: vec![],
+            }),
+        )
+        .await;
+    let mut revision_value = serde_json::to_value(binding_revision(
+        "binding-image:v1",
+        "profile-image:v1",
+        "image",
+        "gpt-image-2",
+        10,
+    ))
+    .expect("revision json");
+    revision_value["provider_model_id"] = serde_json::json!("pm_gpt_image_2");
+    revision_value["target_snapshot"]["provider_model_name"] = serde_json::json!("gpt-image-2");
+    let revision: AsyncTaskBindingRevision =
+        serde_json::from_value(revision_value).expect("revision payload");
+    store
+        .async_task_binding_revision
+        .insert("binding-image:v1".to_string(), versioned(revision))
+        .await;
+    store
+        .async_task_profile_revision
+        .insert(
+            "profile-image:v1".to_string(),
+            versioned(profile_revision("profile-image:v1", "image")),
+        )
+        .await;
+
+    let runtime = resolve_task_runtime(&store, &TaskRequestKey::new("gpt-image-2", "image"))
+        .await
+        .expect("runtime");
+
+    assert_eq!(runtime.binding["provider_model_id"], "pm_gpt_image_2");
+    assert_eq!(runtime.binding["provider_model_name"], "gpt-image-2");
+}
+
+#[tokio::test]
+async fn default_model_endpoint_candidate_resolves_without_model_path() {
+    let candidate = TaskEndpointCandidate {
+        method: "POST".to_string(),
+        path: "/v1/videos".to_string(),
+        task_kind: "video".to_string(),
+        model_path: None,
+        default_model: Some("sora-2".to_string()),
+        content_type: Some("application/json".to_string()),
+    };
+    let client_request = parse_openai_compatible_client_request(
+        &candidate,
+        Some("application/json"),
+        br#"{"prompt":"city at night"}"#,
+    )
+    .await
+    .expect("client request");
+
+    let key = resolve_task_request_key(&candidate, &client_request).expect("request key");
+
+    assert_eq!(key.global_model_id, "sora-2");
+    assert_eq!(key.task_kind, "video");
+    assert_eq!(key.endpoint_method.as_deref(), Some("POST"));
+    assert_eq!(key.endpoint_path.as_deref(), Some("/v1/videos"));
+}
+
+#[test]
+fn default_model_endpoint_candidate_still_requires_client_request_parsing() {
+    let candidate = TaskEndpointCandidate {
+        method: "POST".to_string(),
+        path: "/v1/videos".to_string(),
+        task_kind: "video".to_string(),
+        model_path: None,
+        default_model: Some("sora-2".to_string()),
+        content_type: Some("application/json".to_string()),
+    };
+
+    assert!(should_parse_openai_compatible_client_request(&candidate));
 }
 
 fn profile_revision(id: &str, task_kind: &str) -> AsyncTaskProfileRevision {

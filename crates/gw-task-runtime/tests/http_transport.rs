@@ -5,6 +5,13 @@ use gw_task_runtime::template_executor::{TransportError, UpstreamRequest, Upstre
 use wiremock::matchers::{body_json, body_string_contains, header, header_regex, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[test]
+fn http_transport_exposes_default_timeout_constructor() {
+    let _transport =
+        HttpTemplateTransport::with_default_timeout(Some("https://example.com".into()))
+            .expect("default timeout client should build");
+}
+
 #[tokio::test]
 async fn http_transport_posts_json_to_relative_path() {
     let server = MockServer::start().await;

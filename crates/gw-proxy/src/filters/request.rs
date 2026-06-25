@@ -785,10 +785,20 @@ pub async fn run(
         }
     };
     let parse_body = {
-        let view = ctx
-            .body
-            .as_ref()
-            .expect("ctx.body populated after body buffering");
+        let Some(view) = ctx.body.as_ref() else {
+            let err = ErrorIR {
+                category: ErrorCategory::GatewayInternal,
+                status: 500,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
+                message: Cow::Borrowed("request body unavailable after buffering"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            bail!(session, ctx, &err, &request_id)
+        };
         match view.decoded(32 * 1024 * 1024) {
             Ok(b) => b.clone(),
             Err(_) => {
@@ -804,12 +814,22 @@ pub async fn run(
     let openai_task_client_request = if ctx
         .task_endpoint_candidate
         .as_ref()
-        .is_some_and(|candidate| candidate.model_path.is_some())
+        .is_some_and(crate::filters::task::should_parse_openai_compatible_client_request)
     {
-        let candidate = ctx
-            .task_endpoint_candidate
-            .as_ref()
-            .expect("checked task endpoint candidate");
+        let Some(candidate) = ctx.task_endpoint_candidate.as_ref() else {
+            let err = ErrorIR {
+                category: ErrorCategory::GatewayInternal,
+                status: 500,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
+                message: Cow::Borrowed("task endpoint candidate missing"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            bail!(session, ctx, &err, &request_id)
+        };
         match crate::filters::task::parse_openai_compatible_client_request(
             candidate,
             req_content_type.as_deref(),
@@ -849,7 +869,7 @@ pub async fn run(
             ctx.task_action,
             Some(crate::filters::task::TaskAction::Submit)
         ) {
-            serde_json::from_slice::<serde_json::Value>(&parse_body)
+            match serde_json::from_slice::<serde_json::Value>(&parse_body)
                 .ok()
                 .and_then(|value| {
                     value
@@ -858,7 +878,23 @@ pub async fn run(
                         .map(str::to_string)
                 })
                 .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "task".to_string())
+            {
+                Some(model) => model,
+                None => {
+                    let err = ErrorIR {
+                        category: ErrorCategory::ClientBadRequest,
+                        status: 400,
+                        upstream_status: None,
+                        code: Cow::Borrowed(codes::GW_TASK_MODEL_REQUIRED),
+                        message: Cow::Borrowed("model is required for task submit"),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    bail!(session, ctx, &err, &request_id)
+                }
+            }
         } else {
             "task".to_string()
         };
@@ -869,7 +905,20 @@ pub async fn run(
         let is_stream = hints.stream.unwrap_or(false);
         (ModelName::from(model.as_str()), is_stream, 1, None)
     } else {
-        let codec = codec.expect("codec present for non-task request");
+        let Some(codec) = codec else {
+            let err = ErrorIR {
+                category: ErrorCategory::GatewayInternal,
+                status: 500,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_GATEWAY_INTERNAL),
+                message: Cow::Borrowed("no client codec"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            bail!(session, ctx, &err, &request_id)
+        };
         let parsed = codec.parse_request(&parse_body);
         let (model_name, is_stream, est_input_tokens, max_tokens) = match parsed {
             Ok(ir) => {
@@ -1146,7 +1195,7 @@ pub async fn run(
         }
     }
 
-    if let (Some(candidate), Some(client_request)) = (
+    let mut openai_compatible_submit = if let (Some(candidate), Some(client_request)) = (
         ctx.task_endpoint_candidate.clone(),
         openai_task_client_request.clone(),
     ) {
@@ -1181,64 +1230,10 @@ pub async fn run(
                 bail!(session, ctx, &error_ir, &request_id)
             }
         };
-        let task_result = if modes.client_mode == gw_task::ClientMode::Async {
-            let Some(contract) = task_contract else {
-                let err = ErrorIR {
-                    category: ErrorCategory::GatewayInternal,
-                    status: 500,
-                    upstream_status: None,
-                    code: Cow::Borrowed(codes::GW_TASK_SUBMIT_FAILED),
-                    message: Cow::Borrowed("task contract unavailable"),
-                    retryable: false,
-                    upstream_raw: None,
-                    request_id: "",
-                    retry_after_secs: None,
-                };
-                bail!(session, ctx, &err, &request_id)
-            };
-            crate::filters::task::submit_openai_compatible_task(
-                contract,
-                runtime,
-                modes,
-                client_request,
-                user_id.as_ref(),
-                api_key_id.as_ref().map(ApiKeyId::as_ref),
-                ctx.trace_id.as_ref(),
-                ctx.request_id.as_ref(),
-                task_billing_config,
-                Some(balance.available),
-            )
-            .await
-        } else {
-            let upstream_base_url = runtime.upstream_base_url.clone();
-            let transport = Arc::new(gw_task_runtime::http_transport::HttpTemplateTransport::new(
-                reqwest::Client::new(),
-                upstream_base_url,
-            ));
-            crate::filters::task::handle_openai_compatible_submit(
-                runtime,
-                modes,
-                client_request,
-                transport,
-                user_id.as_ref(),
-                api_key_id.as_ref().map(ApiKeyId::as_ref),
-                ctx.trace_id.as_ref(),
-                ctx.request_id.as_ref(),
-            )
-            .await
-        };
-        match task_result {
-            Ok(response) => {
-                crate::filters::task::write_task_response(session, response).await?;
-                ctx.phase_end();
-                return Ok(true);
-            }
-            Err(err) => {
-                let error_ir = task_error_ir(err);
-                bail!(session, ctx, &error_ir, &request_id)
-            }
-        }
-    }
+        Some((runtime, modes, client_request))
+    } else {
+        None
+    };
 
     if ctx
         .task_endpoint_candidate
@@ -1274,9 +1269,15 @@ pub async fn run(
             bail!(session, ctx, &err, &request_id)
         };
         let task_result = if req_path.ends_with("/content") {
-            crate::filters::task::load_openai_video_content_endpoint(contract, video_id).await
+            crate::filters::task::load_openai_video_content_endpoint(
+                contract,
+                video_id,
+                user_id.as_ref(),
+            )
+            .await
         } else {
-            crate::filters::task::load_openai_video_endpoint(contract, video_id).await
+            crate::filters::task::load_openai_video_endpoint(contract, video_id, user_id.as_ref())
+                .await
         };
         match task_result {
             Ok(response) => {
@@ -1630,6 +1631,25 @@ pub async fn run(
                         ActiveRegistrationEndpoint::from_ctx(ctx),
                         ActiveRegistrationAdmission::LeaseSuccess,
                     );
+                    if let Some((runtime, modes, client_request)) = openai_compatible_submit.take()
+                    {
+                        ctx.merged_perm = Some(merged);
+                        execute_openai_compatible_submit_after_admission(
+                            session,
+                            ctx,
+                            runtime,
+                            modes,
+                            client_request,
+                            task_contract,
+                            user_id.as_ref(),
+                            api_key_id.as_ref(),
+                            task_billing_config,
+                            Some(balance.available),
+                        )
+                        .await?;
+                        ctx.phase_end();
+                        return Ok(true);
+                    }
                     ctx.merged_perm = Some(merged);
                     ctx.phase_end();
                     return Ok(false);
@@ -1660,6 +1680,26 @@ pub async fn run(
                             ActiveRegistrationEndpoint::from_ctx(ctx),
                             ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
                         );
+                        if let Some((runtime, modes, client_request)) =
+                            openai_compatible_submit.take()
+                        {
+                            ctx.merged_perm = Some(merged);
+                            execute_openai_compatible_submit_after_admission(
+                                session,
+                                ctx,
+                                runtime,
+                                modes,
+                                client_request,
+                                task_contract,
+                                user_id.as_ref(),
+                                api_key_id.as_ref(),
+                                task_billing_config,
+                                Some(balance.available),
+                            )
+                            .await?;
+                            ctx.phase_end();
+                            return Ok(true);
+                        }
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1690,6 +1730,26 @@ pub async fn run(
                             ActiveRegistrationEndpoint::from_ctx(ctx),
                             ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
                         );
+                        if let Some((runtime, modes, client_request)) =
+                            openai_compatible_submit.take()
+                        {
+                            ctx.merged_perm = Some(merged);
+                            execute_openai_compatible_submit_after_admission(
+                                session,
+                                ctx,
+                                runtime,
+                                modes,
+                                client_request,
+                                task_contract,
+                                user_id.as_ref(),
+                                api_key_id.as_ref(),
+                                task_billing_config,
+                                Some(balance.available),
+                            )
+                            .await?;
+                            ctx.phase_end();
+                            return Ok(true);
+                        }
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1724,6 +1784,26 @@ pub async fn run(
                             ActiveRegistrationEndpoint::from_ctx(ctx),
                             ActiveRegistrationAdmission::OverflowAdmittedProtectedFailure,
                         );
+                        if let Some((runtime, modes, client_request)) =
+                            openai_compatible_submit.take()
+                        {
+                            ctx.merged_perm = Some(merged);
+                            execute_openai_compatible_submit_after_admission(
+                                session,
+                                ctx,
+                                runtime,
+                                modes,
+                                client_request,
+                                task_contract,
+                                user_id.as_ref(),
+                                api_key_id.as_ref(),
+                                task_billing_config,
+                                Some(balance.available),
+                            )
+                            .await?;
+                            ctx.phase_end();
+                            return Ok(true);
+                        }
                         ctx.merged_perm = Some(merged);
                         ctx.phase_end();
                         return Ok(false);
@@ -1788,6 +1868,25 @@ pub async fn run(
         ActiveRegistrationEndpoint::from_ctx(ctx),
         ActiveRegistrationAdmission::ColdFreezeAdmission,
     );
+
+    if let Some((runtime, modes, client_request)) = openai_compatible_submit.take() {
+        ctx.merged_perm = Some(merged);
+        execute_openai_compatible_submit_after_admission(
+            session,
+            ctx,
+            runtime,
+            modes,
+            client_request,
+            task_contract,
+            user_id.as_ref(),
+            api_key_id.as_ref(),
+            task_billing_config,
+            Some(balance.available),
+        )
+        .await?;
+        ctx.phase_end();
+        return Ok(true);
+    }
 
     ctx.merged_perm = Some(merged);
     ctx.phase_end();
@@ -1962,7 +2061,11 @@ pub fn day_key_utc(now: OffsetDateTime) -> String {
 }
 
 fn task_id_from_path(path: &str, trailing_action: bool) -> Option<&str> {
-    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let segments: Vec<&str> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     match (trailing_action, segments.as_slice()) {
         (false, ["v1", "tasks", task_id]) if !task_id.is_empty() => Some(task_id),
         (true, ["v1", "tasks", task_id, _]) if !task_id.is_empty() => Some(task_id),
@@ -1971,7 +2074,11 @@ fn task_id_from_path(path: &str, trailing_action: bool) -> Option<&str> {
 }
 
 fn openai_video_id_from_path(path: &str) -> Option<&str> {
-    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let segments: Vec<&str> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     match segments.as_slice() {
         ["v1", "videos", video_id] if !video_id.is_empty() => Some(video_id),
         ["v1", "videos", video_id, "content"] if !video_id.is_empty() => Some(video_id),
@@ -1986,7 +2093,7 @@ fn task_request_requires_model_permission(ctx: &ReqCtx) -> bool {
     if ctx
         .task_endpoint_candidate
         .as_ref()
-        .is_some_and(|candidate| candidate.model_path.is_some())
+        .is_some_and(crate::filters::task::should_parse_openai_compatible_client_request)
     {
         return true;
     }
@@ -2012,6 +2119,95 @@ fn task_error_ir(err: crate::filters::task::TaskHttpError) -> ErrorIR<'static> {
         upstream_raw: None,
         request_id: "",
         retry_after_secs: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_openai_compatible_submit_after_admission(
+    session: &mut Session,
+    ctx: &mut ReqCtx,
+    runtime: crate::filters::task::ResolvedTaskRuntime,
+    modes: crate::filters::task::ResolvedExecutionModes,
+    client_request: serde_json::Value,
+    task_contract: Option<&gw_task::redis_contract::RedisTaskContract>,
+    user_id: &str,
+    api_key_id: Option<&ApiKeyId>,
+    task_billing_config: Option<TaskBillingConfig>,
+    available_balance_micro: Option<i64>,
+) -> Result<()> {
+    let request_id = ctx.request_id.0.clone();
+    let task_result = if modes.client_mode == gw_task::ClientMode::Async {
+        let Some(contract) = task_contract else {
+            let err = ErrorIR {
+                category: ErrorCategory::GatewayInternal,
+                status: 500,
+                upstream_status: None,
+                code: Cow::Borrowed(codes::GW_TASK_SUBMIT_FAILED),
+                message: Cow::Borrowed("task contract unavailable"),
+                retryable: false,
+                upstream_raw: None,
+                request_id: "",
+                retry_after_secs: None,
+            };
+            emit_and_bail(session, ctx, &err, &request_id).await?;
+            unreachable!("emit_and_bail always returns Err; see fn doc")
+        };
+        crate::filters::task::submit_openai_compatible_task(
+            contract,
+            runtime,
+            modes,
+            client_request,
+            user_id,
+            api_key_id.map(ApiKeyId::as_ref),
+            ctx.trace_id.as_ref(),
+            ctx.request_id.as_ref(),
+            task_billing_config,
+            available_balance_micro,
+        )
+        .await
+    } else {
+        let upstream_base_url = runtime.upstream_base_url.clone();
+        let transport =
+            match gw_task_runtime::http_transport::HttpTemplateTransport::with_default_timeout(
+                upstream_base_url,
+            ) {
+                Ok(transport) => Arc::new(transport),
+                Err(err) => {
+                    let error_ir = ErrorIR {
+                        category: ErrorCategory::GatewayInternal,
+                        status: 500,
+                        upstream_status: None,
+                        code: Cow::Borrowed(codes::GW_TASK_SUBMIT_FAILED),
+                        message: Cow::Owned(format!("build task http transport: {err}")),
+                        retryable: false,
+                        upstream_raw: None,
+                        request_id: "",
+                        retry_after_secs: None,
+                    };
+                    emit_and_bail(session, ctx, &error_ir, &request_id).await?;
+                    unreachable!("emit_and_bail always returns Err; see fn doc")
+                }
+            };
+        crate::filters::task::handle_openai_compatible_submit(
+            runtime,
+            modes,
+            client_request,
+            transport,
+            user_id,
+            api_key_id.map(ApiKeyId::as_ref),
+            ctx.trace_id.as_ref(),
+            ctx.request_id.as_ref(),
+        )
+        .await
+    };
+
+    match task_result {
+        Ok(response) => crate::filters::task::write_task_response(session, response).await,
+        Err(err) => {
+            let error_ir = task_error_ir(err);
+            emit_and_bail(session, ctx, &error_ir, &request_id).await?;
+            unreachable!("emit_and_bail always returns Err; see fn doc")
+        }
     }
 }
 

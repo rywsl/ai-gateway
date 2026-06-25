@@ -343,9 +343,13 @@ async fn test_load_openai_video_endpoint_maps_task_statuses() {
     }));
     let contract = MemoryTaskContract::with_record(record);
 
-    let response = gw_proxy::filters::task::load_openai_video_endpoint(&contract, &id.to_string())
-        .await
-        .unwrap();
+    let response = gw_proxy::filters::task::load_openai_video_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap();
 
     assert_eq!(response.status, 200);
     assert_eq!(response.body["id"], id.to_string());
@@ -368,9 +372,13 @@ async fn test_load_openai_video_endpoint_maps_failed_state() {
     record.error_message = Some("provider timeout".to_string());
     let contract = MemoryTaskContract::with_record(record);
 
-    let response = gw_proxy::filters::task::load_openai_video_endpoint(&contract, &id.to_string())
-        .await
-        .unwrap();
+    let response = gw_proxy::filters::task::load_openai_video_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap();
 
     assert_eq!(response.body["status"], "failed");
     assert_eq!(response.body["error"]["message"], "provider timeout");
@@ -388,10 +396,13 @@ async fn test_load_openai_video_content_endpoint_redirects_to_artifact_url() {
     }));
     let contract = MemoryTaskContract::with_record(record);
 
-    let response =
-        gw_proxy::filters::task::load_openai_video_content_endpoint(&contract, &id.to_string())
-            .await
-            .unwrap();
+    let response = gw_proxy::filters::task::load_openai_video_content_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap();
 
     assert_eq!(response.status, 302);
     assert_eq!(
@@ -408,13 +419,36 @@ async fn test_load_openai_video_content_endpoint_reports_missing_artifact() {
     record.kind = TaskKind::Video;
     let contract = MemoryTaskContract::with_record(record);
 
-    let err =
-        gw_proxy::filters::task::load_openai_video_content_endpoint(&contract, &id.to_string())
-            .await
-            .unwrap_err();
+    let err = gw_proxy::filters::task::load_openai_video_content_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap_err();
 
     assert_eq!(err.status, 404);
     assert_eq!(err.code, gw_core::error::codes::GW_TASK_ARTIFACT_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_load_openai_video_endpoint_rejects_cross_user_task() {
+    let id = TaskId::new_v4();
+    let mut record = task_record(id, TaskStatus::Succeeded);
+    record.kind = TaskKind::Video;
+    record.user_id = "other_user".to_string();
+    let contract = MemoryTaskContract::with_record(record);
+
+    let err = gw_proxy::filters::task::load_openai_video_endpoint(
+        &contract,
+        &id.to_string(),
+        "user_task",
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status, 404);
+    assert_eq!(err.code, gw_core::error::codes::GW_TASK_NOT_FOUND);
 }
 
 #[tokio::test]

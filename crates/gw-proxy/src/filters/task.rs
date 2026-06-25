@@ -142,6 +142,11 @@ pub fn resolve_task_request_key(
     })
 }
 
+#[must_use]
+pub fn should_parse_openai_compatible_client_request(candidate: &TaskEndpointCandidate) -> bool {
+    candidate.model_path.is_some() || candidate.default_model.is_some()
+}
+
 pub async fn parse_openai_compatible_client_request(
     candidate: &TaskEndpointCandidate,
     content_type: Option<&str>,
@@ -703,6 +708,19 @@ fn profile_matches_endpoint(profile: &serde_json::Value, method: &str, path: &st
 }
 
 fn binding_revision_to_value(revision: &AsyncTaskBindingRevision) -> serde_json::Value {
+    let provider_model_name = revision
+        .provider_model_name
+        .is_empty()
+        .then(|| {
+            revision
+                .target_snapshot
+                .get("provider_model_name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&revision.provider_model_id)
+                .to_string()
+        })
+        .unwrap_or_else(|| revision.provider_model_name.clone());
     json!({
         "id": revision.binding_id,
         "revision_id": revision.id,
@@ -714,7 +732,7 @@ fn binding_revision_to_value(revision: &AsyncTaskBindingRevision) -> serde_json:
         "global_model_id": revision.global_model_id,
         "provider_id": revision.provider_id,
         "provider_model_id": revision.provider_model_id,
-        "provider_model_name": revision.provider_model_id,
+        "provider_model_name": provider_model_name,
         "endpoint_id": revision.endpoint_id,
         "api_format": revision.api_format,
         "provider_key_id": revision.provider_key_id,
@@ -1179,10 +1197,12 @@ pub async fn cancel_endpoint<C: TaskContract + Sync>(
 pub async fn load_openai_video_endpoint<C: TaskContract + Sync>(
     contract: &C,
     video_id: &str,
+    user_id: &str,
 ) -> std::result::Result<TaskHttpResponse, TaskHttpError> {
     let id = parse_task_id(video_id)?;
     let record = contract.load(&id).await.map_err(TaskHttpError::from)?;
     let record = record.ok_or_else(TaskHttpError::not_found)?;
+    ensure_task_owner(&record, user_id)?;
     Ok(TaskHttpResponse {
         status: 200,
         content_type: "application/json",
@@ -1194,10 +1214,12 @@ pub async fn load_openai_video_endpoint<C: TaskContract + Sync>(
 pub async fn load_openai_video_content_endpoint<C: TaskContract + Sync>(
     contract: &C,
     video_id: &str,
+    user_id: &str,
 ) -> std::result::Result<TaskHttpResponse, TaskHttpError> {
     let id = parse_task_id(video_id)?;
     let record = contract.load(&id).await.map_err(TaskHttpError::from)?;
     let record = record.ok_or_else(TaskHttpError::not_found)?;
+    ensure_task_owner(&record, user_id)?;
     if !record.status.is_terminal() {
         return Err(TaskHttpError::artifact_not_found(
             "video content is not available before the task reaches a terminal state",
@@ -1214,6 +1236,14 @@ pub async fn load_openai_video_content_endpoint<C: TaskContract + Sync>(
         headers: BTreeMap::from([("Location", url)]),
         body: serde_json::Value::Null,
     })
+}
+
+fn ensure_task_owner(record: &TaskRecord, user_id: &str) -> std::result::Result<(), TaskHttpError> {
+    if record.user_id == user_id {
+        Ok(())
+    } else {
+        Err(TaskHttpError::not_found())
+    }
 }
 
 pub async fn write_task_response(session: &mut Session, response: TaskHttpResponse) -> Result<()> {

@@ -280,6 +280,9 @@ impl TemplateExecutor {
                             status: "poll_wait".to_string(),
                             poll_wait_ms: Some(wait_ms),
                         });
+                        if wait_ms > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        }
                     }
                     previous_poll_response = poll_response.body;
                 }

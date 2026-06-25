@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Method;
 use serde_json::Value;
+use std::time::Duration;
 
 use crate::template_executor::{
     PollContext, TransportError, UpstreamRequest, UpstreamResponse, UpstreamTransport,
@@ -17,6 +18,14 @@ impl HttpTemplateTransport {
     #[must_use]
     pub fn new(client: reqwest::Client, base_url: Option<String>) -> Self {
         Self { client, base_url }
+    }
+
+    pub fn with_default_timeout(base_url: Option<String>) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(900))
+            .build()?;
+        Ok(Self { client, base_url })
     }
 
     async fn send_request(

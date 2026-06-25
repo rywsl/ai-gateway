@@ -568,6 +568,8 @@ pub struct AsyncTaskBindingRevision {
     #[serde(default)]
     pub provider_model_id: String,
     #[serde(default)]
+    pub provider_model_name: String,
+    #[serde(default)]
     pub endpoint_id: String,
     #[serde(default)]
     pub api_format: String,

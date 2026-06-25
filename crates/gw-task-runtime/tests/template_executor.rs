@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use gw_task::template::TemplateError;
@@ -467,6 +468,47 @@ async fn sync_async_lro_records_openai_poll_after_header_as_wait_event() {
         }
         other => panic!("expected completed result, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn sync_async_lro_waits_between_pending_poll_attempts() {
+    let mut request = fixture_request(
+        "custom-lro-google-veo.json",
+        ClientMode::Sync,
+        UpstreamMode::AsyncLro,
+    );
+    request.profile["upstream_poll_template"]["poll_interval_ms"] = json!(25);
+    let transport = MemoryTransport::with_responses(vec![
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({"name": "operations/video-789"}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({"name": "operations/video-789", "done": false}),
+        },
+        UpstreamResponse {
+            status: 200,
+            headers: Default::default(),
+            body: json!({
+                "name": "operations/video-789",
+                "done": true,
+                "response": {"videos": [{"uri": "gs://bucket/video-789.mp4"}]}
+            }),
+        },
+    ]);
+    let executor = TemplateExecutor::new(Arc::new(transport));
+
+    let started = Instant::now();
+    let result = executor.execute_inline(request).await.expect("execute lro");
+
+    assert!(matches!(result, ExecutionResult::Completed { .. }));
+    assert!(
+        started.elapsed() >= Duration::from_millis(20),
+        "poll loop should wait between pending attempts"
+    );
 }
 
 #[tokio::test]
