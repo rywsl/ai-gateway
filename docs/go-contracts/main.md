@@ -26,6 +26,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
                           ◄──────XADD──────────  usage:detailed（必需,180d 归档）
                           ◄──────XADD──────────  events:entity（status_change / 自动封禁）
    entity:estimate_pricing ────────────────►     EntityStore 懒加载
+   entity:sensitive_filter_policy:global ─►     EntityStore + compiled policy
    entity:management_token ────────────────►     EntityStore.mgmt_token（mgmt verify chain）
    jwt:blacklist:<jti>     ────────────────►     JwtBlacklist 命中查询
    mgmt_token:blacklist:<token_id> ────────►     RedisJwtBlacklist::check_mgmt 命中查询
@@ -35,7 +36,7 @@ Rust 网关只做"用量记录 + 路由 + 限流 + 估算冻结"，**不算 cost
 
 | 文件 | 角色 | 主要内容 |
 |---|---|---|
-| [parts/01-go-as-producer.md](parts/01-go-as-producer.md) | **Go → Rust** | Go 主动写、Rust 消费。涵盖：PgSQL 实体写、`events:entity`、`events:counter`、`counter:*` 余额、`entity:estimate_pricing`、`jwt:blacklist:*`、KEK 轮换 producer 责任 |
+| [parts/01-go-as-producer.md](parts/01-go-as-producer.md) | **Go → Rust** | Go 主动写、Rust 消费。涵盖：PgSQL 实体写、`events:entity`、`events:counter`、`counter:*` 余额、`entity:estimate_pricing`、`entity:sensitive_filter_policy:global`、`jwt:blacklist:*`、KEK 轮换 producer 责任 |
 | [parts/02-go-as-consumer.md](parts/02-go-as-consumer.md) | **Rust → Go** | Rust 主动写、Go 消费。涵盖：`usage:records`（吸收原 C-ε §2）、`usage:records:dlq`、`usage:detailed`、Rust 反向 `events:entity`（`vendor_key.rate_limited` / `ipblock` 自动封禁）、`counter:*:frozen_micro` / `daily_tokens` 读路径 |
 | [parts/03-shared-schema.md](parts/03-shared-schema.md) | **共享 schema** | 双方都接触的 PgSQL 表清单、entity payload JSONB shape、`version BIGINT` 协议、AES-256-GCM 加密 payload、KEK 轮换、Kiro/Vertex vendor-key payload touchpoints |
 | [parts/04-proxy-nodes.md](parts/04-proxy-nodes.md) | **Proxy Nodes** | Rust tunnel client ↔ Go Hub 契约;节点 entity / 心跳分工 / status 状态机 |
@@ -169,6 +170,7 @@ Rust 端对应指标（前缀 `gateway_*`）在 [`docs/architecture.md`](../arch
 | 改动 | 必须同 commit 更新 |
 |---|---|
 | `events:entity` 的 namespace / payload 字段 | parts/01 §1.2 + parts/03 |
+| `sensitive_filter_policy` schema / limits / replacement semantics | parts/01 §1.2.4.3 + parts/03 §3.2.0.1 |
 | `events:counter` payload | parts/01 §1.3 |
 | `usage:records` / `usage:records:dlq` 字段 | parts/02 §2.1 / §2.2 |
 | Rust 反向写 entity 的 op 枚举 | parts/02 §2.4 |

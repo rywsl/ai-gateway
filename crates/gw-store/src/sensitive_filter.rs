@@ -7,6 +7,10 @@ use regex::{Captures, Regex};
 
 const MAX_TRANSIT_MAP_ENTRIES: usize = 512;
 const MAX_TRANSIT_SURROGATE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ENABLED_GROUPS: usize = 100;
+const MAX_ENABLED_RULES: usize = 300;
+const MAX_PATTERN_LEN: usize = 2048;
+const MAX_REPLACEMENT_LEN: usize = 256;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TransitReplacementError {
@@ -119,6 +123,13 @@ impl CompiledSensitiveFilterPolicy {
             .filter(|group| group.enabled)
             .cloned()
             .collect::<Vec<_>>();
+        if groups.len() > MAX_ENABLED_GROUPS {
+            anyhow::bail!(
+                "enabled group count {} exceeds {}",
+                groups.len(),
+                MAX_ENABLED_GROUPS
+            );
+        }
         groups.sort_by(|left, right| {
             left.priority
                 .cmp(&right.priority)
@@ -126,6 +137,7 @@ impl CompiledSensitiveFilterPolicy {
         });
 
         let mut rules = Vec::new();
+        let mut enabled_rules = 0usize;
         for group in groups {
             let mut group_rules = group
                 .rules
@@ -137,7 +149,31 @@ impl CompiledSensitiveFilterPolicy {
                     .cmp(&right.priority)
                     .then_with(|| left.id.cmp(&right.id))
             });
-            for rule in group_rules {
+            for mut rule in group_rules {
+                rule.pattern = rule.pattern.trim().to_owned();
+                rule.replacement = rule.replacement.trim().to_owned();
+                if rule.pattern.is_empty() || rule.pattern.len() > MAX_PATTERN_LEN {
+                    anyhow::bail!(
+                        "rule {} pattern length must be 1..{}",
+                        rule.id,
+                        MAX_PATTERN_LEN
+                    );
+                }
+                if rule.replacement.is_empty() || rule.replacement.len() > MAX_REPLACEMENT_LEN {
+                    anyhow::bail!(
+                        "rule {} replacement length must be 1..{}",
+                        rule.id,
+                        MAX_REPLACEMENT_LEN
+                    );
+                }
+                enabled_rules += 1;
+                if enabled_rules > MAX_ENABLED_RULES {
+                    anyhow::bail!(
+                        "enabled rule count {} exceeds {}",
+                        enabled_rules,
+                        MAX_ENABLED_RULES
+                    );
+                }
                 let re = Regex::new(&rule.pattern)?;
                 rules.push(CompiledRule { rule, re });
             }
@@ -175,13 +211,13 @@ impl CompiledSensitiveFilterPolicy {
             let mut overflow = None;
             let replaced = rule.re.replace_all(&out, |caps: &Captures<'_>| {
                 let matched = caps.get(0).expect("regex capture 0").as_str();
-                let candidate = format!("__sf_{seq}_{nonce}__");
+                let candidate = format!("{}__sf_{seq}_{nonce}__", rule.rule.replacement);
                 let reversible = map.len() < MAX_TRANSIT_MAP_ENTRIES
                     && surrogate_bytes.saturating_add(candidate.len())
                         <= MAX_TRANSIT_SURROGATE_BYTES;
                 if !reversible {
                     tracing::warn!(
-                        target: "gw_runtime::sensitive_filter",
+                            target: "gw_store::sensitive_filter",
                         map_entries = map.len(),
                         surrogate_bytes,
                         "transit replacement budget exhausted; rejecting request"
@@ -331,9 +367,36 @@ mod tests {
             .replace_transit_request(SensitiveFilterTarget::RequestBody, b"sk-one sk-two")
             .unwrap();
         assert_ne!(out.as_ref(), b"sk-one sk-two");
+        assert!(std::str::from_utf8(&out).unwrap().contains("sk-safe__sf_"));
         assert_eq!(map.len(), 2);
         let restored = compiled.reverse_transit_response(&map, out.as_ref(), true);
         assert_eq!(restored.as_ref(), b"sk-one sk-two");
+    }
+
+    #[test]
+    fn compile_rejects_enabled_policy_over_caps() {
+        let mut policy = policy_with_rule(
+            SensitiveFilterMode::ArchiveMask,
+            "ak-[A-Za-z0-9]+",
+            "<AK>",
+            vec![SensitiveFilterTarget::Archive],
+        );
+        let rule = policy.groups[0].rules[0].clone();
+        policy.groups[0].rules = vec![rule; MAX_ENABLED_RULES + 1];
+
+        assert!(CompiledSensitiveFilterPolicy::compile(&policy).is_err());
+    }
+
+    #[test]
+    fn compile_rejects_empty_runtime_replacement() {
+        let policy = policy_with_rule(
+            SensitiveFilterMode::ArchiveMask,
+            "ak-[A-Za-z0-9]+",
+            "   ",
+            vec![SensitiveFilterTarget::Archive],
+        );
+
+        assert!(CompiledSensitiveFilterPolicy::compile(&policy).is_err());
     }
 
     #[test]
@@ -341,7 +404,7 @@ mod tests {
         let compiled = CompiledSensitiveFilterPolicy::compile(&policy_with_rule(
             SensitiveFilterMode::TransitReversible,
             "ak-[A-Za-z0-9_-]+",
-            "",
+            "ak-safe",
             vec![SensitiveFilterTarget::RequestBody],
         ))
         .unwrap();
@@ -351,7 +414,7 @@ mod tests {
             .unwrap();
         let rendered = std::str::from_utf8(&out).unwrap();
 
-        assert!(rendered.starts_with("__sf_"));
+        assert!(rendered.starts_with("ak-safe__sf_"));
         assert!(!rendered.ends_with("_0__"));
     }
 
@@ -360,7 +423,7 @@ mod tests {
         let compiled = CompiledSensitiveFilterPolicy::compile(&policy_with_rule(
             SensitiveFilterMode::TransitReversible,
             ".",
-            "",
+            "safe",
             vec![SensitiveFilterTarget::RequestBody],
         ))
         .unwrap();
@@ -381,7 +444,7 @@ mod tests {
         let compiled = CompiledSensitiveFilterPolicy::compile(&policy_with_rule(
             SensitiveFilterMode::TransitReversible,
             "ak-[0-9]+",
-            "",
+            "safe",
             vec![SensitiveFilterTarget::RequestBody],
         ))
         .unwrap();

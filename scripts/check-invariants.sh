@@ -40,6 +40,18 @@ if command -v cargo >/dev/null && command -v jq >/dev/null; then
       fi
     done
   done
+  runtime_workspace_deps="$(echo "$meta" | jq -r '
+    [ .packages[].name ] as $workspace
+    | .packages[] | select(.name=="gw-runtime")
+    | .dependencies[]
+    | select(.kind == null)
+    | .name as $dep
+    | select($workspace | index($dep))
+    | $dep')"
+  if [ -n "$runtime_workspace_deps" ]; then
+    echo "$runtime_workspace_deps" | sed 's/^/  /'
+    bad "gw-runtime depends on workspace crates (workspace bottom forbidden)"
+  fi
   # Execution crates must not depend on each other.
   proxy_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-proxy") | .dependencies[] | select(.kind == null) | .name')"
   if echo "$proxy_deps" | grep -qx "gw-task-runtime"; then

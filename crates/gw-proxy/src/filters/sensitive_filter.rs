@@ -218,7 +218,7 @@ mod tests {
         assert_ne!(outbound.as_ref(), b"ak-live");
         assert!(std::str::from_utf8(&outbound)
             .expect("utf8 surrogate")
-            .starts_with("__sf_"));
+            .starts_with("ak-placeholder__sf_"));
 
         let restored = reverse_transit_response_body(&mut ctx, outbound, true);
         assert_eq!(restored.as_ref(), b"ak-live");
