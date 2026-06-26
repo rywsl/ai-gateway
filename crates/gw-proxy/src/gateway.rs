@@ -310,18 +310,80 @@ fn mask_archive_text(
     String::from_utf8(masked.to_vec()).unwrap_or(value)
 }
 
-fn mask_archive_body(
+fn mask_archive_optional_text(
+    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    value: Option<String>,
+) -> Option<String> {
+    value.map(|value| mask_archive_text(policy, value))
+}
+
+fn mask_archive_optional_id<T>(
+    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    value: Option<T>,
+) -> Option<T>
+where
+    T: AsRef<str> + From<String>,
+{
+    value.map(|value| mask_archive_text(policy, value.as_ref().to_owned()).into())
+}
+
+fn mask_archive_summary(
+    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    summary: gw_ledger::detailed_archive::SummaryPayload,
+) -> gw_ledger::detailed_archive::SummaryPayload {
+    gw_ledger::detailed_archive::SummaryPayload {
+        user_id: mask_archive_optional_id(policy, summary.user_id),
+        api_key_id: mask_archive_optional_id(policy, summary.api_key_id),
+        model: mask_archive_optional_id(policy, summary.model),
+        client_protocol: mask_archive_optional_text(policy, summary.client_protocol),
+        upstream_protocol: mask_archive_optional_text(policy, summary.upstream_protocol),
+        http_status: summary.http_status,
+        error_code: mask_archive_optional_text(policy, summary.error_code),
+        is_stream: summary.is_stream,
+        input_tokens: summary.input_tokens,
+        output_tokens: summary.output_tokens,
+        latency_ms: summary.latency_ms,
+        ttft_ms: summary.ttft_ms,
+        tunnel_resolution: mask_archive_optional_text(policy, summary.tunnel_resolution),
+    }
+}
+
+fn mask_archive_body_with_encoding(
     policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
     body: Arc<Bytes>,
-) -> Arc<Bytes> {
+    encoding: ArchiveBodyEncoding,
+) -> (Arc<Bytes>, u64) {
     let Some(policy) = policy else {
-        return body;
+        return (body, 0);
     };
-    let masked = policy.mask_archive_bytes(gw_core::entity::SensitiveFilterTarget::Archive, &body);
-    if masked.as_ref() == body.as_ref() {
-        body
-    } else {
-        Arc::new(masked)
+    match encoding {
+        ArchiveBodyEncoding::Unsupported => {
+            return (Arc::new(Bytes::new()), body.len() as u64);
+        }
+        ArchiveBodyEncoding::Supported(encoding) => {
+            let Ok(decoded) = gw_codec::compression::decode(encoding, &body, 32 * 1024 * 1024)
+            else {
+                return (Arc::new(Bytes::new()), body.len() as u64);
+            };
+            let masked = policy
+                .mask_archive_bytes(gw_core::entity::SensitiveFilterTarget::Archive, &decoded);
+            if masked.as_ref() == decoded.as_ref() {
+                return (body, 0);
+            }
+            let Ok(encoded) = gw_codec::compression::encode(encoding, &masked) else {
+                return (Arc::new(Bytes::new()), body.len() as u64);
+            };
+            (Arc::new(encoded), 0)
+        }
+        ArchiveBodyEncoding::Identity => {
+            let masked =
+                policy.mask_archive_bytes(gw_core::entity::SensitiveFilterTarget::Archive, &body);
+            if masked.as_ref() == body.as_ref() {
+                (body, 0)
+            } else {
+                (Arc::new(masked), 0)
+            }
+        }
     }
 }
 
@@ -329,12 +391,55 @@ fn mask_archive_surface(
     ctx: &ReqCtx,
     headers: Vec<(String, String)>,
     body: Arc<Bytes>,
-) -> (Vec<(String, String)>, Arc<Bytes>) {
+) -> (Vec<(String, String)>, Arc<Bytes>, u64) {
     let policy = ctx.sensitive_filter_policy.as_deref();
-    (
-        mask_archive_header_values(policy, headers),
-        mask_archive_body(policy, body),
-    )
+    let encoding = archive_content_encoding(&headers);
+    let (body, dropped) = mask_archive_body_with_encoding(policy, body, encoding);
+    (mask_archive_header_values(policy, headers), body, dropped)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveBodyEncoding {
+    Identity,
+    Supported(gw_codec::compression::Encoding),
+    Unsupported,
+}
+
+fn archive_content_encoding(headers: &[(String, String)]) -> ArchiveBodyEncoding {
+    let mut values = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty());
+    let Some(value) = values.next() else {
+        return ArchiveBodyEncoding::Identity;
+    };
+    if values.next().is_some() {
+        return ArchiveBodyEncoding::Unsupported;
+    }
+    parse_archive_content_encoding(value)
+}
+
+fn parse_archive_content_encoding(value: &str) -> ArchiveBodyEncoding {
+    let mut parts = value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
+    let Some(part) = parts.next() else {
+        return ArchiveBodyEncoding::Identity;
+    };
+    if parts.next().is_some() {
+        return ArchiveBodyEncoding::Unsupported;
+    }
+    if part.eq_ignore_ascii_case("identity") {
+        ArchiveBodyEncoding::Identity
+    } else if part.eq_ignore_ascii_case("gzip") {
+        ArchiveBodyEncoding::Supported(gw_codec::compression::Encoding::Gzip)
+    } else if part.eq_ignore_ascii_case("br") {
+        ArchiveBodyEncoding::Supported(gw_codec::compression::Encoding::Br)
+    } else {
+        ArchiveBodyEncoding::Unsupported
+    }
 }
 
 fn header_u32(response: &ResponseHeader, name: &str) -> Option<u32> {
@@ -770,8 +875,9 @@ impl LlmGateway {
             let truncated = ctx.archive_upstream_response_body.is_truncated();
             let dropped = ctx.archive_upstream_response_body.dropped();
             let body = std::sync::Arc::new(body_bytes);
-            let (headers, body) =
+            let (headers, body, mask_dropped) =
                 mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
+            let dropped = dropped.saturating_add(mask_dropped);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -821,8 +927,9 @@ impl LlmGateway {
             let truncated = ctx.archive_downstream_response_body.is_truncated();
             let dropped = ctx.archive_downstream_response_body.dropped();
             let body = std::sync::Arc::new(body_bytes);
-            let (headers, body) =
+            let (headers, body, mask_dropped) =
                 mask_archive_surface(ctx, redact_loopback_headers(downstream_meta.headers), body);
+            let dropped = dropped.saturating_add(mask_dropped);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -899,8 +1006,9 @@ impl LlmGateway {
             ));
             let truncated = ctx.archive_upstream_response_body.is_truncated();
             let dropped = ctx.archive_upstream_response_body.dropped();
-            let (headers, body) =
+            let (headers, body, mask_dropped) =
                 mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
+            let dropped = dropped.saturating_add(mask_dropped);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -939,8 +1047,9 @@ impl LlmGateway {
             ));
             let truncated = ctx.archive_downstream_response_body.is_truncated();
             let dropped = ctx.archive_downstream_response_body.dropped();
-            let (headers, body) =
+            let (headers, body, mask_dropped) =
                 mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
+            let dropped = dropped.saturating_add(mask_dropped);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -1164,7 +1273,7 @@ impl ProxyHttp for LlmGateway {
             let method = mask_archive_text(policy, meta.method);
             let url = mask_archive_text(policy, meta.url);
             let http_version = mask_archive_text(policy, meta.http_version);
-            let (headers, body) =
+            let (headers, body, _mask_dropped) =
                 mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
@@ -1297,7 +1406,7 @@ impl ProxyHttp for LlmGateway {
             let method = mask_archive_text(policy, meta.method);
             let url = mask_archive_text(policy, meta.url);
             let http_version = mask_archive_text(policy, meta.http_version);
-            let (headers, body) =
+            let (headers, body, _mask_dropped) =
                 mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
@@ -1395,34 +1504,27 @@ impl ProxyHttp for LlmGateway {
             );
         }
 
-        // S-codec T6: cross-protocol non-stream re-renders the body in
-        // `response_body_filter` at EOS, so the upstream's `Content-Length`
-        // and `Content-Encoding` no longer match the bytes we'll emit.
-        // Strip them here so pingora applies chunked transfer-encoding to the
-        // (substituted) outbound body. Stream / same-protocol traffic is
-        // unaffected.
-        if !ctx.is_stream {
-            // Audit 2026-05-30 §1.9: capture the upstream response content-encoding
-            // BEFORE any strip, every attempt, so handle_non_stream_chunk can
-            // decode the body to plaintext before cross-protocol re-render. Always
-            // recaptured here, so it is never stale across a retry.
-            ctx.resp_content_encoding = gw_codec::compression::parse_content_encoding(
-                upstream_response
-                    .headers
-                    .get("content-encoding")
-                    .and_then(|v| v.to_str().ok()),
-            );
-            let cross_protocol = match (ctx.client_codec.as_ref(), ctx.upstream_codec.as_ref()) {
-                (Some(client), Some(upstream)) => {
-                    gw_codec::cross_render::WireFormat::from_any_codec(client)
-                        != gw_codec::cross_render::WireFormat::from_any_codec(upstream)
-                }
-                _ => false,
-            };
-            if cross_protocol {
-                let _ = upstream_response.remove_header("content-length");
-                let _ = upstream_response.remove_header("content-encoding");
+        // Capture response Content-Encoding before any strip. Cross-protocol
+        // re-render emits plaintext; same-protocol transit reverse may
+        // re-compress to a different byte length.
+        ctx.resp_content_encoding = gw_codec::compression::parse_content_encoding(
+            upstream_response
+                .headers
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok()),
+        );
+        let cross_protocol = match (ctx.client_codec.as_ref(), ctx.upstream_codec.as_ref()) {
+            (Some(client), Some(upstream)) => {
+                gw_codec::cross_render::WireFormat::from_any_codec(client)
+                    != gw_codec::cross_render::WireFormat::from_any_codec(upstream)
             }
+            _ => false,
+        };
+        if !ctx.is_stream && cross_protocol {
+            let _ = upstream_response.remove_header("content-length");
+            let _ = upstream_response.remove_header("content-encoding");
+        } else if crate::filters::sensitive_filter::has_compressed_transit_response(ctx) {
+            let _ = upstream_response.remove_header("content-length");
         }
         // ── Egress-impersonate loopback error mapping (Task 4.4) ──────────
         // The loopback egress (gw-egress-impersonate) emits a synthetic
@@ -2344,6 +2446,7 @@ impl ProxyHttp for LlmGateway {
                 ttft_ms,
                 tunnel_resolution: ctx.tunnel_resolution.clone(),
             };
+            let summary = mask_archive_summary(ctx.sensitive_filter_policy.as_deref(), summary);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -2640,7 +2743,7 @@ mod tests {
         ];
         let body = Arc::new(bytes::Bytes::from_static(b"{\"key\":\"ak-secret\"}"));
 
-        let (headers, body) = super::mask_archive_surface(&ctx, headers, body);
+        let (headers, body, dropped) = super::mask_archive_surface(&ctx, headers, body);
         let url = super::mask_archive_text(
             ctx.sensitive_filter_policy.as_deref(),
             "/v1/chat?api_key=ak-secret".to_string(),
@@ -2654,7 +2757,95 @@ mod tests {
             ]
         );
         assert_eq!(body.as_ref().as_ref(), b"{\"key\":\"<AK>\"}");
+        assert_eq!(dropped, 0);
         assert_eq!(url, "/v1/chat?api_key=<AK>");
+    }
+
+    #[test]
+    fn archive_mask_rewrites_compressed_body_payloads() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+
+        let mut ctx = crate::ctx::ReqCtx::default();
+        ctx.sensitive_filter_policy = Some(Arc::new(
+            crate::filters::sensitive_filter::test_support::archive_policy(),
+        ));
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"{\"key\":\"ak-secret\"}").unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let (body, dropped) = super::mask_archive_body_with_encoding(
+            ctx.sensitive_filter_policy.as_deref(),
+            Arc::new(bytes::Bytes::from(compressed)),
+            super::ArchiveBodyEncoding::Supported(gw_codec::compression::Encoding::Gzip),
+        );
+
+        let mut decoder = flate2::read::GzDecoder::new(body.as_ref().as_ref());
+        let mut decoded = String::new();
+        std::io::Read::read_to_string(&mut decoder, &mut decoded).unwrap();
+        assert_eq!(decoded, "{\"key\":\"<AK>\"}");
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn archive_mask_drops_unreadable_compressed_body_payloads() {
+        let policy = Arc::new(crate::filters::sensitive_filter::test_support::archive_policy());
+        let raw = Arc::new(bytes::Bytes::from_static(b"not gzip ak-secret"));
+
+        let (body, dropped) = super::mask_archive_body_with_encoding(
+            Some(policy.as_ref()),
+            raw,
+            super::ArchiveBodyEncoding::Supported(gw_codec::compression::Encoding::Gzip),
+        );
+
+        assert!(body.is_empty());
+        assert_eq!(dropped, b"not gzip ak-secret".len() as u64);
+    }
+
+    #[test]
+    fn archive_mask_drops_unsupported_encoded_body_payloads() {
+        let policy = Arc::new(crate::filters::sensitive_filter::test_support::archive_policy());
+        let headers = vec![("content-encoding".to_string(), "gzip, br".to_string())];
+        let raw = Arc::new(bytes::Bytes::from_static(b"compressed ak-secret"));
+        let mut ctx = crate::ctx::ReqCtx::default();
+        ctx.sensitive_filter_policy = Some(policy);
+
+        let (_, body, dropped) = super::mask_archive_surface(&ctx, headers, raw);
+
+        assert!(body.is_empty());
+        assert_eq!(dropped, b"compressed ak-secret".len() as u64);
+    }
+
+    #[test]
+    fn archive_mask_rewrites_summary_strings() {
+        let policy = Arc::new(crate::filters::sensitive_filter::test_support::archive_policy());
+        let summary = gw_ledger::detailed_archive::SummaryPayload {
+            user_id: Some(gw_core::ids::UserId::from("ak-user")),
+            api_key_id: Some(gw_core::ids::ApiKeyId::from("ak-key")),
+            model: Some(gw_core::ids::ModelName::from("model-ak-secret")),
+            client_protocol: Some("openai-ak-secret".to_string()),
+            upstream_protocol: Some("anthropic-ak-secret".to_string()),
+            http_status: 200,
+            error_code: Some("ak-error".to_string()),
+            is_stream: false,
+            input_tokens: 1,
+            output_tokens: 2,
+            latency_ms: 3,
+            ttft_ms: Some(4),
+            tunnel_resolution: Some("direct-ak-secret".to_string()),
+        };
+
+        let masked = super::mask_archive_summary(Some(policy.as_ref()), summary);
+
+        assert_eq!(masked.user_id.unwrap().as_ref(), "<AK>");
+        assert_eq!(masked.api_key_id.unwrap().as_ref(), "<AK>");
+        assert_eq!(masked.model.unwrap().as_ref(), "model-<AK>");
+        assert_eq!(masked.client_protocol.as_deref(), Some("openai-<AK>"));
+        assert_eq!(masked.upstream_protocol.as_deref(), Some("anthropic-<AK>"));
+        assert_eq!(masked.error_code.as_deref(), Some("<AK>"));
+        assert_eq!(masked.tunnel_resolution.as_deref(), Some("direct-<AK>"));
+        assert_eq!(masked.http_status, 200);
+        assert_eq!(masked.input_tokens, 1);
     }
 
     #[test]

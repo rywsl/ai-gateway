@@ -108,6 +108,25 @@ use fred::interfaces::StreamsInterface;
 use fred::types::{XCap, XCapKind, XCapTrim};
 use tokio::sync::mpsc;
 
+const DETAILED_ARCHIVE_WORKER_NAMES: [&str; 16] = [
+    "detailed_archive_worker_0",
+    "detailed_archive_worker_1",
+    "detailed_archive_worker_2",
+    "detailed_archive_worker_3",
+    "detailed_archive_worker_4",
+    "detailed_archive_worker_5",
+    "detailed_archive_worker_6",
+    "detailed_archive_worker_7",
+    "detailed_archive_worker_8",
+    "detailed_archive_worker_9",
+    "detailed_archive_worker_10",
+    "detailed_archive_worker_11",
+    "detailed_archive_worker_12",
+    "detailed_archive_worker_13",
+    "detailed_archive_worker_14",
+    "detailed_archive_worker_15",
+];
+
 /// Boot-time config; mirrors the `[detailed_log]` table in `config/default.toml`.
 #[derive(Debug, Clone)]
 pub struct DetailedArchiveCfg {
@@ -132,14 +151,13 @@ impl DetailedArchive {
         token: gw_runtime::ShutdownToken,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<CapturedSurface>(cfg.channel_capacity);
-        let workers = cfg.workers.max(1);
+        let workers = cfg.workers.max(1).min(DETAILED_ARCHIVE_WORKER_NAMES.len());
         let shared_rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
         for i in 0..workers {
             let rx = shared_rx.clone();
             let cfg = cfg.clone();
             let redis = redis.clone();
-            let name: &'static str =
-                Box::leak(format!("detailed_archive_worker_{i}").into_boxed_str());
+            let name = DETAILED_ARCHIVE_WORKER_NAMES[i];
             drop(gw_runtime::supervisor::supervised_spawn(
                 name,
                 gw_runtime::supervisor::policy_archive(),

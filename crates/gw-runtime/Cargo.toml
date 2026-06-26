@@ -25,6 +25,7 @@ bytes = { workspace = true }
 gw-core = { path = "../gw-core" }
 sysinfo.workspace = true
 libc = "0.2"
+hex.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -667,6 +667,39 @@ else
     ok "no rogue Supervisor re-exports"
 fi
 
+# ---------------------------------------------------------------------------
+# archive_sensitive_filter_guard — every detailed-archive surface emitted by
+# gw-proxy must pass through the archive sensitive-filter helpers before enqueue.
+# ---------------------------------------------------------------------------
+echo "[archive_sensitive_filter_guard] detailed archive surfaces must be masked before enqueue"
+python_bin="$(command -v python3 || command -v python || true)"
+if [ -z "$python_bin" ]; then
+    note "skipped: python required"
+else
+    archive_guard_output="$("$python_bin" - <<'PY'
+from pathlib import Path
+
+path = Path("crates/gw-proxy/src/gateway.rs")
+lines = path.read_text(encoding="utf-8").splitlines()
+violations = []
+for idx, line in enumerate(lines):
+    if "try_send(CapturedSurface" not in line:
+        continue
+    window = "\n".join(lines[max(0, idx - 25):idx + 1])
+    if "mask_archive_" not in window:
+        violations.append(idx + 1)
+if violations:
+    print("\n".join(f"{path}:{line}: archive surface enqueue without nearby mask_archive_ call" for line in violations))
+PY
+)"
+    if [ -n "$archive_guard_output" ]; then
+        echo "$archive_guard_output"
+        bad "detailed archive surface emitted without sensitive-filter masking"
+    else
+        ok "all detailed archive enqueues have nearby archive masking"
+    fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "INVARIANT CHECK FAILED"
   exit 1

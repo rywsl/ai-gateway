@@ -18,7 +18,9 @@ pub mod supervisor;
 
 pub use health::{Admit, BackpressureGate, HealthHook, HealthSignal, SystemHealthMonitor};
 pub use regex_cache::{CompileError, RegexCache, RegexCacheConfig};
-pub use sensitive_filter::{CompiledSensitiveFilterPolicy, ReverseStream, TransitMap};
+pub use sensitive_filter::{
+    CompiledSensitiveFilterPolicy, ReverseStream, TransitMap, TransitReplacementError,
+};
 pub use shutdown::{DrainOutcome, PhaseHandle, ShutdownCoordinator, ShutdownPhase, ShutdownToken};
 pub use spill_io::{SpillFile, SpillPolicy, SpillRoot, SpillRootConfig};
 pub use supervisor::{RestartPolicy, Supervisor, SupervisorError};

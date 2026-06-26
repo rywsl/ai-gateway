@@ -200,20 +200,25 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
 
     // G6 / ADR-G6-1: drop the Redis L1 entry before Moka invalidate so
     // multi-pod deployments don't retain stale entries up to the L1 TTL.
+    // `sensitive_filter_policy` is Go-published directly into this Redis key
+    // and must survive the invalidation event; Rust only drops its Moka/compiled
+    // cache for that namespace below.
     // Failure is non-fatal — Moka invalidate still runs below.
-    if let Some(redis) = store.loader_redis() {
-        let redis_key = format!("entity:{ns}:{id}");
-        let client = redis.pool.next();
-        use fred::interfaces::KeysInterface;
-        if let Err(err) = client.del::<i64, _>(&redis_key).await {
-            tracing::warn!(
-                target: "gw_store::stream_consumer",
-                ns = %ns,
-                id = %id,
-                key = %redis_key,
-                error = ?err,
-                "events:entity invalidate: redis DEL failed; falling back to Moka invalidate only"
-            );
+    if ns != "sensitive_filter_policy" {
+        if let Some(redis) = store.loader_redis() {
+            let redis_key = format!("entity:{ns}:{id}");
+            let client = redis.pool.next();
+            use fred::interfaces::KeysInterface;
+            if let Err(err) = client.del::<i64, _>(&redis_key).await {
+                tracing::warn!(
+                    target: "gw_store::stream_consumer",
+                    ns = %ns,
+                    id = %id,
+                    key = %redis_key,
+                    error = ?err,
+                    "events:entity invalidate: redis DEL failed; falling back to Moka invalidate only"
+                );
+            }
         }
     }
 

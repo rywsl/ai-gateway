@@ -2,9 +2,20 @@ use bytes::{Bytes, BytesMut};
 use gw_core::entity::{
     SensitiveFilterMode, SensitiveFilterPolicy, SensitiveFilterRule, SensitiveFilterTarget,
 };
+use rand::RngCore;
 use regex::{Captures, Regex};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+
+const MAX_TRANSIT_MAP_ENTRIES: usize = 512;
+const MAX_TRANSIT_SURROGATE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TransitReplacementError {
+    #[error("transit replacement budget exhausted: entries={entries}, surrogate_bytes={surrogate_bytes}")]
+    BudgetExhausted {
+        entries: usize,
+        surrogate_bytes: usize,
+    },
+}
 
 #[derive(Debug)]
 pub struct CompiledSensitiveFilterPolicy {
@@ -37,6 +48,9 @@ impl TransitMap {
 
     fn push(&mut self, surrogate: Bytes, original: Bytes) {
         self.entries.push((surrogate, original));
+    }
+
+    fn sort_by_surrogate_len_desc(&mut self) {
         self.entries
             .sort_by(|left, right| right.0.len().cmp(&left.0.len()));
     }
@@ -148,28 +162,52 @@ impl CompiledSensitiveFilterPolicy {
         &self,
         target: SensitiveFilterTarget,
         input: &[u8],
-    ) -> (Bytes, TransitMap) {
+    ) -> Result<(Bytes, TransitMap), TransitReplacementError> {
         let Some(text) = std::str::from_utf8(input).ok() else {
-            return (Bytes::copy_from_slice(input), TransitMap::default());
+            return Ok((Bytes::copy_from_slice(input), TransitMap::default()));
         };
         let mut out = text.to_string();
         let mut map = TransitMap::default();
         let mut seq = 0u64;
+        let mut surrogate_bytes = 0usize;
+        let nonce = request_nonce_hex();
         for rule in self.transit_rules(target) {
-            let hash = rule_id_hash(&rule.rule.id);
+            let mut overflow = None;
             let replaced = rule.re.replace_all(&out, |caps: &Captures<'_>| {
                 let matched = caps.get(0).expect("regex capture 0").as_str();
-                let surrogate = format!("__sf_{hash}_{seq}__");
+                let candidate = format!("__sf_{seq}_{nonce}__");
+                let reversible = map.len() < MAX_TRANSIT_MAP_ENTRIES
+                    && surrogate_bytes.saturating_add(candidate.len())
+                        <= MAX_TRANSIT_SURROGATE_BYTES;
+                if !reversible {
+                    tracing::warn!(
+                        target: "gw_runtime::sensitive_filter",
+                        map_entries = map.len(),
+                        surrogate_bytes,
+                        "transit replacement budget exhausted; rejecting request"
+                    );
+                    metrics::counter!("gw_sensitive_filter_transit_overflow_total").increment(1);
+                    overflow = Some(TransitReplacementError::BudgetExhausted {
+                        entries: map.len(),
+                        surrogate_bytes,
+                    });
+                    return matched.to_owned();
+                }
                 seq += 1;
+                surrogate_bytes = surrogate_bytes.saturating_add(candidate.len());
                 map.push(
-                    Bytes::from(surrogate.clone()),
+                    Bytes::from(candidate.clone()),
                     Bytes::copy_from_slice(matched.as_bytes()),
                 );
-                surrogate
+                candidate
             });
+            if let Some(err) = overflow {
+                return Err(err);
+            }
             out = replaced.into_owned();
         }
-        (Bytes::from(out), map)
+        map.sort_by_surrogate_len_desc();
+        Ok((Bytes::from(out), map))
     }
 
     pub fn reverse_transit_response(&self, map: &TransitMap, input: &[u8], eos: bool) -> Bytes {
@@ -192,10 +230,10 @@ impl CompiledSensitiveFilterPolicy {
     }
 }
 
-fn rule_id_hash(rule_id: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    rule_id.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+fn request_nonce_hex() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 #[cfg(test)]
@@ -242,6 +280,35 @@ mod tests {
         }
     }
 
+    fn policy_with_rule(
+        mode: SensitiveFilterMode,
+        pattern: &str,
+        replacement: &str,
+        targets: Vec<SensitiveFilterTarget>,
+    ) -> SensitiveFilterPolicy {
+        SensitiveFilterPolicy {
+            id: "global".to_string(),
+            version: 1,
+            groups: vec![SensitiveFilterGroup {
+                id: "g1".to_string(),
+                name: "Default".to_string(),
+                description: String::new(),
+                enabled: true,
+                priority: 1,
+                rules: vec![SensitiveFilterRule {
+                    id: "rule-one".to_string(),
+                    name: "Rule".to_string(),
+                    enabled: true,
+                    priority: 1,
+                    mode,
+                    pattern: pattern.to_string(),
+                    replacement: replacement.to_string(),
+                    targets,
+                }],
+            }],
+        }
+    }
+
     #[test]
     fn archive_mask_replaces_enabled_archive_rules() {
         let compiled = CompiledSensitiveFilterPolicy::compile(&policy()).unwrap();
@@ -260,8 +327,9 @@ mod tests {
     #[test]
     fn transit_replacement_is_unique_and_reversible() {
         let compiled = CompiledSensitiveFilterPolicy::compile(&policy()).unwrap();
-        let (out, map) =
-            compiled.replace_transit_request(SensitiveFilterTarget::RequestBody, b"sk-one sk-two");
+        let (out, map) = compiled
+            .replace_transit_request(SensitiveFilterTarget::RequestBody, b"sk-one sk-two")
+            .unwrap();
         assert_ne!(out.as_ref(), b"sk-one sk-two");
         assert_eq!(map.len(), 2);
         let restored = compiled.reverse_transit_response(&map, out.as_ref(), true);
@@ -269,10 +337,77 @@ mod tests {
     }
 
     #[test]
+    fn transit_surrogate_is_not_plain_rule_hash_and_sequence() {
+        let compiled = CompiledSensitiveFilterPolicy::compile(&policy_with_rule(
+            SensitiveFilterMode::TransitReversible,
+            "ak-[A-Za-z0-9_-]+",
+            "",
+            vec![SensitiveFilterTarget::RequestBody],
+        ))
+        .unwrap();
+
+        let (out, _map) = compiled
+            .replace_transit_request(SensitiveFilterTarget::RequestBody, b"ak-live")
+            .unwrap();
+        let rendered = std::str::from_utf8(&out).unwrap();
+
+        assert!(rendered.starts_with("__sf_"));
+        assert!(!rendered.ends_with("_0__"));
+    }
+
+    #[test]
+    fn transit_replacement_rejects_wide_patterns_at_budget() {
+        let compiled = CompiledSensitiveFilterPolicy::compile(&policy_with_rule(
+            SensitiveFilterMode::TransitReversible,
+            ".",
+            "",
+            vec![SensitiveFilterTarget::RequestBody],
+        ))
+        .unwrap();
+        let input = vec![b'a'; 4096];
+
+        let err = compiled
+            .replace_transit_request(SensitiveFilterTarget::RequestBody, &input)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TransitReplacementError::BudgetExhausted { .. }
+        ));
+    }
+
+    #[test]
+    fn transit_overflow_rejects_request_instead_of_leaking_plaintext() {
+        let compiled = CompiledSensitiveFilterPolicy::compile(&policy_with_rule(
+            SensitiveFilterMode::TransitReversible,
+            "ak-[0-9]+",
+            "",
+            vec![SensitiveFilterTarget::RequestBody],
+        ))
+        .unwrap();
+        let input = (0..(MAX_TRANSIT_MAP_ENTRIES + 2))
+            .map(|idx| format!("ak-{idx}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let err = compiled
+            .replace_transit_request(SensitiveFilterTarget::RequestBody, input.as_bytes())
+            .unwrap_err();
+
+        let TransitReplacementError::BudgetExhausted {
+            entries,
+            surrogate_bytes,
+        } = err;
+        assert_eq!(entries, MAX_TRANSIT_MAP_ENTRIES);
+        assert!(surrogate_bytes > 0);
+    }
+
+    #[test]
     fn streaming_reverse_handles_split_surrogate() {
         let compiled = CompiledSensitiveFilterPolicy::compile(&policy()).unwrap();
-        let (out, map) =
-            compiled.replace_transit_request(SensitiveFilterTarget::RequestBody, b"sk-one");
+        let (out, map) = compiled
+            .replace_transit_request(SensitiveFilterTarget::RequestBody, b"sk-one")
+            .unwrap();
         let split = out.len() - 2;
         let mut stream = ReverseStream::new(&map);
         let a = stream.push(&out[..split], false);

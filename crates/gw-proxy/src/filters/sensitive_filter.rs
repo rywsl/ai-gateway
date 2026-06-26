@@ -1,20 +1,33 @@
 use crate::ctx::ReqCtx;
 use bytes::Bytes;
+use gw_codec::cross_render::WireFormat;
 use gw_core::entity::SensitiveFilterTarget;
 use gw_runtime::CompiledSensitiveFilterPolicy;
+
+const MAX_TRANSIT_RESPONSE_DECODED_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn apply_transit_request_body(
     ctx: &mut ReqCtx,
     compiled: &CompiledSensitiveFilterPolicy,
     body: Bytes,
-) -> Bytes {
-    let (out, map) = compiled.replace_transit_request(SensitiveFilterTarget::RequestBody, &body);
+) -> Result<Bytes, gw_runtime::TransitReplacementError> {
+    let (out, map) = compiled.replace_transit_request(SensitiveFilterTarget::RequestBody, &body)?;
     if map.is_empty() {
-        return body;
+        return Ok(body);
     }
     ctx.sensitive_filter_transit = Some(map);
     ctx.sensitive_filter_reverse_stream = None;
-    out
+    Ok(out)
+}
+
+pub(crate) fn apply_transit_request_body_if_configured(
+    ctx: &mut ReqCtx,
+    body: Bytes,
+) -> Result<Bytes, gw_runtime::TransitReplacementError> {
+    let Some(compiled) = ctx.sensitive_filter_policy.clone() else {
+        return Ok(body);
+    };
+    apply_transit_request_body(ctx, &compiled, body)
 }
 
 pub(crate) fn reverse_transit_response_body(
@@ -48,6 +61,85 @@ pub(crate) fn reverse_body_option(ctx: &mut ReqCtx, body: &mut Option<Bytes>, en
     if had_body || !reversed.is_empty() {
         *body = Some(reversed);
     }
+}
+
+pub(crate) fn reverse_non_stream_response_body_option(
+    ctx: &mut ReqCtx,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+) -> pingora::Result<()> {
+    if should_reverse_compressed_non_stream_response(ctx, body, end_of_stream) {
+        if let Some(chunk) = body.take() {
+            match reverse_compressed_response_body(ctx, chunk) {
+                Ok(reversed) => {
+                    *body = Some(reversed);
+                    return Ok(());
+                }
+                Err(reason) => {
+                    metrics::counter!(
+                        "gw_sensitive_filter_transit_reverse_decode_failure_total",
+                        "reason" => reason,
+                    )
+                    .increment(1);
+                    return Err(pingora::Error::new(pingora::ErrorType::Custom(
+                        "gw_sensitive_filter_transit_reverse_failed",
+                    )));
+                }
+            }
+        }
+    }
+    reverse_body_option(ctx, body, end_of_stream);
+    Ok(())
+}
+
+pub(crate) fn has_compressed_transit_response(ctx: &ReqCtx) -> bool {
+    ctx.sensitive_filter_transit
+        .as_ref()
+        .is_some_and(|map| !map.is_empty())
+        && ctx.resp_content_encoding != gw_codec::compression::Encoding::Identity
+}
+
+pub(crate) fn should_buffer_compressed_non_stream_response_for_reverse(ctx: &ReqCtx) -> bool {
+    !ctx.is_stream && has_compressed_transit_response(ctx) && !is_cross_protocol(ctx)
+}
+
+fn should_reverse_compressed_non_stream_response(
+    ctx: &ReqCtx,
+    body: &Option<Bytes>,
+    end_of_stream: bool,
+) -> bool {
+    end_of_stream
+        && !ctx.is_stream
+        && body.is_some()
+        && has_compressed_transit_response(ctx)
+        && !is_cross_protocol(ctx)
+}
+
+fn reverse_compressed_response_body(ctx: &mut ReqCtx, chunk: Bytes) -> Result<Bytes, &'static str> {
+    let decoded = gw_codec::compression::decode(
+        ctx.resp_content_encoding,
+        &chunk,
+        MAX_TRANSIT_RESPONSE_DECODED_BYTES,
+    )
+    .map_err(|err| match err {
+        gw_codec::compression::CompressionError::TooLarge { .. } => "too_large",
+        gw_codec::compression::CompressionError::Io(_) => "io",
+        gw_codec::compression::CompressionError::Brotli(_) => "brotli",
+    })?;
+    let reversed = reverse_transit_response_body(ctx, decoded, true);
+    gw_codec::compression::encode(ctx.resp_content_encoding, &reversed).map_err(|err| match err {
+        gw_codec::compression::CompressionError::TooLarge { .. } => "too_large",
+        gw_codec::compression::CompressionError::Io(_) => "io",
+        gw_codec::compression::CompressionError::Brotli(_) => "brotli",
+    })
+}
+
+fn is_cross_protocol(ctx: &ReqCtx) -> bool {
+    matches!(
+        (ctx.client_codec.as_ref(), ctx.upstream_codec.as_ref()),
+        (Some(client), Some(upstream))
+            if WireFormat::from_any_codec(client) != WireFormat::from_any_codec(upstream)
+    )
 }
 
 #[cfg(test)]
@@ -121,7 +213,8 @@ mod tests {
         let compiled = test_support::transit_policy();
         let mut ctx = ReqCtx::default();
         let outbound =
-            apply_transit_request_body(&mut ctx, &compiled, Bytes::from_static(b"ak-live"));
+            apply_transit_request_body(&mut ctx, &compiled, Bytes::from_static(b"ak-live"))
+                .unwrap();
         assert_ne!(outbound.as_ref(), b"ak-live");
         assert!(std::str::from_utf8(&outbound)
             .expect("utf8 surrogate")
@@ -136,7 +229,8 @@ mod tests {
         let compiled = test_support::transit_policy();
         let mut ctx = ReqCtx::default();
         let outbound =
-            apply_transit_request_body(&mut ctx, &compiled, Bytes::from_static(b"ak-live"));
+            apply_transit_request_body(&mut ctx, &compiled, Bytes::from_static(b"ak-live"))
+                .unwrap();
         let split = outbound.len() - 2;
 
         let first = reverse_transit_response_body(&mut ctx, outbound.slice(..split), false);
@@ -146,5 +240,40 @@ mod tests {
         joined.extend_from_slice(&first);
         joined.extend_from_slice(&second);
         assert_eq!(joined, b"ak-live");
+    }
+
+    #[test]
+    fn transit_overflow_returns_error_without_setting_map() {
+        let compiled = test_support::transit_policy();
+        let mut ctx = ReqCtx::default();
+        let input = (0..514)
+            .map(|idx| format!("ak-{idx}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let err = apply_transit_request_body(&mut ctx, &compiled, Bytes::from(input)).unwrap_err();
+
+        assert!(matches!(
+            err,
+            gw_runtime::TransitReplacementError::BudgetExhausted { .. }
+        ));
+        assert!(ctx.sensitive_filter_transit.is_none());
+    }
+
+    #[test]
+    fn compressed_transit_response_detection_requires_map_and_encoding() {
+        let compiled = test_support::transit_policy();
+        let mut ctx = ReqCtx {
+            resp_content_encoding: gw_codec::compression::Encoding::Gzip,
+            ..ReqCtx::default()
+        };
+        assert!(!has_compressed_transit_response(&ctx));
+
+        let _ = apply_transit_request_body(&mut ctx, &compiled, Bytes::from_static(b"ak-live"))
+            .unwrap();
+        assert!(has_compressed_transit_response(&ctx));
+
+        ctx.resp_content_encoding = gw_codec::compression::Encoding::Identity;
+        assert!(!has_compressed_transit_response(&ctx));
     }
 }

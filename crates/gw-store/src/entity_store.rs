@@ -829,7 +829,6 @@ impl EntityStore {
 
     pub async fn invalidate_sensitive_filter_policy(&self, id: &str) {
         self.sensitive_filter_policy.invalidate(id).await;
-        *self.compiled_sensitive_filter_policy.lock().await = None;
     }
 
     /// G6/T1-C: handle to the optional loader's Redis pool, used by the
@@ -856,5 +855,84 @@ impl EntityStore {
             load_proxy_nodes_list(&loader).await
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod sensitive_filter_policy_tests {
+    use super::*;
+
+    fn policy(version: u64, pattern: &str) -> Arc<Versioned<SensitiveFilterPolicy>> {
+        Arc::new(Versioned {
+            version,
+            value: Arc::new(SensitiveFilterPolicy {
+                id: "global".to_string(),
+                version,
+                groups: vec![SensitiveFilterGroup {
+                    id: "g1".to_string(),
+                    name: "Default".to_string(),
+                    description: String::new(),
+                    enabled: true,
+                    priority: 1,
+                    rules: vec![SensitiveFilterRule {
+                        id: "r1".to_string(),
+                        name: "AK".to_string(),
+                        enabled: true,
+                        priority: 1,
+                        mode: SensitiveFilterMode::ArchiveMask,
+                        pattern: pattern.to_string(),
+                        replacement: "<AK>".to_string(),
+                        targets: vec![SensitiveFilterTarget::Archive],
+                    }],
+                }],
+            }),
+        })
+    }
+
+    #[tokio::test]
+    async fn invalid_policy_compile_keeps_last_good_compiled_policy() {
+        let store = EntityStore::new();
+        store
+            .sensitive_filter_policy
+            .insert("global".to_string(), policy(1, "ak-[A-Za-z]+"))
+            .await;
+        let first = store
+            .compiled_sensitive_filter_policy_or_compile()
+            .await
+            .expect("valid policy compiles");
+
+        store
+            .sensitive_filter_policy
+            .insert("global".to_string(), policy(2, "[invalid"))
+            .await;
+        store.invalidate_sensitive_filter_policy("global").await;
+        store
+            .sensitive_filter_policy
+            .insert("global".to_string(), policy(2, "[invalid"))
+            .await;
+
+        let second = store
+            .compiled_sensitive_filter_policy_or_compile()
+            .await
+            .expect("last good policy is retained");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn policy_cache_miss_does_not_reuse_last_good_compiled_policy() {
+        let store = EntityStore::new();
+        store
+            .sensitive_filter_policy
+            .insert("global".to_string(), policy(1, "ak-[A-Za-z]+"))
+            .await;
+        let _first = store
+            .compiled_sensitive_filter_policy_or_compile()
+            .await
+            .expect("valid policy compiles");
+
+        store.invalidate_sensitive_filter_policy("global").await;
+
+        let second = store.compiled_sensitive_filter_policy_or_compile().await;
+        assert!(second.is_none(), "load miss must not reuse stale policy");
     }
 }

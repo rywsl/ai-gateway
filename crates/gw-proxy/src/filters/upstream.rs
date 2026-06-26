@@ -17,7 +17,7 @@
 use crate::ctx::ReqCtx;
 use crate::error_emit;
 use crate::filters::early::{pick_emit_codec, short_circuit, with_request_id};
-use crate::filters::sensitive_filter::apply_transit_request_body;
+use crate::filters::sensitive_filter::apply_transit_request_body_if_configured;
 use crate::timeouts::Timeouts;
 use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
@@ -867,11 +867,7 @@ pub async fn rewrite_request(
         .as_ref()
         .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_client_codec")))?;
     let client_kind = client_codec.kind();
-    let outbound_body = ctx
-        .body
-        .as_ref()
-        .map(|v| v.outbound_or_raw().clone())
-        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_body_view")))?;
+    let outbound_body = decoded_outbound_or_raw(ctx)?;
     let picked = ctx
         .picked_vendor_key
         .as_ref()
@@ -903,6 +899,7 @@ pub async fn rewrite_request(
                 ctx.stream_state = Some(codec.new_stream_state());
             }
         }
+        let outbound = apply_transit_for_upstream(ctx, upstream_request, outbound, false)?;
         let outbound = apply_outbound_adapter(
             ctx,
             upstream_request,
@@ -916,11 +913,6 @@ pub async fn rewrite_request(
             upstream_kind,
         )
         .await?;
-        let outbound = if let Some(compiled) = ctx.sensitive_filter_policy.clone() {
-            apply_transit_request_body(ctx, &compiled, outbound)
-        } else {
-            outbound
-        };
         if let Some(view) = ctx.body.as_mut() {
             view.set_outbound(outbound.clone());
         }
@@ -1030,6 +1022,7 @@ pub async fn rewrite_request(
         }
     }
 
+    let outbound = apply_transit_for_upstream(ctx, upstream_request, outbound, true)?;
     let outbound = apply_outbound_adapter(
         ctx,
         upstream_request,
@@ -1043,11 +1036,6 @@ pub async fn rewrite_request(
         upstream_kind,
     )
     .await?;
-    let outbound = if let Some(compiled) = ctx.sensitive_filter_policy.clone() {
-        apply_transit_request_body(ctx, &compiled, outbound)
-    } else {
-        outbound
-    };
     if let Some(view) = ctx.body.as_mut() {
         view.set_outbound(outbound.clone());
     }
@@ -1143,6 +1131,19 @@ pub fn cli_passthrough_body(
         view.set_outbound(outbound.clone());
     }
     Ok(outbound)
+}
+
+fn decoded_outbound_or_raw(ctx: &ReqCtx) -> Result<bytes::Bytes> {
+    let view = ctx
+        .body
+        .as_ref()
+        .ok_or_else(|| Error::new(ErrorType::Custom("gw_no_body_view")))?;
+    if ctx.req_content_encoding == gw_codec::compression::Encoding::Identity {
+        return Ok(view.outbound_or_raw().clone());
+    }
+    view.decoded(32 * 1024 * 1024)
+        .cloned()
+        .map_err(|_| Error::new(ErrorType::Custom("gw_request_body_decode_failed")))
 }
 
 fn archive_upstream_request(
@@ -1335,6 +1336,36 @@ async fn apply_outbound_adapter(
     }
 
     Ok(outbound)
+}
+
+fn apply_transit_for_upstream(
+    ctx: &mut ReqCtx,
+    upstream_request: &mut RequestHeader,
+    outbound: Bytes,
+    input_is_decoded: bool,
+) -> Result<Bytes> {
+    let had_request_encoding =
+        ctx.req_content_encoding != gw_codec::compression::Encoding::Identity;
+    let input = if ctx.req_content_encoding == gw_codec::compression::Encoding::Identity
+        || input_is_decoded
+    {
+        outbound
+    } else {
+        let decoded =
+            gw_codec::compression::decode(ctx.req_content_encoding, &outbound, 32 * 1024 * 1024)
+                .map_err(|_| {
+                    Error::new(ErrorType::Custom(
+                        "gw_sensitive_filter_transit_decode_failed",
+                    ))
+                })?;
+        decoded
+    };
+    if had_request_encoding {
+        let _ = upstream_request.remove_header("content-encoding");
+    }
+    let output = apply_transit_request_body_if_configured(ctx, input)
+        .map_err(|_| Error::new(ErrorType::Custom("gw_sensitive_filter_transit_overflow")))?;
+    Ok(output)
 }
 
 fn sha256_hex(body: &[u8]) -> String {
@@ -2511,6 +2542,121 @@ mod regression_baseline_tests {
                 .as_ref(),
             outbound.as_ref()
         );
+    }
+
+    #[tokio::test]
+    async fn transit_request_runs_before_adapter_len_hash_signing() {
+        let (mut ctx, mut req, key, vendor, _) = make_canonical_inputs();
+        let body = Bytes::from_static(
+            br#"{"model":"gpt-4","messages":[{"role":"user","content":"ak-live"}]}"#,
+        );
+        ctx.picked_vendor_key = Some(key.clone());
+        ctx.picked_vendor = Some(vendor.clone());
+        ctx.sensitive_filter_policy = Some(Arc::new(
+            crate::filters::sensitive_filter::test_support::transit_policy(),
+        ));
+        let registry = Arc::new(gw_adapter::AdapterRegistry::default());
+        let adapter = Arc::new(PatchBodyAdapter {
+            calls: AtomicUsize::new(0),
+        });
+        registry.register_adapter(VendorId::from("openai"), adapter.clone());
+        let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> = Arc::new(StaticOAuthRuntime);
+        let health = Arc::new(gw_health::store::KeyHealthStore::default());
+
+        let transit_body = apply_transit_request_body_if_configured(&mut ctx, body.clone())
+            .expect("transit replacement");
+        assert_ne!(transit_body.as_ref(), body.as_ref());
+        let outbound = apply_outbound_adapter(
+            &mut ctx,
+            &mut req,
+            &key,
+            &vendor,
+            transit_body,
+            &registry,
+            &oauth_runtime,
+            &health,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            gw_core::protocol::ProtocolKind::OpenAi,
+        )
+        .await
+        .expect("adapter rewrite");
+
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            req.headers
+                .get("content-length")
+                .and_then(|v| v.to_str().ok()),
+            Some(outbound.len().to_string()).as_deref()
+        );
+        assert_eq!(
+            req.headers
+                .get("x-body-sha256")
+                .and_then(|v| v.to_str().ok()),
+            Some(sha256_hex(&outbound)).as_deref()
+        );
+        assert!(!String::from_utf8_lossy(&outbound).contains("ak-live"));
+    }
+
+    #[tokio::test]
+    async fn transit_request_decodes_compressed_body_before_adapter_signing() {
+        let (mut ctx, mut req, key, vendor, _) = make_canonical_inputs();
+        let plain = Bytes::from_static(
+            br#"{"model":"gpt-4","messages":[{"role":"user","content":"ak-live"}]}"#,
+        );
+        let gz = gw_codec::compression::encode(gw_codec::compression::Encoding::Gzip, &plain)
+            .expect("gzip encode");
+        ctx.req_content_encoding = gw_codec::compression::Encoding::Gzip;
+        ctx.body = Some(crate::body::RequestBodyView::from_raw(
+            gz,
+            gw_codec::compression::Encoding::Gzip,
+        ));
+        ctx.picked_vendor_key = Some(key.clone());
+        ctx.picked_vendor = Some(vendor.clone());
+        ctx.sensitive_filter_policy = Some(Arc::new(
+            crate::filters::sensitive_filter::test_support::transit_policy(),
+        ));
+        req.insert_header("content-encoding", "gzip").unwrap();
+        let registry = Arc::new(gw_adapter::AdapterRegistry::default());
+        let adapter = Arc::new(PatchBodyAdapter {
+            calls: AtomicUsize::new(0),
+        });
+        registry.register_adapter(VendorId::from("openai"), adapter.clone());
+        let oauth_runtime: Arc<dyn gw_adapter::OAuthRuntime> = Arc::new(StaticOAuthRuntime);
+        let health = Arc::new(gw_health::store::KeyHealthStore::default());
+
+        let decoded = decoded_outbound_or_raw(&ctx).expect("decoded body");
+        assert_eq!(decoded.as_ref(), plain.as_ref());
+        let transit_body =
+            apply_transit_for_upstream(&mut ctx, &mut req, decoded, true).expect("transit");
+        assert!(req.headers.get("content-encoding").is_none());
+        let outbound = apply_outbound_adapter(
+            &mut ctx,
+            &mut req,
+            &key,
+            &vendor,
+            transit_body,
+            &registry,
+            &oauth_runtime,
+            &health,
+            gw_core::protocol::ProtocolKind::OpenAi,
+            gw_core::protocol::ProtocolKind::OpenAi,
+        )
+        .await
+        .expect("adapter rewrite");
+
+        assert_eq!(
+            req.headers
+                .get("content-length")
+                .and_then(|v| v.to_str().ok()),
+            Some(outbound.len().to_string()).as_deref()
+        );
+        assert_eq!(
+            req.headers
+                .get("x-body-sha256")
+                .and_then(|v| v.to_str().ok()),
+            Some(sha256_hex(&outbound)).as_deref()
+        );
+        assert!(!String::from_utf8_lossy(&outbound).contains("ak-live"));
     }
 
     #[tokio::test]

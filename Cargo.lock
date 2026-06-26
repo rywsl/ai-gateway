@@ -2209,6 +2209,7 @@ dependencies = [
  "bytes",
  "futures",
  "gw-core",
+ "hex",
  "libc",
  "metrics",
  "moka",
