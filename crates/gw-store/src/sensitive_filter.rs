@@ -64,21 +64,38 @@ impl TransitMap {
 pub struct ReverseStream {
     entries: Vec<(Bytes, Bytes)>,
     tail: Vec<u8>,
-    max_surrogate_len: usize,
+    trie: Vec<ReverseTrieNode>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReverseTrieNode {
+    terminal: Option<usize>,
+    children: Vec<(u8, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReverseMatch {
+    Full { entry_idx: usize, len: usize },
+    NeedMore,
+    None,
+}
+
+impl ReverseTrieNode {
+    fn child(&self, byte: u8) -> Option<usize> {
+        self.children
+            .iter()
+            .find_map(|(candidate, child)| (*candidate == byte).then_some(*child))
+    }
 }
 
 impl ReverseStream {
     pub fn new(map: &TransitMap) -> Self {
         let entries = map.entries.clone();
-        let max_surrogate_len = entries
-            .iter()
-            .map(|(surrogate, _)| surrogate.len())
-            .max()
-            .unwrap_or(0);
+        let trie = build_reverse_trie(&entries);
         Self {
             entries,
             tail: Vec::new(),
-            max_surrogate_len,
+            trie,
         }
     }
 
@@ -95,24 +112,70 @@ impl ReverseStream {
         let mut out = BytesMut::with_capacity(input.len());
         let mut pos = 0usize;
         while pos < input.len() {
-            if !eos && input.len() - pos < self.max_surrogate_len {
-                self.tail.extend_from_slice(&input[pos..]);
-                break;
-            }
-            if let Some((surrogate, original)) = self
-                .entries
-                .iter()
-                .find(|(surrogate, _)| input[pos..].starts_with(surrogate.as_ref()))
-            {
-                out.extend_from_slice(original.as_ref());
-                pos += surrogate.len();
-            } else {
-                out.extend_from_slice(&input[pos..pos + 1]);
-                pos += 1;
+            match self.match_at(&input, pos, eos) {
+                ReverseMatch::Full { entry_idx, len } => {
+                    out.extend_from_slice(self.entries[entry_idx].1.as_ref());
+                    pos += len;
+                }
+                ReverseMatch::NeedMore => {
+                    self.tail.extend_from_slice(&input[pos..]);
+                    break;
+                }
+                ReverseMatch::None => {
+                    out.extend_from_slice(&input[pos..pos + 1]);
+                    pos += 1;
+                }
             }
         }
         Bytes::from(out.freeze())
     }
+
+    fn match_at(&self, input: &[u8], pos: usize, eos: bool) -> ReverseMatch {
+        let mut node_idx = 0usize;
+        let mut idx = pos;
+        let mut best = None;
+        while idx < input.len() {
+            let Some(child_idx) = self.trie[node_idx].child(input[idx]) else {
+                return best
+                    .map(|(entry_idx, len)| ReverseMatch::Full { entry_idx, len })
+                    .unwrap_or(ReverseMatch::None);
+            };
+            node_idx = child_idx;
+            idx += 1;
+            if let Some(entry_idx) = self.trie[node_idx].terminal {
+                best = Some((entry_idx, idx - pos));
+            }
+        }
+        if !eos && !self.trie[node_idx].children.is_empty() {
+            ReverseMatch::NeedMore
+        } else {
+            best.map(|(entry_idx, len)| ReverseMatch::Full { entry_idx, len })
+                .unwrap_or(ReverseMatch::None)
+        }
+    }
+}
+
+fn build_reverse_trie(entries: &[(Bytes, Bytes)]) -> Vec<ReverseTrieNode> {
+    let mut trie = vec![ReverseTrieNode::default()];
+    for (entry_idx, (surrogate, _original)) in entries.iter().enumerate() {
+        if surrogate.is_empty() {
+            continue;
+        }
+        let mut node_idx = 0usize;
+        for byte in surrogate.as_ref() {
+            let child_idx = if let Some(child_idx) = trie[node_idx].child(*byte) {
+                child_idx
+            } else {
+                trie.push(ReverseTrieNode::default());
+                let child_idx = trie.len() - 1;
+                trie[node_idx].children.push((*byte, child_idx));
+                child_idx
+            };
+            node_idx = child_idx;
+        }
+        trie[node_idx].terminal = Some(entry_idx);
+    }
+    trie
 }
 
 impl CompiledSensitiveFilterPolicy {
@@ -507,5 +570,18 @@ mod tests {
         joined.extend_from_slice(&a);
         joined.extend_from_slice(&b);
         assert_eq!(joined, b"sk-one");
+    }
+
+    #[test]
+    fn streaming_reverse_does_not_buffer_unrelated_short_chunk() {
+        let compiled = CompiledSensitiveFilterPolicy::compile(&policy()).unwrap();
+        let (_out, map) = compiled
+            .replace_transit_request(SensitiveFilterTarget::RequestBody, b"sk-one")
+            .unwrap();
+        let mut stream = ReverseStream::new(&map);
+
+        let out = stream.push(b"hello", false);
+
+        assert_eq!(out.as_ref(), b"hello");
     }
 }
