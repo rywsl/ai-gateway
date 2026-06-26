@@ -1,9 +1,10 @@
-//! Detailed archive — per-surface, wire-fidelity request/response capture.
+//! Detailed archive — per-surface request/response capture.
 //!
 //! Spec: `docs/spec/06-billing-ledger.md`.
 //! Each Pingora filter that completes a surface calls `DetailedArchive::try_send`
 //! with a [`CapturedSurface`]; a background flusher pool encodes (raw/lz4/zstd)
-//! and XADDs to `usage:detailed`.
+//! and XADDs to `usage:detailed`. `gw-proxy` applies sensitive-filter archive
+//! masking before this boundary when the global policy has enabled archive rules.
 
 use crate::encoding::Encoding;
 use bytes::Bytes;

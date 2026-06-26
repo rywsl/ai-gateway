@@ -258,6 +258,9 @@ pub(crate) async fn apply_entity_event(store: &Arc<EntityStore>, ns: &str, id: &
         "management_token" => {
             store.invalidate_mgmt_token(id).await;
         }
+        "sensitive_filter_policy" => {
+            store.invalidate_sensitive_filter_policy(id).await;
+        }
         "async_task_profile_revision" => {
             store.invalidate_async_task_profile_revision(id).await;
         }
@@ -661,6 +664,38 @@ mod mgmt_token_tests {
             store.mgmt_token.get("tk-1").await.is_none(),
             "cache entry must be absent after invalidation"
         );
+    }
+}
+
+#[cfg(test)]
+mod sensitive_filter_policy_tests {
+    use super::*;
+    use crate::entity_store::EntityStore;
+    use gw_core::entity::SensitiveFilterPolicy;
+    use gw_core::versioned::Versioned;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn apply_entity_event_invalidates_sensitive_filter_policy() {
+        let store = Arc::new(EntityStore::new());
+        store
+            .sensitive_filter_policy
+            .insert(
+                "global".to_string(),
+                Arc::new(Versioned {
+                    version: 1,
+                    value: Arc::new(SensitiveFilterPolicy {
+                        id: "global".to_string(),
+                        version: 1,
+                        groups: vec![],
+                    }),
+                }),
+            )
+            .await;
+
+        apply_entity_event(&store, "sensitive_filter_policy", "global").await;
+
+        assert!(store.sensitive_filter_policy.get("global").await.is_none());
     }
 }
 

@@ -17,6 +17,7 @@
 use crate::ctx::ReqCtx;
 use crate::error_emit;
 use crate::filters::early::{pick_emit_codec, short_circuit, with_request_id};
+use crate::filters::sensitive_filter::apply_transit_request_body;
 use crate::timeouts::Timeouts;
 use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
@@ -915,6 +916,11 @@ pub async fn rewrite_request(
             upstream_kind,
         )
         .await?;
+        let outbound = if let Some(compiled) = ctx.sensitive_filter_policy.clone() {
+            apply_transit_request_body(ctx, &compiled, outbound)
+        } else {
+            outbound
+        };
         if let Some(view) = ctx.body.as_mut() {
             view.set_outbound(outbound.clone());
         }
@@ -1037,6 +1043,11 @@ pub async fn rewrite_request(
         upstream_kind,
     )
     .await?;
+    let outbound = if let Some(compiled) = ctx.sensitive_filter_policy.clone() {
+        apply_transit_request_body(ctx, &compiled, outbound)
+    } else {
+        outbound
+    };
     if let Some(view) = ctx.body.as_mut() {
         view.set_outbound(outbound.clone());
     }

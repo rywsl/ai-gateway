@@ -14,8 +14,8 @@ use crate::loader::{
     load_async_task_binding_revision, load_async_task_endpoint_registry,
     load_async_task_profile_revision, load_auth_config, load_estimate_pricing, load_ipblock,
     load_jwks, load_mgmt_token, load_model, load_model_group, load_module_enabled, load_pricing,
-    load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
-    load_vendor_key, LoaderCtx,
+    load_proxy_node, load_proxy_nodes_list, load_sensitive_filter_policy, load_user,
+    load_user_group, load_vendor, load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -25,6 +25,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 pub type VendorKeyInvalidationHook = Arc<dyn Fn(&KeyId) + Send + Sync + 'static>;
@@ -154,6 +155,7 @@ pub struct EntityStore {
     /// Go-owned module toggles keyed by bare module name (`apikey` for
     /// `module.apikey.enabled`). Missing/unreadable rows are treated as enabled.
     pub module_enabled: Cache<String, bool>,
+    pub sensitive_filter_policy: Cache<String, Arc<Versioned<SensitiveFilterPolicy>>>,
     /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
     /// `None` for unit tests that pre-populate caches by hand.
     loader: Option<Arc<LoaderCtx>>,
@@ -163,6 +165,8 @@ pub struct EntityStore {
     cold_load_timeout: Duration,
     vendor_key_invalidation_hooks: Vec<VendorKeyInvalidationHook>,
     auth_config_rebuild_hook: Option<AuthConfigRebuildHook>,
+    compiled_sensitive_filter_policy:
+        Mutex<Option<(u64, Arc<gw_runtime::CompiledSensitiveFilterPolicy>)>>,
 }
 
 impl Default for EntityStore {
@@ -266,10 +270,15 @@ impl EntityStore {
                 .max_capacity(100)
                 .time_to_live(Duration::from_secs(300))
                 .build(),
+            sensitive_filter_policy: Cache::builder()
+                .max_capacity(16)
+                .time_to_live(Duration::from_secs(300))
+                .build(),
             loader,
             cold_load_timeout,
             vendor_key_invalidation_hooks: Vec::new(),
             auth_config_rebuild_hook: None,
+            compiled_sensitive_filter_policy: Mutex::new(None),
         }
     }
 
@@ -767,6 +776,60 @@ impl EntityStore {
 
     pub async fn invalidate_module_enabled(&self, name: &str) {
         self.module_enabled.invalidate(name).await;
+    }
+
+    pub async fn sensitive_filter_policy_or_load(
+        &self,
+    ) -> Option<Arc<Versioned<SensitiveFilterPolicy>>> {
+        const KEY: &str = "global";
+        if let Some(hit) = self.sensitive_filter_policy.get(KEY).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let deadline = self.cold_load_timeout;
+        self.sensitive_filter_policy
+            .try_get_with_by_ref(KEY, async move {
+                with_cold_load_timeout("sensitive_filter_policy", deadline, async move {
+                    load_sensitive_filter_policy(&loader, KEY).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn compiled_sensitive_filter_policy_or_compile(
+        &self,
+    ) -> Option<Arc<gw_runtime::CompiledSensitiveFilterPolicy>> {
+        let policy = self.sensitive_filter_policy_or_load().await?;
+        let mut slot = self.compiled_sensitive_filter_policy.lock().await;
+        if let Some((version, compiled)) = slot.as_ref() {
+            if *version == policy.version {
+                return Some(compiled.clone());
+            }
+        }
+        match gw_runtime::CompiledSensitiveFilterPolicy::compile(policy.value.as_ref()) {
+            Ok(compiled) => {
+                let compiled = Arc::new(compiled);
+                *slot = Some((policy.version, compiled.clone()));
+                Some(compiled)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "gw_store::sensitive_filter",
+                    error = %err,
+                    "compile failed; keeping last good sensitive filter policy"
+                );
+                slot.as_ref().map(|(_, compiled)| compiled.clone())
+            }
+        }
+    }
+
+    pub async fn invalidate_sensitive_filter_policy(&self, id: &str) {
+        self.sensitive_filter_policy.invalidate(id).await;
+        *self.compiled_sensitive_filter_policy.lock().await = None;
     }
 
     /// G6/T1-C: handle to the optional loader's Redis pool, used by the

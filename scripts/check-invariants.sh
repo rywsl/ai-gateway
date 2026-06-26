@@ -569,18 +569,19 @@ fi
 # done
 
 # ---------------------------------------------------------------------------
-# no_detailed_redaction — detailed archive must not reintroduce redaction.
+# sensitive_filter_archive_boundary — archive masking must use the policy engine.
 # Spec: docs/spec/06-billing-ledger.md
 # ---------------------------------------------------------------------------
-echo "[no_detailed_redaction] redaction helpers must not appear in gw-ledger/gw-proxy"
+echo "[sensitive_filter_archive_boundary] archive masking must use sensitive filter engine only"
 hits=$(grep -RnE 'redact_body|redact_headers|redact_message_content|redacted_preview|REDACT_HEADER_DENYLIST|REDACT_HEADER_ALLOWLIST' \
     crates/gw-ledger/src crates/gw-proxy/src 2>/dev/null | grep -v '^Binary file' || true)
 if [ -n "$hits" ]; then
   echo "$hits"
-  bad "detailed archive redaction helpers reintroduced"
+  bad "ad hoc detailed archive redaction helper present; use sensitive_filter engine"
 else
-  ok "no detailed-archive redaction helpers in gw-ledger/gw-proxy"
+  ok "no ad hoc detailed archive redaction helpers"
 fi
+grep -Rq "sensitive_filter" crates/gw-proxy/src || bad "sensitive filter archive boundary missing in gw-proxy"
 
 # ---------------------------------------------------------------------------
 # no_detailed_truncation — body preview / hard cap constants must not return.

@@ -25,7 +25,10 @@ use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
 use gw_routing::in_flight::InFlightGuard;
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
-use gw_runtime::{BackpressureGate, RegexCache, RegexCacheConfig, SpillFile, SpillRoot};
+use gw_runtime::{
+    BackpressureGate, CompiledSensitiveFilterPolicy, RegexCache, RegexCacheConfig, ReverseStream,
+    SpillFile, SpillRoot, TransitMap,
+};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -511,6 +514,13 @@ pub struct ReqCtx {
     /// Compiled-regex cache wired from Wired (T6.1). Always present — bootstrap
     /// constructs it once in Wired and threads it through LlmGateway -> new_ctx.
     pub regex_cache: Arc<RegexCache>,
+    /// Global sensitive-filter policy snapshot compiled once per request.
+    pub sensitive_filter_policy: Option<Arc<CompiledSensitiveFilterPolicy>>,
+    /// Request-local surrogate -> original mappings produced for upstream
+    /// request transit replacement.
+    pub sensitive_filter_transit: Option<TransitMap>,
+    /// Streaming reverse state for response chunks that may split a surrogate.
+    pub sensitive_filter_reverse_stream: Option<ReverseStream>,
 
     // --- Resilience ---
     /// Force-majeure backpressure gate (T7.1). Wired from Wired at bootstrap;
@@ -824,6 +834,9 @@ impl ReqCtx {
             api_key_id: None,
             merged_perm: None,
             regex_cache,
+            sensitive_filter_policy: None,
+            sensitive_filter_transit: None,
+            sensitive_filter_reverse_stream: None,
             backpressure_gate,
             model: None,
             is_stream: false,

@@ -35,6 +35,7 @@
 //! The check runs *before* any body processing or cross-protocol re-render.
 
 use crate::ctx::{ArchiveState, ArchiveStorage, ReqCtx};
+use crate::filters::sensitive_filter::reverse_body_option;
 use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
 use gw_codec::cross_render::{CrossRender, WireFormat};
@@ -218,6 +219,7 @@ pub async fn run(
                 *body = None;
             }
         }
+        reverse_body_option(ctx, body, end_of_stream);
         // Archive capture for non-stream path; body reflects whatever bytes
         // (substituted or upstream-verbatim) reach the client.
         if let Some(b) = body.as_ref() {
@@ -297,6 +299,7 @@ pub async fn run(
     if let Some(buf) = ctx.pending_client_body.take() {
         *body = Some(buf.freeze());
     }
+    reverse_body_option(ctx, body, end_of_stream);
 
     // Archive: capture downstream-bound bytes after all in-function mutation.
     if let Some(b) = body.as_ref() {
@@ -378,6 +381,7 @@ pub fn run_memory_sync(
                 *body = None;
             }
         }
+        reverse_body_option(ctx, body, end_of_stream);
         if let Some(b) = body.as_ref() {
             append_archive_sync(
                 &mut ctx.archive_downstream_response_body,
@@ -427,6 +431,7 @@ pub fn run_memory_sync(
     if let Some(buf) = ctx.pending_client_body.take() {
         *body = Some(buf.freeze());
     }
+    reverse_body_option(ctx, body, end_of_stream);
 
     if let Some(b) = body.as_ref() {
         append_archive_sync(
@@ -562,10 +567,14 @@ pub async fn run_cli_body_filter(
                 ));
             }
         }
+        let mut downstream = Some(Bytes::copy_from_slice(&passthrough));
+        reverse_body_option(ctx, &mut downstream, end_of_stream);
+        let downstream = downstream.expect("reverse helper preserves Some");
+        *body = Some(downstream.clone());
         if let Some(sr) = ctx.spill_root.clone() {
             ctx.archive_downstream_response_body
                 .append_chunk(
-                    &passthrough,
+                    &downstream,
                     &ctx.archive_caps,
                     &sr,
                     ctx.request_id.as_ref(),
@@ -573,7 +582,7 @@ pub async fn run_cli_body_filter(
                 )
                 .await;
         } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
-            buf.extend_from_slice(&passthrough);
+            buf.extend_from_slice(&downstream);
         }
     }
     if end_of_stream && !ctx.is_stream {
@@ -620,9 +629,13 @@ pub fn run_cli_body_filter_sync(
                 ));
             }
         }
+        let mut downstream = Some(Bytes::copy_from_slice(&passthrough));
+        reverse_body_option(ctx, &mut downstream, end_of_stream);
+        let downstream = downstream.expect("reverse helper preserves Some");
+        *body = Some(downstream.clone());
         append_archive_sync(
             &mut ctx.archive_downstream_response_body,
-            &passthrough,
+            &downstream,
             &ctx.archive_caps,
             ctx.request_id.as_ref(),
             "cli_downstream",

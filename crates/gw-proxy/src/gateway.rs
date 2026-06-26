@@ -148,6 +148,8 @@ fn reset_response_attempt_state(ctx: &mut ReqCtx, new_key: Arc<gw_core::entity::
     ctx.stream_probe_retry_pending = false;
     ctx.sse_leftover.clear();
     ctx.pending_client_body = None;
+    ctx.sensitive_filter_transit = None;
+    ctx.sensitive_filter_reverse_stream = None;
     // Reset archive accumulators. Without this, bytes from the failed attempt
     // bleed into the retry attempt's detailed-log surfaces, and any Spilled
     // shard files from the prior attempt would only be reclaimed by the LRU
@@ -274,6 +276,67 @@ fn redact_loopback_headers(headers: Vec<(String, String)>) -> Vec<(String, Strin
         .collect()
 }
 
+fn mask_archive_header_values(
+    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    headers: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let Some(policy) = policy else {
+        return headers;
+    };
+    headers
+        .into_iter()
+        .map(|(name, value)| {
+            let masked = policy.mask_archive_bytes(
+                gw_core::entity::SensitiveFilterTarget::Archive,
+                value.as_bytes(),
+            );
+            let value = String::from_utf8(masked.to_vec()).unwrap_or(value);
+            (name, value)
+        })
+        .collect()
+}
+
+fn mask_archive_text(
+    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    value: String,
+) -> String {
+    let Some(policy) = policy else {
+        return value;
+    };
+    let masked = policy.mask_archive_bytes(
+        gw_core::entity::SensitiveFilterTarget::Archive,
+        value.as_bytes(),
+    );
+    String::from_utf8(masked.to_vec()).unwrap_or(value)
+}
+
+fn mask_archive_body(
+    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    body: Arc<Bytes>,
+) -> Arc<Bytes> {
+    let Some(policy) = policy else {
+        return body;
+    };
+    let masked = policy.mask_archive_bytes(gw_core::entity::SensitiveFilterTarget::Archive, &body);
+    if masked.as_ref() == body.as_ref() {
+        body
+    } else {
+        Arc::new(masked)
+    }
+}
+
+fn mask_archive_surface(
+    ctx: &ReqCtx,
+    headers: Vec<(String, String)>,
+    body: Arc<Bytes>,
+) -> (Vec<(String, String)>, Arc<Bytes>) {
+    let policy = ctx.sensitive_filter_policy.as_deref();
+    (
+        mask_archive_header_values(policy, headers),
+        mask_archive_body(policy, body),
+    )
+}
+
 fn header_u32(response: &ResponseHeader, name: &str) -> Option<u32> {
     response
         .headers
@@ -391,7 +454,7 @@ pub struct LlmGateway {
     /// Turn-state cache (Task 4.6). Per-conversation impersonation turn
     /// counter; cloned onto `ReqCtx` in `new_ctx`.
     pub turn_state_cache: Arc<gw_core::impersonate::turn_state::TurnStateCache>,
-    /// Detailed-log archive (T10). Sender handle for per-surface wire-fidelity
+    /// Detailed-log archive (T10). Sender handle for per-surface archive
     /// capture. `try_send` is fire-and-forget; a full channel drops + metrics.
     pub(crate) detailed_archive: std::sync::Arc<gw_ledger::detailed_archive::DetailedArchive>,
     /// InflightLedger (W2-T6). Tracks in-flight request hashes in Redis so the
@@ -707,6 +770,8 @@ impl LlmGateway {
             let truncated = ctx.archive_upstream_response_body.is_truncated();
             let dropped = ctx.archive_upstream_response_body.dropped();
             let body = std::sync::Arc::new(body_bytes);
+            let (headers, body) =
+                mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -716,7 +781,7 @@ impl LlmGateway {
                 payload: SurfacePayload::Response(
                     ResponsePayload {
                         status: meta.status,
-                        headers: redact_loopback_headers(meta.headers),
+                        headers,
                         body_b64: String::new(),
                         archive_truncated: truncated,
                         archive_dropped: dropped,
@@ -756,6 +821,8 @@ impl LlmGateway {
             let truncated = ctx.archive_downstream_response_body.is_truncated();
             let dropped = ctx.archive_downstream_response_body.dropped();
             let body = std::sync::Arc::new(body_bytes);
+            let (headers, body) =
+                mask_archive_surface(ctx, redact_loopback_headers(downstream_meta.headers), body);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -765,7 +832,7 @@ impl LlmGateway {
                 payload: SurfacePayload::Response(
                     ResponsePayload {
                         status: downstream_meta.status,
-                        headers: redact_loopback_headers(downstream_meta.headers),
+                        headers,
                         body_b64: String::new(),
                         archive_truncated: truncated,
                         archive_dropped: dropped,
@@ -832,6 +899,8 @@ impl LlmGateway {
             ));
             let truncated = ctx.archive_upstream_response_body.is_truncated();
             let dropped = ctx.archive_upstream_response_body.dropped();
+            let (headers, body) =
+                mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -841,7 +910,7 @@ impl LlmGateway {
                 payload: SurfacePayload::Response(
                     ResponsePayload {
                         status: meta.status,
-                        headers: redact_loopback_headers(meta.headers),
+                        headers,
                         body_b64: String::new(),
                         archive_truncated: truncated,
                         archive_dropped: dropped,
@@ -870,6 +939,8 @@ impl LlmGateway {
             ));
             let truncated = ctx.archive_downstream_response_body.is_truncated();
             let dropped = ctx.archive_downstream_response_body.dropped();
+            let (headers, body) =
+                mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: now_ms,
                 request_id: ctx.request_id.clone(),
@@ -879,7 +950,7 @@ impl LlmGateway {
                 payload: SurfacePayload::Response(
                     ResponsePayload {
                         status: meta.status,
-                        headers: redact_loopback_headers(meta.headers),
+                        headers,
                         body_b64: String::new(),
                         archive_truncated: truncated,
                         archive_dropped: dropped,
@@ -1076,6 +1147,10 @@ impl ProxyHttp for LlmGateway {
             }),
         )
         .await?;
+        ctx.sensitive_filter_policy = self
+            .store
+            .compiled_sensitive_filter_policy_or_compile()
+            .await;
         // Emit downstream_request surface (only when process() actually read the
         // body; short-circuit paths may bail before the snapshot is taken).
         if let (Some(body), Some(meta)) = (
@@ -1085,6 +1160,12 @@ impl ProxyHttp for LlmGateway {
             use gw_ledger::detailed_archive::{
                 CapturedSurface, Kind, RequestPayload, SurfacePayload,
             };
+            let policy = ctx.sensitive_filter_policy.as_deref();
+            let method = mask_archive_text(policy, meta.method);
+            let url = mask_archive_text(policy, meta.url);
+            let http_version = mask_archive_text(policy, meta.http_version);
+            let (headers, body) =
+                mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
                 request_id: ctx.request_id.clone(),
@@ -1093,10 +1174,10 @@ impl ProxyHttp for LlmGateway {
                 kind: Kind::DownstreamRequest,
                 payload: SurfacePayload::Request(
                     RequestPayload {
-                        method: meta.method,
-                        url: meta.url,
-                        http_version: meta.http_version,
-                        headers: redact_loopback_headers(meta.headers),
+                        method,
+                        url,
+                        http_version,
+                        headers,
                         body_b64: String::new(),
                     },
                     body,
@@ -1212,6 +1293,12 @@ impl ProxyHttp for LlmGateway {
             use gw_ledger::detailed_archive::{
                 CapturedSurface, Kind, RequestPayload, SurfacePayload,
             };
+            let policy = ctx.sensitive_filter_policy.as_deref();
+            let method = mask_archive_text(policy, meta.method);
+            let url = mask_archive_text(policy, meta.url);
+            let http_version = mask_archive_text(policy, meta.http_version);
+            let (headers, body) =
+                mask_archive_surface(ctx, redact_loopback_headers(meta.headers), body);
             self.detailed_archive.try_send(CapturedSurface {
                 ts_ms: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
                 request_id: ctx.request_id.clone(),
@@ -1220,10 +1307,10 @@ impl ProxyHttp for LlmGateway {
                 kind: Kind::UpstreamRequest,
                 payload: SurfacePayload::Request(
                     RequestPayload {
-                        method: meta.method,
-                        url: meta.url,
-                        http_version: meta.http_version,
-                        headers: redact_loopback_headers(meta.headers),
+                        method,
+                        url,
+                        http_version,
+                        headers,
                         body_b64: String::new(),
                     },
                     body,
@@ -2539,6 +2626,35 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].0, "authorization");
         assert_eq!(out[1].0, "Content-Type");
+    }
+
+    #[test]
+    fn archive_mask_rewrites_header_values_and_body() {
+        let mut ctx = crate::ctx::ReqCtx::default();
+        ctx.sensitive_filter_policy = Some(Arc::new(
+            crate::filters::sensitive_filter::test_support::archive_policy(),
+        ));
+        let headers = vec![
+            ("authorization".to_string(), "Bearer ak-secret".to_string()),
+            ("x-client".to_string(), "keep".to_string()),
+        ];
+        let body = Arc::new(bytes::Bytes::from_static(b"{\"key\":\"ak-secret\"}"));
+
+        let (headers, body) = super::mask_archive_surface(&ctx, headers, body);
+        let url = super::mask_archive_text(
+            ctx.sensitive_filter_policy.as_deref(),
+            "/v1/chat?api_key=ak-secret".to_string(),
+        );
+
+        assert_eq!(
+            headers,
+            vec![
+                ("authorization".to_string(), "Bearer <AK>".to_string()),
+                ("x-client".to_string(), "keep".to_string()),
+            ]
+        );
+        assert_eq!(body.as_ref().as_ref(), b"{\"key\":\"<AK>\"}");
+        assert_eq!(url, "/v1/chat?api_key=<AK>");
     }
 
     #[test]
