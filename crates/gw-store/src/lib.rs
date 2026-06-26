@@ -14,6 +14,7 @@ pub mod oauth_refresh;
 pub mod pg_client;
 pub mod quota_state;
 pub mod redis_client;
+pub mod sensitive_filter;
 pub mod stream_consumer;
 
 pub use counter_store::CounterStore;

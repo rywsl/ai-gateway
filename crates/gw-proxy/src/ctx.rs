@@ -25,10 +25,8 @@ use gw_core::versioned::Versioned;
 use gw_ledger::RequestFreeze;
 use gw_routing::in_flight::InFlightGuard;
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
-use gw_runtime::{
-    BackpressureGate, CompiledSensitiveFilterPolicy, RegexCache, RegexCacheConfig, ReverseStream,
-    SpillFile, SpillRoot, TransitMap,
-};
+use gw_runtime::{BackpressureGate, RegexCache, RegexCacheConfig, SpillFile, SpillRoot};
+use gw_store::sensitive_filter::{CompiledSensitiveFilterPolicy, ReverseStream, TransitMap};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

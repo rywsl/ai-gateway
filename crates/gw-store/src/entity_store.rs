@@ -165,8 +165,12 @@ pub struct EntityStore {
     cold_load_timeout: Duration,
     vendor_key_invalidation_hooks: Vec<VendorKeyInvalidationHook>,
     auth_config_rebuild_hook: Option<AuthConfigRebuildHook>,
-    compiled_sensitive_filter_policy:
-        Mutex<Option<(u64, Arc<gw_runtime::CompiledSensitiveFilterPolicy>)>>,
+    compiled_sensitive_filter_policy: Mutex<
+        Option<(
+            u64,
+            Arc<crate::sensitive_filter::CompiledSensitiveFilterPolicy>,
+        )>,
+    >,
 }
 
 impl Default for EntityStore {
@@ -802,7 +806,7 @@ impl EntityStore {
 
     pub async fn compiled_sensitive_filter_policy_or_compile(
         &self,
-    ) -> Option<Arc<gw_runtime::CompiledSensitiveFilterPolicy>> {
+    ) -> Option<Arc<crate::sensitive_filter::CompiledSensitiveFilterPolicy>> {
         let policy = self.sensitive_filter_policy_or_load().await?;
         let mut slot = self.compiled_sensitive_filter_policy.lock().await;
         if let Some((version, compiled)) = slot.as_ref() {
@@ -810,7 +814,8 @@ impl EntityStore {
                 return Some(compiled.clone());
             }
         }
-        match gw_runtime::CompiledSensitiveFilterPolicy::compile(policy.value.as_ref()) {
+        match crate::sensitive_filter::CompiledSensitiveFilterPolicy::compile(policy.value.as_ref())
+        {
             Ok(compiled) => {
                 let compiled = Arc::new(compiled);
                 *slot = Some((policy.version, compiled.clone()));

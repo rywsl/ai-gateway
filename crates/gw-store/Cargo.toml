@@ -34,6 +34,8 @@ rand.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 reqwest.workspace = true
+regex.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 testcontainers.workspace = true

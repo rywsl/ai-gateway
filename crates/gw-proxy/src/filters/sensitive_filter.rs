@@ -2,7 +2,7 @@ use crate::ctx::ReqCtx;
 use bytes::Bytes;
 use gw_codec::cross_render::WireFormat;
 use gw_core::entity::SensitiveFilterTarget;
-use gw_runtime::CompiledSensitiveFilterPolicy;
+use gw_store::sensitive_filter::CompiledSensitiveFilterPolicy;
 
 const MAX_TRANSIT_RESPONSE_DECODED_BYTES: usize = 32 * 1024 * 1024;
 
@@ -10,7 +10,7 @@ pub(crate) fn apply_transit_request_body(
     ctx: &mut ReqCtx,
     compiled: &CompiledSensitiveFilterPolicy,
     body: Bytes,
-) -> Result<Bytes, gw_runtime::TransitReplacementError> {
+) -> Result<Bytes, gw_store::sensitive_filter::TransitReplacementError> {
     let (out, map) = compiled.replace_transit_request(SensitiveFilterTarget::RequestBody, &body)?;
     if map.is_empty() {
         return Ok(body);
@@ -23,7 +23,7 @@ pub(crate) fn apply_transit_request_body(
 pub(crate) fn apply_transit_request_body_if_configured(
     ctx: &mut ReqCtx,
     body: Bytes,
-) -> Result<Bytes, gw_runtime::TransitReplacementError> {
+) -> Result<Bytes, gw_store::sensitive_filter::TransitReplacementError> {
     let Some(compiled) = ctx.sensitive_filter_policy.clone() else {
         return Ok(body);
     };
@@ -43,7 +43,7 @@ pub(crate) fn reverse_transit_response_body(
     }
     let stream = ctx
         .sensitive_filter_reverse_stream
-        .get_or_insert_with(|| gw_runtime::ReverseStream::new(map));
+        .get_or_insert_with(|| gw_store::sensitive_filter::ReverseStream::new(map));
     stream.push(&body, end_of_stream)
 }
 
@@ -255,7 +255,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            gw_runtime::TransitReplacementError::BudgetExhausted { .. }
+            gw_store::sensitive_filter::TransitReplacementError::BudgetExhausted { .. }
         ));
         assert!(ctx.sensitive_filter_transit.is_none());
     }

@@ -30,6 +30,7 @@ use gw_routing::in_flight::InFlightStore;
 use gw_routing::latency::LatencyTracker;
 use gw_routing::{FailoverClass, FailoverDecision, FailoverExecutor};
 use gw_routing::{ModelFrequencyTracker, ReservationGlobalView};
+use gw_store::sensitive_filter::CompiledSensitiveFilterPolicy;
 use gw_store::{CounterStore, EntityStore};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
@@ -277,7 +278,7 @@ fn redact_loopback_headers(headers: Vec<(String, String)>) -> Vec<(String, Strin
 }
 
 fn mask_archive_header_values(
-    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    policy: Option<&CompiledSensitiveFilterPolicy>,
     headers: Vec<(String, String)>,
 ) -> Vec<(String, String)> {
     let Some(policy) = policy else {
@@ -296,10 +297,7 @@ fn mask_archive_header_values(
         .collect()
 }
 
-fn mask_archive_text(
-    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
-    value: String,
-) -> String {
+fn mask_archive_text(policy: Option<&CompiledSensitiveFilterPolicy>, value: String) -> String {
     let Some(policy) = policy else {
         return value;
     };
@@ -311,14 +309,14 @@ fn mask_archive_text(
 }
 
 fn mask_archive_optional_text(
-    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    policy: Option<&CompiledSensitiveFilterPolicy>,
     value: Option<String>,
 ) -> Option<String> {
     value.map(|value| mask_archive_text(policy, value))
 }
 
 fn mask_archive_optional_id<T>(
-    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    policy: Option<&CompiledSensitiveFilterPolicy>,
     value: Option<T>,
 ) -> Option<T>
 where
@@ -328,7 +326,7 @@ where
 }
 
 fn mask_archive_summary(
-    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    policy: Option<&CompiledSensitiveFilterPolicy>,
     summary: gw_ledger::detailed_archive::SummaryPayload,
 ) -> gw_ledger::detailed_archive::SummaryPayload {
     gw_ledger::detailed_archive::SummaryPayload {
@@ -349,7 +347,7 @@ fn mask_archive_summary(
 }
 
 fn mask_archive_body_with_encoding(
-    policy: Option<&gw_runtime::CompiledSensitiveFilterPolicy>,
+    policy: Option<&CompiledSensitiveFilterPolicy>,
     body: Arc<Bytes>,
     encoding: ArchiveBodyEncoding,
 ) -> (Arc<Bytes>, u64) {
