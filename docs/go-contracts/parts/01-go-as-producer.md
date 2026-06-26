@@ -65,7 +65,7 @@ XADD 字段（key-value 列表）：
 | `proxy_node` | `proxy_nodes`（0005 migration,已 merged）| `EntityStore.proxy_node` | `ProxyNodeEntry` | 30 min TTL;支撑 tunnel client 节点视图;详见 [parts/04](04-proxy-nodes.md) |
 | `estimate_pricing` | `estimate_pricings`（Go 负责建表/写入） | `EntityStore.estimate_pricing` | `EstimatePricing`（见 §1.5） | 30 min TTL |
 | `error_message_rules` | `error_message_rules`（Go 负责建表/写入） | `ErrorMessageRuleStore` 全局 `ArcSwap` snapshot | `CompiledErrorMessageRules` | ID 固定为 `"global"`；Rust 收到事件后整表 reload + compile，失败保留旧 snapshot |
-| `sensitive_filter_policy` | `sensitive_filter_policy_meta` + `sensitive_filter_groups` + `sensitive_filter_rules`（Go migration 00082） | `EntityStore.sensitive_filter_policy` + compiled policy cache | `SensitiveFilterPolicy` | ID 固定为 `"global"`；Go publishes Redis hash `entity:sensitive_filter_policy:global` and emits `events:entity ns=sensitive_filter_policy id=global`; Rust invalidates and recompiles, failures keep last-good compiled policy |
+| `sensitive_filter_policy` | `sensitive_filter_policy_meta` + `sensitive_filter_groups` + `sensitive_filter_rules`（Go migration 00084） | `EntityStore.sensitive_filter_policy` + compiled policy cache | `SensitiveFilterPolicy` | ID 固定为 `"global"`；Go publishes Redis hash `entity:sensitive_filter_policy:global` and emits `events:entity ns=sensitive_filter_policy id=global`; Rust invalidates and recompiles, failures keep last-good compiled policy |
 
 未知 ns Rust 端 warn 后丢弃。新增 ns **必须**同步：本表 + `crates/gw-store/src/stream_consumer.rs::apply_entity_event` + `crates/gw-store/src/entity_store.rs::EntityStore`。
 

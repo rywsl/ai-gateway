@@ -62,7 +62,7 @@ deleted_at  TIMESTAMPTZ NULL
   `events:entity ns=error_message_rules id=global` 后整表 reload + compile。
   这是全局 snapshot 表，不是普通 `EntityStore` Moka entity。
 - **`sensitive_filter_policy_meta` / `sensitive_filter_groups` /
-  `sensitive_filter_rules`**（Go migration 00082）：全局敏感过滤策略。Writer：
+  `sensitive_filter_rules`**（Go migration 00084）：全局敏感过滤策略。Writer：
   **Go** `sensitivefilter` module。Reader：Rust `EntityStore.sensitive_filter_policy`
   和 `CompiledSensitiveFilterPolicy`。Go 同事务 mutation + version bump，Redis
   write-through 键为 `entity:sensitive_filter_policy:global`，事件为
