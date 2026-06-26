@@ -150,9 +150,8 @@ impl CompiledSensitiveFilterPolicy {
                     .then_with(|| left.id.cmp(&right.id))
             });
             for mut rule in group_rules {
-                rule.pattern = rule.pattern.trim().to_owned();
                 rule.replacement = rule.replacement.trim().to_owned();
-                if rule.pattern.is_empty() || rule.pattern.len() > MAX_PATTERN_LEN {
+                if rule.pattern.trim().is_empty() || rule.pattern.len() > MAX_PATTERN_LEN {
                     anyhow::bail!(
                         "rule {} pattern length must be 1..{}",
                         rule.id,
@@ -397,6 +396,35 @@ mod tests {
         );
 
         assert!(CompiledSensitiveFilterPolicy::compile(&policy).is_err());
+    }
+
+    #[test]
+    fn compile_rejects_empty_runtime_pattern() {
+        let policy = policy_with_rule(
+            SensitiveFilterMode::ArchiveMask,
+            "   ",
+            "<AK>",
+            vec![SensitiveFilterTarget::Archive],
+        );
+
+        assert!(CompiledSensitiveFilterPolicy::compile(&policy).is_err());
+    }
+
+    #[test]
+    fn compile_preserves_regex_pattern_whitespace() {
+        let compiled = CompiledSensitiveFilterPolicy::compile(&policy_with_rule(
+            SensitiveFilterMode::ArchiveMask,
+            " ak-[A-Za-z0-9]+ ",
+            "<AK>",
+            vec![SensitiveFilterTarget::Archive],
+        ))
+        .unwrap();
+
+        let out = compiled.mask_archive_bytes(SensitiveFilterTarget::Archive, b"ak-secret");
+        assert_eq!(out.as_ref(), b"ak-secret");
+
+        let out = compiled.mask_archive_bytes(SensitiveFilterTarget::Archive, b" ak-secret ");
+        assert_eq!(out.as_ref(), b"<AK>");
     }
 
     #[test]
