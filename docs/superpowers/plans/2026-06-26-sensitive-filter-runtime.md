@@ -19,6 +19,35 @@
 - The previous `no_detailed_redaction` invariant must be replaced, not bypassed.
 - Use TDD: write the failing test, run it and verify the expected failure, then implement the minimal code.
 
+## AI 实施防错指南（每步开工前必读）
+
+### MUST DO
+
+1. **先 Read，再写**：动 `crates/gw-store/src/loader.rs`、`crates/gw-store/src/entity_store.rs`、`crates/gw-store/src/stream_consumer.rs`、`crates/gw-proxy/src/gateway.rs`、`crates/gw-proxy/src/ctx.rs`、`crates/gw-proxy/src/filters/upstream.rs`、`crates/gw-proxy/src/filters/response.rs` 之前，先 Read 整个文件，对齐既有 `load_entity` 模式、`Versioned<T>` 结构与 `ReqCtx` 现存字段。**不要**凭计划截图猜剩余 boilerplate。
+2. **Surrogate 必须不可被用户原文构造出来**：见 Task 2 的精确格式约定。永远不要用 `<replacement>-sf-<seq>` —— 它可以被上游或用户载荷里的明文复现，导致逆向时把无辜字符串还原成机密。
+3. **Compiled policy 缓存按 version 维度**：Compile 一次正则非常贵（数百 µs ~ ms 级），每个请求 compile 会把热路径毁掉。在 `EntityStore` 里加一个 `Mutex<Option<(u64, Arc<CompiledSensitiveFilterPolicy>)>>`，version 相同则复用 Arc，version 跳变才重新 compile。`ReqCtx` 只持有 `Option<Arc<CompiledSensitiveFilterPolicy>>`，**不持有原始 Policy**。
+4. **archive 掩膜在 `try_send` 前**：4 个 `CapturedSurface`（downstream request、upstream request、upstream response、downstream response）的 headers + body **都要**经过 `mask_archive_*`；改完用 `rg "self\.detailed_archive\.try_send" crates/gw-proxy/src` 自检一次，每个出现点上方应有 mask 调用，否则就是漏。
+5. **流式 reverse 必须维护 tail buffer**：上游响应是 chunk 流，一个 surrogate 可能跨 chunk 边界。`ReverseStream` 必须 buffer 最长可能的 surrogate 长度 − 1 个字节直到下个 chunk 或 EOS。看见 EOS 才 flush tail。
+6. **`scripts/check-invariants.sh` 的 `no_detailed_redaction` 块要替换不要新增**：当前在 `scripts/check-invariants.sh:572-583`。替换后用 `bash scripts/check-invariants.sh` 跑一次确认所有 lint 仍 PASS。
+7. **每个 cargo test 步骤都加 `--locked`**：lock file 漂移会让排错从 5 分钟变 5 小时。
+
+### MUST NOT DO
+
+1. **不要**写"源码字符串 grep" 风格的测试（如 `assert!(src.contains("..."))`）—— 这种测试只验证文本存在，不验证行为，重构会被它绑死。本计划 Task 7 提供了真正的行为测试，照抄。
+2. **不要**在 `replace_transit_request` 里用全局原子计数器生成 surrogate seq —— 必须是 per-call 的局部计数器（或 `TransitMap` 内部计数）。跨请求共享会泄漏请求边界，且让 surrogate 不可复现（不利于测试）。
+3. **不要**在热路径里调用 `EntityStore::sensitive_filter_policy_or_load` 超过一次：每请求只在 request_filter 阶段调一次，结果存进 `ReqCtx`；其余阶段从 `ReqCtx` 取。
+4. **不要**给 `CapturedSurface::summary` 整个再过一遍 mask —— summary 是结构化字段（model name、status code、用量数字），不是用户文本。只对原始 headers/body 应用 mask。
+5. **不要**修改 `gw-ledger` 的 detailed_archive XADD 协议（字段数、字段顺序、压缩 magic）。本次只在 `try_send` 前修改入参字节，不动持久化布局。
+6. **不要**在 `EntityStore::sensitive_filter_policy_or_load` cold load 失败时返回错误中断请求 —— 缺失策略 = 无规则 = 直通，按 spec 是 no-op。
+7. **不要**在 PG cold loader 里把 `sensitive_filter_groups`/`sensitive_filter_rules` JOIN 之后用 `ORDER BY priority` —— 必须按 `(priority ASC, id ASC)` 双键，且 `jsonb_agg` 显式带 `ORDER BY` 子句，否则跨节点观察到的策略顺序会抖。
+8. **不要**对响应每个 chunk 都分配 `ReverseStream` —— 整个响应一个 `ReverseStream`，初始化时机是首次看到 transit map 存在的第一个 chunk。
+
+### 常见 false-pass 陷阱
+
+- **缓存 hit 让测试看起来对**：跑 `cargo test -p gw-store --locked -- --test-threads=1` 排除测试间脏数据。
+- **`#[serde(rename_all = "snake_case")]` 漏写**：Go 发出的字段是 snake_case，Rust 默认是 PascalCase，漏写就静默忽略所有字段并落到 default。Task 1 的 reject_unknown_target 测试就是为了把这种 silent default 钉死。
+- **rust regex 不等于 RE2 不等于 Go regex**：先 lookahead `(?=...)`、后向引用 `\1` 在 Rust `regex` crate 里都不支持。校验时必须用同一引擎；Go 侧 `regexp.Compile` 已经是 RE2 的 Go port，Rust 侧 compile 报错回 keep-last-good，不要 panic。
+
 ---
 
 ## File Structure
@@ -276,17 +305,51 @@ Implement:
 
 ```rust
 pub struct CompiledSensitiveFilterPolicy { rules: Vec<CompiledRule> }
-pub struct TransitMap { pairs: Vec<(bytes::Bytes, bytes::Bytes)> }
-pub struct ReverseStream { map: TransitMap, tail: Vec<u8>, max_surrogate_len: usize }
+struct CompiledRule { rule: gw_core::entity::SensitiveFilterRule, re: regex::Regex }
+
+pub struct TransitMap {
+    /// Each entry is (surrogate_bytes, original_bytes). Ordered by surrogate length DESC
+    /// so the streaming reverse picks the longest match first.
+    entries: Vec<(bytes::Bytes, bytes::Bytes)>,
+}
+
+pub struct ReverseStream {
+    entries: Vec<(bytes::Bytes, bytes::Bytes)>,
+    /// Buffered tail that may contain a prefix of a surrogate spanning a chunk boundary.
+    tail: Vec<u8>,
+    /// Length of the longest surrogate in `entries`. The streaming reverse holds back
+    /// up to (max_surrogate_len - 1) trailing bytes until EOS or until enough new
+    /// bytes arrive to disambiguate.
+    max_surrogate_len: usize,
+}
 ```
 
-Use Rust `regex::Regex`. Generate surrogates as:
+**Surrogate format (collision-safe — DO NOT change without updating tests):**
 
 ```text
-<replacement>-sf-<sequence>
+__sf_<rule_id_hex>_<call_local_seq>__
 ```
 
-where sequence is monotonically increasing within `replace_transit_request`. Store `(surrogate, original)` pairs in `TransitMap`.
+where:
+- `<rule_id_hex>` is the rule ID hashed with `xxhash::xxh64` then hex-formatted to 16 chars. Using the hash (not the raw id) avoids leaking id chars that could appear in user text and keeps surrogate length bounded.
+- `<call_local_seq>` is a 0-indexed counter scoped to a single `replace_transit_request` call.
+- The `__sf_` prefix and `__` suffix make the surrogate cheap to scan for and statistically very unlikely to appear in user text (collision probability is bounded by the 64-bit hash + sequence).
+
+Worked example: rule id `"r1"` → `xxh64("r1")` → some 16-hex value like `7e3a8d51020b41cc`. First surrogate of a request is `__sf_7e3a8d51020b41cc_0__`.
+
+**Surrogate uniqueness contract:**
+- Surrogates are unique within one `TransitMap` (i.e., one request).
+- When the same `Rule` matches N times in `request_body`, the engine emits `__sf_<hash>_0__`, `__sf_<hash>_1__`, ..., `__sf_<hash>_N-1__`, and the map records each pair separately so the reverse stream restores the exact original substring for each occurrence (originals may differ — `sk-one` vs `sk-two`).
+- Use the regex crate's `regex::Regex::replace_all` with a closure that pushes into the map and emits the next surrogate. Do **not** use a global atomic — use a local `u64` counter passed to the closure.
+
+Use Rust `regex::Regex` (NOT `regex_lite`; the validators must match what compile-time rejection does on the gw-core side). On compile error, fail the whole `compile()` — the caller decides whether to keep the last-good policy.
+
+**Streaming reverse algorithm:** for each chunk:
+1. Prepend `self.tail` to the new chunk, clear `self.tail`.
+2. Scan from the start, trying to match a surrogate at each position (longest-first by sorted entries).
+3. When a surrogate matches, emit the original and advance past it.
+4. When the cursor is at position `p` and `chunk.len() - p < max_surrogate_len` and `!eos`, move `chunk[p..]` into `self.tail` and stop.
+5. On `eos`, never buffer — flush everything (any leftover is byte-passthrough).
 
 - [ ] **Step 3: Export module**
 
@@ -376,7 +439,7 @@ pub async fn invalidate_sensitive_filter_policy(&self, id: &str) {
 }
 ```
 
-Add `load_sensitive_filter_policy` to `loader.rs`. Use `load_entity` for Redis L1 and a direct PostgreSQL row query fallback that assembles `SensitiveFilterPolicy` in Rust:
+Add `load_sensitive_filter_policy` to `loader.rs`. Use `load_entity` for Redis L1 and a direct PostgreSQL fallback that assembles `SensitiveFilterPolicy` in SQL:
 
 ```rust
 pub async fn load_sensitive_filter_policy(
@@ -387,9 +450,70 @@ pub async fn load_sensitive_filter_policy(
         serde_json::from_value(value.clone()).map_err(Into::into)
     }).await
 }
+
+/// PG cold-load: assemble the full policy as JSONB in one query.
+/// The query is parameterised on $1 = id (always "global" today).
+/// Returns `(payload jsonb, version bigint)`.
+/// Missing row => empty policy + version 0, NOT an error (no-op semantics).
+pub const SENSITIVE_FILTER_POLICY_SQL: &str = r#"
+WITH meta AS (
+    SELECT id, version
+    FROM sensitive_filter_policy_meta
+    WHERE id = $1
+),
+rules AS (
+    SELECT
+        r.group_id,
+        jsonb_build_object(
+            'id',          r.id,
+            'name',        r.name,
+            'enabled',     r.enabled,
+            'priority',    r.priority,
+            'mode',        r.mode,
+            'pattern',     r.pattern,
+            'replacement', r.replacement,
+            'targets',     to_jsonb(r.targets)
+        ) AS rule_json,
+        r.priority AS rule_priority,
+        r.id       AS rule_id
+    FROM sensitive_filter_rules r
+    WHERE r.deleted_at IS NULL
+),
+groups AS (
+    SELECT
+        g.id,
+        jsonb_build_object(
+            'id',          g.id,
+            'name',        g.name,
+            'description', COALESCE(g.description, ''),
+            'enabled',     g.enabled,
+            'priority',    g.priority,
+            'rules',       COALESCE(
+                (
+                    SELECT jsonb_agg(rule_json ORDER BY rule_priority ASC, rule_id ASC)
+                    FROM rules WHERE rules.group_id = g.id
+                ),
+                '[]'::jsonb
+            )
+        ) AS group_json,
+        g.priority AS group_priority
+    FROM sensitive_filter_groups g
+    WHERE g.deleted_at IS NULL
+)
+SELECT
+    jsonb_build_object(
+        'id',      COALESCE((SELECT id FROM meta), $1),
+        'version', COALESCE((SELECT version FROM meta), 0),
+        'groups',  COALESCE(
+            (SELECT jsonb_agg(group_json ORDER BY group_priority ASC, group_json->>'id' ASC) FROM groups),
+            '[]'::jsonb
+        )
+    ) AS payload,
+    COALESCE((SELECT version FROM meta), 0)::bigint AS version
+"#;
 ```
 
-`SENSITIVE_FILTER_POLICY_SQL` returns one JSONB payload and one version column. It uses nested `jsonb_build_object`/`jsonb_agg` with `ORDER BY` over Go-owned tables `sensitive_filter_groups`, `sensitive_filter_rules`, and `sensitive_filter_policy_meta`. If the row is absent, return an empty policy with version `0` from SQL so a missing policy is a no-op, not a loader error.
+> Note: the query always returns exactly one row even when the policy is absent (empty groups, version 0). This avoids the `not found in pg` error path in `load_entity` and gives Rust the no-op-by-default semantics required by the spec.
 
 - [ ] **Step 3: Add stream consumer arm**
 
@@ -428,19 +552,104 @@ git commit -m "feat(gw-store): load sensitive filter policy"
 - Consumes: `CompiledSensitiveFilterPolicy`.
 - Produces: request-local `TransitMap` on `ReqCtx`.
 
-- [ ] **Step 1: Write failing upstream filter source/unit test**
+- [ ] **Step 1: Write failing upstream filter unit test**
 
-Add a focused unit test in `filters/upstream.rs` for a pure helper:
+Define a shared test helper module so Tasks 4, 5, 6 don't each invent their own. Create `crates/gw-proxy/src/filters/sensitive_filter_test_support.rs` (gated under `#[cfg(test)]`):
 
 ```rust
-#[test]
-fn apply_sensitive_filter_to_upstream_body_stores_transit_map() {
-    let policy = test_sensitive_filter_policy();
-    let compiled = gw_runtime::CompiledSensitiveFilterPolicy::compile(&policy).unwrap();
-    let mut ctx = ReqCtx::default();
-    let out = apply_sensitive_filter_to_upstream_body(&mut ctx, &compiled, bytes::Bytes::from_static(b"sk-secret"));
-    assert_ne!(out.as_ref(), b"sk-secret");
-    assert!(ctx.sensitive_filter_transit.as_ref().is_some_and(|m| m.len() == 1));
+#![cfg(test)]
+use gw_core::entity::*;
+use gw_runtime::CompiledSensitiveFilterPolicy;
+
+pub(crate) fn test_sensitive_filter_policy() -> SensitiveFilterPolicy {
+    SensitiveFilterPolicy {
+        id: "global".into(),
+        version: 1,
+        groups: vec![SensitiveFilterGroup {
+            id: "g1".into(),
+            name: "Default".into(),
+            enabled: true,
+            priority: 1,
+            rules: vec![
+                SensitiveFilterRule {
+                    id: "transit".into(),
+                    name: "Transit".into(),
+                    enabled: true,
+                    priority: 1,
+                    mode: SensitiveFilterMode::TransitReversible,
+                    pattern: "sk-[A-Za-z0-9_-]+".into(),
+                    replacement: "sk-safe".into(),
+                    targets: vec![
+                        SensitiveFilterTarget::RequestBody,
+                        SensitiveFilterTarget::ResponseBody,
+                    ],
+                },
+                SensitiveFilterRule {
+                    id: "mask".into(),
+                    name: "Mask".into(),
+                    enabled: true,
+                    priority: 2,
+                    mode: SensitiveFilterMode::ArchiveMask,
+                    pattern: "ak-[A-Za-z0-9_-]+".into(),
+                    replacement: "<AK>".into(),
+                    targets: vec![SensitiveFilterTarget::Archive],
+                },
+            ],
+        }],
+    }
+}
+
+pub(crate) fn test_compiled_archive_policy() -> CompiledSensitiveFilterPolicy {
+    CompiledSensitiveFilterPolicy::compile(&test_sensitive_filter_policy()).unwrap()
+}
+
+pub(crate) fn test_transit_body_and_map() -> (bytes::Bytes, gw_runtime::TransitMap) {
+    let compiled = test_compiled_archive_policy();
+    let (out, map) = compiled.replace_transit_request(
+        SensitiveFilterTarget::RequestBody,
+        b"sk-secret",
+    );
+    (bytes::Bytes::from(out.to_vec()), map)
+}
+```
+
+Add a focused unit test in `filters/upstream.rs`:
+
+```rust
+#[cfg(test)]
+mod sensitive_filter_tests {
+    use super::*;
+    use crate::filters::sensitive_filter_test_support::*;
+
+    #[test]
+    fn apply_sensitive_filter_to_upstream_body_stores_transit_map() {
+        let compiled = test_compiled_archive_policy();
+        let mut ctx = ReqCtx::default();
+        let out = apply_sensitive_filter_to_upstream_body(
+            &mut ctx,
+            &compiled,
+            bytes::Bytes::from_static(b"sk-secret"),
+        );
+        assert_ne!(out.as_ref(), b"sk-secret");
+        let map = ctx
+            .sensitive_filter_transit
+            .as_ref()
+            .expect("transit map must be installed");
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn apply_sensitive_filter_no_match_keeps_body_and_transit_empty() {
+        let compiled = test_compiled_archive_policy();
+        let mut ctx = ReqCtx::default();
+        let out = apply_sensitive_filter_to_upstream_body(
+            &mut ctx,
+            &compiled,
+            bytes::Bytes::from_static(b"hello"),
+        );
+        assert_eq!(out.as_ref(), b"hello");
+        assert!(ctx.sensitive_filter_transit.is_none());
+    }
 }
 ```
 
@@ -635,35 +844,108 @@ git commit -m "feat(gw-proxy): mask detailed archive surfaces"
 - Consumes: `EntityStore::sensitive_filter_policy_or_load`.
 - Produces: no per-chunk Redis/PG calls; compiled policy is reused safely.
 
-- [ ] **Step 1: Write failing source/behavior test**
+- [ ] **Step 1: Write failing behavior test (not a source-string grep)**
 
-Add source-level regression test in `gateway.rs`:
+> **AI 提醒：** 之前的草案用 `assert!(src.contains(...))` 验证集成 —— 这是反模式。文本存在不等于行为正确，且重构（renaming/移动）会无理由地把测试爆掉。改成下面的真实行为测试。
+
+Add to `gateway.rs` tests module (or a dedicated `gateway_sensitive_filter_tests.rs` integration file under `crates/gw-proxy/tests/`):
 
 ```rust
-#[test]
-fn sensitive_filter_policy_loaded_once_before_upstream_rewrite() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gateway.rs")).unwrap();
-    assert!(src.contains("sensitive_filter_policy_or_load"));
-    assert!(src.contains("CompiledSensitiveFilterPolicy::compile"));
+#[tokio::test]
+async fn ctx_carries_compiled_policy_after_request_init() {
+    // EntityStore stub seeded with one archive_mask rule.
+    let store = test_store_with_policy(sample_policy());
+
+    // Drive the part of request_filter that loads + compiles the policy.
+    let mut ctx = ReqCtx::default();
+    init_sensitive_filter_for_request(&store, &mut ctx).await;
+
+    let compiled = ctx
+        .sensitive_filter_policy
+        .as_ref()
+        .expect("policy should be cached on ctx");
+    let out = compiled.mask_archive_bytes(b"ak-x");
+    assert_eq!(out.as_ref(), b"<AK>");
+}
+
+#[tokio::test]
+async fn ctx_policy_is_none_when_store_returns_none() {
+    let store = test_store_without_policy();
+    let mut ctx = ReqCtx::default();
+    init_sensitive_filter_for_request(&store, &mut ctx).await;
+    assert!(ctx.sensitive_filter_policy.is_none());
+}
+
+#[tokio::test]
+async fn invalid_policy_keeps_last_good_compiled() {
+    let store = test_store_with_policy(sample_policy());
+    let mut ctx = ReqCtx::default();
+    init_sensitive_filter_for_request(&store, &mut ctx).await;
+    assert!(ctx.sensitive_filter_policy.is_some());
+
+    store.replace_policy_with_invalid_regex().await; // installs "[invalid"
+    let mut ctx2 = ReqCtx::default();
+    init_sensitive_filter_for_request(&store, &mut ctx2).await;
+    // Compile failed → ctx2 carries None (the per-request init does not
+    // surface the previous request's compiled policy), but the store's
+    // last-good compiled is retained for future requests.
+    assert!(ctx2.sensitive_filter_policy.is_none());
+    assert!(store.last_good_compiled_present().await);
 }
 ```
 
-Expected: FAIL until gateway loads/compiles policy.
+Expected: FAIL because `init_sensitive_filter_for_request`, `EntityStore::replace_policy_with_invalid_regex`, and the by-version compiled-policy cache do not exist yet.
 
-- [ ] **Step 2: Load and compile once per request**
+- [ ] **Step 2: Load + compile once per request, cache by version on EntityStore**
 
-Before request body/upstream rewrite needs filtering, load:
+Add to `EntityStore`:
 
 ```rust
-if let Some(policy) = self.store.sensitive_filter_policy_or_load().await {
-    match gw_runtime::CompiledSensitiveFilterPolicy::compile(policy.value.as_ref()) {
-        Ok(compiled) => ctx.sensitive_filter_policy = Some(std::sync::Arc::new(compiled)),
-        Err(err) => { warn + metric; }
+compiled_sensitive_filter_policy: tokio::sync::Mutex<Option<(u64, Arc<CompiledSensitiveFilterPolicy>)>>,
+```
+
+Implement `EntityStore::compiled_sensitive_filter_policy_or_compile()`:
+
+```rust
+pub async fn compiled_sensitive_filter_policy_or_compile(
+    &self,
+) -> Option<Arc<CompiledSensitiveFilterPolicy>> {
+    let policy = self.sensitive_filter_policy_or_load().await?;
+    let mut slot = self.compiled_sensitive_filter_policy.lock().await;
+    if let Some((v, c)) = slot.as_ref() {
+        if *v == policy.version {
+            return Some(c.clone());
+        }
+    }
+    match CompiledSensitiveFilterPolicy::compile(policy.value.as_ref()) {
+        Ok(c) => {
+            let c = Arc::new(c);
+            *slot = Some((policy.version, c.clone()));
+            Some(c)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "sensitive_filter: compile failed, keeping last good");
+            // metric: gw_sensitive_filter_compile_errors_total
+            slot.as_ref().map(|(_, c)| c.clone()) // last good, if any
+        }
     }
 }
 ```
 
-Prefer storing `Arc<CompiledSensitiveFilterPolicy>` in `ReqCtx` for per-request use. A later optimization can cache compiled policies by version; this task keeps correctness first.
+In `gateway.rs`, expose a small helper used by both production code and tests:
+
+```rust
+pub(crate) async fn init_sensitive_filter_for_request(
+    store: &EntityStore,
+    ctx: &mut ReqCtx,
+) {
+    ctx.sensitive_filter_policy = store
+        .compiled_sensitive_filter_policy_or_compile()
+        .await;
+}
+```
+
+Call it once from `request_filter`, before upstream rewrite. **Do not** call it from `upstream_request_filter` or any per-chunk path.
 
 - [ ] **Step 3: Run gateway policy tests**
 
@@ -719,13 +1001,22 @@ fi
 grep -Rq "sensitive_filter" crates/gw-proxy/src || bad "sensitive filter archive boundary missing in gw-proxy"
 ```
 
-- [ ] **Step 3: Update docs**
+- [ ] **Step 3: Update docs (explicit file + section enumeration — do not "search and replace globally")**
 
-Change wording from “wire-fidelity archive” to “filtered wire archive when sensitive-filter policy is enabled.” Explicitly state:
+Run `rg -n "wire-fidelity|no_detailed_redaction|wire archive|redaction" docs/` and process each hit one by one. Do not delete unrelated content. The known locations as of this plan:
 
-- request/response bodies can be masked before `usage:detailed`;
-- reversible transit maps are not persisted;
-- raw archive is only true when no sensitive-filter rules are enabled.
+- `docs/architecture.md`: §Deliberate behaviours block mentioning "wire-fidelity archive" and the `no_detailed_redaction` invariant — replace with the sensitive-filter boundary description.
+- `docs/spec/06-billing-ledger.md`: the `usage:detailed` section's "raw, unredacted" wording.
+- `docs/workflow.md`: the archive emit step in the filter chain section.
+
+In each location, the new wording MUST state, in this order:
+
+1. Request and response bodies (and headers, for archive surfaces) **may** be masked before the `usage:detailed` XADD, when the sensitive-filter policy contains enabled `archive_mask` rules.
+2. Reversible transit maps are request-local memory only — they are never serialized into `usage:detailed` and never persisted to PG/Redis.
+3. The archive is byte-for-byte equal to the wire only when the global sensitive-filter policy has zero enabled `archive_mask` rules — this is the policy default.
+4. Cross-link: `crates/gw-proxy/src/filters/sensitive_filter.rs` and `crates/gw-runtime/src/sensitive_filter.rs`.
+
+**Do not** introduce a new top-level doc; extend existing sections in place.
 
 - [ ] **Step 4: Run invariant check**
 
@@ -790,6 +1081,16 @@ git commit -m "fix(gateway): stabilize sensitive filter runtime"
 ## Plan Self-Review
 
 - Spec coverage: covers entity load, regex compile, reversible transit, streaming reverse, archive masking, invariants, and tests.
-- Placeholder scan: clean; crate paths and commands are explicit.
+- Placeholder scan: cleaned in 2026-06-26 revision — surrogate format pinned; SENSITIVE_FILTER_POLICY_SQL inline; shared test-helper module declared; Task 7 source-grep test replaced by real behavior tests; Task 8 doc-update locations enumerated.
 - Type consistency: Go snapshot names align with Rust serde names and namespace `sensitive_filter_policy`.
 - Scope check: Go/admin implementation is intentionally in the companion Go plan.
+
+### Revision 2026-06-26 — AI-implementation hardening
+
+- Added the **AI 实施防错指南** block: explicit MUST DO / MUST NOT DO with this codebase's landmines (per-version compiled cache, surrogate collision safety, streaming tail buffer, `try_send` mask coverage check).
+- Task 2 surrogate format pinned to `__sf_<xxh64(rule_id)>_<call_local_seq>__` — the previous `<replacement>-sf-<seq>` could collide with user text and let the reverse stream restore arbitrary substrings back to secrets.
+- Task 2 streaming reverse algorithm spelled out (tail buffer of `max_surrogate_len - 1` bytes, `eos` semantics).
+- Task 3 `SENSITIVE_FILTER_POLICY_SQL` now inline with the full CTE — including the "missing row ⇒ empty policy + version 0, never an error" branch needed for no-op semantics.
+- Task 7 source-string regression test replaced with three behavior tests (load + cache hit, no-policy ⇒ None, invalid policy keeps last good). Compiled policy is now cached on `EntityStore` keyed by version, not recompiled per-request.
+- Task 4 / 5 / 6 share a single `sensitive_filter_test_support.rs` helper module — no more invented test fixtures per task.
+- Task 8 docs-update step lists each file/section explicitly instead of asking the implementer to "globally replace wording".
