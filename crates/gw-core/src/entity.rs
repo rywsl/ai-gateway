@@ -219,6 +219,61 @@ pub struct TimeoutSpec {
     pub stream_total_ms: Option<u32>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct SensitiveFilterPolicy {
+    pub id: String,
+    #[serde(default)]
+    pub version: u64,
+    #[serde(default)]
+    pub groups: Vec<SensitiveFilterGroup>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct SensitiveFilterGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub rules: Vec<SensitiveFilterRule>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct SensitiveFilterRule {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub priority: i32,
+    pub mode: SensitiveFilterMode,
+    pub pattern: String,
+    pub replacement: String,
+    #[serde(default)]
+    pub targets: Vec<SensitiveFilterTarget>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SensitiveFilterMode {
+    TransitReversible,
+    ArchiveMask,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SensitiveFilterTarget {
+    RequestHeader,
+    RequestBody,
+    ResponseHeader,
+    ResponseBody,
+    Archive,
+}
+
 /// Vendor Key —— api_key 是解密后的 SecretString
 pub struct VendorKey {
     pub key_id: KeyId,
@@ -854,7 +909,7 @@ mod mgmt_scope_tests {
 #[cfg(test)]
 mod tests {
     use super::entity_helpers::EncryptedBlob;
-    use super::ApiKeyEntry;
+    use super::{ApiKeyEntry, SensitiveFilterMode, SensitiveFilterPolicy, SensitiveFilterTarget};
 
     /// Verifies that `EncryptedBlob` round-trips through `serde_json`. `Vec<u8>`
     /// fields serialise as JSON integer arrays (serde_json default) and
@@ -945,5 +1000,55 @@ mod tests {
         let entry: super::UserEntry =
             serde_json::from_str(json).expect("deser without token_version");
         assert_eq!(entry.token_version, 0);
+    }
+
+    #[test]
+    fn sensitive_filter_policy_deserializes_go_shape() {
+        let raw = r#"{
+		  "id":"global",
+		  "version":12,
+		  "groups":[{
+		    "id":"g1",
+		    "name":"Default",
+		    "enabled":true,
+		    "priority":1000,
+		    "rules":[{
+		      "id":"r1",
+		      "name":"AK",
+		      "enabled":true,
+		      "priority":1,
+		      "mode":"archive_mask",
+		      "pattern":"ak-[A-Za-z0-9_-]+",
+		      "replacement":"<AK>",
+		      "targets":["archive","request_body"]
+		    }]
+		  }]
+		}"#;
+        let policy: SensitiveFilterPolicy = serde_json::from_str(raw).unwrap();
+        assert_eq!(policy.id, "global");
+        assert_eq!(
+            policy.groups[0].rules[0].mode,
+            SensitiveFilterMode::ArchiveMask
+        );
+        assert_eq!(
+            policy.groups[0].rules[0].targets[0],
+            SensitiveFilterTarget::Archive
+        );
+    }
+
+    #[test]
+    fn sensitive_filter_policy_rejects_unknown_target() {
+        let raw = r#"{
+		  "id":"global",
+		  "version":1,
+		  "groups":[{
+		    "id":"g1","name":"Default","enabled":true,"priority":1,
+		    "rules":[{
+		      "id":"r1","name":"Bad","enabled":true,"priority":1,
+		      "mode":"archive_mask","pattern":"x","replacement":"<X>","targets":["bad"]
+		    }]
+		  }]
+		}"#;
+        assert!(serde_json::from_str::<SensitiveFilterPolicy>(raw).is_err());
     }
 }

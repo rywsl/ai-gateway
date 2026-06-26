@@ -40,6 +40,18 @@ if command -v cargo >/dev/null && command -v jq >/dev/null; then
       fi
     done
   done
+  runtime_workspace_deps="$(echo "$meta" | jq -r '
+    [ .packages[].name ] as $workspace
+    | .packages[] | select(.name=="gw-runtime")
+    | .dependencies[]
+    | select(.kind == null)
+    | .name as $dep
+    | select($workspace | index($dep))
+    | $dep')"
+  if [ -n "$runtime_workspace_deps" ]; then
+    echo "$runtime_workspace_deps" | sed 's/^/  /'
+    bad "gw-runtime depends on workspace crates (workspace bottom forbidden)"
+  fi
   # Execution crates must not depend on each other.
   proxy_deps="$(echo "$meta" | jq -r '.packages[] | select(.name=="gw-proxy") | .dependencies[] | select(.kind == null) | .name')"
   if echo "$proxy_deps" | grep -qx "gw-task-runtime"; then
@@ -569,18 +581,19 @@ fi
 # done
 
 # ---------------------------------------------------------------------------
-# no_detailed_redaction — detailed archive must not reintroduce redaction.
+# sensitive_filter_archive_boundary — archive masking must use the policy engine.
 # Spec: docs/spec/06-billing-ledger.md
 # ---------------------------------------------------------------------------
-echo "[no_detailed_redaction] redaction helpers must not appear in gw-ledger/gw-proxy"
+echo "[sensitive_filter_archive_boundary] archive masking must use sensitive filter engine only"
 hits=$(grep -RnE 'redact_body|redact_headers|redact_message_content|redacted_preview|REDACT_HEADER_DENYLIST|REDACT_HEADER_ALLOWLIST' \
     crates/gw-ledger/src crates/gw-proxy/src 2>/dev/null | grep -v '^Binary file' || true)
 if [ -n "$hits" ]; then
   echo "$hits"
-  bad "detailed archive redaction helpers reintroduced"
+  bad "ad hoc detailed archive redaction helper present; use sensitive_filter engine"
 else
-  ok "no detailed-archive redaction helpers in gw-ledger/gw-proxy"
+  ok "no ad hoc detailed archive redaction helpers"
 fi
+grep -Rq "sensitive_filter" crates/gw-proxy/src || bad "sensitive filter archive boundary missing in gw-proxy"
 
 # ---------------------------------------------------------------------------
 # no_detailed_truncation — body preview / hard cap constants must not return.
@@ -664,6 +677,39 @@ if grep -RInE 'pub use .*::supervisor::Supervisor' crates/ \
     bad "Supervisor must come from gw_runtime; remove the re-export(s) above."
 else
     ok "no rogue Supervisor re-exports"
+fi
+
+# ---------------------------------------------------------------------------
+# archive_sensitive_filter_guard — every detailed-archive surface emitted by
+# gw-proxy must pass through the archive sensitive-filter helpers before enqueue.
+# ---------------------------------------------------------------------------
+echo "[archive_sensitive_filter_guard] detailed archive surfaces must be masked before enqueue"
+python_bin="$(command -v python3 || command -v python || true)"
+if [ -z "$python_bin" ]; then
+    note "skipped: python required"
+else
+    archive_guard_output="$("$python_bin" - <<'PY'
+from pathlib import Path
+
+path = Path("crates/gw-proxy/src/gateway.rs")
+lines = path.read_text(encoding="utf-8").splitlines()
+violations = []
+for idx, line in enumerate(lines):
+    if "try_send(CapturedSurface" not in line:
+        continue
+    window = "\n".join(lines[max(0, idx - 25):idx + 1])
+    if "mask_archive_" not in window:
+        violations.append(idx + 1)
+if violations:
+    print("\n".join(f"{path}:{line}: archive surface enqueue without nearby mask_archive_ call" for line in violations))
+PY
+)"
+    if [ -n "$archive_guard_output" ]; then
+        echo "$archive_guard_output"
+        bad "detailed archive surface emitted without sensitive-filter masking"
+    else
+        ok "all detailed archive enqueues have nearby archive masking"
+    fi
 fi
 
 if [ "$fail" -ne 0 ]; then

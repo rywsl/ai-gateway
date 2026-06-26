@@ -65,6 +65,7 @@ XADD 字段（key-value 列表）：
 | `proxy_node` | `proxy_nodes`（0005 migration,已 merged）| `EntityStore.proxy_node` | `ProxyNodeEntry` | 30 min TTL;支撑 tunnel client 节点视图;详见 [parts/04](04-proxy-nodes.md) |
 | `estimate_pricing` | `estimate_pricings`（Go 负责建表/写入） | `EntityStore.estimate_pricing` | `EstimatePricing`（见 §1.5） | 30 min TTL |
 | `error_message_rules` | `error_message_rules`（Go 负责建表/写入） | `ErrorMessageRuleStore` 全局 `ArcSwap` snapshot | `CompiledErrorMessageRules` | ID 固定为 `"global"`；Rust 收到事件后整表 reload + compile，失败保留旧 snapshot |
+| `sensitive_filter_policy` | `sensitive_filter_policy_meta` + `sensitive_filter_groups` + `sensitive_filter_rules`（Go migration 00082） | `EntityStore.sensitive_filter_policy` + compiled policy cache | `SensitiveFilterPolicy` | ID 固定为 `"global"`；Go publishes Redis hash `entity:sensitive_filter_policy:global` and emits `events:entity ns=sensitive_filter_policy id=global`; Rust invalidates and recompiles, failures keep last-good compiled policy |
 
 未知 ns Rust 端 warn 后丢弃。新增 ns **必须**同步：本表 + `crates/gw-store/src/stream_consumer.rs::apply_entity_event` + `crates/gw-store/src/entity_store.rs::EntityStore`。
 
@@ -141,6 +142,65 @@ then bounded upstream-message substring checks. `endpoint_id` participates only
 when the request context has `selected_endpoint_id`; first-version routing keeps
 it `None` because the current `VendorKey` projection does not expose endpoint
 row identity.
+
+### 1.2.4.3 Sensitive-filter global policy
+
+Sensitive-filter policy is Go-owned control-plane data consumed by Rust as one
+global snapshot:
+
+1. Go writes `sensitive_filter_groups` and `sensitive_filter_rules` rows in
+   PgSQL, and bumps `sensitive_filter_policy_meta.version` in the same
+   transaction. The `global` meta row starts at version `1`.
+2. Before commit and before publish, Go validates the enabled runtime snapshot:
+   max `100` enabled groups, max `300` enabled rules, `pattern` length
+   `1..2048`, `replacement` length `1..256`, and regex compilation.
+3. Go publishes Redis HASH `entity:sensitive_filter_policy:global` with fields:
+   `v=<sensitive_filter_policy_meta.version>`, `enc=json`,
+   `d=<SensitiveFilterPolicy JSON>`. Go-owned write-through keys do not expire.
+4. Go emits `XADD events:entity * ns sensitive_filter_policy id global v <version> op upsert`.
+
+The JSON `d` field is:
+
+```json
+{
+  "id": "global",
+  "version": 42,
+  "groups": [{
+    "id": "sfg_...",
+    "name": "Default",
+    "description": "optional",
+    "enabled": true,
+    "priority": 1000,
+    "rules": [{
+      "id": "sfr_...",
+      "name": "Access key",
+      "enabled": true,
+      "priority": 10,
+      "mode": "transit_reversible",
+      "pattern": "ak-[A-Za-z0-9_-]+",
+      "replacement": "ak-placeholder",
+      "targets": ["request_body"]
+    }]
+  }]
+}
+```
+
+Go publishes only enabled groups/rules sorted by
+`group.priority ASC, group.id ASC, rule.priority ASC, rule.id ASC`. Rust
+revalidates all caps and regexes while compiling. On Redis miss, Rust falls back
+to PgSQL using the same tables. On read/deserialize/compile failure, Rust logs
+and keeps the previous compiled policy; request hot paths do not call Redis or
+PgSQL.
+
+Mode semantics:
+
+- `archive_mask`: `replacement` is the exact placeholder written into
+  `usage:detailed` archive surfaces before XADD. Reversible transit maps are
+  never persisted.
+- `transit_reversible`: `replacement` is a configured surrogate prefix. Rust
+  appends a per-request unique suffix (`__sf_<seq>_<nonce>__`) before sending the
+  upstream request and stores the request-local map in memory so response chunks
+  containing that surrogate can be restored to the original matched value.
 
 ### 1.2.5 删除语义
 

@@ -61,6 +61,13 @@ deleted_at  TIMESTAMPTZ NULL
   `errormessage` module。Reader：Rust `ErrorMessageRuleStore`，启动冷加载并在
   `events:entity ns=error_message_rules id=global` 后整表 reload + compile。
   这是全局 snapshot 表，不是普通 `EntityStore` Moka entity。
+- **`sensitive_filter_policy_meta` / `sensitive_filter_groups` /
+  `sensitive_filter_rules`**（Go migration 00082）：全局敏感过滤策略。Writer：
+  **Go** `sensitivefilter` module。Reader：Rust `EntityStore.sensitive_filter_policy`
+  和 `CompiledSensitiveFilterPolicy`。Go 同事务 mutation + version bump，Redis
+  write-through 键为 `entity:sensitive_filter_policy:global`，事件为
+  `events:entity ns=sensitive_filter_policy id=global`。runtime 上限：100 enabled
+  groups / 300 enabled rules；`pattern` 1..2048；`replacement` 1..256。
 
 ### 3.1.3 `vendor_keys` 生产形态：可写 VIEW over `provider_keys`（CNxus-Rust #11）
 
@@ -146,6 +153,59 @@ unchanged.
 when `selected_endpoint_id` is available in request context. Current
 `VendorKey` projection does not carry endpoint row identity, so the gateway
 sets it to `None` until that projection is extended.
+
+### 3.2.0.1 `sensitive_filter_policy` — global sensitive-filter snapshot
+
+This policy is Go-owned and Rust read-only. PgSQL shape:
+
+```sql
+CREATE TABLE sensitive_filter_policy_meta (
+  id TEXT PRIMARY KEY,
+  version BIGINT NOT NULL DEFAULT 1,
+  updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE sensitive_filter_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  priority INTEGER NOT NULL DEFAULT 1000,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  deleted_at BIGINT
+);
+
+CREATE TABLE sensitive_filter_rules (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES sensitive_filter_groups(id),
+  name TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  priority INTEGER NOT NULL DEFAULT 1000,
+  mode TEXT NOT NULL CHECK (mode IN ('transit_reversible', 'archive_mask')),
+  pattern TEXT NOT NULL CHECK (length(pattern) BETWEEN 1 AND 2048),
+  replacement TEXT NOT NULL CHECK (length(replacement) BETWEEN 1 AND 256),
+  targets TEXT[] NOT NULL,
+  notes TEXT,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  deleted_at BIGINT
+);
+```
+
+Redis entity envelope:
+
+```text
+entity:sensitive_filter_policy:global HASH
+  v   <policy_meta.version>
+  enc json
+  d   <SensitiveFilterPolicy JSON>
+```
+
+Rust type anchor: `crates/gw-core/src/entity.rs::SensitiveFilterPolicy`.
+The policy JSON is the same shape documented in Part 01 §1.2.4.3.
 
 ### 3.2.1 `users.payload` — `UserEntry`
 

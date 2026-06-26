@@ -15,7 +15,7 @@ use gw_core::entity::{
     ApiKeyEntry, AsyncTaskBindingIndex, AsyncTaskBindingRevision, AsyncTaskEndpointRegistry,
     AsyncTaskProfileRevision, AuthConfig, EstimatePricing, IpBlockEntry, JwksEntry,
     ManagementTokenEntry, Model, ModelGroup, OAuthCredentials, Pricing, ProxyNode, QuotaState,
-    UserEntry, UserGroup, Vendor, VendorKey,
+    SensitiveFilterPolicy, UserEntry, UserGroup, Vendor, VendorKey,
 };
 use gw_core::ids::{ApiKeyId, Group, KeyId, Kid, ModelName, UserGroupId, UserId, VendorId};
 use gw_core::versioned::Versioned;
@@ -327,6 +327,62 @@ const ASYNC_TASK_PROFILE_REVISION_SQL: &str = "SELECT jsonb_build_object('id', i
 const ASYNC_TASK_BINDING_REVISION_SQL: &str = "SELECT jsonb_build_object('id', id, 'binding_id', binding_id, 'version', version, 'profile_id', profile_id, 'profile_revision_id', profile_revision_id, 'profile_version', profile_version, 'global_model_id', global_model_id, 'provider_id', provider_id, 'provider_model_id', provider_model_id, 'provider_model_name', COALESCE(target_snapshot->>'provider_model_name', provider_model_id), 'endpoint_id', endpoint_id, 'api_format', api_format, 'provider_key_id', provider_key_id, 'priority', priority, 'target_snapshot', target_snapshot, 'overrides_snapshot', overrides_snapshot, 'effective_template_snapshot', effective_template_snapshot, 'effective_template_hash', effective_template_hash, 'specificity_key', specificity_key, 'published_by', published_by, 'published_at', published_at) AS payload, version FROM async_task_binding_revisions WHERE id = $1";
 const ASYNC_TASK_BINDING_INDEX_SQL: &str = "WITH parts AS (SELECT split_part($1, ':', 1) AS global_model_id, split_part($1, ':', 2) AS task_kind), rows AS (SELECT abr.id, abr.version, apr.published_snapshot FROM async_task_binding_revisions abr JOIN async_task_bindings ab ON ab.id = abr.binding_id AND ab.status = 'published' AND ab.deleted_at IS NULL JOIN async_task_profile_revisions apr ON apr.id = abr.profile_revision_id JOIN async_task_profiles p_current ON p_current.id = apr.profile_id AND p_current.status = 'published' AND p_current.deleted_at IS NULL JOIN parts p ON TRUE WHERE abr.global_model_id = p.global_model_id AND apr.task_kind = p.task_kind ORDER BY abr.priority DESC, abr.version DESC) SELECT jsonb_build_object('global_model_id', (SELECT global_model_id FROM parts), 'task_kind', (SELECT task_kind FROM parts), 'binding_revision_ids', COALESCE(jsonb_agg(id ORDER BY version DESC), '[]'::jsonb), 'endpoint_registry', COALESCE(jsonb_agg(published_snapshot->'client_request_template') FILTER (WHERE published_snapshot ? 'client_request_template'), '[]'::jsonb)) AS payload, COALESCE(MAX(version), 0)::BIGINT AS version FROM rows";
 const ASYNC_TASK_ENDPOINT_REGISTRY_SQL: &str = "WITH routes AS (SELECT DISTINCT ON ((endpoint->>'method'), (endpoint->>'path'), (endpoint->>'task_kind'), COALESCE(endpoint->>'content_type', ''), COALESCE(endpoint->>'model_path', ''), COALESCE(endpoint->>'default_model', '')) endpoint, apr.version FROM async_task_profile_revisions apr JOIN async_task_profiles p ON p.id = apr.profile_id AND p.status = 'published' AND p.deleted_at IS NULL CROSS JOIN LATERAL (SELECT apr.published_snapshot->'client_request_template'->'endpoint' AS endpoint) e WHERE apr.published_snapshot ? 'client_request_template' AND apr.published_snapshot->'client_request_template' ? 'endpoint' AND endpoint ? 'method' AND endpoint ? 'path' ORDER BY (endpoint->>'method'), (endpoint->>'path'), (endpoint->>'task_kind'), COALESCE(endpoint->>'content_type', ''), COALESCE(endpoint->>'model_path', ''), COALESCE(endpoint->>'default_model', ''), apr.version DESC) SELECT jsonb_build_object('routes', COALESCE(jsonb_agg(endpoint ORDER BY endpoint->>'method', endpoint->>'path'), '[]'::jsonb)) AS payload, COALESCE(MAX(version), 0)::BIGINT AS version FROM routes WHERE $1 = 'global'";
+pub const SENSITIVE_FILTER_POLICY_SQL: &str = r#"
+WITH meta AS (
+    SELECT id, version
+    FROM sensitive_filter_policy_meta
+    WHERE id = $1
+),
+rules AS (
+    SELECT
+        r.group_id,
+        jsonb_build_object(
+            'id',          r.id,
+            'name',        r.name,
+            'enabled',     r.enabled,
+            'priority',    r.priority,
+            'mode',        r.mode,
+            'pattern',     r.pattern,
+            'replacement', r.replacement,
+            'targets',     to_jsonb(r.targets)
+        ) AS rule_json,
+        r.priority AS rule_priority,
+        r.id       AS rule_id
+    FROM sensitive_filter_rules r
+    WHERE r.deleted_at IS NULL
+),
+groups AS (
+    SELECT
+        g.id,
+        jsonb_build_object(
+            'id',          g.id,
+            'name',        g.name,
+            'description', COALESCE(g.description, ''),
+            'enabled',     g.enabled,
+            'priority',    g.priority,
+            'rules',       COALESCE(
+                (
+                    SELECT jsonb_agg(rule_json ORDER BY rule_priority ASC, rule_id ASC)
+                    FROM rules WHERE rules.group_id = g.id
+                ),
+                '[]'::jsonb
+            )
+        ) AS group_json,
+        g.priority AS group_priority
+    FROM sensitive_filter_groups g
+    WHERE g.deleted_at IS NULL
+)
+SELECT
+    jsonb_build_object(
+        'id',      COALESCE((SELECT id FROM meta), $1),
+        'version', COALESCE((SELECT version FROM meta), 0),
+        'groups',  COALESCE(
+            (SELECT jsonb_agg(group_json ORDER BY group_priority ASC, group_json->>'id' ASC) FROM groups),
+            '[]'::jsonb
+        )
+    ) AS payload,
+    COALESCE((SELECT version FROM meta), 0)::bigint AS version
+"#;
 
 pub async fn load_user(ctx: &LoaderCtx, id: &UserId) -> anyhow::Result<Versioned<UserEntry>> {
     load_entity(ctx, "user", id.as_ref(), USER_SQL, |v| {
@@ -538,6 +594,20 @@ pub async fn load_async_task_endpoint_registry(
         id,
         ASYNC_TASK_ENDPOINT_REGISTRY_SQL,
         |v| serde_json::from_value::<AsyncTaskEndpointRegistry>(v.clone()).map_err(Into::into),
+    )
+    .await
+}
+
+pub async fn load_sensitive_filter_policy(
+    ctx: &LoaderCtx,
+    id: &str,
+) -> anyhow::Result<Versioned<SensitiveFilterPolicy>> {
+    load_entity(
+        ctx,
+        "sensitive_filter_policy",
+        id,
+        SENSITIVE_FILTER_POLICY_SQL,
+        |v| serde_json::from_value::<SensitiveFilterPolicy>(v.clone()).map_err(Into::into),
     )
     .await
 }

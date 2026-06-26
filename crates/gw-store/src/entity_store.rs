@@ -14,8 +14,8 @@ use crate::loader::{
     load_async_task_binding_revision, load_async_task_endpoint_registry,
     load_async_task_profile_revision, load_auth_config, load_estimate_pricing, load_ipblock,
     load_jwks, load_mgmt_token, load_model, load_model_group, load_module_enabled, load_pricing,
-    load_proxy_node, load_proxy_nodes_list, load_user, load_user_group, load_vendor,
-    load_vendor_key, LoaderCtx,
+    load_proxy_node, load_proxy_nodes_list, load_sensitive_filter_policy, load_user,
+    load_user_group, load_vendor, load_vendor_key, LoaderCtx,
 };
 use gw_core::entity::*;
 use gw_core::ids::*;
@@ -25,6 +25,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 pub type VendorKeyInvalidationHook = Arc<dyn Fn(&KeyId) + Send + Sync + 'static>;
@@ -154,6 +155,7 @@ pub struct EntityStore {
     /// Go-owned module toggles keyed by bare module name (`apikey` for
     /// `module.apikey.enabled`). Missing/unreadable rows are treated as enabled.
     pub module_enabled: Cache<String, bool>,
+    pub sensitive_filter_policy: Cache<String, Arc<Versioned<SensitiveFilterPolicy>>>,
     /// When `Some`, cache misses on `*_or_load` fall through to the cold loader.
     /// `None` for unit tests that pre-populate caches by hand.
     loader: Option<Arc<LoaderCtx>>,
@@ -163,6 +165,12 @@ pub struct EntityStore {
     cold_load_timeout: Duration,
     vendor_key_invalidation_hooks: Vec<VendorKeyInvalidationHook>,
     auth_config_rebuild_hook: Option<AuthConfigRebuildHook>,
+    compiled_sensitive_filter_policy: Mutex<
+        Option<(
+            u64,
+            Arc<crate::sensitive_filter::CompiledSensitiveFilterPolicy>,
+        )>,
+    >,
 }
 
 impl Default for EntityStore {
@@ -266,10 +274,15 @@ impl EntityStore {
                 .max_capacity(100)
                 .time_to_live(Duration::from_secs(300))
                 .build(),
+            sensitive_filter_policy: Cache::builder()
+                .max_capacity(16)
+                .time_to_live(Duration::from_secs(300))
+                .build(),
             loader,
             cold_load_timeout,
             vendor_key_invalidation_hooks: Vec::new(),
             auth_config_rebuild_hook: None,
+            compiled_sensitive_filter_policy: Mutex::new(None),
         }
     }
 
@@ -769,6 +782,60 @@ impl EntityStore {
         self.module_enabled.invalidate(name).await;
     }
 
+    pub async fn sensitive_filter_policy_or_load(
+        &self,
+    ) -> Option<Arc<Versioned<SensitiveFilterPolicy>>> {
+        const KEY: &str = "global";
+        if let Some(hit) = self.sensitive_filter_policy.get(KEY).await {
+            return Some(hit);
+        }
+        let loader = self.loader.as_ref()?.clone();
+        let deadline = self.cold_load_timeout;
+        self.sensitive_filter_policy
+            .try_get_with_by_ref(KEY, async move {
+                with_cold_load_timeout("sensitive_filter_policy", deadline, async move {
+                    load_sensitive_filter_policy(&loader, KEY).await
+                })
+                .await
+                .map(Arc::new)
+                .ok_or_else(|| anyhow::anyhow!(COLD_LOAD_MISS_SENTINEL))
+            })
+            .await
+            .ok()
+    }
+
+    pub async fn compiled_sensitive_filter_policy_or_compile(
+        &self,
+    ) -> Option<Arc<crate::sensitive_filter::CompiledSensitiveFilterPolicy>> {
+        let policy = self.sensitive_filter_policy_or_load().await?;
+        let mut slot = self.compiled_sensitive_filter_policy.lock().await;
+        if let Some((version, compiled)) = slot.as_ref() {
+            if *version == policy.version {
+                return Some(compiled.clone());
+            }
+        }
+        match crate::sensitive_filter::CompiledSensitiveFilterPolicy::compile(policy.value.as_ref())
+        {
+            Ok(compiled) => {
+                let compiled = Arc::new(compiled);
+                *slot = Some((policy.version, compiled.clone()));
+                Some(compiled)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "gw_store::sensitive_filter",
+                    error = %err,
+                    "compile failed; keeping last good sensitive filter policy"
+                );
+                slot.as_ref().map(|(_, compiled)| compiled.clone())
+            }
+        }
+    }
+
+    pub async fn invalidate_sensitive_filter_policy(&self, id: &str) {
+        self.sensitive_filter_policy.invalidate(id).await;
+    }
+
     /// G6/T1-C: handle to the optional loader's Redis pool, used by the
     /// stream consumer to DEL the Redis L1 key before invalidating Moka.
     /// Also consumed by the proxy's `OAuthListener` (T2-B) to reverse-XADD
@@ -793,5 +860,84 @@ impl EntityStore {
             load_proxy_nodes_list(&loader).await
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod sensitive_filter_policy_tests {
+    use super::*;
+
+    fn policy(version: u64, pattern: &str) -> Arc<Versioned<SensitiveFilterPolicy>> {
+        Arc::new(Versioned {
+            version,
+            value: Arc::new(SensitiveFilterPolicy {
+                id: "global".to_string(),
+                version,
+                groups: vec![SensitiveFilterGroup {
+                    id: "g1".to_string(),
+                    name: "Default".to_string(),
+                    description: String::new(),
+                    enabled: true,
+                    priority: 1,
+                    rules: vec![SensitiveFilterRule {
+                        id: "r1".to_string(),
+                        name: "AK".to_string(),
+                        enabled: true,
+                        priority: 1,
+                        mode: SensitiveFilterMode::ArchiveMask,
+                        pattern: pattern.to_string(),
+                        replacement: "<AK>".to_string(),
+                        targets: vec![SensitiveFilterTarget::Archive],
+                    }],
+                }],
+            }),
+        })
+    }
+
+    #[tokio::test]
+    async fn invalid_policy_compile_keeps_last_good_compiled_policy() {
+        let store = EntityStore::new();
+        store
+            .sensitive_filter_policy
+            .insert("global".to_string(), policy(1, "ak-[A-Za-z]+"))
+            .await;
+        let first = store
+            .compiled_sensitive_filter_policy_or_compile()
+            .await
+            .expect("valid policy compiles");
+
+        store
+            .sensitive_filter_policy
+            .insert("global".to_string(), policy(2, "[invalid"))
+            .await;
+        store.invalidate_sensitive_filter_policy("global").await;
+        store
+            .sensitive_filter_policy
+            .insert("global".to_string(), policy(2, "[invalid"))
+            .await;
+
+        let second = store
+            .compiled_sensitive_filter_policy_or_compile()
+            .await
+            .expect("last good policy is retained");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn policy_cache_miss_does_not_reuse_last_good_compiled_policy() {
+        let store = EntityStore::new();
+        store
+            .sensitive_filter_policy
+            .insert("global".to_string(), policy(1, "ak-[A-Za-z]+"))
+            .await;
+        let _first = store
+            .compiled_sensitive_filter_policy_or_compile()
+            .await
+            .expect("valid policy compiles");
+
+        store.invalidate_sensitive_filter_policy("global").await;
+
+        let second = store.compiled_sensitive_filter_policy_or_compile().await;
+        assert!(second.is_none(), "load miss must not reuse stale policy");
     }
 }

@@ -35,6 +35,10 @@
 //! The check runs *before* any body processing or cross-protocol re-render.
 
 use crate::ctx::{ArchiveState, ArchiveStorage, ReqCtx};
+use crate::filters::sensitive_filter::{
+    has_compressed_transit_response, reverse_body_option, reverse_non_stream_response_body_option,
+    should_buffer_compressed_non_stream_response_for_reverse,
+};
 use bytes::{Bytes, BytesMut};
 use gw_codec::cli::CliCodec;
 use gw_codec::cross_render::{CrossRender, WireFormat};
@@ -195,7 +199,9 @@ pub async fn run(
     // error JSON.
     if !ctx.is_stream {
         let cross_protocol = is_cross_protocol(ctx);
-        handle_non_stream_chunk(body.as_ref(), end_of_stream, ctx);
+        let buffer_for_compressed_reverse =
+            should_buffer_compressed_non_stream_response_for_reverse(ctx);
+        handle_non_stream_chunk(body.as_ref(), end_of_stream, ctx)?;
         if cross_protocol {
             if end_of_stream {
                 if let Some(buf) = ctx.pending_client_body.take() {
@@ -217,7 +223,16 @@ pub async fn run(
                 // emitted once at EOS.
                 *body = None;
             }
+        } else if buffer_for_compressed_reverse {
+            if end_of_stream {
+                if let Some(orig) = ctx.upstream_body_accum.take() {
+                    *body = Some(orig.freeze());
+                }
+            } else {
+                *body = None;
+            }
         }
+        reverse_non_stream_response_body_option(ctx, body, end_of_stream)?;
         // Archive capture for non-stream path; body reflects whatever bytes
         // (substituted or upstream-verbatim) reach the client.
         if let Some(b) = body.as_ref() {
@@ -238,6 +253,8 @@ pub async fn run(
         }
         return Ok(None);
     }
+
+    reject_compressed_transit_stream(ctx)?;
 
     // ---- Streaming path -------------------------------------------------
     // Snapshot the codec *kinds* so we can rebuild fresh zero-sized codecs
@@ -297,6 +314,7 @@ pub async fn run(
     if let Some(buf) = ctx.pending_client_body.take() {
         *body = Some(buf.freeze());
     }
+    reverse_body_option(ctx, body, end_of_stream);
 
     // Archive: capture downstream-bound bytes after all in-function mutation.
     if let Some(b) = body.as_ref() {
@@ -366,7 +384,9 @@ pub fn run_memory_sync(
 
     if !ctx.is_stream {
         let cross_protocol = is_cross_protocol(ctx);
-        handle_non_stream_chunk(body.as_ref(), end_of_stream, ctx);
+        let buffer_for_compressed_reverse =
+            should_buffer_compressed_non_stream_response_for_reverse(ctx);
+        handle_non_stream_chunk(body.as_ref(), end_of_stream, ctx)?;
         if cross_protocol {
             if end_of_stream {
                 if let Some(buf) = ctx.pending_client_body.take() {
@@ -377,7 +397,16 @@ pub fn run_memory_sync(
             } else {
                 *body = None;
             }
+        } else if buffer_for_compressed_reverse {
+            if end_of_stream {
+                if let Some(orig) = ctx.upstream_body_accum.take() {
+                    *body = Some(orig.freeze());
+                }
+            } else {
+                *body = None;
+            }
         }
+        reverse_non_stream_response_body_option(ctx, body, end_of_stream)?;
         if let Some(b) = body.as_ref() {
             append_archive_sync(
                 &mut ctx.archive_downstream_response_body,
@@ -389,6 +418,8 @@ pub fn run_memory_sync(
         }
         return Ok(None);
     }
+
+    reject_compressed_transit_stream(ctx)?;
 
     let Some(upstream_kind) = ctx.upstream_codec.as_ref().map(AnyCodec::kind) else {
         return Ok(None);
@@ -427,6 +458,7 @@ pub fn run_memory_sync(
     if let Some(buf) = ctx.pending_client_body.take() {
         *body = Some(buf.freeze());
     }
+    reverse_body_option(ctx, body, end_of_stream);
 
     if let Some(b) = body.as_ref() {
         append_archive_sync(
@@ -562,10 +594,14 @@ pub async fn run_cli_body_filter(
                 ));
             }
         }
+        let mut downstream = Some(Bytes::copy_from_slice(&passthrough));
+        reverse_body_option(ctx, &mut downstream, end_of_stream);
+        let downstream = downstream.expect("reverse helper preserves Some");
+        *body = Some(downstream.clone());
         if let Some(sr) = ctx.spill_root.clone() {
             ctx.archive_downstream_response_body
                 .append_chunk(
-                    &passthrough,
+                    &downstream,
                     &ctx.archive_caps,
                     &sr,
                     ctx.request_id.as_ref(),
@@ -573,7 +609,7 @@ pub async fn run_cli_body_filter(
                 )
                 .await;
         } else if let ArchiveState::InMemory(ref mut buf) = ctx.archive_downstream_response_body {
-            buf.extend_from_slice(&passthrough);
+            buf.extend_from_slice(&downstream);
         }
     }
     if end_of_stream && !ctx.is_stream {
@@ -620,9 +656,13 @@ pub fn run_cli_body_filter_sync(
                 ));
             }
         }
+        let mut downstream = Some(Bytes::copy_from_slice(&passthrough));
+        reverse_body_option(ctx, &mut downstream, end_of_stream);
+        let downstream = downstream.expect("reverse helper preserves Some");
+        *body = Some(downstream.clone());
         append_archive_sync(
             &mut ctx.archive_downstream_response_body,
-            &passthrough,
+            &downstream,
             &ctx.archive_caps,
             ctx.request_id.as_ref(),
             "cli_downstream",
@@ -841,6 +881,15 @@ fn enc_label(enc: gw_codec::compression::Encoding) -> &'static str {
         Encoding::Gzip => "gzip",
         Encoding::Br => "br",
     }
+}
+
+fn reject_compressed_transit_stream(ctx: &ReqCtx) -> Result<()> {
+    if has_compressed_transit_response(ctx) {
+        return Err(pingora::Error::new(pingora::ErrorType::Custom(
+            "gw_sensitive_filter_transit_compressed_stream_unsupported",
+        )));
+    }
+    Ok(())
 }
 
 /// SSE event-boundary detector. Returns `Some((event_end_offset, separator_len))`
@@ -1241,7 +1290,7 @@ pub(crate) fn handle_non_stream_chunk(
     chunk: Option<&Bytes>,
     end_of_stream: bool,
     ctx: &mut ReqCtx,
-) {
+) -> Result<()> {
     if let Some(b) = chunk {
         // T-W3-05: cap at UPSTREAM_BODY_ACCUM_CAP_BYTES with Reject policy.
         // On overflow we drop the offending chunk (buffer stays at cap)
@@ -1259,23 +1308,31 @@ pub(crate) fn handle_non_stream_chunk(
         if matches!(outcome, crate::bounded::PushOutcome::Rejected { .. }) {
             ctx.upstream_error_code
                 .get_or_insert("GW_UPSTREAM_BODY_TRUNCATED");
+            return Err(pingora::Error::because(
+                pingora::ErrorType::CustomCode("GW_UPSTREAM_BODY_TRUNCATED", 502),
+                "upstream body exceeded bounded_buf cap",
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "upstream_body_accum cap exceeded",
+                )),
+            ));
         }
     }
 
     if !end_of_stream {
-        return;
+        return Ok(());
     }
 
     // EOS path: take the accumulator (leaves the field `None`) and decode.
     let Some(body) = ctx.upstream_body_accum.take() else {
-        return;
+        return Ok(());
     };
     let Some(codec) = ctx.upstream_codec.as_ref() else {
         // No codec means we can't parse — put the bytes back so the caller
         // can forward them verbatim. The logging filter will fall back to
         // the freeze-time estimate.
         ctx.upstream_body_accum = Some(body);
-        return;
+        return Ok(());
     };
     // Audit 2026-05-30 §1.9: on the cross-protocol path, response_filter strips
     // content-encoding (the re-rendered body will be plaintext). Decode the
@@ -1320,6 +1377,10 @@ pub(crate) fn handle_non_stream_chunk(
     } else {
         body
     };
+    if should_buffer_compressed_non_stream_response_for_reverse(ctx) {
+        ctx.upstream_body_accum = Some(body);
+        return Ok(());
+    }
     let codec_kind = codec.kind();
     let codec_shape = codec.api_shape();
     // `parse_response` borrows from `body`; both the successful `ResponseIR`
@@ -1459,6 +1520,7 @@ pub(crate) fn handle_non_stream_chunk(
     if return_body_to_accum {
         ctx.upstream_body_accum = Some(body);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1487,7 +1549,7 @@ mod non_stream_branch_tests {
         let chunk1 = Bytes::from_static(
             br#"{"id":"x","object":"chat.completion","created":0,"model":"gpt","choices":[],"#,
         );
-        handle_non_stream_chunk(Some(&chunk1), false, &mut ctx);
+        handle_non_stream_chunk(Some(&chunk1), false, &mut ctx).unwrap();
         assert!(
             ctx.upstream_body_accum.is_some(),
             "first chunk must allocate accumulator"
@@ -1497,7 +1559,7 @@ mod non_stream_branch_tests {
         let chunk2 = Bytes::from_static(
             br#""usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}"#,
         );
-        handle_non_stream_chunk(Some(&chunk2), true, &mut ctx);
+        handle_non_stream_chunk(Some(&chunk2), true, &mut ctx).unwrap();
 
         assert_eq!(ctx.usage.input_tokens, 7);
         assert_eq!(ctx.usage.output_tokens, 2);
@@ -1510,7 +1572,7 @@ mod non_stream_branch_tests {
     fn non_stream_decode_error_increments_metric() {
         let mut ctx = make_ctx_non_stream();
         let body = Bytes::from_static(b"not json");
-        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+        handle_non_stream_chunk(Some(&body), true, &mut ctx).unwrap();
         // usage stays at zero — the logging filter emits Unknown provenance tags
         // when no vendor-observed dim has a value.
         assert_eq!(ctx.usage.input_tokens, 0);
@@ -1530,7 +1592,7 @@ mod non_stream_branch_tests {
         ctx.r7_502_on_parse_fail = true;
         let body = Bytes::from_static(b"not json");
 
-        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+        handle_non_stream_chunk(Some(&body), true, &mut ctx).unwrap();
 
         assert_eq!(
             ctx.upstream_error_code,
@@ -1553,7 +1615,7 @@ mod non_stream_branch_tests {
         };
         let upstream_bytes = Bytes::from_static(b"not json");
 
-        handle_non_stream_chunk(Some(&upstream_bytes), true, &mut ctx);
+        handle_non_stream_chunk(Some(&upstream_bytes), true, &mut ctx).unwrap();
 
         assert_eq!(
             ctx.upstream_error_code,
@@ -1575,7 +1637,7 @@ mod non_stream_branch_tests {
         // when the upstream body terminated on the previous chunk. The helper
         // must tolerate that: nothing to parse, nothing changes.
         let mut ctx = make_ctx_non_stream();
-        handle_non_stream_chunk(None, true, &mut ctx);
+        handle_non_stream_chunk(None, true, &mut ctx).unwrap();
         assert_eq!(ctx.usage.output_tokens, 0);
         assert!(ctx.upstream_body_accum.is_none());
     }
@@ -1585,7 +1647,7 @@ mod non_stream_branch_tests {
         let mut ctx = make_ctx_non_stream();
         ctx.upstream_codec = None;
         let body = Bytes::from_static(b"{\"usage\":{}}");
-        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+        handle_non_stream_chunk(Some(&body), true, &mut ctx).unwrap();
         assert_eq!(ctx.usage.output_tokens, 0);
     }
 
@@ -1604,7 +1666,7 @@ mod non_stream_branch_tests {
                      "cache_creation_input_tokens":1000,"cache_read_input_tokens":500}
         }"#,
         );
-        handle_non_stream_chunk(Some(&body), true, &mut ctx);
+        handle_non_stream_chunk(Some(&body), true, &mut ctx).unwrap();
         assert_eq!(ctx.usage.input_tokens, 50);
         assert_eq!(ctx.usage.output_tokens, 25);
         assert_eq!(ctx.usage.cached_tokens, Some(500));
@@ -1630,7 +1692,7 @@ mod non_stream_branch_tests {
             resp_content_encoding: gw_codec::compression::Encoding::Gzip,
             ..ReqCtx::default()
         };
-        handle_non_stream_chunk(Some(&Bytes::copy_from_slice(&gz)), true, &mut ctx);
+        handle_non_stream_chunk(Some(&Bytes::copy_from_slice(&gz)), true, &mut ctx).unwrap();
         // Decode-before-parse worked: usage was extracted from the OpenAI JSON,
         // proving the gzip body was inflated rather than fed compressed to parse.
         assert_eq!(ctx.usage.input_tokens, 11);
@@ -1651,7 +1713,7 @@ mod non_stream_branch_tests {
             resp_content_encoding: gw_codec::compression::Encoding::Gzip,
             ..ReqCtx::default()
         };
-        handle_non_stream_chunk(Some(&Bytes::copy_from_slice(&gz)), true, &mut ctx);
+        handle_non_stream_chunk(Some(&Bytes::copy_from_slice(&gz)), true, &mut ctx).unwrap();
         // Not decoded → parse_response saw gzip bytes and failed → body preserved
         // verbatim for the client (which decompresses via the intact header).
         let accum = ctx
@@ -1660,6 +1722,94 @@ mod non_stream_branch_tests {
             .expect("compressed body preserved");
         assert_eq!(accum.as_ref(), &gz[..]);
         assert_eq!(ctx.usage.input_tokens, 0);
+    }
+
+    #[test]
+    fn same_protocol_gzip_transit_response_is_reversed_at_eos() {
+        let compiled = crate::filters::sensitive_filter::test_support::transit_policy();
+        let mut ctx = ReqCtx {
+            is_stream: false,
+            client_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            upstream_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            resp_content_encoding: gw_codec::compression::Encoding::Gzip,
+            ..ReqCtx::default()
+        };
+        let surrogate = crate::filters::sensitive_filter::apply_transit_request_body(
+            &mut ctx,
+            &compiled,
+            Bytes::from_static(b"ak-live"),
+        )
+        .expect("transit replacement");
+        let plain_response = Bytes::from(format!(
+            r#"{{"id":"x","object":"chat.completion","created":0,"model":"gpt","choices":[{{"message":{{"content":"{}"}}}}]}}"#,
+            std::str::from_utf8(&surrogate).unwrap()
+        ));
+        let gz =
+            gw_codec::compression::encode(gw_codec::compression::Encoding::Gzip, &plain_response)
+                .expect("gzip encode");
+        let split = gz.len() / 2;
+        let first = gz.slice(..split);
+        let second = gz.slice(split..);
+        handle_non_stream_chunk(Some(&first), false, &mut ctx).unwrap();
+        assert!(
+            ctx.upstream_body_accum.is_some(),
+            "compressed response should buffer before EOS"
+        );
+        handle_non_stream_chunk(Some(&second), true, &mut ctx).unwrap();
+        let mut body = ctx.upstream_body_accum.take().map(BytesMut::freeze);
+        crate::filters::sensitive_filter::reverse_non_stream_response_body_option(
+            &mut ctx, &mut body, true,
+        )
+        .unwrap();
+
+        let out = body.expect("reversed compressed body");
+        let decoded =
+            gw_codec::compression::decode(gw_codec::compression::Encoding::Gzip, &out, 1024 * 1024)
+                .expect("decode output");
+        let rendered = std::str::from_utf8(&decoded).unwrap();
+        assert!(rendered.contains("ak-live"));
+        assert!(!rendered.contains("__sf_"));
+    }
+
+    #[test]
+    fn non_stream_accumulator_overflow_returns_error() {
+        let mut ctx = make_ctx_non_stream();
+        let oversized = Bytes::from(vec![
+            b'a';
+            crate::bounded::UPSTREAM_BODY_ACCUM_CAP_BYTES + 1
+        ]);
+
+        let err = handle_non_stream_chunk(Some(&oversized), false, &mut ctx)
+            .expect_err("overflow must fail closed");
+
+        assert!(format!("{err:?}").contains("GW_UPSTREAM_BODY_TRUNCATED"));
+    }
+
+    #[test]
+    fn compressed_stream_with_transit_map_fails_closed() {
+        let compiled = crate::filters::sensitive_filter::test_support::transit_policy();
+        let mut ctx = ReqCtx {
+            is_stream: true,
+            upstream_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            client_codec: Some(AnyCodec::OpenAi(OpenAi)),
+            resp_content_encoding: gw_codec::compression::Encoding::Gzip,
+            archive_caps: crate::ctx::ArchiveCaps {
+                storage: ArchiveStorage::Memory,
+                ..Default::default()
+            },
+            ..ReqCtx::default()
+        };
+        let _ = crate::filters::sensitive_filter::apply_transit_request_body(
+            &mut ctx,
+            &compiled,
+            Bytes::from_static(b"ak-live"),
+        )
+        .unwrap();
+        let err = reject_compressed_transit_stream(&ctx)
+            .expect_err("compressed stream transit must fail closed");
+
+        assert!(format!("{err:?}")
+            .contains("gw_sensitive_filter_transit_compressed_stream_unsupported"));
     }
 
     #[test]
